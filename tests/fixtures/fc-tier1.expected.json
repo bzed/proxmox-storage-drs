@@ -1,6 +1,15 @@
 {
   "schema_version": 1,
-  "generated_by": "tests/fixtures/generate_fc_tier1.py (exhaustive enumeration)",
+  "generated_by": "tests/fixtures/generate_expected.py (exhaustive enumeration)",
+  "assumptions": {
+    "account_saferemove_wipe": false,
+    "omega_wipe": 1.0,
+    "saferemove_by_storage": {
+      "san-a": false,
+      "san-b": false,
+      "san-c": false
+    }
+  },
   "derived": {
     "total_load": 7.4,
     "u_star": 2.466667,
@@ -96,7 +105,21 @@
           "violates_reserve": false
         }
       },
-      "expected_spread_after": 0.445946
+      "expected_spread_after": 0.445946,
+      "lexicographic": {
+        "min_total_slack_tib": 0.0,
+        "expected_objective_nonreserve": 2.533333,
+        "expected_move_count": 3,
+        "expected_moves": [
+          "101:scsi1:san-a->san-b",
+          "102:scsi0:san-a->san-c",
+          "105:scsi0:san-c->san-b"
+        ],
+        "agrees_with_big_m_at_configured_p": true,
+        "big_m_agreement_threshold_p": -3.273333,
+        "big_m_p_configured": 1000.0,
+        "big_m_p_min_computed": 22675456.0
+      }
     },
     {
       "beta_move_count": 0.5,
@@ -154,26 +177,44 @@
           "violates_reserve": false
         }
       },
-      "expected_spread_after": 0.527027
+      "expected_spread_after": 0.527027,
+      "lexicographic": {
+        "min_total_slack_tib": 0.0,
+        "expected_objective_nonreserve": 3.158333,
+        "expected_move_count": 2,
+        "expected_moves": [
+          "101:scsi1:san-a->san-b",
+          "102:scsi0:san-a->san-c"
+        ],
+        "agrees_with_big_m_at_configured_p": true,
+        "big_m_agreement_threshold_p": -3.323333,
+        "big_m_p_configured": 1000.0,
+        "big_m_p_min_computed": 24248320.0
+      }
     }
   ],
   "payback_two_move_plan": {
+    "beta_move_count": 0.5,
     "per_move": [
       {
         "disk": "101:scsi1",
         "size_tib": 1.0,
+        "duration_mirror_seconds": 5242.88,
+        "duration_wipe_seconds": 0.0,
         "duration_seconds": 5242.88,
         "cost_load_seconds": 10485.76
       },
       {
         "disk": "102:scsi0",
         "size_tib": 1.5,
+        "duration_mirror_seconds": 7864.32,
+        "duration_wipe_seconds": 0.0,
         "duration_seconds": 7864.32,
         "cost_load_seconds": 15728.64
       }
     ],
     "total_cost_load_seconds": 26214.4,
-    "benefit_load_seconds": 3951360.0,
+    "benefit_load_seconds": 3951360.2,
     "ratio": 150.73,
     "accepted": true
   },

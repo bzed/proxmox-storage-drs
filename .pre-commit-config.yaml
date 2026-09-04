@@ -37,7 +37,7 @@ repos:
     hooks:
       - id: fixtures-current
         name: fc-tier1.expected.json is current
-        entry: python3 tests/fixtures/generate_fc_tier1.py --check
+        entry: python3 tests/fixtures/generate_expected.py --check
         language: system
         pass_filenames: false
         files: ^tests/fixtures/

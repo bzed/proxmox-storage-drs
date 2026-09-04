@@ -46,13 +46,20 @@ tests/
 `fc-tier1.expected.json` holds the proven-optimal results — **generated, never hand-written**:
 
 ```sh
-python3 tests/fixtures/generate_fc_tier1.py           # regenerate
-python3 tests/fixtures/generate_fc_tier1.py --check   # assert it is current (CI, make check)
+python3 tests/fixtures/generate_expected.py           # regenerate
+python3 tests/fixtures/generate_expected.py --check   # assert it is current (CI, make check)
 ```
 
 The generator solves by exhaustive enumeration of all |S|^|D| assignments, so the recorded
 optimum is proven rather than hand-worked. It covers both the single-stage big-M solve and the
 lexicographic two-stage solve, and records the threshold `P` at which the two agree.
+
+`reserve-tradeoff.yaml` is the second fixture and exists because `fc-tier1` cannot fail the way
+that matters: there, every reserve-violating assignment is *also* worse on balance, so the two
+solve paths agree at any penalty. `reserve-tradeoff` puts them in genuine conflict — the
+lexicographic solve leaves the group maximally imbalanced rather than breach the reserve by 1 TiB,
+big-M with the configured `P = 1000` agrees, and big-M with `P = 5` moves the disk and produces a
+plan the scheduler then refuses to order. Test the lexicographic path against that one.
 
 If a change makes the expected file stale, that is a signal — read the diff before regenerating.
 A change in those numbers means the model changed.

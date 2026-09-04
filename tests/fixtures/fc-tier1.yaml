@@ -6,8 +6,8 @@
 # are held fixed across the sweep. Sizes and capacities are TiB; loads are in
 # average-in-flight-I/O units (plan section 4), NOT normalised to sum to 1.
 #
-# Regenerate expectations with `python3 generate_fc_tier1.py`; do not hand-edit
-# fc-tier1.expected.json. `generate_fc_tier1.py --check` asserts it is current.
+# Regenerate expectations with `python3 generate_expected.py`; do not hand-edit
+# fc-tier1.expected.json. `generate_expected.py --check` asserts it is current.
 schema_version: 1
 description: Section 14 worked example. Numbers verified by exhaustive enumeration
   of all 3^6 assignments.
@@ -20,14 +20,20 @@ group:
     capability_weight: 1.0
     capacity_tib: 8.0
     foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
   - id: san-b
     capability_weight: 1.0
     capacity_tib: 8.0
     foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
   - id: san-c
     capability_weight: 1.0
     capacity_tib: 8.0
     foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
 disks:
 - key: 101:scsi0
   vmid: 101
@@ -69,6 +75,14 @@ migration:
   bwlimit_bytes_per_sec: 209715200
   omega_src: 1.0
   omega_dst: 1.0
+  omega_wipe: 1.0
+  # Plan section 7.1. saferemove is off on every storage above, so
+  # duration_wipe_d = 0 and duration_d = duration_mirror_d, which is what the
+  # section 14.5 payback arithmetic assumes. Stated here rather than only in the
+  # prose so the fixture is self-contained -- note the CONFIG default is
+  # account_saferemove_wipe: true, and with saferemove on, the 1.5 TiB move
+  # costs ~44h of wipe on top of ~2.2h of mirror.
+  account_saferemove_wipe: false
   payback_horizon_seconds: 604800
   payback_ratio: 10.0
 objective:
