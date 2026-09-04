@@ -11,7 +11,14 @@ and performing as few migrations as possible.
 Design stage. [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) is a complete, self-contained
 specification intended to be handed to an implementer (human or model). No application code yet.
 
+The same document as a paper: [`docs/IMPLEMENTATION_PLAN.pdf`](docs/IMPLEMENTATION_PLAN.pdf)
+(35 pages, typeset with a title page and table of contents). It is generated from the Markdown by
+`make pdf` and kept in step by `make pdf-check`, which runs as part of `make check`; its title page
+carries the SHA-256 of the Markdown it was built from.
+
 ## Requirements
+
+### To run it
 
 - Proxmox VE 9.2 cluster with shared LVM/FC storages
 - A Prometheus (or VictoriaMetrics) instance already receiving PVE metrics via the
@@ -19,6 +26,13 @@ specification intended to be handed to an implementer (human or model). No appli
   series (`rd_operations`, `wr_operations`, `rd_bytes`, `wr_bytes`, `rd_total_time_ns`,
   `wr_total_time_ns`)
 - A PVE API user with permission to read cluster/storage/VM config and to run `move_disk`
+
+### To work on it
+
+- Python 3.11+ (`make venv` installs the rest into `.venv/`)
+- `pandoc`, `lualatex` and `latexmk` — only needed to rebuild the PDF. On Debian:
+  `pandoc texlive-luatex texlive-latex-extra latexmk fonts-sil-gentiumplus fonts-dejavu-core
+  fonts-dejavu-mono fonts-symbola`
 
 ## How to read the plan
 
@@ -47,7 +61,8 @@ the domain rules that must not be refactored away. [`.agents/`](.agents/) holds 
 
 ```sh
 make venv     # bootstrap .venv with the dev tooling
-make check    # format, lint, types, tests, coverage, fixture freshness
+make check    # format, lint, types, tests, coverage, fixture and PDF freshness
+make pdf      # re-render docs/IMPLEMENTATION_PLAN.pdf after editing the plan
 ```
 
 ## Licence

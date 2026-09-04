@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Static pandoc metadata for the PDF rendering of IMPLEMENTATION_PLAN.md.
+# The volatile fields — date, revision, source hash — are passed on the command
+# line by `make pdf` so that this file never needs touching. See AGENTS.md § 7.
+title: "Proxmox Storage DRS"
+subtitle: "Balancing disk I/O across shared storages on Proxmox VE 9.2"
+author:
+  - "Bernd Zeimetz <bernd@bzed.de>"
+lang: en-GB
+papersize: a4
+fontsize: 11pt
+geometry: "left=2.2cm,right=2.2cm,top=2.6cm,bottom=2.2cm,headheight=14pt"
+colorlinks: true
+linkcolor: "black"
+citecolor: "MidnightBlue"
+urlcolor: "MidnightBlue"
+toccolor: "black"
+toc-title: "Contents"
+numbersections: false
+secnumdepth: 0
+subject: "Storage I/O load balancing for Proxmox VE"
+keywords:
+  - Proxmox VE
+  - Storage DRS
+  - I/O load balancing
+  - MILP
+  - live migration

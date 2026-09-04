@@ -15,6 +15,7 @@ repos:
       - id: check-json
       - id: check-merge-conflict
       - id: check-added-large-files
+        args: [--maxkb=2048]  # docs/IMPLEMENTATION_PLAN.pdf is ~0.4 MB
       - id: detect-private-key
 
   - repo: https://github.com/pycqa/isort
@@ -41,3 +42,10 @@ repos:
         language: system
         pass_filenames: false
         files: ^tests/fixtures/
+
+      - id: paper-current
+        name: docs/IMPLEMENTATION_PLAN.pdf is current
+        entry: make pdf
+        language: system
+        pass_filenames: false
+        files: ^(IMPLEMENTATION_PLAN\.md|docs/paper/|tools/check_paper_log\.py)$

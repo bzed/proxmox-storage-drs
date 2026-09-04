@@ -4,7 +4,8 @@ Walk this list. It is short on purpose.
 
 ## Mechanical
 
-- [ ] `make check` is green (format, lint, types, tests, coverage ≥ 85 %, fixture freshness).
+- [ ] `make check` is green (format, lint, types, tests, coverage ≥ 85 %, fixture and PDF
+      freshness).
 - [ ] New files carry the SPDX header with `Bernd Zeimetz <bernd@bzed.de>`.
 - [ ] No secrets, no `config/drs.yaml`, no `state.json`, no `.venv/` in the diff
       (`git status --short` and `git diff --cached --stat` both clean of them).
@@ -26,6 +27,8 @@ Walk this list. It is short on purpose.
 ## Documentation
 
 - [ ] `IMPLEMENTATION_PLAN.md` updated in the **same commit** if behaviour changed.
+- [ ] If the plan changed, `make pdf` was run and `docs/IMPLEMENTATION_PLAN.pdf` plus its
+      `.sha256` stamp are in the same commit ([`paper.md`](paper.md)).
 - [ ] §15 traceability and §15.1 knob→formula tables still complete.
 - [ ] `config/drs.example.yaml` carries any new knob, with a comment explaining what happens
       at the default and what happens if you get it wrong.
