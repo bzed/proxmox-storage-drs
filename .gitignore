@@ -10,6 +10,9 @@ venv/
 build/
 dist/
 
+# Paper build intermediates (the PDF itself in docs/ is committed)
+docs/.build/
+
 # Coverage artefacts
 .coverage
 .coverage.*

@@ -1,0 +1,137 @@
+% SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+% SPDX-License-Identifier: AGPL-3.0-or-later
+%
+% LaTeX preamble for the PDF ("paper") rendering of IMPLEMENTATION_PLAN.md.
+% Injected with pandoc --include-in-header, which in pandoc's default article
+% template lands *after* fontspec/unicode-math and the verbatim machinery but
+% *before* hyperref, longtable and booktabs -- hence the \AtBeginDocument
+% wrappers further down.  Build with `make pdf`; see AGENTS.md section 7.
+
+\usepackage{etoolbox}
+\usepackage{xcolor}
+\usepackage{framed}
+\usepackage{fvextra}
+\usepackage{fancyhdr}
+\usepackage[explicit]{titlesec}
+
+% ---------------------------------------------------------------- fonts ----
+% The plan uses a lot of mathematical and box-drawing Unicode (l Sigma omega
+% <= <=> and box drawing, block and sub/superscript characters).  No single
+% well-shaped text font covers all of it, so every family gets a luaotfload
+% fallback chain ending in DejaVu Sans, which covers every codepoint that
+% occurs in the document, with Symbola behind it.  A glyph the chain cannot
+% render produces a "Missing character" warning, which `make pdf` treats as an
+% error rather than shipping a PDF with holes in it.
+\directlua{
+  luaotfload.add_fallback(
+    "drsfallback",
+    { "DejaVuSans:mode=harf;", "Symbola:mode=harf;" }
+  )
+}
+\setmainfont{Gentium Book Plus}[RawFeature={fallback=drsfallback}]
+\setsansfont{DejaVu Sans}[Scale=0.90, RawFeature={fallback=drsfallback}]
+\setmonofont{DejaVu Sans Mono}[Scale=0.80, RawFeature={fallback=drsfallback}]
+
+\linespread{1.06}
+
+% Long identifiers set in \texttt -- metric names, config paths, API routes --
+% are unbreakable words and would otherwise stick out into the margin.  Allow a
+% break after every underscore in typewriter text (no hyphen is inserted, so a
+% broken identifier is not misread), and let TeX loosen a line rather than
+% overrun it.  `make pdf` fails on any remaining overfull box wider than 2pt.
+\newcommand{\drsbreakableunderscore}{\textunderscore\allowbreak}
+\let\drsorigtexttt\texttt
+\renewcommand{\texttt}[1]{{\let\_\drsbreakableunderscore\drsorigtexttt{#1}}}
+\tolerance=1200
+\setlength{\emergencystretch}{3em}
+
+% ------------------------------------------------------- headings, page ----
+\titleformat{\section}{\sffamily\large\bfseries}{}{0pt}{#1}
+\titleformat{\subsection}{\sffamily\normalsize\bfseries}{}{0pt}{#1}
+\titleformat{\subsubsection}{\sffamily\small\bfseries}{}{0pt}{#1}
+% Level-4 headings ("#### 5.1.1 ...") would otherwise be run into the following
+% paragraph, which hides a numbered subsection of the specification.
+\titleformat{\paragraph}[block]{\sffamily\small\bfseries}{}{0pt}{#1}
+\titlespacing*{\section}{0pt}{2.4ex plus 1ex minus .2ex}{1.0ex plus .2ex}
+\titlespacing*{\subsection}{0pt}{1.8ex plus .8ex minus .2ex}{0.7ex plus .2ex}
+\titlespacing*{\subsubsection}{0pt}{1.4ex plus .6ex minus .2ex}{0.5ex plus .2ex}
+\titlespacing*{\paragraph}{0pt}{1.4ex plus .6ex minus .2ex}{0.5ex plus .2ex}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\footnotesize\sffamily Proxmox Storage DRS}
+\fancyhead[R]{\footnotesize\sffamily\nouppercase{\leftmark}}
+\fancyfoot[C]{\footnotesize\sffamily\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+% Sections are unnumbered -- the document numbers them itself ("## 5. The
+% optimization problem") -- so \leftmark carries the heading text verbatim.
+\renewcommand{\sectionmark}[1]{\markboth{#1}{}}
+
+% Title page and table of contents each get pages of their own.
+\pretocmd{\tableofcontents}{\clearpage}{}{}
+\apptocmd{\tableofcontents}{\clearpage}{}{}
+
+% ------------------------------------------------------------ code blocks ----
+\definecolor{shadecolor}{HTML}{F4F4F1}
+\fvset{fontsize=\footnotesize, breaklines=true, breakanywhere=true,
+       breaksymbolleft={}, breakindent=0pt}
+% Used by filters.lua for fenced blocks that carry no language, which is most
+% of them: the plan's "code" is mostly formulas, PromQL fragments and ASCII
+% diagrams rather than a highlightable language.  Without this they would
+% render as bare, unshaded verbatim, visually unlike the highlighted few.
+\newenvironment{plaincode}{\begin{snugshade}}{\end{snugshade}}
+
+% ------------------------------------------------------------ title page ----
+% `make pdf` writes \drssourcehash into a generated second header file; the
+% default keeps a bare `pandoc --include-in-header=header.tex` run working.
+% The hash of the Markdown source is the edition marker: it is reproducible,
+% it is what `make pdf-check` compares against, and a reader can verify that
+% this PDF is the plan they have in front of them.
+\providecommand{\drssourcehash}{unknown}
+
+\makeatletter
+\renewcommand{\maketitle}{%
+  \begin{titlepage}%
+    \centering
+    \vspace*{0.22\textheight}
+    {\sffamily\bfseries\Huge\@title\par}%
+    \vspace{1.6em}
+    \rule{0.55\textwidth}{0.4pt}\par
+    \vspace{1.6em}
+    {\large\@author\par}%
+    \vspace{0.8em}
+    {\@date\par}%
+    \vfill
+    {\footnotesize
+     Rendered from \texttt{IMPLEMENTATION\_PLAN.md},
+     SHA-256 \texttt{\drssourcehash}\\
+     (\texttt{sha256sum IMPLEMENTATION\_PLAN.md} in the repository must
+     print the same).\\[0.9em]
+     Copyright \textcopyright{} 2026 Bernd Zeimetz.
+     Licensed under the GNU Affero General Public License,
+     version 3 or later.\par}
+    \vspace{1.2em}
+  \end{titlepage}%
+  % article's titlepage resets the counter to 1, which would make the printed
+  % page numbers run one behind the PDF's.  Count the title page instead.
+  \setcounter{page}{2}%
+}
+\makeatother
+
+% ------------------------------------------- deferred: loaded after this ----
+\AtBeginDocument{%
+  % Section 11 and 15 hold wide tables; shrink them and let cells wrap rather
+  % than overflow into the margin.
+  \AtBeginEnvironment{longtable}{\footnotesize}%
+  \AtBeginEnvironment{tabular}{\footnotesize}%
+  \setlength{\LTpre}{0.8\baselineskip}%
+  \setlength{\LTpost}{0.8\baselineskip}%
+  \hypersetup{%
+    bookmarksnumbered=false,
+    bookmarksopen=true,
+    bookmarksopenlevel=1,
+    pdfdisplaydoctitle=true,
+  }%
+  \urlstyle{same}%
+}

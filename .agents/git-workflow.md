@@ -64,7 +64,11 @@ surface) can go to a subagent. Rules:
 ## Never commit
 
 `config/drs.yaml` (contains the PVE password), `state.json`, `.env`, `.claude/`, `.venv/`,
-`.coverage`, `htmlcov/`. They are in `.gitignore`. Adding a `!` exception for any of them is a
-stop-and-ask moment.
+`.coverage`, `htmlcov/`, `docs/.build/`. They are in `.gitignore`. Adding a `!` exception for any
+of them is a stop-and-ask moment.
+
+The one deliberate exception to "do not commit build products" is
+`docs/IMPLEMENTATION_PLAN.pdf`: it is a deliverable, it is read outside a checkout, and
+`make pdf-check` makes a stale copy impossible to commit. See [`paper.md`](paper.md).
 
 Before a first push to a remote, check for secrets in the *history*, not just the worktree.

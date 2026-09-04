@@ -64,7 +64,7 @@ Run the formatter before the linter, always. `make fmt lint` does that in the ri
 ## 2. The loop — never commit without running it
 
 ```sh
-make check          # fmt-check + lint + typecheck + test-with-coverage + fixtures
+make check          # fmt-check + lint + typecheck + test-with-coverage + fixtures + pdf-check
 ```
 
 `make check` is what CI runs and what you run before every commit. It must be green.
@@ -72,8 +72,9 @@ If you cannot make it green, **do not commit to a shared branch** — commit on 
 branch with the failure described in the commit message, and keep going.
 
 Individual targets: `make fmt`, `make lint`, `make typecheck`, `make test`, `make cov`,
-`make fixtures`. `make venv` bootstraps `.venv/` with the dev dependencies; the tools are
-**not** installed system-wide on this host, so start there.
+`make fixtures`, `make pdf`, `make pdf-check`. `make venv` bootstraps `.venv/` with the dev
+dependencies; the Python tools are **not** installed system-wide on this host, so start there.
+The paper toolchain (`pandoc`, `lualatex`) *is* system-wide and is not part of `.venv`.
 
 ---
 
@@ -171,7 +172,16 @@ Details: [`.agents/domain-invariants.md`](.agents/domain-invariants.md).
    When you address one, record how in the plan and reference the ID in the commit message.
    You may also **refute** a finding — say so explicitly and explain why, rather than
    implementing a change you believe is wrong.
-4. **Do not state Proxmox behaviour you have not verified.** Read the PVE source, or ask the
+4. **The plan ships as a PDF too.** [`docs/IMPLEMENTATION_PLAN.pdf`](docs/IMPLEMENTATION_PLAN.pdf)
+   is a rendering of the Markdown, committed alongside it because it is read outside a git
+   checkout. It is a build product with a single source: **never edit the PDF, and never edit
+   anything under `docs/paper/` to work around a problem in the text.** After any change to
+   `IMPLEMENTATION_PLAN.md`, run `make pdf` and commit the regenerated PDF and its `.sha256`
+   stamp in the *same* commit as the Markdown. `make pdf-check` — part of `make check` —
+   compares the stamp against the current Markdown and fails when they have drifted, so a
+   commit that updates only one of the two cannot pass. See
+   [`.agents/paper.md`](.agents/paper.md).
+5. **Do not state Proxmox behaviour you have not verified.** Read the PVE source, or ask the
    operator, or label the claim as unverified in the text. Forum threads from the PVE 6/7 era
    have repeatedly been wrong for 9.2. See [`.agents/domain-invariants.md`](.agents/domain-invariants.md).
 

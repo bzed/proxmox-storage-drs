@@ -10,7 +10,9 @@ with no memory of previous sessions.
 | [`testing.md`](testing.md) | Test layout, the 85 % coverage floor, fixtures, what must never be tested over the network |
 | [`git-workflow.md`](git-workflow.md) | Branching, commit cadence, merge criteria, subagent/worktree delegation |
 | [`domain-invariants.md`](domain-invariants.md) | The safety rules that come from moving live VM disks, and the "do not assert unverified PVE behaviour" rule |
+| [`paper.md`](paper.md) | The committed PDF of the plan: how it is built and how it is kept in step |
 | [`review-checklist.md`](review-checklist.md) | The list to walk before saying "done" |
 
 Read `python-style.md` and `testing.md` before writing code, `domain-invariants.md` before
-touching the solver, scheduler or executor, and `git-workflow.md` before your first commit.
+touching the solver, scheduler or executor, `git-workflow.md` before your first commit, and
+`paper.md` before touching `IMPLEMENTATION_PLAN.md`.
