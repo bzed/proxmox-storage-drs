@@ -11,9 +11,11 @@ with no memory of previous sessions.
 | [`git-workflow.md`](git-workflow.md) | Branching, commit cadence, merge criteria, subagent/worktree delegation |
 | [`domain-invariants.md`](domain-invariants.md) | The safety rules that come from moving live VM disks, and the "do not assert unverified PVE behaviour" rule |
 | [`documentation.md`](documentation.md) | What documentation we owe the reader, the operator and the terminal, and how it is generated and tested |
+| [`packaging.md`](packaging.md) | Choosing dependencies Debian ships, the `.deb`, the autopkgtest, and the two CI pipelines |
 | [`paper.md`](paper.md) | The PDF build machinery: fonts, filters, freshness stamps, and the traps in it |
 | [`review-checklist.md`](review-checklist.md) | The list to walk before saying "done" |
 
 Read `python-style.md` and `testing.md` before writing code, `domain-invariants.md` before
 touching the solver, scheduler or executor, `git-workflow.md` before your first commit, `documentation.md` before writing any user-facing
-text, and `paper.md` before touching `IMPLEMENTATION_PLAN.md`.
+text, `packaging.md` before adding a dependency, and `paper.md` before touching
+`IMPLEMENTATION_PLAN.md`.

@@ -38,7 +38,16 @@ Walk this list. It is short on purpose.
       `config/drs.example.yaml` and plan §15.1.
 - [ ] A new or changed CLI option appears in `--help` with its default and unit, and in the
       manpage's `OPTIONS`.
-- [ ] `make docs` was run and the regenerated PDFs and `man/pve-drs.1` are in the same commit.
+- [ ] `make docs` was run and any regenerated PDF is in the same commit.
+
+## Packaging
+
+- [ ] A new dependency exists in Debian trixie (`rmadison -s trixie python3-<name>`), or is
+      vendored, or is optional and imported where it is used rather than at module level
+      ([`packaging.md`](packaging.md)).
+- [ ] `debian/control` Build-Depends and Depends match what the tree now needs.
+- [ ] A new document, manpage or example is installed by the matching `debian/pve-drs.*` file.
+- [ ] `debian/changelog` and `pyproject.toml` still agree on the version.
 - [ ] §15 traceability and §15.1 knob→formula tables still complete.
 - [ ] `config/drs.example.yaml` carries any new knob, with a comment explaining what happens
       at the default and what happens if you get it wrong.

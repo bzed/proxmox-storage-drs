@@ -291,6 +291,73 @@ Details: [`.agents/documentation.md`](.agents/documentation.md).
 
 ---
 
-## 9. Review checklist
+## 9. Dependencies, packaging and CI
+
+The deployment target is Proxmox VE 9.x, which is Debian **trixie**. Everything below follows from
+that one fact.
+
+### 9.1 Debian first
+
+**Prefer a module that trixie packages.** Not out of purism: a packaged module is one the operator
+already trusts, already patches through their normal update path, and already has on a host with no
+outbound network. Before adding a dependency, check it:
+
+```sh
+rmadison -s trixie python3-<name>
+```
+
+The order of preference, and there is no fourth option:
+
+1. **In trixie** — add it to `debian/control` and to `pyproject.toml`, done.
+2. **Not in trixie, pure Python, small** — vendor it into our source package, with its licence
+   recorded in `debian/copyright` and its provenance and version in `.agents/packaging.md`.
+3. **Not in trixie, and not vendorable** (a C extension, or simply too large — `ortools` is both) —
+   it must be **optional**, imported where it is used and never at module level, with a code path
+   that works without it. The autopkgtest of §9.2 is what enforces this.
+
+### 9.2 The Debian package is a deliverable
+
+`debian/` builds `pve-drs`: the executable, the manpage, the example configuration and the
+generated documentation. Three standing rules:
+
+- **`debian/control` is the single source of truth for dependencies.** Build-Depends and Depends
+  are updated in the *same commit* as the thing that needs them — a new Python import, a new
+  document that needs a new tool, a new test that needs a new library. CI installs the build
+  dependencies from `debian/control` with `mk-build-deps`, so a stale declaration fails there
+  rather than silently working on a machine that happens to have the package.
+- **Whenever documentation or a tool is added, the packaging is updated with it.** A new document
+  goes into `debian/pve-drs.docs`, a new manpage into `debian/pve-drs.manpages`, a new example into
+  `debian/pve-drs.examples`, a new build step into `debian/rules`. A file that is generated but not
+  installed is a file nobody will ever read.
+- **The autopkgtest asks what the build cannot.** The build chroot has the Build-Depends installed
+  and so cannot see a missing runtime dependency. `debian/tests` installs the package on a system
+  carrying only its `Depends` and runs `pve-drs --version`, `pve-drs --help` and an import of every
+  module in the package. Keep it that way: it is the test that catches an optional dependency
+  imported at the top of a module.
+
+`debian/changelog` and `pyproject.toml` must agree on the version; CI checks it.
+
+### 9.3 Two pipelines
+
+| | Where | What it proves |
+|---|---|---|
+| GitHub Actions | `debian:trixie` containers | The Debian-packaged toolchain is enough: lint, types, tests, coverage to Codecov, the document build against trixie's older pandoc, `dpkg-buildpackage`, lintian, and install-then-run |
+| GitLab CI | Debian's Salsa pipeline (`debian/.gitlab-ci.yml`) | sbuild in an unshare chroot with **no network**, then lintian, piuparts, reprotest and autopkgtest |
+
+CI installs its Python tooling **from apt, never from pip**. A CI that pip-installed its way around
+a missing Debian package would hide the day §9.1 stopped being true, which is the only thing it is
+there to detect. `make SYSTEM_TOOLS=1 <target>` is the switch that runs the ordinary targets against
+the system toolchain.
+
+The Salsa build has no network on purpose: that is what proves the package builds from trixie alone.
+If a module genuinely has to be fetched during a build, vendor it (§9.1 rule 2). Setting
+`SALSA_CI_SBUILD_ARGS: '--enable-network'` is the fallback, and it is a deliberate, reviewable edit
+— never a default and never a quiet workaround.
+
+Details: [`.agents/packaging.md`](.agents/packaging.md).
+
+---
+
+## 10. Review checklist
 
 Before declaring anything done, walk [`.agents/review-checklist.md`](.agents/review-checklist.md).

@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Everything runs in debian:trixie, the base of Proxmox VE 9.x, with the
+# toolchain installed from apt rather than pip. That is not incidental: the
+# dependency policy is that Debian's packaged modules are enough, and a CI that
+# pip-installed its way around a missing package would hide the day that
+# stopped being true.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint, types and tests
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - name: Install the toolchain from Debian
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            black flake8 git isort make mypy pandoc python3-flake8-bugbear \
+            python3-jsonschema python3-pytest python3-pytest-cov \
+            python3-pytest-xdist python3-requests python3-ruamel.yaml \
+            python3-yaml
+
+      - uses: actions/checkout@v7
+
+      # Only until src/ exists: before the first line of code there is nothing
+      # to lint, type-check or cover, and pytest would fail the coverage floor
+      # on an empty tree. Delete this step and the `if:`s below along with the
+      # first commit that adds code.
+      - name: Is there code yet?
+        id: probe
+        run: |
+          if ls src/*/*.py >/dev/null 2>&1; then
+            echo "code=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::src/ is empty; running only the checks that do not need code"
+          fi
+
+      - name: Fixtures are current
+        run: make SYSTEM_TOOLS=1 fixtures
+
+      - name: Manpage builds and is clean
+        run: make SYSTEM_TOOLS=1 man-check
+
+      - name: Format, lint and types
+        if: steps.probe.outputs.code == 'yes'
+        run: make SYSTEM_TOOLS=1 fmt-check lint typecheck
+
+      - name: Tests with coverage
+        if: steps.probe.outputs.code == 'yes'
+        run: |
+          python3 -m pytest \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term \
+            --junitxml=junit.xml
+
+      - name: Upload coverage to Codecov
+        if: steps.probe.outputs.code == 'yes'
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: true
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && steps.probe.outputs.code == 'yes' }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: junit.xml
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      # trixie ships pandoc 3.1, which is older than the one this is usually
+      # developed against; building here is what keeps the document pipeline
+      # honest about the version Proxmox VE 9.x actually has.
+      - name: Install the document toolchain from Debian
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            fonts-dejavu-core fonts-dejavu-mono fonts-sil-gentiumplus \
+            fonts-symbola git groff latexmk make pandoc python3 \
+            texlive-latex-extra texlive-luatex
+
+      - uses: actions/checkout@v7
+
+      - name: The committed PDF matches the Markdown
+        run: sha256sum --check docs/IMPLEMENTATION_PLAN.pdf.sha256
+
+      # Not compared byte-for-byte against the committed PDF: the build is
+      # reproducible for a fixed toolchain, and trixie's pandoc is a different
+      # one. What this proves is that the documents still build on the target
+      # distribution -- and `make pdf` fails on a missing glyph or an overfull
+      # box, so "it built" is a real statement about the result.
+      - name: Rebuild every document from source
+        run: make SYSTEM_TOOLS=1 docs
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: documentation
+          path: |
+            docs/IMPLEMENTATION_PLAN.pdf
+            man/pve-drs.1

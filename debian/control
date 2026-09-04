@@ -1,0 +1,52 @@
+Source: pve-drs
+Section: admin
+Priority: optional
+Maintainer: Bernd Zeimetz <bernd@bzed.de>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-sequence-python3,
+ pandoc <!nodoc>,
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-jsonschema <!nocheck>,
+ python3-pytest <!nocheck>,
+ python3-pytest-cov <!nocheck>,
+ python3-requests <!nocheck>,
+ python3-ruamel.yaml <!nocheck>,
+ python3-setuptools,
+ python3-yaml <!nocheck>,
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/bzed/proxmox-storage-drs
+Vcs-Git: https://github.com/bzed/proxmox-storage-drs.git
+Vcs-Browser: https://github.com/bzed/proxmox-storage-drs
+
+Package: pve-drs
+Architecture: all
+Depends:
+ python3-jsonschema,
+ python3-requests,
+ python3-ruamel.yaml,
+ ${misc:Depends},
+ ${python3:Depends},
+Recommends:
+ coinor-cbc,
+ python3-pulp,
+Suggests:
+ python3-statsmodels,
+Description: storage I/O load balancer for Proxmox VE
+ pve-drs equalizes disk I/O load across configurable groups of shared storages
+ in a Proxmox VE cluster by live-migrating individual VM disks between the
+ storages of a group. It is the storage counterpart to the built-in Dynamic
+ Load Balancer, which balances guests across nodes and has no notion of the
+ LUNs behind them.
+ .
+ Placement is solved as a mixed integer linear program over the measured
+ per-disk I/O load, subject to a snapshot free-space reserve that must hold
+ during a migration and not merely before and after it, and to a payback rule
+ that rejects a plan whose own migration cost exceeds the imbalance it removes.
+ Load comes from an existing Prometheus; topology and the migrations themselves
+ come from the Proxmox VE API.
+ .
+ The default mode is dry-run: it prints the plan, the arithmetic behind it and
+ the API calls it would issue, and changes nothing.

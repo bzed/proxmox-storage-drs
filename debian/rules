@@ -1,0 +1,35 @@
+#!/usr/bin/make -f
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+export DH_VERBOSE = 1
+export PYBUILD_NAME = proxmox-storage-drs
+
+%:
+	dh $@ --buildsystem=pybuild
+
+# The manpage is generated from Markdown, so it is built here rather than
+# committed.  The PDF is not rebuilt: it is a committed, reproducible artefact
+# whose freshness `make check` and CI already enforce, and re-running LuaLaTeX
+# in the build chroot would pull in the whole of TeX Live to produce a
+# byte-identical file.  override_dh_auto_test verifies it instead of trusting
+# it.
+override_dh_auto_build:
+	dh_auto_build
+ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS) $(DEB_BUILD_PROFILES)))
+	$(MAKE) man
+endif
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	dh_auto_test
+	# The shipped PDF must be the rendering of the shipped Markdown.  This is
+	# the same assertion `make pdf-check` makes, written out so that it needs
+	# no document toolchain in the chroot and cannot degrade to a warning.
+	sha256sum --check docs/IMPLEMENTATION_PLAN.pdf.sha256
+endif
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -f man/pve-drs.1
+	rm -rf docs/.build .pytest_cache .mypy_cache
