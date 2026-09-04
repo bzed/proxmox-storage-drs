@@ -46,7 +46,7 @@ Walk this list. It is short on purpose.
       vendored, or is optional and imported where it is used rather than at module level
       ([`packaging.md`](packaging.md)).
 - [ ] `debian/control` Build-Depends and Depends match what the tree now needs.
-- [ ] A new document, manpage or example is installed by the matching `debian/pve-drs.*` file.
+- [ ] A new document, manpage or example is installed by the matching `debian/pve-storage-drs.*` file.
 - [ ] `debian/changelog` and `pyproject.toml` still agree on the version.
 - [ ] §15 traceability and §15.1 knob→formula tables still complete.
 - [ ] `config/drs.example.yaml` carries any new knob, with a comment explaining what happens

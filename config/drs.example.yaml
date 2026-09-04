@@ -4,10 +4,10 @@
 # Install this to /etc/pve/drs.yaml. That path is on the cluster filesystem, so
 # the file is replicated to every node and there is exactly one authoritative
 # copy; a management host that is not a cluster member provides the same path
-# locally. pve-drs looks for its config in this order, first match wins:
+# locally. pve-storage-drs looks for its config in this order, first match wins:
 #
 #   1. --config PATH  (-c)      missing or invalid -> hard error, no fallback
-#   2. $PVE_DRS_CONFIG          missing or invalid -> hard error, no fallback
+#   2. $PVE_STORAGE_DRS_CONFIG          missing or invalid -> hard error, no fallback
 #   3. /etc/pve/drs.yaml        the default
 #
 # Two warnings that follow from the location (plan §11):
@@ -49,7 +49,7 @@ prometheus:
   bearer_token: null
 
 # ------------------------------------------------------- metric name mapping
-# Telegraf/InfluxDB naming varies by deployment. Run `pve-drs verify-metrics` after
+# Telegraf/InfluxDB naming varies by deployment. Run `pve-storage-drs verify-metrics` after
 # editing this block; it validates every name against the live server and prints
 # a sample series before you rely on it.
 metrics:
@@ -66,14 +66,14 @@ metrics:
     vmid: vmid
     # PVE emits the drive id (scsi0, virtio0) in a tag named "instance", which
     # COLLIDES with Prometheus's own scrape "instance" label. Many Telegraf
-    # setups rename it. Confirm with `pve-drs verify-metrics` and set it here.
+    # setups rename it. Confirm with `pve-storage-drs verify-metrics` and set it here.
     device: instance
     node: nodename
 
   rate_window: 5m       # inner range for rate(); must be >= 4x pvestatd_push_interval
   step: 5m              # sampling step for range queries
   # PVE-side push cadence of pvestatd. The tool cannot read this from the API, so
-  # declare it here; `pve-drs verify-metrics` measures the real sample spacing of a
+  # declare it here; `pve-storage-drs verify-metrics` measures the real sample spacing of a
   # live series and errors if this value is wrong by more than 20%.
   pvestatd_push_interval: 60s
 
@@ -284,7 +284,7 @@ report:
 state:
   # Local disk, never /etc/pve: this is rewritten on every run, pmxcfs writes
   # need quorum, and the file is deliberately node-local (plan §11).
-  path: /var/lib/pve-drs/state.json
+  path: /var/lib/pve-storage-drs/state.json
 
 forecast:
   model: quantile        # quantile | seasonal_naive | holt_winters

@@ -21,10 +21,10 @@ docs/
     ...
   IMPLEMENTATION_PLAN.pdf  the specification, built from ../IMPLEMENTATION_PLAN.md
   internals.pdf            built from docs/internals/*.md
-  pve-drs-manual.pdf       built from docs/manual/*.md
+  pve-storage-drs-manual.pdf       built from docs/manual/*.md
 man/
-  pve-drs.1.md             source
-  pve-drs.1                built with pandoc -s -t man; installed to share/man/man1
+  pve-storage-drs.1.md             source
+  pve-storage-drs.1                built with pandoc -s -t man; installed to share/man/man1
 ```
 
 Multi-file sources are concatenated in filename order, which is why the files are numbered. Keep
@@ -42,10 +42,10 @@ these documents use the same `docs/paper/` machinery.
 The manpage build is the one different invocation:
 
 ```sh
-pandoc man/pve-drs.1.md --standalone --to=man --output=man/pve-drs.1
+pandoc man/pve-storage-drs.1.md --standalone --to=man --output=man/pve-storage-drs.1
 ```
 
-with the metadata block at the top of `pve-drs.1.md` supplying the title, section, date and footer.
+with the metadata block at the top of `pve-storage-drs.1.md` supplying the title, section, date and footer.
 
 ## Writing the internals documentation
 
@@ -96,15 +96,15 @@ Type, default, unit, what it does, what happens at each extreme, what it interac
 Short on purpose — it refers onward — except `OPTIONS`, which is complete. Skeleton:
 
 ```markdown
-% PVE-DRS(1) pve-drs VERSION | Proxmox Storage DRS
+% PVE-STORAGE-DRS(1) pve-storage-drs VERSION | Proxmox Storage DRS
 % Bernd Zeimetz
 % BUILD DATE
 
 # NAME
-pve-drs - balance disk I/O across Proxmox VE shared storages
+pve-storage-drs - balance disk I/O across Proxmox VE shared storages
 
 # SYNOPSIS
-**pve-drs** [*global options*] *command* [*command options*]
+**pve-storage-drs** [*global options*] *command* [*command options*]
 
 # DESCRIPTION
 Three or four paragraphs. What it does, what it will never do without being asked, where the
@@ -114,7 +114,7 @@ configuration lives.  No theory.
 Every global option and every subcommand option, with defaults.
 
 # CONFIGURATION
-Where the file lives, its top-level keys, one line each, then: "see pve-drs-manual.pdf".
+Where the file lives, its top-level keys, one line each, then: "see pve-storage-drs-manual.pdf".
 
 # FILES
 # EXIT STATUS
@@ -134,10 +134,10 @@ Where the file lives, its top-level keys, one line each, then: "see pve-drs-manu
   plus real default values in `add_argument` is enough; a hardcoded default in a help string is a
   bug.
 - Every option's help text says the **unit**.
-- `pve-drs --manual` and `pve-drs help`: `exec man pve-drs` when the page is installed and stdout is a tty;
+- `pve-storage-drs --manual` and `pve-storage-drs help`: `exec man pve-storage-drs` when the page is installed and stdout is a tty;
   otherwise write the shipped plain-text rendering to stdout so it pipes and greps. A URL is not an
   answer — these machines may have no browser.
-- `pve-drs --help` must fit the "what can this thing do" question in one screen per subcommand. Detail
+- `pve-storage-drs --help` must fit the "what can this thing do" question in one screen per subcommand. Detail
   belongs in the manual.
 
 ## The tests that keep it honest
@@ -146,7 +146,7 @@ Documentation rots silently, so it is tested like code:
 
 | Test | Asserts |
 |---|---|
-| `test_help_covers_options` | every argparse option appears in `man/pve-drs.1.md` under `OPTIONS` |
+| `test_help_covers_options` | every argparse option appears in `man/pve-storage-drs.1.md` under `OPTIONS` |
 | `test_manual_covers_config` | every key in the config schema appears in `docs/manual/` |
 | `test_config_covers_manual` | every key the manual documents exists in the schema |
 | `test_example_config_valid` | `config/drs.example.yaml` validates against the schema |

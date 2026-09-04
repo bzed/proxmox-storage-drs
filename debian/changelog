@@ -1,6 +1,6 @@
-pve-drs (0.0.1) UNRELEASED; urgency=medium
+pve-storage-drs (0.0.1) UNRELEASED; urgency=medium
 
-  * Initial packaging: binary package pve-drs, the documentation, the example
+  * Initial packaging: binary package pve-storage-drs, the documentation, the example
     configuration and an autopkgtest that proves the installed command runs
     with only its declared dependencies.
   * Not yet buildable: the specification is complete but src/ is not, so

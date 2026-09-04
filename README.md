@@ -1,6 +1,18 @@
 # proxmox-storage-drs
 
+[![Proxmox](https://img.shields.io/badge/Proxmox-E57000?style=for-the-badge&logo=proxmox&logoColor=white)](https://proxmox.com/)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/bzed/proxmox-storage-drs)
+[![Tests](https://github.com/bzed/proxmox-storage-drs/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/bzed/proxmox-storage-drs/actions/workflows/tests.yml)
+[![Debian Package](https://github.com/bzed/proxmox-storage-drs/actions/workflows/debian-package.yml/badge.svg?branch=main)](https://github.com/bzed/proxmox-storage-drs/actions/workflows/debian-package.yml)
+[![codecov](https://codecov.io/gh/bzed/proxmox-storage-drs/branch/main/graph/badge.svg)](https://codecov.io/gh/bzed/proxmox-storage-drs)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 A Storage DRS replacement for Proxmox VE 9.2.
+
+It is the **storage** counterpart to the Dynamic Load Balancer that PVE 9.2 ships: that one moves
+guests between nodes to even out CPU and memory, and has no notion of the LUNs behind them. This
+one never moves a guest — it moves individual disks between storages. The command is
+`pve-storage-drs`, named to keep the two from being confused.
 
 It balances **disk I/O load across configurable groups of shared storages** (LVM/FC) by live-migrating
 individual VM disks between storages within a group, while guaranteeing a snapshot free-space reserve
@@ -12,7 +24,7 @@ Design stage. [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) is a complete, 
 specification intended to be handed to an implementer (human or model). No application code yet.
 
 The same document as a paper: [`docs/IMPLEMENTATION_PLAN.pdf`](docs/IMPLEMENTATION_PLAN.pdf)
-(35 pages, typeset with a title page and table of contents). It is generated from the Markdown by
+(typeset with a title page and table of contents). It is generated from the Markdown by
 `make pdf` and kept in step by `make pdf-check`, which runs as part of `make check`; its title page
 carries the SHA-256 of the Markdown it was built from.
 
@@ -42,7 +54,7 @@ numeric example that doubles as a test fixture.
 
 `config/drs.example.yaml` is the annotated reference configuration. It installs to
 `/etc/pve/drs.yaml` — on the cluster filesystem, so every node reads the same file — and
-`pve-drs --config PATH` overrides that for a single run.
+`pve-storage-drs --config PATH` overrides that for a single run.
 
 `tests/fixtures/fc-tier1.yaml` is the section 14 example in machine-readable form;
 `fc-tier1.expected.json` holds its proven-optimal results.
@@ -57,14 +69,14 @@ commit messages refer back to.
 ## Documentation
 
 Beyond the specification, the tool ships — once there is code to describe — an internals guide for
-whoever changes it, an operator manual documenting every configuration option, and a `pve-drs(1)`
+whoever changes it, an operator manual documenting every configuration option, and a `pve-storage-drs(1)`
 manpage, all generated from Markdown in `docs/`, plus a `--help` that carries every option and its
 default. [`AGENTS.md`](AGENTS.md) section 8 and
 [`.agents/documentation.md`](.agents/documentation.md) specify what that means in practice.
 
 ## Packaging
 
-The tool is delivered as the Debian package `pve-drs`, built from `debian/` in this repository and
+The tool is delivered as the Debian package `pve-storage-drs`, built from `debian/` in this repository and
 targeting **Debian trixie**, the base of Proxmox VE 9.x. Dependencies are chosen for being packaged
 in trixie, so the package installs on a management host with no outbound network; `debian/tests`
 installs the built package on a system carrying only its `Depends` and proves the command runs.

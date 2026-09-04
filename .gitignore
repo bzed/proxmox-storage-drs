@@ -29,14 +29,14 @@ config/*.local.yaml
 .claude/
 
 # Generated manpage (built by "make man" and by debian/rules)
-man/pve-drs.1
+man/pve-storage-drs.1
 
 # Debian build artefacts
 debian/.debhelper/
 debian/files
-debian/pve-drs/
-debian/pve-drs.debhelper.log
-debian/pve-drs.substvars
+debian/pve-storage-drs/
+debian/pve-storage-drs.debhelper.log
+debian/pve-storage-drs.substvars
 debian/debhelper-build-stamp
 debian/*-build-deps_*
 .pybuild/

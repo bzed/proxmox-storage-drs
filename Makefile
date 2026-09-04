@@ -47,7 +47,7 @@ help:
 	@echo "cov        pytest with an HTML coverage report in htmlcov/"
 	@echo "fixtures   assert tests/fixtures/*.expected.json are current"
 	@echo "pdf        render IMPLEMENTATION_PLAN.md to docs/IMPLEMENTATION_PLAN.pdf"
-	@echo "man        render man/pve-drs.1.md to man/pve-drs.1"
+	@echo "man        render man/pve-storage-drs.1.md to man/pve-storage-drs.1"
 	@echo "docs       pdf + man"
 	@echo "docs-check assert every generated document matches its Markdown"
 	@echo "deb        build the Debian package with dpkg-buildpackage"
@@ -167,8 +167,8 @@ pdf-check:
 		fi; \
 	fi
 
-MANPAGE  := man/pve-drs.1
-MAN_SRC  := man/pve-drs.1.md
+MANPAGE  := man/pve-storage-drs.1
+MAN_SRC  := man/pve-storage-drs.1.md
 VERSION  := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
 
 docs: pdf man

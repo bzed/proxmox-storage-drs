@@ -13,9 +13,12 @@ and the short version.
   [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md), which is the specification and the
   source of truth for behaviour.
 - **Names, and they are not interchangeable:** the distribution is `proxmox-storage-drs`, the
-  import package is `proxmox_storage_drs`, and the **installed executable is `pve-drs`** — one
-  `[project.scripts]` entry point onto `cli.py`. Every command in the documentation, in `--help`,
-  in the manpage and in commit messages is written `pve-drs <subcommand>`. Never `drs`.
+  import package is `proxmox_storage_drs`, and the **installed executable is `pve-storage-drs`** —
+  one `[project.scripts]` entry point onto `cli.py`. Every command in the documentation, in
+  `--help`, in the manpage and in commit messages is written `pve-storage-drs <subcommand>`.
+  Never `drs`, and never `pve-drs`: PVE 9.2 ships a Dynamic Load Balancer that moves *guests*
+  between nodes, and a name that does not say **storage** invites the reader to think this tool
+  replaces that one. The Debian source and binary package carry the same name.
 - **Licence:** GNU **AGPL-3.0-or-later**. Full text in [`LICENSE`](LICENSE).
 - **Copyright holder:** `Bernd Zeimetz <bernd@bzed.de>`.
 
@@ -200,12 +203,12 @@ in PDF or in roff.
 | Audience | Source | Generated |
 |---|---|---|
 | Whoever reads or changes the code | docstrings and comments, plus `docs/internals/*.md` | `docs/internals.pdf` |
-| The operator who runs it | `docs/manual/*.md` | `docs/pve-drs-manual.pdf`, `man/pve-drs.1` |
-| Somebody at a terminal, right now | the CLI's own option definitions | `pve-drs --help`, `pve-drs --manual` |
+| The operator who runs it | `docs/manual/*.md` | `docs/pve-storage-drs-manual.pdf`, `man/pve-storage-drs.1` |
+| Somebody at a terminal, right now | the CLI's own option definitions | `pve-storage-drs --help`, `pve-storage-drs --manual` |
 
 **Status:** only the specification pipeline (`make pdf`, [`.agents/paper.md`](.agents/paper.md))
 exists today, because there is no code yet. The commit that first adds a CLI adds the rest —
-`docs/internals/`, `docs/manual/`, `man/pve-drs.1.md`, the `docs`/`docs-check` targets — and wires
+`docs/internals/`, `docs/manual/`, `man/pve-storage-drs.1.md`, the `docs`/`docs-check` targets — and wires
 `docs-check` into `make check`. `docs/paper/` is document-agnostic apart from its title block and
 is meant to be reused, not copied.
 
@@ -253,9 +256,9 @@ modes, exit codes, troubleshooting, and the safety properties they are entitled 
 what happens if it is set too high and too low. A knob that exists in the schema or in
 `config/drs.example.yaml` but not in the manual is a bug, and so is the reverse.
 
-### 8.4 The manpage: `man/pve-drs.1`
+### 8.4 The manpage: `man/pve-storage-drs.1`
 
-Generated from `man/pve-drs.1.md` with `pandoc -s -t man`. It is deliberately the short one — it
+Generated from `man/pve-storage-drs.1.md` with `pandoc -s -t man`. It is deliberately the short one — it
 refers onward to the manual PDF for anything that needs more than a paragraph — with one
 exception: **`OPTIONS` is complete**, because that is what people open a manpage for.
 
@@ -267,11 +270,11 @@ the manpage is fixed.
 
 ### 8.5 `--help`
 
-- `pve-drs --help` prints a usage summary: every subcommand, every option, **with its default**.
+- `pve-storage-drs --help` prints a usage summary: every subcommand, every option, **with its default**.
   It is generated from the same argparse definitions the program runs on and the same constants
   the config loader uses, so it cannot drift from the behaviour.
-- `pve-drs <subcommand> --help` does the same for that subcommand.
-- `pve-drs --manual` (and `pve-drs help`) shows the manpage: exec `man pve-drs` when the page is installed and
+- `pve-storage-drs <subcommand> --help` does the same for that subcommand.
+- `pve-storage-drs --manual` (and `pve-storage-drs help`) shows the manpage: exec `man pve-storage-drs` when the page is installed and
   a pager makes sense, otherwise write the shipped plain-text rendering to stdout. Never answer
   with a URL alone — this runs on machines with no browser.
 
@@ -317,7 +320,7 @@ The order of preference, and there is no fourth option:
 
 ### 9.2 The Debian package is a deliverable
 
-`debian/` builds `pve-drs`: the executable, the manpage, the example configuration and the
+`debian/` builds `pve-storage-drs`: the executable, the manpage, the example configuration and the
 generated documentation. Three standing rules:
 
 - **`debian/control` is the single source of truth for dependencies.** Build-Depends and Depends
@@ -326,12 +329,12 @@ generated documentation. Three standing rules:
   dependencies from `debian/control` with `mk-build-deps`, so a stale declaration fails there
   rather than silently working on a machine that happens to have the package.
 - **Whenever documentation or a tool is added, the packaging is updated with it.** A new document
-  goes into `debian/pve-drs.docs`, a new manpage into `debian/pve-drs.manpages`, a new example into
-  `debian/pve-drs.examples`, a new build step into `debian/rules`. A file that is generated but not
+  goes into `debian/pve-storage-drs.docs`, a new manpage into `debian/pve-storage-drs.manpages`, a new example into
+  `debian/pve-storage-drs.examples`, a new build step into `debian/rules`. A file that is generated but not
   installed is a file nobody will ever read.
 - **The autopkgtest asks what the build cannot.** The build chroot has the Build-Depends installed
   and so cannot see a missing runtime dependency. `debian/tests` installs the package on a system
-  carrying only its `Depends` and runs `pve-drs --version`, `pve-drs --help` and an import of every
+  carrying only its `Depends` and runs `pve-storage-drs --version`, `pve-storage-drs --help` and an import of every
   module in the package. Keep it that way: it is the test that catches an optional dependency
   imported at the top of a module.
 

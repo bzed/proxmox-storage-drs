@@ -115,4 +115,4 @@ jobs:
           name: documentation
           path: |
             docs/IMPLEMENTATION_PLAN.pdf
-            man/pve-drs.1
+            man/pve-storage-drs.1

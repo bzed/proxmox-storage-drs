@@ -46,15 +46,15 @@ upstream tarball to track. `debian/gbp.conf` points at `main` for the same reaso
 |---|---|
 | `debian/control` | Any dependency changes — build or runtime, Python or tool |
 | `debian/rules` | A build step is added (a document to generate, a file to install) |
-| `debian/pve-drs.docs` | A document is added that a user should have on disk |
-| `debian/pve-drs.manpages` | A manpage is added |
-| `debian/pve-drs.examples` | An example configuration is added |
+| `debian/pve-storage-drs.docs` | A document is added that a user should have on disk |
+| `debian/pve-storage-drs.manpages` | A manpage is added |
+| `debian/pve-storage-drs.examples` | An example configuration is added |
 | `debian/tests/` | A new failure mode is worth catching on the installed package |
 | `debian/changelog` | Every release; `gbp dch` generates it, and its version must match `pyproject.toml` |
 
 ### What the build does and does not rebuild
 
-It **builds the manpage** from `man/pve-drs.1.md`, because that is generated from source and nobody
+It **builds the manpage** from `man/pve-storage-drs.1.md`, because that is generated from source and nobody
 should be reading a committed roff file.
 
 It **does not rebuild the PDFs**. They are committed, reproducible artefacts whose freshness
@@ -79,7 +79,7 @@ The build chroot has the Build-Depends installed. It therefore *cannot* tell you
 `python3-requests` is missing from `Depends`, or that `optimize.py` imports `ortools` at module
 level. `debian/tests` installs the package on a system with only its `Depends` and:
 
-- runs `pve-drs --version` and `pve-drs --help` — the entry point resolves and the CLI starts;
+- runs `pve-storage-drs --version` and `pve-storage-drs --help` — the entry point resolves and the CLI starts;
 - imports every module in the package (`debian/tests/import-all`) — every module is importable with
   the hard dependencies alone, which is what keeps the optional ones optional.
 

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Import every module of the installed package with only the binary package's
-# Depends available.  `pve-drs --version` exercises one import path; this
+# Depends available.  `pve-storage-drs --version` exercises one import path; this
 # exercises all of them, which is what catches a module that imports an
 # optional dependency (ortools, statsmodels, pulp) at the top level instead of
 # where it is used.  Those are Recommends and Suggests: the tool must plan and
