@@ -86,6 +86,24 @@ level. `debian/tests` installs the package on a system with only its `Depends` a
 When you add a module that uses an optional dependency, this test is what tells you that you put
 the import in the wrong place.
 
+**The autopkgtest deliberately runs without `python3-pulp`.** `Depends: @` installs the package's
+`Depends` and not its `Recommends`, which is exactly the configuration the test exists to
+exercise: the tool must plan with the heuristic alone. The *build-time* suite is the opposite —
+`coinor-cbc` and `python3-pulp` are `Build-Depends` under `<!nocheck>` and are in the GitHub
+Actions install list, so `dh_auto_test` and CI do exercise the MILP path, which is the primary
+solver on a Debian install. Keep both halves: a solver test that quietly `importorskip`s in every
+pipeline would leave the packaged solver path untested, and an autopkgtest that had pulp available
+would stop proving the tool runs without it.
+
+## Two identities, and which goes where
+
+`debian/changelog` is signed with the **packaging** identity, `Bernd Zeimetz <bzed@debian.org>` —
+the Debian developer address, which is what belongs on Debian packaging work. Everything else in
+the tree — the SPDX headers, `debian/copyright`'s `Upstream-Contact`, `pyproject.toml`'s authors,
+the manpage's `AUTHOR` — carries the **upstream** identity, `Bernd Zeimetz <bernd@bzed.de>`. The
+two addresses are the same person wearing different hats; neither is a typo for the other, and a
+tidy-up that unified them would be wrong in one direction or the other.
+
 ## CI
 
 **GitHub Actions**, in `debian:trixie` containers:

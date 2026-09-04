@@ -3,12 +3,14 @@ Section: admin
 Priority: optional
 Maintainer: Bernd Zeimetz <bernd@bzed.de>
 Build-Depends:
+ coinor-cbc <!nocheck>,
  debhelper-compat (= 13),
  dh-sequence-python3,
  pandoc <!nodoc>,
  pybuild-plugin-pyproject,
  python3-all,
  python3-jsonschema <!nocheck>,
+ python3-pulp <!nocheck>,
  python3-pytest <!nocheck>,
  python3-pytest-cov <!nocheck>,
  python3-requests <!nocheck>,

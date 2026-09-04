@@ -143,7 +143,7 @@ without it.
 | `requests` | PVE API and Prometheus HTTP | `python3-requests` 2.32 |
 | `ruamel.yaml` | Config (round-trips comments) | `python3-ruamel.yaml` 0.18 |
 | `jsonschema` | Config validation (§11.1) | `python3-jsonschema` 4.19 |
-| `pulp` | MILP via CBC — **the packaged solver path** | `python3-pulp` 2.7 + `coinor-cbc` 2.10 |
+| `pulp` | MILP via CBC — **the packaged solver path**, optional | `python3-pulp` 2.7 + `coinor-cbc` 2.10 |
 | `statsmodels` | Holt-Winters, optional | `python3-statsmodels` 0.14 |
 | `ortools` | CP-SAT, optional and unpackaged | **not in Debian** |
 | `pytest`, `pytest-cov`, `pytest-xdist` | Tests; groups are independent so they parallelize | `python3-pytest*` |
@@ -154,9 +154,13 @@ extra**, and CP-SAT is a bonus for whoever installs it rather than the assumed b
 be read accordingly: on a Debian install the MILP is solved by **CBC through `python3-pulp`**, with
 the dependency-free heuristic below that.
 
-Make `ortools` and `statsmodels` **optional extras**. The tool must run, plan and execute with only
-`requests` + `ruamel.yaml` + `jsonschema` installed, falling back to the heuristic solver and the
-quantile forecaster. This keeps it deployable on a locked-down management host — and it is enforced
+Make `ortools`, `pulp` and `statsmodels` **optional extras**. The tool must run, plan and execute
+with only `requests` + `ruamel.yaml` + `jsonschema` installed, falling back to the heuristic solver
+and the quantile forecaster. `pulp` is the odd one: it is *in* Debian and it is the solver an
+operator should have, so it is `Recommends` in `debian/control` and an extra rather than a
+dependency in `pyproject.toml` — "the packaged solver path" describes which MILP backend a Debian
+install gets, not that the MILP is mandatory. Without any solver the tool still plans, using the
+heuristic of §5.5; that is the whole point of specifying two of them. This keeps it deployable on a locked-down management host — and it is enforced
 rather than hoped for: the autopkgtest in §2.2 imports every module of the installed package with
 only the binary package's `Depends` present, so an optional dependency imported at module level
 fails the build.
@@ -1638,15 +1642,25 @@ Accepted before the subcommand, and shown by `pve-storage-drs --help` with their
 | `--group NAME` | all groups | Restrict the run to one group; repeatable. Groups are independent (§5), so this changes nothing about the result for the groups selected |
 | `--mode {dry-run,confirm,auto}` | `execution.mode` | Override the execution mode for this run only |
 | `--json` | off | Emit the machine-readable report of §9.5 instead of the human one |
-| `-v`, `--quiet` | normal | Log level; `--quiet` leaves only warnings and errors, for the timer |
+| `-v`, `--verbose` | normal | More detail on stderr. Repeatable |
+| `--quiet` | normal | Warnings and errors only, for the systemd timer |
 | `--version` | — | Version, then exit |
 | `--manual` | — | Show `pve-storage-drs(1)` (§8.5 of `AGENTS.md`) |
 
-Two rules the implementation must honour. `--mode` may make a run *safer* without ceremony, but
-`--mode auto` on a config that says `dry-run` is an operator deliberately overriding their own
-safety setting: log it at warning level, naming both values. And no option may set a value that
-`config.py` would have rejected in the file — the command line goes through the same validation
-(§11.1), because a knob that is only checked on one of its two paths is a knob that is not checked.
+Two rules the implementation must honour.
+
+**Every `--mode` override is logged, and an override toward less safety is a warning.** Order the
+modes `dry-run < confirm < auto`. Moving *down* that order — `auto` to `confirm`, `confirm` to
+`dry-run` — is logged at info: an operator being more careful than their config needs no ceremony.
+Moving *up* it is the operator deliberately removing a barrier they themselves configured, whether
+that barrier is the dry run or the per-step confirmation, so `dry-run → confirm`, `dry-run → auto`
+and `confirm → auto` all log at **warning** level, naming both values. In `auto` mode the log is
+the only record a human will see (§2.1), and "why did it move disks when the config said confirm"
+must be answerable from it.
+
+**No option may set a value that `config.py` would have rejected in the file.** The command line
+goes through the same validation (§11.1), because a knob that is only checked on one of its two
+paths is a knob that is not checked.
 
 ---
 
