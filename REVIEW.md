@@ -23,6 +23,9 @@ the `reserve-tradeoff` fixture, the lexicographic solver path, the `ω_wipe` sta
 saturation guard, AGENTS.md, and the Python toolchain. All M-findings are resolved; two new
 findings (K-01..K-02) were identified, both Low severity.
 
+A **fifth pass** (section 9) reviews the plan after the author addressed K-01..K-02. Both
+findings are resolved. No new findings. The plan and fixtures are clean.
+
 ---
 
 ## 0. Overall assessment
@@ -919,6 +922,40 @@ The updated fixtures and generator were independently verified:
   the deadlock detection in a single 502-line file with clean separation between state
   evaluation, objective computation, and ordering. The `Fixture` dataclass and the
   `all_assignments()` iterator make the exhaustive enumeration readable and trustworthy.
+
+---
+
+## 9. Fifth-pass review of the updated plan
+
+Commit `78d9573` ("Address fourth-pass review findings K-01, K-02") made targeted fixes only;
+the plan, config, and fixtures changed in three small ways. No new findings.
+
+### 9.1 Resolution of fourth-pass findings
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| K-01 | Resolved | `generate_expected.py` `payback()` now takes an `e_after` parameter (the exact, unrounded `E_of(f, a)`), passed via a `_exact_E_after` field on the case dict (stripped before writing with a `_`-prefix filter). `benefit_load_seconds` is now `3951360.0`, matching the §14.5 prose exactly. The `ratio` is unchanged at `150.73`. Verified: `generate_expected.py --check` exits 0. |
+| K-02 | Resolved | Both fixture YAMLs renamed `omega_src`→`source_load_weight`, `omega_dst`→`target_load_weight`, `omega_wipe`→`wipe_load_weight` to match `config/drs.example.yaml`. The generator's `cost()` and `build()` functions updated to read the new names. The expected files' `assumptions` block renamed `omega_wipe`→`wipe_load_weight`. A field-naming convention comment was added to both fixture YAMLs documenting that fixture knobs mirror config names, with two deliberate exceptions (`payback_horizon_seconds` as integer vs config's `7d`, and `beta_values` as a list vs config's single `beta_move_count`). |
+
+The plan also fixed two stale references in §11 and §15.1's traceability tables:
+`gamma_move_bytes` → `gamma_move_bytes_per_tib` to match the actual config field name, and the
+config itself was corrected from `gamma_move_bytes` to `gamma_move_bytes_per_tib`.
+
+### 9.2 Verification
+
+- `python3 tests/fixtures/generate_expected.py --check` exits 0 — both expected files current.
+- `fc-tier1.expected.json` `benefit_load_seconds` = `3951360.0` (was `3951360.2`), matching §14.5.
+- Fixture migration keys: `source_load_weight`, `target_load_weight`, `wipe_load_weight` —
+  all match config field names.
+- Fixture objective keys: `gamma_move_bytes_per_tib` — matches config.
+- No changes to the plan's §5.5 CP-SAT scaling, §5.3 lexicographic/big-M, §7.1 cost model,
+  §7.3 saturation guard, §8.1 transient invariant, or §14.6 reserve-tradeoff fixture.
+
+### 9.3 Assessment
+
+The plan and its fixtures are clean. Across five review passes, 40 findings (F-01..F-25,
+N-01..N-07, M-01..M-06, K-01..K-02) have been raised and all are resolved. The remaining
+open items are zero. The plan is ready for implementation.
 
 ---
 
