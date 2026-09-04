@@ -55,7 +55,7 @@ commit messages refer back to.
 ## Documentation
 
 Beyond the specification, the tool ships — once there is code to describe — an internals guide for
-whoever changes it, an operator manual documenting every configuration option, and a `drs(1)`
+whoever changes it, an operator manual documenting every configuration option, and a `pve-drs(1)`
 manpage, all generated from Markdown in `docs/`, plus a `--help` that carries every option and its
 default. [`AGENTS.md`](AGENTS.md) section 8 and
 [`.agents/documentation.md`](.agents/documentation.md) specify what that means in practice.

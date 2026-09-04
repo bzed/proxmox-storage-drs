@@ -50,7 +50,7 @@ dev = [
 ]
 
 [project.scripts]
-drs = "proxmox_storage_drs.cli:main"
+pve-drs = "proxmox_storage_drs.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/bzed/proxmox-storage-drs"
