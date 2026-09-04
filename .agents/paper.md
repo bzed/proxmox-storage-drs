@@ -6,6 +6,10 @@ have a git checkout — a reviewer, an operator, an implementer working from a p
 
 **The PDF is a build product. Never edit it, and never let it drift.**
 
+The machinery described here is document-agnostic apart from the title block, and is the intended
+basis for the internals and manual PDFs described in [`documentation.md`](documentation.md).
+Extend it; do not copy it.
+
 ```sh
 make pdf         # rebuild docs/IMPLEMENTATION_PLAN.pdf from the Markdown
 make pdf-check   # fail if the committed PDF was built from a different Markdown

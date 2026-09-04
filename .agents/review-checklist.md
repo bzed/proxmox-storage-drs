@@ -29,6 +29,16 @@ Walk this list. It is short on purpose.
 - [ ] `IMPLEMENTATION_PLAN.md` updated in the **same commit** if behaviour changed.
 - [ ] If the plan changed, `make pdf` was run and `docs/IMPLEMENTATION_PLAN.pdf` plus its
       `.sha256` stamp are in the same commit ([`paper.md`](paper.md)).
+- [ ] Every module and public function documents what it does, its units, and the plan section
+      it implements; non-obvious code says **why**, not what.
+- [ ] The internals page for anything you changed still describes the code as built
+      ([`documentation.md`](documentation.md)).
+- [ ] A new or changed config knob is documented in the manual with type, default, unit, both
+      failure directions, and what it interacts with — and appears in
+      `config/drs.example.yaml` and plan §15.1.
+- [ ] A new or changed CLI option appears in `--help` with its default and unit, and in the
+      manpage's `OPTIONS`.
+- [ ] `make docs` was run and the regenerated PDFs and `man/drs.1` are in the same commit.
 - [ ] §15 traceability and §15.1 knob→formula tables still complete.
 - [ ] `config/drs.example.yaml` carries any new knob, with a comment explaining what happens
       at the default and what happens if you get it wrong.
