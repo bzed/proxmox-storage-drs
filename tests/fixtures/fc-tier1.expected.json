@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "derived": {
+    "total_load": 7.4,
+    "u_star": 2.466667,
+    "initial": {
+      "san-a": {
+        "load": 6.5,
+        "used_tib": 4.5,
+        "largest_tib": 2.0,
+        "required_tib": 8.5,
+        "violates_reserve": true
+      },
+      "san-b": {
+        "load": 0.7,
+        "used_tib": 1.5,
+        "largest_tib": 1.0,
+        "required_tib": 3.5,
+        "violates_reserve": false
+      },
+      "san-c": {
+        "load": 0.2,
+        "used_tib": 0.5,
+        "largest_tib": 0.5,
+        "required_tib": 1.5,
+        "violates_reserve": false
+      }
+    },
+    "E_before": 8.066667,
+    "spread_before": 2.554054
+  },
+  "cases": [
+    {
+      "beta_move_count": 0.25,
+      "expected_objective": 2.533333,
+      "expected_move_count": 3,
+      "expected_E_after": 1.133333,
+      "expected_fragmentation": 1,
+      "expected_moves": [
+        "101:scsi1:san-a->san-b",
+        "102:scsi0:san-a->san-c",
+        "105:scsi0:san-c->san-b"
+      ],
+      "expected_final_loads": {
+        "san-a": 3.0,
+        "san-b": 1.9,
+        "san-c": 2.5
+      },
+      "expected_spread_after": 0.445946
+    },
+    {
+      "beta_move_count": 0.5,
+      "expected_objective": 3.158333,
+      "expected_move_count": 2,
+      "expected_E_after": 1.533333,
+      "expected_fragmentation": 1,
+      "expected_moves": [
+        "101:scsi1:san-a->san-b",
+        "102:scsi0:san-a->san-c"
+      ],
+      "expected_final_loads": {
+        "san-a": 3.0,
+        "san-b": 1.7,
+        "san-c": 2.7
+      },
+      "expected_spread_after": 0.527027
+    }
+  ],
+  "payback_two_move_plan": {
+    "per_move": [
+      {
+        "disk": "102:scsi0",
+        "size_tib": 1.5,
+        "duration_seconds": 7864.32,
+        "cost_load_seconds": 15728.64
+      },
+      {
+        "disk": "101:scsi1",
+        "size_tib": 1.0,
+        "duration_seconds": 5242.88,
+        "cost_load_seconds": 10485.76
+      }
+    ],
+    "total_cost_load_seconds": 26214.4,
+    "benefit_load_seconds": 3951360.0,
+    "ratio": 150.73,
+    "accepted": true
+  },
+  "payback_rejected_archive_disk": {
+    "size_tib": 4.0,
+    "delta_E": 0.05,
+    "cost_load_seconds": 41943.04,
+    "benefit_load_seconds": 30240.0,
+    "ratio": 0.721,
+    "accepted": false
+  }
+}

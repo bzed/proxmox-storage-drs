@@ -1,6 +1,10 @@
 # proxmox-storage-drs — reference configuration
 # Every value shown is the default unless marked REQUIRED.
 
+# Config format version. config.py rejects an unknown MAJOR version rather than
+# misinterpreting fields.
+schema_version: 1
+
 # ---------------------------------------------------------------- connections
 proxmox:
   host: pve01.example.com          # REQUIRED. Any cluster member.
@@ -15,6 +19,9 @@ proxmox:
     token_id: null                 # e.g. "drs@pve!balancer"
     token_secret: null             # env: PVE_TOKEN_SECRET
   ticket_refresh_seconds: 3000     # PVE tickets last 2h; refresh well before
+  # PVE has no batch config endpoint, so topology is O(number of VMs) requests.
+  # Bounded parallelism for the read phase.
+  read_workers: 12
 
 prometheus:
   url: http://prometheus.example.com:9090   # REQUIRED
@@ -51,20 +58,29 @@ metrics:
 
 # ------------------------------------------------------------ decision window
 window:
-  lookback: 24h         # timeframe considered for decisions
-  quantile: 0.95        # robust reduction of the window to one scalar per disk
-  seasonal_lookback_days: 7   # for the seasonal-naive comparison; 0 disables
+  # The DECISION window: the period whose load we balance. This is NOT the same
+  # as the history a forecaster needs -- see the forecast: block below.
+  lookback: 24h
+  quantile: 0.95        # point estimate: robust reduction of the window per disk
+  upper_quantile: 0.99  # the bound the OPTIMIZER consumes (>= quantile)
   min_coverage: 0.80    # reject a disk's data if fewer than this fraction of
                         # expected samples are present
 
 # ------------------------------------------------------------------ load model
-# load = w_iotime*avg_inflight + w_ops*(ops/s) + w_bytes*(bytes/s)
-# Terms are normalized to comparable scale first (see plan section 4).
+# Read and write series are fetched separately and combined ENGINE-SIDE:
+#   raw_X(d) = read_factor*rd_X + write_factor*wr_X    for X in {time, ops, bytes}
+# then each term is normalized by its group total, then weighted:
+#   load = w_iotime*iotime_hat + w_ops*ops_hat + w_bytes*bytes_hat
+# See plan section 4.
 load_weights:
   iotime: 1.0           # primary: rate(rd+wr_total_time_ns)/1e9, dimensionless
   ops:    0.0
   bytes:  0.0
-  # Optional asymmetry between reads and writes, applied within ops and bytes.
+  # Read/write asymmetry. Intended for the ops and bytes terms, where the real
+  # cost difference between a read and a write is NOT otherwise represented
+  # (a RAID-6 write costs far more than a read of the same size).
+  # The iotime term already measures that cost directly, so applying these to it
+  # double-counts -- do so only deliberately.
   read_factor:  1.0
   write_factor: 1.0
 
@@ -91,7 +107,9 @@ snapshot_reserve:
   # transiently during a migration. PVE 9 volume-chain snapshots allocate a new
   # full-size LV per snapshot, which is what this protects.
   factor: 2.0
-  # Also honour a flat floor, whichever is larger.
+  # Absolute floor, applied as reserve = max(factor * largest_disk, min_free_bytes).
+  # Matters when a storage's largest disk is small: with factor=2 and a 10 GiB
+  # largest disk, the snapshot term alone reserves only 20 GiB on a 20 TiB LUN.
   min_free_bytes: 0
   # Count volumes not managed by DRS (templates, orphans, other clusters)
   # against capacity. Strongly recommended.
@@ -136,9 +154,13 @@ solver:
 # ----------------------------------------------------------------- execution
 execution:
   mode: dry-run          # dry-run | confirm | auto
+  # >1 requires the GENERALIZED transient reserve invariant (plan section 8.1):
+  # several disks can be landing on one storage at once and no source releases
+  # space until it completes. Leave at 1 unless you have verified headroom.
   max_concurrent_migrations: 1
   max_migrations_per_run: 5
-  max_concurrent_per_storage: 1
+  max_concurrent_per_storage: 1   # counts a storage as both source and target
+  max_replans_per_run: 3          # bound on mid-execution re-plans (section 9.2)
   abort_on_failure: true
   poll_interval_seconds: 10
   time_windows:          # empty = any time. Applies to "auto" mode only.
@@ -160,7 +182,17 @@ state:
 
 forecast:
   model: quantile        # quantile | seasonal_naive | holt_winters
+  # Each forecaster declares the HISTORY it needs, independent of
+  # window.lookback. Startup validation fails if Prometheus retention or the
+  # configured window cannot supply it, rather than silently degrading:
+  #   quantile        -> window.lookback                      (24h)
+  #   seasonal_naive  -> seasonal_lookback_days                (7d)
+  #   holt_winters    -> 2 * seasonal_periods * step           (48h)
+  # NOTE: with seasonal_periods=288 at a 5m step, holt_winters needs 48h. A 24h
+  # lookback alone can never satisfy it -- it would fall back to quantile forever.
+  seasonal_lookback_days: 7    # used by seasonal_naive; 0 disables
   holt_winters:
     seasonal_periods: 288      # 24h at 5m step
     trend: add
     seasonal: add
+    residual_z: 2.0            # upper bound = point + z * sigma(residuals)

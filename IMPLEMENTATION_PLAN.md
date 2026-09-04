@@ -25,6 +25,27 @@ storages within each group by live-migrating individual VM disks, subject to:
 Compute/CPU/memory DRS, VM-to-node placement, HA, backup scheduling, storage provisioning,
 thin-pool overcommit management, and any modification of guest configuration beyond disk location.
 
+### Relationship to the PVE 9.2 Dynamic Load Balancer
+
+PVE 9.2 ships a built-in Dynamic Load Balancer — a dynamic mode for the Cluster Resource Scheduler
+that continuously live-migrates **HA-managed guests between nodes** to even out node CPU/memory
+utilization. It is **complementary, not overlapping**: it balances guests across *hypervisors* and
+has no notion of storage or of the FC LUNs behind it. Nothing in PVE balances disk I/O across
+storages, which is the gap this tool fills.
+
+There is, however, a real interaction: the built-in balancer may live-migrate a VM to another node
+*while a Storage DRS plan is executing*, invalidating the `{node}` in a queued `move_disk` call.
+The pre-move re-validation in §9.2 exists precisely to catch this — it re-reads the VM's current node
+before every move and re-plans on mismatch. Implementers must not cache the node across moves.
+
+### Requirement interpretation: "minimal number of migrations"
+
+The requirement that migrations be minimal is implemented as a **tunable preference** (the `β` term
+in §5.4), not as a strict lexicographic minimum. A strict minimum would refuse a second cheap move
+that halves the remaining imbalance, which is not what is wanted. `β` sets the exchange rate between
+"one more migration" and "this much less imbalance"; §14.3 demonstrates `β` selecting a two-move
+plan over a three-move plan on the same input.
+
 ### Operating assumptions
 
 - PVE 9.2, shared LVM (typically over FC) or any shared storage supporting `move_disk`.
@@ -85,6 +106,46 @@ The join between them is the disk identity `(vmid, device)`, which both sides ex
 | `execute.py` | Three execution modes, task supervision |
 | `cli.py` | `plan`, `apply`, `verify-metrics`, `show-load`, `explain` |
 
+### 2.1 Implementation, deployment and operations
+
+**Language: Python 3.11+.** The decision is driven by the solver and forecasting libraries — OR-Tools
+CP-SAT and `statsmodels` have no usable equivalent in Go or Rust without substantial
+reimplementation, and PVE hosts already ship Python, so operators can read and patch the tool.
+Single-binary deployment is not a requirement here; if it ever becomes one, the dependency-free
+heuristic path (§5.5) is the portable subset worth porting.
+
+`pyproject.toml` dependencies:
+
+| Package | Purpose |
+|---|---|
+| `ortools>=9` | CP-SAT, the preferred solver backend |
+| `pulp>=2.7` | CBC fallback (bundled CBC wheel) |
+| `statsmodels>=0.14` | Holt-Winters, optional extra |
+| `requests>=2.31` | PVE API and Prometheus HTTP |
+| `ruamel.yaml` | Config (round-trips comments) |
+| `jsonschema` | Config validation (§11.1) |
+| `pytest`, `pytest-xdist` | Tests; groups are independent so they parallelize |
+
+Make `ortools` and `statsmodels` **optional extras**. The tool must run, plan and execute with only
+`requests` + `ruamel.yaml` + `jsonschema` installed, falling back to the heuristic solver and the
+quantile forecaster. This keeps it deployable on a locked-down management host.
+
+**Deployment.** Runs on a management host — not necessarily a PVE node — needing outbound access to
+the PVE API (tcp/8006) and to Prometheus. It holds credentials and must be treated accordingly;
+prefer an API token over username/password for unattended operation.
+
+**Cadence.** Invoked by a systemd timer (or cron) every 15–30 min. Note the separation of concerns:
+the *invocation* cadence is independent of `execution.time_windows`, which constrain only when
+**moves execute**. The engine may plan at any time and simply decline to act outside the window.
+The drift and imbalance gates (§6) make frequent invocation cheap — most runs exit at a gate having
+issued only read queries.
+
+**Logging.** Structured JSON lines to stdout (captured by journald) plus an optional file sink.
+Every run must log, at minimum: each gate decision with its computed value and threshold; the load
+vector digest; the chosen plan and its objective breakdown; the payback arithmetic; every `move_disk`
+issued with its UPID; and every abort, re-plan and deadlock. In `auto` mode this log is the only
+record a human will see, so it must be sufficient to reconstruct why any migration happened.
+
 ---
 
 ## 3. Data acquisition
@@ -124,6 +185,18 @@ blockstat_rd_operations{vmid="101", instance="scsi0", nodename="pve01", host="db
 Everything needed for true per-disk IOPS, throughput **and latency** is therefore already present in
 an existing PVE → InfluxDB → Telegraf → Prometheus pipeline. **No new exporter or collector is
 required.**
+
+**Verification status of the above.** The `vmstatus(undef, 1)` call, the `blockstat->{$drive_id}`
+assignment, the `s/drive-//r` prefix stripping and the `InfluxDB.pm` nesting behaviour were read
+from the `pve-manager` and `qemu-server` sources, not inferred from documentation. Independently,
+the operator of the target cluster confirmed empirically that their existing Prometheus already
+carries `rd_operations`, `wr_operations`, `rd_bytes`, `wr_bytes`, `rd_total_time_ns` and
+`wr_total_time_ns` per disk. The *existence* of the data is therefore settled.
+
+What remains genuinely unconfirmed is the **Telegraf-side naming** — the measurement/field join
+character, and whether the `instance` tag survived the collision described in §3.3. That varies per
+deployment and is exactly what `drs verify-metrics` exists to pin down. Treat §3.4's metric names as
+defaults to be confirmed, not as constants.
 
 ### 3.2 Two paths deliberately not taken
 
@@ -169,21 +242,21 @@ else. It shall:
 Let `R` be `metrics.rate_window` (default `5m`) and `W` be `window.lookback` (default `24h`).
 Three raw quantities per disk, all keyed by `(vmid, device)`:
 
+Read and write are fetched **separately** so that `read_factor`/`write_factor` (§4) can be applied
+engine-side — six queries per group, not three:
+
 ```promql
-# average in-flight I/O (dimensionless) — the primary load signal
-sum by (vmid, device) (
-    rate(blockstat_rd_total_time_ns[5m]) + rate(blockstat_wr_total_time_ns[5m])
-) / 1e9
+# in-flight I/O, read and write (divide by 1e9 to get s/s)
+sum by (vmid, device) (rate(blockstat_rd_total_time_ns[5m])) / 1e9
+sum by (vmid, device) (rate(blockstat_wr_total_time_ns[5m])) / 1e9
 
 # operations per second
-sum by (vmid, device) (
-    rate(blockstat_rd_operations[5m]) + rate(blockstat_wr_operations[5m])
-)
+sum by (vmid, device) (rate(blockstat_rd_operations[5m]))
+sum by (vmid, device) (rate(blockstat_wr_operations[5m]))
 
 # bytes per second
-sum by (vmid, device) (
-    rate(blockstat_rd_bytes[5m]) + rate(blockstat_wr_bytes[5m])
-)
+sum by (vmid, device) (rate(blockstat_rd_bytes[5m]))
+sum by (vmid, device) (rate(blockstat_wr_bytes[5m]))
 ```
 
 Reduce each to one scalar over the decision window with a robust quantile rather than a mean, so a
@@ -237,6 +310,31 @@ the first `:`; the size comes from the `size=` parameter, cross-checked against
 containing `media=cdrom`, and skip `efidisk`/`tpmstate` volumes — they are tiny and moving them is
 pointless and, for TPM state, unsupported alongside volume-chain snapshots.
 
+**Disk format.** Detect the source format from the volume returned by `/storage/{storage}/content`
+(`format: raw|qcow2|…`), falling back to the storage type's default (raw for LVM, qcow2 for
+directory storages, raw for ZFS zvols). (C2) fixes `x_{d,s} = 0` when `s` cannot store that format.
+`move_disk` without an explicit `format` preserves the source format, which is what we want:
+**format conversion is out of scope and must stay disabled by default.** Only pass `format=` when an
+operator has explicitly opted in — converting raw→qcow2 on shared LVM is what enables volume-chain
+snapshots, but it is a deliberate storage-policy change, not something a balancer should do
+silently.
+
+**Read-path cost and concurrency.** The topology read is `O(number of VMs)`: PVE has no batch
+config endpoint, so `/qemu/{vmid}/config` must be fetched per VM. For a few hundred VMs, serial
+fetching dominates run time. Specify:
+
+- a bounded thread pool (8–16 workers, configurable) for the per-VM config fetches, with a short
+  per-request timeout and bounded retries on 5xx;
+- a **per-run topology cache** — one snapshot at the start of the run, reused by the load model,
+  solver and scheduler;
+- the pre-move re-validation in §9.2 **must bypass this cache** for the specific VM and target
+  storage it is about to touch, and only for those; everything else may be reused;
+- `/cluster/resources` is a single call and gives the VM inventory, node placement and coarse
+  storage usage, so fetch it first and use it to decide which per-VM configs are needed at all
+  (excluded, stopped and ungrouped VMs need none).
+
+Expected call count per run: `2 + |VMs considered| + 2·|storages|`.
+
 Write path:
 
 ```
@@ -257,15 +355,35 @@ For each disk `d`, reduce the three raw quantities to a single scalar. The terms
 different magnitudes (in-flight I/O ≈ 0–10, ops/s ≈ 0–50000, bytes/s ≈ 0–10⁹), so each is normalized
 by the group total before weighting; otherwise the configured weights would be meaningless.
 
+Read and write are combined **before** normalization, using the configurable asymmetry factors
+`ρ = load_weights.read_factor` and `ω = load_weights.write_factor` (both 1.0 by default). Reads and
+writes are therefore fetched as **separate series** and combined engine-side in `loadmodel.py`,
+not summed inside PromQL — this keeps the factors in tested code rather than in deployed query
+strings, and makes them unit-testable in isolation:
+
 ```
-        iotime_d              ops_d               bytes_d
+raw_t(d) = ρ·rd_time_d + ω·wr_time_d        (in-flight I/O, s/s)
+raw_o(d) = ρ·rd_ops_d  + ω·wr_ops_d         (ops/s)
+raw_b(d) = ρ·rd_bytes_d + ω·wr_bytes_d      (bytes/s)
+```
+
+Each term is then normalized by its group total, because the three have wildly different magnitudes
+(in-flight I/O ≈ 0–10, ops/s ≈ 0–50 000, bytes/s ≈ 0–10⁹) and unnormalized weights would be
+meaningless:
+
+```
+        raw_t(d)              raw_o(d)             raw_b(d)
 î_d = ───────────── ,  ô_d = ───────────  ,  b̂_d = ─────────────
-       Σ_{e∈g} iotime_e      Σ_{e∈g} ops_e        Σ_{e∈g} bytes_e
+       Σ_{e∈g} raw_t(e)      Σ_{e∈g} raw_o(e)     Σ_{e∈g} raw_b(e)
 
 ℓ_d  =  w_t·î_d  +  w_o·ô_d  +  w_b·b̂_d
 ```
 
 with `w_t = 1, w_o = w_b = 0` by default — **I/O time is the primary quantity**.
+
+Note that `ℓ` is normalized to sum to `w_t + w_o + w_b` over the group (1.0 with defaults). All
+objective weights in §5.4 are calibrated against that scale. Guard the division: if a group's total
+for a term is 0, that term contributes 0 for every disk rather than producing NaN.
 
 Why I/O time is the right default. `rate(rd_total_time_ns + wr_total_time_ns) / 1e9` is, by Little's
 law, the **average number of I/O requests in flight** for that disk. It is dimensionless, it is
@@ -276,6 +394,13 @@ Pure IOPS treats those two operations as equal and so systematically under-count
 load; pure throughput does the reverse and under-counts small random load. `ops` and `bytes` remain
 available as additional weighted terms for operators who want to express a policy the array's own
 timings do not capture.
+
+Because I/O time already embodies the real cost asymmetry between reads and writes, leaving
+`read_factor = write_factor = 1.0` is correct for the default configuration. The factors exist for
+the `ops`/`bytes` terms, where the asymmetry is *not* otherwise represented — a write to a RAID-6
+array costs far more than a read of the same size, and neither an operation count nor a byte count
+knows that. Applying them to the I/O-time term as well is supported but double-counts, so do it only
+deliberately.
 
 One caveat to document: I/O time is a *feedback* signal — it rises when the array is slow, including
 when the slowness is caused by some other tenant. Combined with the drift gate and cooldowns this is
@@ -311,9 +436,26 @@ four groups is four small problems, not one large one.
 | `z_d` | provisioned size of disk `d` (bytes) |
 | `ℓ_d` | load of disk `d` (section 4) |
 | `C_s` | total capacity of storage `s` |
-| `Uˢᵉˣᵗ` | bytes on `s` consumed by volumes DRS does not manage |
+| `Uˢᵉˣᵗ` | bytes on `s` consumed by volumes DRS does not manage (§5.1.1) |
 | `c_s` | capability weight of `s` |
 | `f_s` | snapshot reserve factor for `s` (default 2.0) |
+
+#### 5.1.1 Computing `Uˢᵉˣᵗ`
+
+```
+Uˢᵉˣᵗ = Σ { size(vol) : vol ∈ GET /nodes/{node}/storage/{s}/content ,
+                        identity(vol) ∉ D }
+```
+
+where `identity(vol)` is the `(vmid, device)` pair the volume belongs to, resolved by matching the
+volume id against the owning VM's config. Everything that is not a movable disk of this group counts
+as foreign: templates, ISOs and backups, disks of stopped/excluded/ungrouped VMs, disks belonging to
+another group that shares the storage, unreferenced orphans, and **orphaned target volumes left by a
+previously failed move** (§9.3). Counting those orphans is intentional — they really do occupy the
+LUN, and letting them inflate `Uˢᵉˣᵗ` is what makes their cost visible rather than silently eroding
+the reserve.
+
+Set `Uˢᵉˣᵗ = 0` only if `snapshot_reserve.count_foreign_volumes` is false, which is not recommended.
 
 ### 5.2 Variables
 
@@ -342,6 +484,9 @@ small:
 - `s` is not shared, or is restricted to nodes that cannot see the VM;
 - `s` cannot hold the disk's format, or the disk is `efidisk`/`tpmstate`;
 - `d` or `v(d)` is excluded by config (`exclude.vmids`, `exclude.disks`, tags, `no-drs`);
+- `σ₀(d)` belongs to **no** configured group — such a disk is unmanaged: it is not in any `D`, it is
+  pinned where it is, and its bytes count toward `Uˢᵉˣᵗ` of its storage. Report it in `show-load` as
+  "ungrouped, not managed" so an unintended omission from `groups` is visible rather than silent;
 - `d` has an existing snapshot chain and `exclude.skip_vms_with_snapshots` is set — in which case
   additionally pin `x_{d,σ₀(d)} = 1`;
 - `d` is within its per-disk cooldown — also pin to current.
@@ -361,20 +506,39 @@ optimum:
 Z_s  ≥  z_d · x_{d,s}                                  ∀ d ∈ D, s ∈ S
 ```
 
-**(C5) Capacity and snapshot reserve.** The core safety constraint:
+**(C5) Capacity and snapshot reserve.** The core safety constraint. The reserve is the **larger** of
+the snapshot term and the configured flat floor, so introduce `R_s ≥ 0`:
 
 ```
-Σ_d z_d·x_{d,s}  +  Uˢᵉˣᵗ  +  f_s · Z_s   ≤   C_s  +  r_s          ∀ s ∈ S
+R_s  ≥  f_s · Z_s
+R_s  ≥  min_free_bytes_s                                           (constant)
+
+Σ_d z_d·x_{d,s}  +  Uˢᵉˣᵗ  +  R_s   ≤   C_s  +  r_s                ∀ s ∈ S
 ```
 
-The `f_s · Z_s` term is the "always keep 2× the largest disk free" rule, and (C4) is what makes it
-expressible in a linear model at all.
+Two one-sided bounds are exact for `R_s = max(f_s·Z_s, min_free_bytes_s)` because (C5) pushes `R_s`
+*down* while both bounds push it *up*. The `f_s · Z_s` term is the "always keep 2× the largest disk
+free" rule, and (C4) is what makes it expressible in a linear model at all. `min_free_bytes` is the
+absolute floor for a storage whose largest disk is small — with `f=2` and a 10 GiB largest disk, the
+snapshot term alone would reserve only 20 GiB on a 20 TiB LUN.
 
-`r_s` is a **soft slack penalized heavily** in the objective rather than a hard `≤ C_s`. This is
-essential: a storage can already be violating the reserve when the engine first runs (see the worked
-example in section 14), and a hard constraint would make the model infeasible and the tool useless
-exactly when it is most needed. With slack, the solver instead produces the plan that *repairs* the
-violation. Report any residual `r_s > 0` prominently as an unfixable shortfall.
+`r_s` is a **repair slack**, not a licence to overfill. A storage can already be violating the
+reserve when the engine first runs (see the worked example in §14), and a hard `≤ C_s` would make
+the model infeasible and the tool useless exactly when it is most needed. Two ways to keep it
+effectively hard:
+
+1. **Lexicographic, preferred and provably correct.** Solve in two stages: minimize `Σ_s r_s`
+   alone; then fix `Σ_s r_s` to that minimum as a constraint and minimize the §5.4 objective. Both
+   CP-SAT and CBC support this by re-solving. The reserve is then never traded against balance at
+   any weight, and `Σ r_s > 0` provably means *physically impossible*, not merely *unattractive*.
+2. **Single-stage big-M**, simpler: keep `P · Σ_s r_s` in the objective with `P` chosen to exceed
+   any achievable gain from the other terms. Since `ℓ` is normalized to sum to 1 per group (§4),
+   `Σ_s e_s ≤ 2` and the whole non-reserve objective is bounded by
+   `2α + β|D| + γ·Σz_d + κ|V|·(|S|−1)`; any `P` above that bound is dominant. The default
+   `P = 1000` clears it comfortably for realistic group sizes — but it is a *calibrated* constant,
+   not an infinite one, so validate it if the weights are retuned.
+
+Report any residual `r_s > 0` prominently as an unfixable shortfall, with the byte amount.
 
 **(C6) Spread.** With `u* = (Σ_d ℓ_d) / (Σ_s c_s)` — a **constant**, since total group load is
 invariant under reassignment — the L1 form is fully linear:
@@ -404,14 +568,44 @@ counts the number of **extra** storages a VM is spread across, so it is 0 for a 
 together and grows by 1 per additional storage — a soft preference that free space (C5) or a strong
 imbalance can legitimately override, as required.
 
+`κ` measures **within-group** fragmentation only. Because the problem decomposes per group and a
+disk can never leave its group, a VM with disks in two different groups is not counted as
+fragmented — that spread is structural and no migration could ever repair it. This is a consequence
+of the decomposition, not an oversight.
+
 Scaling matters: normalize `z_d` to TiB and `ℓ_d` to fractions of group total (section 4) before
 applying the weights, so the defaults in the example config are meaningful.
 
 ### 5.5 Solver backends
 
-**CP-SAT (preferred).** All coefficients must be integral, so scale `ℓ` by 10⁶ and `z` to MiB and
-round. Warm-start from the current assignment via `AddHint(x[d, σ₀(d)], 1)`, which typically finds the
-incumbent immediately and spends the rest of the time limit proving the gap.
+**CP-SAT (preferred).** All variables and coefficients must be integral. Use exactly two scale
+factors and apply them consistently:
+
+| Quantity | Unit after scaling | Factor |
+|---|---|---|
+| `ℓ_d`, `u_s`, `u*`, `e_s`, `t` | load micro-units | `K = 10⁶` |
+| `z_d`, `Z_s`, `R_s`, `C_s`, `Uˢᵉˣᵗ`, `r_s` | MiB | `1 MiB` |
+
+Because `ℓ` is normalized to sum to 1 per group (§4), `K = 10⁶` gives every disk's load ~6
+significant digits; rounding error is ≤ 1e-6 load units per disk and ≤ 1 MiB per size, both
+negligible against objective weights of order 0.05–1.0. `u_s = L_s / c_s` involves a division, so
+pre-multiply instead: scale each storage's load by `round(K / c_s)` rather than dividing, keeping
+everything integral. `β` and `κ` multiply integer counts and need no scaling. `γ` is expressed
+per-TiB in config, so use `γ_scaled = round(γ · K / 2²⁰)` per MiB.
+
+The scaled objective is then:
+
+```
+min  α·K · Σ e_s^int  +  β·K · Σ (1 − x)  +  γ_scaled · Σ z_d^MiB·(1 − x)
+   + κ·K · Σ (Σ y − 1)  +  P·K · Σ r_s^MiB
+```
+
+with all weights themselves rounded to integers after multiplication by `K`.
+
+Warm-start from the current assignment via `AddHint(x[d, σ₀(d)], 1)`, which typically finds the
+incumbent immediately and spends the rest of the time limit proving the gap. Assert after solving
+that the unscaled objective recomputed in floating point agrees with the solver's value to within
+the rounding bound — a cheap guard against a scaling mistake silently producing wrong plans.
 
 **CBC via PuLP.** Direct transcription; continuous `e_s`, `Z_s`, `r_s` are fine.
 
@@ -446,8 +640,26 @@ vector against the one recorded at the last *executed* balance:
 ```
 
 Using the L1 norm over the whole vector, rather than a per-disk test, means many small correlated
-changes can legitimately trigger a re-plan while one noisy disk cannot. Disks that appeared or
-disappeared since the last balance count their full load as drift.
+changes can legitimately trigger a re-plan while one noisy disk cannot.
+
+**Vector alignment.** The two vectors are indexed over the **union** of disk keys present in either,
+with a missing disk contributing load 0 to the vector it is absent from. A disk created since the
+last balance therefore contributes its full current load to the numerator, and a deleted disk
+contributes its full former load — both are genuine changes to the group's I/O profile and should be
+able to trigger a re-plan on their own.
+
+**Degenerate cases**, which must be handled explicitly rather than left to produce a division by
+zero:
+
+| Condition | Behaviour |
+|---|---|
+| No `ℓ_last` recorded (first run ever, or state file reset) | **Skip the drift gate**, proceed to the imbalance gate |
+| `‖ℓ_last‖₁ = 0` (group was entirely idle) and `‖ℓ_now‖₁ > 0` | Treat as fully drifted, proceed |
+| `‖ℓ_last‖₁ = 0` and `‖ℓ_now‖₁ = 0` | No load, no imbalance — exit "no action" |
+
+`ℓ_last` is recorded **only on a run that actually executed at least one migration**, not on every
+run. Recording it on planning runs would let load creep past the threshold in sub-threshold steps
+without ever triggering.
 
 **Imbalance gate** — the "% of IOPS difference over all storages in the group" requirement:
 
@@ -509,9 +721,30 @@ with `H = 7d` and `λ = 10` by default. Additional **hard** rules, applied per m
 individual migrations regardless of the aggregate test:
 
 - `duration_d > migration.max_single_move_duration` (default 6h) → reject the move;
-- the move would push `u_src` or `u_dst` above `migration.saturation_ceiling` *during* the mirror →
-  defer the move to a later run rather than reject the plan;
+- the move would push either endpoint above `migration.saturation_ceiling` during the mirror →
+  defer the move to a later run rather than reject the plan (see below);
 - the move violates the transient reserve invariant of section 8 → reject.
+
+**Defining "during the mirror".** `u_s` as used everywhere else is a p95 over the lookback window —
+a robust *statistic*, not an instantaneous reading — so adding an instantaneous `ω` to it would mix
+two different kinds of quantity. Define the check explicitly:
+
+```
+u_during(s)  =  û_s(duration_d)  +  Σ_{m in flight at s} ω_role(m,s)
+
+check:  u_during(src) ≤ saturation_ceiling · c_src
+        u_during(dst) ≤ saturation_ceiling · c_dst
+```
+
+where `û_s(Δ)` is the **forecaster's upper bound** for storage `s` over a horizon equal to the move's
+expected duration (§10), and `ω_role` is `ω_src` or `ω_dst` depending on whether `s` is the source or
+target of that in-flight move. Summing over all in-flight moves matters when
+`max_concurrent_migrations > 1`.
+
+This is deliberately a **best-effort guard**, not a physical limit: we have no model of the array's
+true saturation point, only the load we can attribute to guests. `max_single_move_duration` and the
+transient reserve invariant are the hard bounds; this one exists to avoid the obviously bad case of
+starting a long mirror onto a storage that is already the busiest in the group.
 
 If the plan fails the aggregate test, re-solve with `β` and `γ` doubled and retry, up to three times.
 This naturally converges on the smaller subset of high-value moves rather than abandoning the run —
@@ -533,7 +766,7 @@ constraint on every intermediate state, not just the endpoints.
 
 During a `move_disk` of disk `d` from `a` to `b`, the volume exists on **both** storages — the mirror
 target is fully allocated before the switchover, and the source is only removed afterwards by
-`delete=1`. So while the move is in flight, `b` must satisfy:
+`delete=1`. So while a single move is in flight, `b` must satisfy:
 
 ```
 used_b + z_d + f_b · max(Z_b, z_d)   ≤   C_b
@@ -545,6 +778,33 @@ likely to fill a SAN LUN.
 
 The source `a` gets no relief until the move completes, so a plan that depends on freeing space on `a`
 to make room on `a` is simply infeasible and must be ordered around.
+
+**Generalized to concurrent moves.** `execution.max_concurrent_migrations` may exceed 1, and then the
+single-move form above is **not sufficient**: several disks can be landing on `b` at once, and none
+of their sources release space until each completes. For an in-flight set `M`, every storage `b`
+must satisfy:
+
+```
+used_b  +  Σ_{m∈M : dst(m)=b} z_{disk(m)}
+        +  f_b · max( Z_b , max_{m∈M : dst(m)=b} z_{disk(m)} )   ≤   C_b
+```
+
+Both the sum and the inner `max` are over the same in-flight set. Implement this as the single
+feasibility predicate and call it with `M = {m}` for the sequential case, so there is only one
+version of this rule in the codebase.
+
+`concurrency_ok(state, m)` is then defined as: adding `m` to the current in-flight set
+
+1. keeps the generalized invariant above satisfied on **every** storage;
+2. keeps `|M| ≤ max_concurrent_migrations`;
+3. keeps the count of in-flight moves touching any single storage — **as either source or target** —
+   at or below `max_concurrent_per_storage`;
+4. respects the saturation check of §7.3, which sums `ω` over all in-flight moves at that storage;
+5. violates no per-disk or per-storage cooldown.
+
+With the default `max_concurrent_per_storage: 1`, two moves targeting the same storage serialize
+automatically and the generalized form collapses to the single-move form. That is the recommended
+configuration, and raising it should be a deliberate act on a storage with ample headroom.
 
 ### 8.2 Scheduling algorithm
 
@@ -616,15 +876,38 @@ poll GET /nodes/{node}/tasks/{upid}/status every execution.poll_interval_seconds
   until status == "stopped"; success ⟺ exitstatus == "OK"
 ```
 
+`bwlimit` is **KiB/s** in the API, while `migration.bwlimit_bytes_per_sec` is bytes/s; convert at the
+call site and nowhere else.
+
+With `max_concurrent_migrations > 1` this loop launches up to the cap (subject to
+`concurrency_ok`, §8.1) and polls **all** in-flight UPIDs each cycle, starting the next queued move
+as each slot frees. With the default cap of 1 it degenerates to the sequential form above.
+
 Before **every** move, re-read the live state rather than trusting the plan:
 
 1. re-fetch `/nodes/{node}/qemu/{vmid}/config` and confirm the disk is still on the expected source
-   — the VM may have been touched by an operator, or live-migrated to another node, changing `{node}`;
+   — the VM may have been touched by an operator, or live-migrated to another node by the PVE 9.2
+   Dynamic Load Balancer (§1), changing `{node}`;
 2. re-fetch `/nodes/{node}/storage/{target}/status` and re-check the transient invariant against
    *actual* current free space;
 3. confirm the VM is still running and untagged for exclusion.
 
-Any mismatch aborts that move and triggers a re-plan rather than proceeding on stale assumptions.
+These re-reads bypass the per-run topology cache (§3.5) for this VM and this storage only.
+
+**Re-plan protocol.** A mismatch is a *normal* outcome in a live cluster, not an error, and must not
+be allowed to loop:
+
+1. Abandon the remaining moves in the current plan. Do not attempt to patch it — the state it was
+   computed against no longer holds.
+2. Record the moves already completed in `state.json` (including their cooldown timestamps) so the
+   next pass sees them as history rather than re-deriving them.
+3. Re-invoke the **whole** pipeline from the new observed state: gates, load model, solver, payback,
+   ordering. The gates may well conclude no further action is needed, which is a correct outcome.
+4. Cap re-plans at `execution.max_replans_per_run` (default 3). On exceeding it, stop and report —
+   a cluster churning faster than the engine can plan is a condition for a human to look at, not to
+   iterate against.
+5. In `auto` mode, a re-plan inherits the remaining time window; if too little remains for the
+   cheapest queued move, stop cleanly rather than starting one that cannot finish.
 
 ### 9.3 Failure handling
 
@@ -668,21 +951,41 @@ touching the optimizer:
 
 ```python
 class Forecaster(Protocol):
+    def required_range(self) -> timedelta:
+        """How much history this model needs. metrics.py serves exactly this."""
+
     def predict(self, series: TimeSeries, horizon: timedelta) -> Forecast:
         """Returns point estimate and an upper bound for the horizon."""
 ```
 
-| Implementation | Behaviour |
-|---|---|
-| `quantile` *(default)* | p95 over `W`. No seasonality, no fitting, never surprising. |
-| `seasonal_naive` | Compare the same hour-of-day over the last `seasonal_lookback_days`; take the p95 across those. Captures a nightly batch window with no model risk. |
-| `holt_winters` | Triple exponential smoothing (`statsmodels.tsa.holtwinters.ExponentialSmoothing`, `trend='add'`, `seasonal='add'`, `seasonal_periods = 24h/step`). |
+### 10.1 Each forecaster owns its data range
 
-The optimizer consumes the **upper bound**, not the point estimate. Being wrong in the direction of
+`window.lookback` is the **decision** window — the period whose load we are balancing. It is *not*
+the amount of history a forecaster needs, and conflating the two makes the seasonal models
+unreachable: Holt-Winters with `seasonal_periods = 288` (24 h at a 5 m step) needs `2 × 288 = 576`
+samples, i.e. **48 h**, which a 24 h window can never supply. It would silently fall back to
+`quantile` forever.
+
+So `metrics.py` must expose `query_range` over an **arbitrary** range, not just `window.lookback`,
+and each forecaster declares what it needs:
+
+| Implementation | `required_range()` | Point estimate | Upper bound |
+|---|---|---|---|
+| `quantile` *(default)* | `window.lookback` (24 h) | p95 over `W` | `quantile_over_time(upper_quantile)`, default p99 |
+| `seasonal_naive` | `max(lookback, seasonal_lookback_days)` (7 d) | median across same-hour-of-day samples | p95 across those samples |
+| `holt_winters` | `max(lookback, 2 · seasonal_periods · step)` (48 h) | fitted forecast at `horizon` | point + `z·σ` of in-sample residuals, `z = 2` |
+
+The optimizer consumes the **upper bound**, never the point estimate. Being wrong in the direction of
 "this disk is busier than it looks" costs a slightly suboptimal balance; being wrong the other way
-migrates a disk onto a storage that is about to be saturated.
+migrates a disk onto a storage that is about to be saturated. For the default `quantile` forecaster
+this makes the distinction concrete rather than vacuous: the point estimate is `window.quantile`
+(p95) and the bound is `window.upper_quantile` (p99), so the optimizer sees p99.
 
-Two implementation warnings:
+Config validation (§11.1) must **reject** a configuration whose Prometheus retention or whose
+selected forecaster and window are mutually inconsistent, rather than silently degrading. Enabling a
+seasonal model is a statement that the history exists to support it.
+
+### 10.2 Implementation warnings
 
 - **Do not compute Holt-Winters in PromQL.** Prometheus's `holt_winters` was renamed
   `double_exponential_smoothing` in Prometheus 3.x and requires
@@ -691,8 +994,9 @@ Two implementation warnings:
   cannot learn a daily cycle. Seasonal forecasting must happen engine-side on data pulled via
   `query_range`.
 - Require at least `2 × seasonal_periods` samples before trusting a Holt-Winters fit, and fall back to
-  `quantile` otherwise. Validate by backtesting against the last 24h before letting a forecast drive
-  a migration.
+  `quantile` otherwise — with a **logged warning**, since a silent fallback hides a misconfiguration.
+- Validate by backtesting: fit on `[t−2T, t−T]`, predict `[t−T, t]`, compare against actual. Refuse
+  to let a model whose backtest error exceeds the imbalance threshold drive migrations.
 
 ---
 
@@ -713,6 +1017,68 @@ requirement-to-setting mapping:
 | Migration load accounted for | `migration.*`, `objective.gamma_move_bytes` |
 | Manual vs automatic | `execution.mode` |
 | Forecasting | `forecast.model` |
+
+The config carries `schema_version: 1` at the top level. `config.py` rejects an unknown **major**
+version with an explicit message naming the version it understands, so a future incompatible change
+has a migration path instead of misinterpreting fields.
+
+### 11.1 Validation rules
+
+Validate with `jsonschema` for structure, then apply these semantic rules. Every one of them is a
+failure that produces a clear error and a non-zero exit, never a warning-and-continue — a
+misconfigured balancer moving production disks is worse than one that refuses to start.
+
+| Rule | Rationale |
+|---|---|
+| `schema_version` major matches | Forward compatibility |
+| Every group non-empty, ≥ 2 storages | A one-storage group has nothing to balance |
+| **No storage appears in two groups** | A disk's group would be ambiguous |
+| Storage ids exist in the cluster | Catches typos before they silently exclude disks |
+| `capability_weight > 0` | Appears in a denominator |
+| `reserve_factor ≥ 0`, `min_free_bytes ≥ 0` | Negative reserve is meaningless |
+| `0 ≤ drift_threshold ≤ 1`, `0 ≤ imbalance_threshold ≤ 1` | They are ratios |
+| `quantile ∈ (0,1)`, `upper_quantile ∈ (0,1)`, `upper_quantile ≥ quantile` | The bound must not sit below the point estimate |
+| `min_coverage ∈ (0,1]` | A ratio; 0 would accept a disk with no data |
+| Metric names non-empty; label names non-empty and pairwise distinct | A duplicated label name silently collapses series |
+| `rate_window ≥ 4 × pvestatd push interval` | Below this, `rate()` sees too few points |
+| `window.lookback ≥ forecaster.required_range()` | See §10.1 — otherwise the model can never run |
+| `payback_ratio > 0`, `payback_horizon > 0` | Zero disables the safety test |
+| `saturation_ceiling ∈ (0,1]` | A fraction of capability weight |
+| `max_concurrent_* ≥ 1` | Zero would deadlock the scheduler |
+| Time windows: `start ≠ end`; crossing midnight allowed and explicit | Ambiguity here silently disables `auto` |
+| `execution.mode ∈ {dry-run, confirm, auto}` | Typo must not silently fall back to acting |
+
+### 11.2 `state.json`
+
+The only persistent state. Small, versioned, and written atomically (temp file + `os.replace`):
+
+```json
+{
+  "schema_version": 1,
+  "lock": { "pid": 12345, "host": "mgmt01", "acquired_at": "2026-09-04T02:00:00Z" },
+  "last_balance": {
+    "at": "2026-09-03T22:14:03Z",
+    "load_vector": { "fc-tier1:101:scsi0": 3.0, "fc-tier1:102:scsi0": 2.5 }
+  },
+  "cooldowns": {
+    "disk":    { "fc-tier1:101:scsi1": "2026-09-03T22:41:55Z" },
+    "storage": { "fc-tier1:san-b":     "2026-09-03T22:41:55Z" }
+  },
+  "inflight_upids": [],
+  "staged_disks": []
+}
+```
+
+- Keys are `"<group>:<vmid>:<device>"` and `"<group>:<storage>"`, so a vmid reused after a VM is
+  destroyed and recreated in a different group cannot collide.
+- `last_balance` is updated **only after a run that executed at least one migration** (§6).
+- **Locking**: `fcntl.LOCK_EX` on the file for the duration of a run. If the lock is held but
+  `lock.pid` is not alive on `lock.host`, reclaim it and log the reclamation — a killed run must not
+  block the timer forever. A live PID means another instance is running: exit 0 quietly.
+- `inflight_upids` is written *before* issuing each `move_disk` and cleared on completion, so a
+  crashed run can be reconciled on the next start (§13).
+- Losing this file is safe but not free: cooldowns and drift history reset, so the next run may
+  migrate sooner than intended. Treat it as state to back up, not as a cache.
 
 ---
 
@@ -752,15 +1118,29 @@ production fallback for large groups. Do not start with the solver.
 | Two DRS instances running | Advisory lock in `state.json` plus a startup scan for in-flight `move_disk` UPIDs owned by the DRS user |
 | Solver infeasible or timing out | Fall back to the heuristic; never emit a partial/unvalidated assignment |
 | `bwlimit` misunderstood | It is **KiB/s** in the API; config is bytes/s and must be converted |
+| PVE Dynamic Load Balancer moves a VM mid-plan | Node re-fetched before every move (§9.2); mismatch triggers a bounded re-plan |
+| Engine crashes mid-move | `inflight_upids` in `state.json` + startup scan; the PVE task continues regardless |
+| Concurrent moves onto one storage | Generalized transient invariant over the in-flight set (§8.1) |
+| Config knob with no effect | §11.1 validation; every knob maps to exactly one formula (§15) |
 
-Overarching rule: **the reserve constraint is never traded against balance.** Every other objective
-term is soft; (C5) is enforced before, during and after every move.
+Overarching rule: **the reserve constraint is never traded against balance.** Stated precisely: with
+the lexicographic solve of (C5) this is exact — the reserve shortfall is minimized in a prior stage
+that the balance objective cannot influence at any weight. With the single-stage big-M alternative it
+is *effectively* rather than *provably* hard, because `P` is a calibrated constant; §5.3 gives the
+bound `P` must clear. Either way `Σ r_s > 0` means physically impossible, not merely unattractive,
+and (C5) is enforced before, during and after every move.
 
 ---
 
 ## 14. Worked example
 
-A complete, self-consistent fixture. Implementations should reproduce these numbers exactly.
+A complete, self-consistent fixture. Implementations must reproduce these numbers exactly.
+
+The machine-readable form lives in **`tests/fixtures/fc-tier1.yaml`** (input) and
+**`tests/fixtures/fc-tier1.expected.json`** (expected derivations, both `β` cases, and both payback
+calculations). Assert against those files in CI rather than transcribing the tables below — the
+expectations were generated by exhaustive enumeration of all `3⁶ = 729` assignments, so they are the
+proven optimum under the stated weights, not a hand-worked guess.
 
 ### 14.1 Input
 
@@ -888,3 +1268,38 @@ numerically.
 | Forecasting (Holt-Winters or other) | §10 |
 | Configurable decision timeframe, default 24h | `window.lookback`; §3.4 |
 | Migration load counted against the benefit | §7; demonstrated §14.5 |
+
+### 15.1 Config knob → formula
+
+Every knob must appear in exactly one formula. A knob with no formula is dead configuration and a
+bug waiting to happen; this table is the audit.
+
+| Knob | Where it acts |
+|---|---|
+| `load_weights.iotime/ops/bytes` | §4, `ℓ_d` |
+| `load_weights.read_factor/write_factor` | §4, `raw_X(d)`, applied engine-side before normalization |
+| `window.lookback` | §3.4 reduction range |
+| `window.quantile` / `upper_quantile` | §10.1, point estimate vs. the bound the optimizer consumes |
+| `window.min_coverage` | §3.4, disk data rejection |
+| `groups[].storages[].capability_weight` | §4, `u_s = L_s / c_s` |
+| `snapshot_reserve.factor` | §5.3 (C5), `R_s ≥ f_s·Z_s` |
+| `snapshot_reserve.min_free_bytes` | §5.3 (C5), `R_s ≥ min_free_bytes_s` |
+| `snapshot_reserve.count_foreign_volumes` | §5.1.1, `Uˢᵉˣᵗ` |
+| `gates.drift_threshold` | §6 drift gate |
+| `gates.imbalance_threshold` | §6 imbalance gate |
+| `gates.cooldown_per_disk/storage` | §5.3 (C2) pinning, §8.1 `concurrency_ok` |
+| `migration.bwlimit_bytes_per_sec` | §7.1 `duration_d`; converted to KiB/s at the API call |
+| `migration.source/target_load_weight` | §7.1 `ω_src`, `ω_dst` |
+| `migration.payback_horizon` / `payback_ratio` | §7.2, §7.3 acceptance test |
+| `migration.max_single_move_duration` | §7.3 hard per-move rule |
+| `migration.saturation_ceiling` | §7.3 `u_during(s)` |
+| `objective.alpha_spread/beta_move_count/gamma_move_bytes/kappa_vm_affinity` | §5.4 |
+| `objective.reserve_violation_penalty` | §5.3 (C5), single-stage `P` alternative |
+| `objective.spread_metric` | §5.3 (C6), L1 vs min–max |
+| `solver.*` | §5.5 |
+| `execution.max_concurrent_migrations/per_storage` | §8.1 generalized invariant, `concurrency_ok` |
+| `execution.max_replans_per_run` | §9.2 re-plan protocol |
+| `execution.time_windows` | §9.1 `auto` mode gating |
+| `exclude.*` | §5.3 (C2) variable fixing |
+| `forecast.model` + `holt_winters.*` | §10.1 |
+| `proxmox.read_workers` | §3.5 read-path concurrency |

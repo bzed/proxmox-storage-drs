@@ -1,0 +1,69 @@
+# Machine-readable form of IMPLEMENTATION_PLAN.md section 14.
+# Regenerate expectations with the same exhaustive search; do not hand-edit.
+schema_version: 1
+description: Section 14 worked example. Numbers verified by exhaustive enumeration
+  of all 3^6 assignments.
+group:
+  name: fc-tier1
+  capacity_tib: 8.0
+  reserve_factor: 2.0
+  storages:
+  - id: san-a
+    capability_weight: 1.0
+    capacity_tib: 8.0
+    foreign_used_tib: 0.0
+  - id: san-b
+    capability_weight: 1.0
+    capacity_tib: 8.0
+    foreign_used_tib: 0.0
+  - id: san-c
+    capability_weight: 1.0
+    capacity_tib: 8.0
+    foreign_used_tib: 0.0
+disks:
+- key: 101:scsi0
+  vmid: 101
+  device: scsi0
+  size_tib: 2.0
+  load: 3.0
+  current_storage: san-a
+- key: 101:scsi1
+  vmid: 101
+  device: scsi1
+  size_tib: 1.0
+  load: 1.0
+  current_storage: san-a
+- key: 102:scsi0
+  vmid: 102
+  device: scsi0
+  size_tib: 1.5
+  load: 2.5
+  current_storage: san-a
+- key: 103:scsi0
+  vmid: 103
+  device: scsi0
+  size_tib: 0.5
+  load: 0.4
+  current_storage: san-b
+- key: 104:scsi0
+  vmid: 104
+  device: scsi0
+  size_tib: 1.0
+  load: 0.3
+  current_storage: san-b
+- key: 105:scsi0
+  vmid: 105
+  device: scsi0
+  size_tib: 0.5
+  load: 0.2
+  current_storage: san-c
+migration:
+  bwlimit_bytes_per_sec: 209715200
+  omega_src: 1.0
+  omega_dst: 1.0
+  payback_horizon_seconds: 604800
+  payback_ratio: 10.0
+objective:
+  alpha_spread: 1.0
+  gamma_move_bytes_per_tib: 0.05
+  kappa_vm_affinity: 0.5

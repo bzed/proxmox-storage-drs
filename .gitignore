@@ -13,3 +13,6 @@ state.json
 config/drs.yaml
 config/*.local.yaml
 .env
+
+# Claude Code local settings
+.claude/
