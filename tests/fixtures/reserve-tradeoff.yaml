@@ -1,0 +1,80 @@
+# A group where the snapshot reserve and the balance objective genuinely
+# conflict, so the two section 5.3 solve paths give DIFFERENT answers unless the
+# big-M penalty P is large enough. fc-tier1 cannot demonstrate this: there every
+# reserve-violating assignment is also worse on balance, so any P >= 0 agrees
+# with the lexicographic solve and the fixture never exercises the distinction.
+#
+# The shape: `roomy` has room to spare, `cramped` is a small LUN that is already
+# 3 of its 5 TiB full with volumes DRS does not manage. Both hot disks sit on
+# `roomy`, so the group is maximally imbalanced (E = 10) but perfectly legal
+# (total slack 0). Moving either disk to `cramped` balances it exactly (E = 0)
+# and breaches the 2x reserve on `cramped` by 1 TiB.
+#
+#   lexicographic  -> minimise slack first: stay put, accept E = 10.
+#   big-M, P=1000  -> same answer.
+#   big-M, P=5     -> move, gaining 10 of imbalance for 1 TiB of reserve breach.
+#
+# The two disks are interchangeable; the recorded move names 202:scsi0 only
+# because that is how the enumerator breaks the tie. Assert on the move count
+# and the resulting slack, not on which disk moved.
+#
+# The expected file records the exact threshold P at which big-M flips, the
+# plan's computed P_min for comparison, and the fact that the P=5 plan is not
+# even schedulable: the section 8.1 transient check rejects its only move.
+#
+# Regenerate expectations with `python3 generate_expected.py`; do not hand-edit
+# reserve-tradeoff.expected.json. `generate_expected.py --check` asserts it is
+# current. Sizes and capacities are TiB; loads are in average-in-flight-I/O
+# units (plan section 4).
+schema_version: 1
+description: Reserve-vs-balance conflict; separates the lexicographic solve from
+  single-stage big-M. Verified by exhaustive enumeration of all 2^2 assignments.
+group:
+  name: fc-conflict
+  reserve_factor: 2.0
+  storages:
+  - id: roomy
+    capability_weight: 1.0
+    capacity_tib: 20.0
+    foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+  - id: cramped
+    capability_weight: 1.0
+    capacity_tib: 5.0
+    # Volumes DRS does not manage (plan section 5.1.1): templates, disks of
+    # excluded VMs, orphans. They leave 2 TiB of headroom against a reserve that
+    # a single 1 TiB disk would raise to 3 TiB.
+    foreign_used_tib: 3.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+disks:
+- key: 201:scsi0
+  vmid: 201
+  device: scsi0
+  size_tib: 1.0
+  load: 5.0
+  current_storage: roomy
+- key: 202:scsi0
+  vmid: 202
+  device: scsi0
+  size_tib: 1.0
+  load: 5.0
+  current_storage: roomy
+migration:
+  bwlimit_bytes_per_sec: 209715200
+  omega_src: 1.0
+  omega_dst: 1.0
+  omega_wipe: 1.0
+  account_saferemove_wipe: false
+  payback_horizon_seconds: 604800
+  payback_ratio: 10.0
+objective:
+  alpha_spread: 1.0
+  beta_values: [0.25]
+  gamma_move_bytes_per_tib: 0.05
+  kappa_vm_affinity: 0.5
+  reserve_violation_penalty: 1000.0
+  # Not a knob the engine has: a deliberately undersized P, solved alongside the
+  # configured one so the expected file shows what an uncalibrated big-M does.
+  big_m_undersized_p_demo: 5.0

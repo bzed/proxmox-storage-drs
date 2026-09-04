@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "generated_by": "tests/fixtures/generate_expected.py (exhaustive enumeration)",
+  "assumptions": {
+    "account_saferemove_wipe": false,
+    "omega_wipe": 1.0,
+    "saferemove_by_storage": {
+      "roomy": false,
+      "cramped": false
+    }
+  },
+  "derived": {
+    "total_load": 10.0,
+    "u_star": 5.0,
+    "initial": {
+      "roomy": {
+        "load": 10.0,
+        "used_tib": 2.0,
+        "largest_tib": 1.0,
+        "required_tib": 4.0,
+        "violates_reserve": false
+      },
+      "cramped": {
+        "load": 0,
+        "used_tib": 3.0,
+        "largest_tib": 0.0,
+        "required_tib": 3.0,
+        "violates_reserve": false
+      }
+    },
+    "E_before": 10.0,
+    "spread_before": 2.0
+  },
+  "cases": [
+    {
+      "beta_move_count": 0.25,
+      "expected_objective": 10.0,
+      "expected_move_count": 0,
+      "expected_E_after": 10.0,
+      "expected_fragmentation": 0,
+      "expected_moves": [],
+      "expected_order": [],
+      "expected_final_loads": {
+        "roomy": 10.0,
+        "cramped": 0
+      },
+      "expected_final_reserve": {
+        "roomy": {
+          "load": 10.0,
+          "used_tib": 2.0,
+          "largest_tib": 1.0,
+          "required_tib": 4.0,
+          "violates_reserve": false
+        },
+        "cramped": {
+          "load": 0,
+          "used_tib": 3.0,
+          "largest_tib": 0.0,
+          "required_tib": 3.0,
+          "violates_reserve": false
+        }
+      },
+      "expected_spread_after": 2.0,
+      "lexicographic": {
+        "min_total_slack_tib": 0.0,
+        "expected_objective_nonreserve": 10.0,
+        "expected_move_count": 0,
+        "expected_moves": [],
+        "agrees_with_big_m_at_configured_p": true,
+        "big_m_agreement_threshold_p": 9.7,
+        "big_m_p_configured": 1000.0,
+        "big_m_p_min_computed": 22649241.6
+      },
+      "big_m_undersized_p_demo": {
+        "p": 5.0,
+        "expected_objective": 5.3,
+        "expected_moves": [
+          "202:scsi0:roomy->cramped"
+        ],
+        "total_slack_tib": 1.0,
+        "matches_lexicographic": false,
+        "orderable": false,
+        "blocked_reason": "no feasible move among ['202:scsi0']"
+      }
+    }
+  ]
+}

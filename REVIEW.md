@@ -13,6 +13,11 @@ A **second pass** (section 6) reviews the updated plan after the author addresse
 All original findings are resolved; seven new findings (N-01..N-07) were identified in the new
 and changed material.
 
+A **third pass** (section 7) reviews the plan after the author addressed N-01..N-07 and added
+substantial new material (all-bus enumeration, snapshot handling, saferemove wipe accounting,
+VM locks, load-model rescale, saturation-load redesign, fixture generator). All N-findings
+are resolved; six new findings (M-01..M-06) were identified, all Low or Info severity.
+
 ---
 
 ## 0. Overall assessment
@@ -646,6 +651,168 @@ The fixture's expected values were independently verified:
 
 The fixture is a sound acceptance test. The gaps in N-02 and N-03 are about what it *doesn't*
 test, not about wrong values.
+
+---
+
+## 7. Third-pass review of the updated plan
+
+The plan grew from 1305 to 1721 lines. `config/drs.example.yaml` grew from 198 to 279 lines.
+The expected fixture grew from 97 to 188 lines and the input fixture from 69 to 80 lines. A
+new file `tests/fixtures/generate_fc_tier1.py` (208 lines) was added. Two further commits
+beyond the N-01..N-07 fixes introduced substantial new material: all-bus disk enumeration
+(§3.5/§3.6), snapshot exclusion policy (§3.7), load-model rescale back to in-flight-I/O units
+(§4), computed big-M penalty (§5.3), CP-SAT coefficient folding (§5.5), saferemove wipe
+accounting (§7.1, §9.3), saturation-load redesign with `N_s` (§7.3), draining state (§8.2),
+VM lock handling (§9.3), and fixture improvements including ordering and post-plan reserve
+status. This section records the resolution status of every N-finding and presents new
+findings.
+
+### 7.1 Resolution of second-pass findings
+
+All 7 second-pass findings (N-01..N-07) have been addressed. Summary:
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| N-01 | Resolved | §5.5 rewritten: instead of factoring γ out as a standalone per-MiB integer, each disk's coefficient is folded at full precision: `round(γ·W·K·z_d^TiB)`. The γ-trap is explicitly documented with the worked example showing `round(0.05·10⁶/2²⁰)=0` and why raising K doesn't fix it. An assertion at model-build time checks every non-zero weight produces a non-zero integer coefficient. Verified: `round(0.05·10⁴·10⁶·0.5) = 2.5×10⁸`, exact. |
+| N-02 | Resolved | `beta_values: [0.25, 0.5]` added to the input fixture's `objective` block with a comment: "Swept by the harness; one cases[] entry in the expected file per value." The fixture contract is now explicit. |
+| N-03 | Resolved | `expected_order` field added to each case (ordered list with per-move transient checks: `transient_target_used_tib`, `transient_reserve_basis_tib`, `transient_required_tib`, `capacity_tib`, `ok`). `expected_final_reserve` section added mirroring the `initial` block (per-storage `used_tib`, `largest_tib`, `required_tib`, `violates_reserve`). Both verified against §14.4. |
+| N-04 | Resolved | Config example `fc-tier1` now has `san-c: capability_weight: 1.0`, matching the fixture. The 0.5 feature is illustrated on `san-e` in `fc-tier2`. A comment notes the alignment with the fixture. |
+| N-05 | Resolved | §7.3 rewritten: `û_s` is now explicitly `L̂_s` (load, not normalized utilization). The check is `L_during(s) ≤ saturation_ceiling · N_s` where `N_s` is the storage's physical saturation load, not `c_s`. The old `saturation_ceiling · c_s` form is called out as the original defect. |
+| N-06 | Resolved | `metrics.pvestatd_push_interval: 60s` added to config. `verify-metrics` (§3.3 step 6) now measures observed sample spacing and errors if it disagrees with config by >20%. §11.1 validation rule references the config field. |
+| N-07 | Resolved | §5.5 now folds both `K` and `c_s` into a single per-(disk,storage) coefficient `a_{d,s} = round(K·ℓ_d/c_s)`, with error bound `≤ 0.5` (i.e. `≤ 5×10⁻⁷` in load units), independent of `c_s`. The old `round(K/c_s)` approach is explicitly called out as making CP-SAT and CBC disagree. |
+
+### 7.2 New findings summary
+
+| ID | Severity | Section | Topic |
+|----|----------|---------|-------|
+| M-01 | Low | §5.5, generator | Generator uses single-stage big-M (P=1000), not the preferred lexicographic solve; fixture doesn't test lexicographic |
+| M-02 | Low | §7.1, §14.5 | §14.5 payback example silently assumes saferemove off, but the config default is `account_saferemove_wipe: true`; a naïve implementer will get different numbers |
+| M-03 | Low | §8.2 | `draining` state holds source charged for the whole wipe, but the transient invariant (§8.1) doesn't model the wipe's own I/O load on the source |
+| M-04 | Low | §3.6, §13 | `tpmstate0` online move was "verified on PVE 9.2" but the plan also says PVE may not use drive-mirror for it; the transient invariant assumption (both storages occupied) is unverified for swtpm |
+| M-05 | Info | §4, §14 | Load-model rescale is correct but the §14 fixture's `ℓ_d` values are now reinterpreted as raw in-flight I/O (not normalized); old Appendix A verification still holds but the units description changed |
+| M-06 | Info | §5.3 | Big-M `P_min` is computed from `T_g` (group absolute load), which changes per run; the plan correctly says to compute at model-build time, but the config `reserve_violation_penalty: 1000` as a floor may need to be much larger for small-`T_g` groups |
+
+### 7.3 New findings — detail
+
+#### M-01 — Generator tests big-M, not the preferred lexicographic solve (Low)
+**Where:** `tests/fixtures/generate_fc_tier1.py`, §5.3.
+**Issue:** The generator's `objective()` function includes `P_RESERVE * slack` as a
+single-stage big-M term with `P=1000`. The plan states the lexicographic two-stage solve
+(option 1) is the preferred default and option 2 (big-M) needs a computed `P`. The fixture
+therefore validates the big-M path with a fixed `P=1000`, not the lexicographic path. For
+this fixture both approaches give the same answer because `P=1000` is dominant here (the
+initial violation is 0.5 TiB, so `P·0.5 = 500 >> 21.6` max non-reserve objective). But an
+implementer who implements only the lexicographic solve has no fixture to test it against, and
+an implementer who uses big-M with `P=1000` on a different group where the violation is
+sub-GiB may get a different answer than lexicographic (the plan's own §5.3 computation shows
+`P_min ≈ 2.27×10⁷` for mebibyte granularity, so `P=1000` is 4 orders of magnitude too small
+there).
+**Recommendation:** Either (a) add a second fixture or a second mode in the generator that
+validates the lexicographic solve (minimize `Σr_s` first, then fix it and minimize the rest),
+or (b) document that the fixture only tests big-M and that a lexicographic test must be added
+when that path is implemented. This is low-severity because both paths agree on the fixture,
+but it's a test-coverage gap.
+
+#### M-02 — §14.5 payback silently assumes saferemove off (Low)
+**Where:** §14.5, config `migration.account_saferemove_wipe: true`.
+**Issue:** §14.5 now states "and **`saferemove` off on all three storages** so
+`duration_wipe_d = 0`". This is necessary because the new §7.1 wipe accounting would otherwise
+make the payback numbers much larger (a 1.5 TiB disk at 10 MiB/s wipe takes ~44h, dwarfing the
+2.2h mirror). But the config default is `account_saferemove_wipe: true`. An implementer who
+runs the fixture with the default config values will get payback numbers that don't match
+unless they notice the saferemove-off assumption. The fixture's `migration` block doesn't
+include `account_saferemove_wipe: false` or any saferemove-throughput field.
+**Recommendation:** Add `account_saferemove_wipe: false` (or `saferemove_throughput: 0` per
+storage) to the fixture's `migration` block so the fixture is self-contained and an
+implementer doesn't have to infer the assumption from the prose. Alternatively, add
+`saferemove_throughput_tib_per_sec: 0` per storage in the fixture's `group.storages` to make
+the wipe-off assumption explicit in the data.
+
+#### M-03 — Transient invariant doesn't model the wipe's I/O load (Low)
+**Where:** §8.1, §8.2, §7.1.
+**Issue:** The `draining` state (§8.2) keeps the source charged for `z_d` bytes until the
+volume is observed gone, which is correct for the *capacity* invariant. But the wipe itself
+is a sequential write at `saferemove_throughput` (§7.1) that generates I/O on the source
+storage. §7.1 charges this as `duration_wipe_d · ω_src` in the cost model, but §8.1's
+transient invariant — which checks *capacity* (`used + reserve ≤ C`) — does not check
+*load* during the drain. A storage that is already near its `N_s` saturation load could be
+pushed over by a wipe running in the background while the next move is being scheduled. The
+`concurrency_ok` predicate (§8.1 condition 4) checks the §7.3 saturation guard for in-flight
+*mirrors*, but a draining wipe is no longer in the in-flight set `M` (the task has reported
+OK), so its load is not counted.
+**Recommendation:** Either (a) include draining moves in the saturation check: a move stays
+in a "load-in-flight" set (distinct from the capacity in-flight set `M`) until `done`, and
+`concurrency_ok` sums `ω_src` for all draining moves at that storage; or (b) document that
+the wipe load is best-effort and is not modeled in the transient invariant, and that
+`cooldown_per_storage` (which §9.3 sizes against the wipe time) is the mitigation. Option (b)
+is simpler and may be sufficient given that the wipe is a low-throughput sequential operation
+(10 MiB/s default), but the plan should state this explicitly.
+
+#### M-04 — tpmstate0 transient invariant assumption unverified for swtpm (Low)
+**Where:** §3.6, §13.
+**Issue:** §3.6 states `tpmstate0` is movable online on PVE 9.2 (verified empirically) but
+also says "PVE may not use the `drive-mirror` path for it, since `swtpm` rather than QEMU
+owns the state." The transient invariant (§8.1) assumes "the volume exists on **both**
+storages — the mirror target is fully allocated before the switchover." If `swtpm` moves
+state by a different mechanism (e.g., copy-then-delete, or atomic rename), the both-storages
+assumption may not hold, and the conservative invariant may over-reserve during the move.
+This is safe (over-reserving never causes a reserve breach), but it could make a
+`tpmstate0` move unnecessarily infeasible on a tight storage.
+**Recommendation:** The plan already says "no part of the model needs to know which mechanism
+PVE picked" and the conservative assumption is the safe direction. Consider adding one
+sentence: "If swtpm does not use drive-mirror, the both-storages invariant is conservative
+(over-reserves) but never unsafe; a `tpmstate0` move that fails the transient check on a
+tight storage should be treated as any other infeasible move — deferred, not forced."
+
+#### M-05 — Load-model rescale reinterprets §14 fixture units (Info)
+**Where:** §4, §14, Appendix A.
+**Issue:** §4 was rewritten to rescale `ℓ_d` back onto the in-flight-I/O scale (`Σℓ_d = T_g`,
+not 1.0). The §14 fixture's loads (3.0, 1.0, 2.5, etc.) are now explicitly described as "in
+average in-flight I/O requests, *not* normalized to sum to one." This is a change in
+*description*, not in values — the numbers are the same, but what they *mean* is now
+different. The Appendix A verification in this review was performed under the old
+description (normalized to sum to 1) but still holds because the values and ratios are
+unchanged; only the unit label shifted.
+**Recommendation:** No action needed. The change is correct and the payback comparison in §7
+is now on a sounder footing (`ω = 1.0` is commensurable with `ℓ` because both are in
+in-flight I/O requests). Recorded so the implementer knows the Appendix A verification
+remains valid despite the units reinterpretation.
+
+#### M-06 — Big-M `P_min` depends on `T_g`, which varies per run (Info)
+**Where:** §5.3.
+**Issue:** The computed big-M penalty `P_min = U_obj / ε_r` depends on `T_g` (the group's
+total absolute load), which changes every run as workloads shift. On a quiet group with
+`T_g = 0.1`, `U_obj` is tiny and `P_min` is small; on a busy group with `T_g = 20`, `P_min`
+is large. The config `reserve_violation_penalty: 1000` is a *floor*, and the engine uses
+`max(configured, P_min)`. This is correct, but it means the same config file produces
+different effective `P` values on different groups and different runs. An operator who
+sets `reserve_violation_penalty: 5000` thinking it's the actual penalty may not realize the
+engine is silently raising it to `P_min` on busy groups.
+**Recommendation:** The plan already says "logs a warning when it had to raise it," which is
+the right mitigation. Consider also logging the computed `P_min` and the `T_g` it was
+derived from, so an operator seeing the warning can verify the computation. No structural
+change needed.
+
+### 7.4 Fixture and generator verification
+
+The fixture and generator were independently verified:
+
+- **Generator freshness:** `python3 generate_fc_tier1.py --check` exits 0 — the committed
+  `fc-tier1.expected.json` is current.
+- **Objective values:** both β cases match the generator's exhaustive enumeration (verified
+  in §6.4 and re-confirmed).
+- **Ordering:** `expected_order` correctly places `102:scsi0` first (repairs the reserve
+  violation) in both cases. Transient checks match §14.4: 5.0≤8.0, 4.5≤8.0, 5.0≤8.0.
+- **Post-plan reserve:** `expected_final_reserve` for both cases shows no violations, matching
+  §14.3's final-state table.
+- **CP-SAT coefficient folding:** verified `round(0.05·10⁴·10⁶·0.5) = 2.5×10⁸` — the γ term is
+  now exact, not zero. The N-01 defect is fixed.
+- **Big-M bound:** `P_min = 21.625 / 2⁻²⁰ ≈ 2.27×10⁷`, matching the plan's §5.3 computation.
+- **Generator covers the fixture's objective formula exactly** (`alpha·E + beta·moves +
+  gamma·bytes + kappa·frag + P·slack`), including the `P·slack` term. The generator does not
+  model the lexicographic two-stage solve (M-01).
+- **Generator does not model `affinity_counts_pinned_disks`** or the `D^mov` distinction,
+  but the fixture has no pinned disks so `D^mov = D` and the computation is correct.
 
 ---
 

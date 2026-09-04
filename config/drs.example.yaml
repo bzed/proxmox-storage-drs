@@ -167,6 +167,12 @@ migration:
   # from GET /storage/{id}. Only set false if you have verified saferemove is off
   # everywhere in the group. See plan sections 7.1 and 9.3.
   account_saferemove_wipe: true
+  # In-flight I/O charged to the SOURCE for the whole duration of that wipe -- both
+  # in the cost model (plan 7.1) and in the saturation guard (plan 7.3), where a
+  # draining move charges this to its source and nothing to its target. The zeroing
+  # pass is one sequential writer, so 1.0 is the natural value; lower it only if you
+  # have measured that a throttled wipe does not disturb your array.
+  wipe_load_weight: 1.0
   # Fraction of a storage's saturation_load (NOT of capability_weight) that a move
   # may drive it to. Inactive for any storage whose saturation_load is null.
   saturation_ceiling: 0.85

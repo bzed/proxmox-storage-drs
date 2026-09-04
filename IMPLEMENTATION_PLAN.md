@@ -420,7 +420,13 @@ isolation. Second, PVE may not use the `drive-mirror` path for `tpmstate0`, beca
 than QEMU holds that state. Do not depend on drive-mirror semantics for it. The transient invariant
 of §8.1 — the volume occupies **both** storages until the move completes — is the conservative
 assumption and stays correct under either mechanism, so no part of the model needs to know which one
-PVE picked.
+PVE picked. Be clear about which way that conservatism cuts: if `swtpm` does *not* use drive-mirror,
+the both-storages assumption over-reserves during the move. Over-reserving can never cause a reserve
+breach, so it is safe; the only cost is that a `tpmstate0` move onto a nearly-full storage may fail
+the transient check when it would physically have fitted. Treat that exactly like any other
+infeasible move — **defer it, never force it** — and let `drs explain` say that the transient check
+was the blocker. Given that TPM state is a few megabytes, a storage tight enough for this to bind is
+a storage with a much larger problem.
 
 **Metrics coverage differs by device type.** `efidisk0` is a QEMU drive and should appear in
 `blockstat`; `tpmstate0` and `unused{N}` are not QEMU block devices, so no series will exist for them
@@ -723,7 +729,14 @@ effectively hard:
    at most twice the total. Take `ε_r = 1 MiB` expressed in the same size unit as `z_d` (2⁻²⁰ TiB if
    sizes are TiB), which says: never accept even a one-mebibyte reserve shortfall in exchange for
    balance. Config `objective.reserve_violation_penalty` is then a *floor*, not the value used:
-   the model uses `P = max(configured, P_min)` and logs a warning when it had to raise it.
+   the model uses `P = max(configured, P_min)` and logs a warning when it had to raise it. That
+   warning must be *checkable*, not just an announcement: log `P_configured`, `P_min`, `P_used`,
+   and the four inputs the bound came from — `T_g`, `|D|`, `Σ_d z_d`, `|V|·(|S|−1)` — plus the `ε_r`
+   granularity, and repeat them in `drs explain`. `P_min` moves with `T_g`, so the same config file
+   legitimately yields different effective penalties on a quiet group and a busy one, and on the
+   same group at different times of day. An operator who sets `reserve_violation_penalty: 5000` and
+   sees the engine using 2.3×10⁷ needs to be able to reconstruct that number rather than take it on
+   faith.
 
    Worked against §14 (`T_g = 7.4`, `|D| = 6`, `Σz = 6.5 TiB`, `|V| = 5`, `|S| = 3`, sizes in TiB):
    `U_obj = 14.8 + 1.5 + 0.325 + 5.0 = 21.6`, so `P_min = 21.6 · 2²⁰ ≈ 2.27×10⁷`. The configured
@@ -734,6 +747,11 @@ effectively hard:
 **Use the lexicographic solve (option 1) by default.** It needs no calibration, its correctness does
 not depend on `T_g`, and both backends support it by re-solving. Option 2 exists for a backend that
 cannot re-solve cheaply.
+
+`tests/fixtures/reserve-tradeoff.yaml` (§14.6) is the fixture for this rule: a two-storage group in
+which the two options provably disagree, with the exact `P` at which big-M flips recorded alongside
+the computed `P_min`. Test both paths against it. The §14 fixture cannot do this job — there, every
+reserve-violating assignment is also worse on balance, so both options agree at any `P`.
 
 Report any residual `r_s > 0` prominently as an unfixable shortfall, with the byte amount.
 
@@ -936,14 +954,17 @@ duration_wipe_d   = z_d / saferemove_throughput(σ₀(d))     if saferemove is e
 
 duration_d        = duration_mirror_d + duration_wipe_d
 
-cost_d            = duration_mirror_d · (ω_src + ω_dst)  +  duration_wipe_d · ω_src
+cost_d            = duration_mirror_d · (ω_src + ω_dst)  +  duration_wipe_d · ω_wipe
 ```
 
 `ω_src` and `ω_dst` (default 1.0 each) are the added in-flight I/O on source and target — a mirror is
 one sequential reader plus one sequential writer, so 1.0 each is the natural unit and is directly
 comparable to `ℓ`, which is measured in the same units (§4). `cost_d` is therefore in
 **load-seconds**. The wipe is charged to the source only, because it is a sequential write over the
-old volume with nothing happening on the target.
+old volume with nothing happening on the target; `ω_wipe` (`migration.wipe_load_weight`, default
+1.0) is its own weight so an operator who knows their array shrugs off a throttled zeroing pass can
+lower it without touching the mirror weights. §7.3 charges the same quantity to the saturation guard
+for the whole `draining` window.
 
 **Why the wipe term is not a rounding detail.** PVE's LVM `saferemove` ("Wipe Removed Volumes" in the
 UI) defaults to a throughput of **10 MiB/s**. At that rate the 1.5 TiB disk of the §14 example takes
@@ -998,6 +1019,33 @@ where `L̂_s(Δ)` is the **forecaster's upper bound on `L_s`** — the storage's
 horizon equal to the move's expected duration (§10), in average in-flight I/O requests, the same
 units as `ℓ` (§4) and as `ω`. It is **not** the capability-normalized `u_s`; mixing the two here was
 the original defect in this rule.
+
+**`ω_role(m,s)` depends on the move's *state*, not only on its endpoints.** A move stays in the
+in-flight set `M` until it reaches `done` (§8.2). That is right for capacity, but a *fixed* role
+charge would be wrong for load: once the mirror has switched over, this move writes nothing more to
+the target, while the source is being **zeroed** for as long as `saferemove` takes. So:
+
+```
+state        charge on src(m)     charge on dst(m)
+-----------  -------------------  -----------------
+mirroring    ω_src                ω_dst
+draining     ω_wipe               0
+done         0                    0
+```
+
+`ω_wipe` is `migration.wipe_load_weight`, default 1.0 — the zeroing pass is one sequential writer,
+so 1.0 is the natural value and it is the same quantity §7.1 charges for `duration_wipe_d`. With
+this, a 44-hour wipe on a busy source stays visible to the saturation guard for its whole duration
+instead of vanishing from the check the moment `move_disk` reports OK, which is the only way the
+guard can protect the *next* move scheduled onto that storage. The capacity invariant of §8.1 needs
+no change: it already holds the move in `M` until `done`, and the source-side byte accounting of
+`mirroring` and `draining` is identical.
+
+Two honest caveats. The wipe is throttled by construction (10 MiB/s by default), so charging it a
+full `ω` is conservative — deliberately so, because the alternative is to under-count a storage that
+is busy zeroing 1.5 TiB. And this remains a best-effort guard: a deployment with no
+`saturation_load` set skips it entirely, and there `execution.cooldown_per_storage`, sized against
+the wipe time (§9.3), is the blunter mitigation that still works.
 
 **`N_s` is what the check is measured against, and it is not `c_s`.** `c_s` is a *relative*
 capability weight whose default is 1.0 and whose absolute value is meaningless — only the ratios
@@ -1081,7 +1129,9 @@ version of this rule in the codebase.
 2. keeps `|M| ≤ max_concurrent_migrations`;
 3. keeps the count of in-flight moves touching any single storage — **as either source or target** —
    at or below `max_concurrent_per_storage`;
-4. respects the saturation check of §7.3, which sums `ω` over all in-flight moves at that storage;
+4. respects the saturation check of §7.3, which sums `ω_role(m,s)` over **every** move still in
+   `M` at that storage — including moves in `draining`, whose source is charged `ω_wipe` and whose
+   target is charged nothing;
 5. violates no per-disk or per-storage cooldown.
 
 With the default `max_concurrent_per_storage: 1`, two moves targeting the same storage serialize
@@ -1132,7 +1182,11 @@ done:       source volume absent from /storage/{a}/content
 
 For the generalized transient invariant of §8.1 the *source-side* accounting of `mirroring` and
 `draining` is identical, so keep a move in `M` until it reaches `done` and the invariant needs no
-change at all. What does change is that ordering rule 2 — "moves that free space a later move needs"
+change at all. The *load* charge is not identical across the two states, and §7.3's `ω_role(m,s)`
+table is what distinguishes them: a draining move charges `ω_wipe` to its source and nothing to its
+target. Keeping the move in `M` is therefore what makes the wipe visible to the saturation guard as
+well as to the capacity check — which is the point, since the wipe is by far the longer of the two
+windows on a large disk. What does change is that ordering rule 2 — "moves that free space a later move needs"
 — cannot be satisfied within a run when the source wipes slowly. The scheduler must therefore treat a
 predicted free-space release as **unrealised until observed**, and a plan whose feasibility depends on
 one is split rather than executed on faith (§8.3, option 2).
@@ -1548,11 +1602,17 @@ The machine-readable form lives in **`tests/fixtures/fc-tier1.yaml`** (input) an
 both payback calculations). Assert against those files in CI rather than transcribing the tables
 below.
 
-The expected file is **generated, not written**: `tests/fixtures/generate_fc_tier1.py` enumerates all
+The expected file is **generated, not written**: `tests/fixtures/generate_expected.py` enumerates all
 `3⁶ = 729` assignments per `β`, so the recorded optimum is proven rather than hand-worked, and
 derives the order with the §8.2 rule and the §8.1 transient predicate. Run it with `--check` in CI to
 assert the committed file is current; that check is also the regression test for §5.5's coefficient
 scaling, since a scaling bug shows up as a different optimum.
+
+**This example cannot test everything, and one gap is worth naming.** In `fc-tier1` every
+reserve-violating assignment is *also* worse on balance, so the lexicographic solve and the
+single-stage big-M solve agree here at **any** `P ≥ 0` — the fixture simply never exercises the
+distinction the two options of §5.3 exist to make. `tests/fixtures/reserve-tradeoff.yaml` is the
+companion fixture that does; see §14.6.
 
 ### 14.1 Input
 
@@ -1636,6 +1696,15 @@ move 3 → san-b:  used 2.5 + 0.5 = 3.0,  max(Z_b, 0.5) = 1.0,  3.0 + 2.0 = 5.0 
 At `bwlimit = 200 MiB/s`, `ω_src = ω_dst = 1.0`, `H = 7d = 604800 s`, `λ = 10`, and **`saferemove`
 off on all three storages** so `duration_wipe_d = 0` (§7.1), for the two-move plan:
 
+That last assumption is not a detail of the prose — the config default is
+`migration.account_saferemove_wipe: true`, and with a wipe at the PVE default of 10 MiB/s the
+1.5 TiB move below would carry ~44 h of zeroing on top of its 2.2 h mirror and the arithmetic would
+look nothing like this. So the fixture states it in the data rather than leaving it to be inferred:
+`saferemove: false` on each storage, `account_saferemove_wipe: false` in the `migration` block, and
+an `assumptions` object echoed into the expected file. The per-move records carry
+`duration_mirror_seconds` and `duration_wipe_seconds` separately, so a run with wiping enabled is a
+different number in a named field rather than a silent discrepancy.
+
 | Move | Size | Duration | `cost = 2 × duration` |
 |---|---|---|---|
 | `102:scsi0` | 1.5 TiB | 7 864 s (2.18 h) | 15 729 load·s |
@@ -1659,6 +1728,48 @@ ratio   = 0.72   <  λ = 10   → REJECT
 The migration would generate more I/O than it saves within the horizon. This is the requirement that
 "migrating a very large disk might generate more traffic than we are trying to save", enforced
 numerically.
+
+### 14.6 Companion fixture: when the reserve and the balance objective disagree
+
+`tests/fixtures/reserve-tradeoff.yaml` is a second, deliberately awkward group, and its only job is
+to separate the two solve paths of §5.3.
+
+Two storages: `roomy` (20 TiB, empty) and `cramped` (5 TiB, of which 3 TiB is already `Uˢᵉˣᵗ` —
+volumes DRS does not manage). `f = 2.0`. Two disks, both 1.0 TiB, both `ℓ_d = 5.0`, both on `roomy`,
+belonging to different VMs. So `u* = 5.0`, and:
+
+| Assignment | `Σ r_s` | `E` | Non-reserve objective at `β = 0.25` |
+|---|---|---|---|
+| both on `roomy` (current) | **0** | 10.0 | 10.0 |
+| one moved to `cramped` | 1.0 TiB | **0.0** | 0.30 |
+| both moved to `cramped` | 2.0 TiB | 10.0 | 10.60 |
+
+Moving one disk balances the group *perfectly* and costs a 1 TiB reserve breach on `cramped`
+(`3 + 1 + 2·1 = 6 > 5`). That is the trade the reserve rule exists to forbid, and the three answers
+are:
+
+- **Lexicographic (the default).** Stage 1 finds `min Σ r_s = 0`, stage 2 optimises within that
+  set — so the plan is *no moves at all*, and the group stays at `E = 10`. Correct, and it needed
+  no calibration to be correct.
+- **Big-M at the configured `P = 1000`.** Same answer: `0.30 + 1000 > 10.0`.
+- **Big-M at `P = 5`.** `0.30 + 5 = 5.30 < 10.0`, so it moves the disk and breaches the reserve for
+  balance. The exact flip point, recorded in the expected file as
+  `big_m_agreement_threshold_p`, is **`P = 9.7`**: below it big-M is wrong, above it big-M is right.
+  Note how small that number is — nothing about `P = 5` looks obviously wrong to an operator, which
+  is the whole argument for computing `P` rather than configuring it.
+
+The build-time bound of §5.3 gives `P_min = 21.6 · 2²⁰ ≈ 2.26×10⁷` for this group, four orders above
+the 9.7 actually needed. That is the bound doing its job: it is deliberately worst-case (it refuses
+to trade even one mebibyte), and being conservative in the safe direction costs nothing.
+
+One further check the fixture records: the `P = 5` plan is not merely undesirable, it is
+**unschedulable**. Its single move fails the §8.1 transient predicate on `cramped`, so §8.2 reports a
+deadlock rather than emitting it. The two safety mechanisms are independent, and the fixture asserts
+that both fire.
+
+Disk `201:scsi0` and `202:scsi0` are interchangeable here; the recorded move names `202:scsi0`
+because that is how the enumerator breaks the tie. An implementation may pick either — assert on the
+move *count* and the resulting slack, not on the disk identity.
 
 ---
 
@@ -1709,6 +1820,7 @@ bug waiting to happen; this table is the audit.
 | `migration.payback_horizon` / `payback_ratio` | §7.2, §7.3 acceptance test |
 | `migration.max_single_move_duration` | §7.3 hard per-move rule; compared against `duration_d` *including* the wipe |
 | `migration.account_saferemove_wipe` | §7.1 `duration_wipe_d` |
+| `migration.wipe_load_weight` | §7.1 `ω_wipe` in `cost_d`; §7.3 `ω_role(m,s)` while `draining` |
 | `execution.locks.*` | §9.3 lock wait loop; §5.3 (C2) planning-time pin |
 | `execution.source_release.*` | §9.3 completion criterion; §8.2 `draining` state |
 | `exclude.include_unused_disks` | §3.6 membership of `D` |

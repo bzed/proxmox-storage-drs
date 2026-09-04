@@ -69,7 +69,7 @@ cov: venv
 	@echo "open htmlcov/index.html"
 
 fixtures:
-	python3 tests/fixtures/generate_fc_tier1.py --check
+	python3 tests/fixtures/generate_expected.py --check
 
 check: fmt-check lint typecheck test fixtures
 	@echo "check: OK"
