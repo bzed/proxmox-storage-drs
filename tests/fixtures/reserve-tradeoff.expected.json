@@ -3,7 +3,7 @@
   "generated_by": "tests/fixtures/generate_expected.py (exhaustive enumeration)",
   "assumptions": {
     "account_saferemove_wipe": false,
-    "omega_wipe": 1.0,
+    "wipe_load_weight": 1.0,
     "saferemove_by_storage": {
       "roomy": false,
       "cramped": false

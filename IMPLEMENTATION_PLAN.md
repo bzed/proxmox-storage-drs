@@ -1462,7 +1462,7 @@ requirement-to-setting mapping:
 | Timeframe considered | `window.lookback` (default `24h`) |
 | Minimal number of migrations | `objective.beta_move_count` |
 | Keep a VM's disks together | `objective.kappa_vm_affinity` |
-| Migration load accounted for | `migration.*`, `objective.gamma_move_bytes` |
+| Migration load accounted for | `migration.*`, `objective.gamma_move_bytes_per_tib` |
 | Manual vs automatic | `execution.mode` |
 | Forecasting | `forecast.model` |
 
@@ -1829,7 +1829,7 @@ bug waiting to happen; this table is the audit.
 | `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
 | `migration.saturation_ceiling` | §7.3 `L_during(s) ≤ saturation_ceiling · N_s` |
 | `groups[].storages[].saturation_load` | §7.3 `N_s`; guard skipped when unset |
-| `objective.alpha_spread/beta_move_count/gamma_move_bytes/kappa_vm_affinity` | §5.4 |
+| `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity` | §5.4 |
 | `objective.reserve_violation_penalty` | §5.3 (C5), *floor* for the single-stage `P` alternative |
 | `metrics.pvestatd_push_interval` | §11.1 `rate_window` validation; §3.3 `verify-metrics` |
 | `objective.spread_metric` | §5.3 (C6), L1 vs min–max |

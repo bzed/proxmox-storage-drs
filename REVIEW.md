@@ -18,6 +18,11 @@ substantial new material (all-bus enumeration, snapshot handling, saferemove wip
 VM locks, load-model rescale, saturation-load redesign, fixture generator). All N-findings
 are resolved; six new findings (M-01..M-06) were identified, all Low or Info severity.
 
+A **fourth pass** (section 8) reviews the plan after the author addressed M-01..M-06 and added
+the `reserve-tradeoff` fixture, the lexicographic solver path, the `ω_wipe` state-dependent
+saturation guard, AGENTS.md, and the Python toolchain. All M-findings are resolved; two new
+findings (K-01..K-02) were identified, both Low severity.
+
 ---
 
 ## 0. Overall assessment
@@ -813,6 +818,107 @@ The fixture and generator were independently verified:
   model the lexicographic two-stage solve (M-01).
 - **Generator does not model `affinity_counts_pinned_disks`** or the `D^mov` distinction,
   but the fixture has no pinned disks so `D^mov = D` and the computation is correct.
+
+---
+
+## 8. Fourth-pass review of the updated plan
+
+The plan grew from 1721 to 1842 lines. `config/drs.example.yaml` grew from 279 to 285 lines
+(one new field: `migration.wipe_load_weight`). The generator was renamed from
+`generate_fc_tier1.py` to `generate_expected.py` and rewritten (208→502 lines) to handle
+multiple fixtures, the lexicographic solve path, and the `ω_wipe` cost model. A new fixture
+pair `reserve-tradeoff.yaml`/`.expected.json` was added. `AGENTS.md`, `.agents/`, `LICENSE`
+(AGPL-3.0), `pyproject.toml`, `Makefile`, and `.pre-commit-config.yaml` were added as project
+tooling. This section records the resolution of every M-finding and presents new findings.
+
+### 8.1 Resolution of third-pass findings
+
+All 6 third-pass findings (M-01..M-06) have been addressed. Summary:
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| M-01 | Resolved | New `reserve-tradeoff` fixture (§14.6) with a group where lexicographic and big-M provably disagree. Generator rewritten with `best_lexicographic()`, `big_m_agreement_threshold()`, and `computed_p_min()` functions. The expected file records both solve paths, the threshold P, and whether they agree at the configured P. The `big_m_undersized_p_demo` (P=5) shows big-M making the wrong choice and the resulting plan being unschedulable. |
+| M-02 | Resolved | `fc-tier1.yaml` now has `saferemove: false` per storage and `account_saferemove_wipe: false` in the `migration` block. The expected file has an `assumptions` object echoing this. Per-move records carry `duration_mirror_seconds` and `duration_wipe_seconds` separately. §14.5 prose explicitly explains the assumption is in the data, not just the prose. |
+| M-03 | Resolved | §7.3 now defines a state-dependent `ω_role(m,s)` table: `mirroring` charges `ω_src`/`ω_dst`, `draining` charges `ω_wipe`/0, `done` charges 0/0. §8.1 condition 4 sums `ω_role` over all moves in `M` including draining. New config field `migration.wipe_load_weight` (default 1.0) controls `ω_wipe`. The generator's `cost()` function implements the same split. |
+| M-04 | Resolved | §3.6 now states: "if swtpm does not use drive-mirror, the both-storages assumption over-reserves during the move. Over-reserving can never cause a reserve breach, so it is safe; the only cost is that a tpmstate0 move onto a nearly-full storage may fail the transient check... Treat that exactly like any other infeasible move — defer it, never force it." |
+| M-05 | Resolved (no action) | The units reinterpretation is now fully documented in §4 and §14.1. Appendix A verification in this review remains valid as noted. |
+| M-06 | Resolved | §5.3 now requires logging `P_configured`, `P_min`, `P_used`, and the four inputs (`T_g`, `|D|`, `Σz_d`, `|V|·(|S|−1)`) plus `ε_r`, and repeating them in `drs explain`. The text explicitly addresses the "operator sets 5000 and sees 2.3×10⁷" scenario. |
+
+### 8.2 New findings summary
+
+| ID | Severity | Section | Topic |
+|----|----------|---------|-------|
+| K-01 | Low | generator, §14.5 | Payback `benefit_load_seconds` mixes exact `E_before` with rounded `E_after`; fixture says 3951360.2, prose says 3951360.0 |
+| K-02 | Low | §7.1, §7.3, config | `ω_wipe` renamed to `wipe_load_weight` in config but the plan text uses `ω_wipe` and `migration.wipe_load_weight` inconsistently |
+
+### 8.3 New findings — detail
+
+#### K-01 — Payback benefit mixes exact and rounded E (Low)
+**Where:** `tests/fixtures/generate_expected.py` `payback()` function, §14.5.
+**Issue:** The generator's `payback()` function computes `delta_e = E_of(f, f.current) -
+case["expected_E_after"]`, where `case["expected_E_after"]` is already rounded to 6 decimal
+places. This mixes an exact `E_before` (8.0666666...) with a rounded `E_after` (1.533333),
+producing `delta_e = 6.5333336...` instead of the exact `6.5333333...`. The benefit becomes
+`3951360.2` instead of the exact `3951360.0` that the §14.5 prose states. The ratio is
+unaffected (150.73 in both cases), so the payback acceptance test passes either way, but an
+implementer asserting exact equality against the fixture will see a 0.2 load-seconds
+discrepancy with the prose.
+**Recommendation:** In the generator's `payback()` function, compute `delta_e` from the exact
+assignment rather than from the rounded case value:
+```python
+# Instead of:
+delta_e = E_of(f, f.current) - case["expected_E_after"]
+# Use:
+two_assign = best_big_m(f, case["beta_move_count"], f.big_m_p)[0]
+delta_e = E_of(f, f.current) - E_of(f, two_assign)
+```
+Or simply pass the exact `E_after` into `payback()` alongside the rounded one. This is a
+cosmetic fix — the 5×10⁻⁸ relative error has no physical consequence — but it eliminates a
+prose-vs-fixture discrepancy that an implementer would have to explain.
+
+#### K-02 — `ω_wipe` / `wipe_load_weight` naming inconsistency (Low)
+**Where:** §7.1, §7.3, §15.1, `config/drs.example.yaml`.
+**Issue:** The plan text in §7.1 and §7.3 refers to the wipe load weight as `ω_wipe`, and
+§15.1 maps it to `migration.wipe_load_weight`. The config file has `wipe_load_weight: 1.0`
+under `migration:`. This is consistent. However, the fixture's `migration` block uses
+`omega_wipe: 1.0` (not `wipe_load_weight`), and the generator reads it as
+`f.migration.get("omega_wipe", 1.0)`. So the fixture uses a different field name than the
+config for the same quantity. An implementer who reads the config field name from
+`drs.example.yaml` and then looks at the fixture will see two different names for the same
+knob.
+**Recommendation:** Rename `omega_wipe` to `wipe_load_weight` in the fixture YAML files
+(`fc-tier1.yaml` and `reserve-tradeoff.yaml`) and in the generator's `migration.get()` call, to
+match the config field name. This is purely a naming consistency issue; the values and
+semantics are identical.
+
+### 8.4 Fixture and generator verification
+
+The updated fixtures and generator were independently verified:
+
+- **Generator freshness:** `python3 tests/fixtures/generate_expected.py --check` exits 0 —
+  both `fc-tier1.expected.json` and `reserve-tradeoff.expected.json` are current.
+- **fc-tier1 numbers:** all objective values, ordering, transient checks, and post-plan
+  reserve status match the §14 prose and the previous verification (§6.4, §7.4). The new
+  `lexicographic` block correctly records that both paths agree (`agrees_with_big_m_at_configured_p:
+  true`) and that the threshold is negative (`-3.273333`), meaning no P≥0 can make them
+  disagree on this fixture.
+- **reserve-tradeoff numbers:** all values verified by hand:
+  - Both on roomy: E=10.0, slack=0, obj_nr=10.0 ✓
+  - One to cramped: E=0.0, slack=1.0, obj_nr=0.30 ✓
+  - Big-M P=1000: stays (1000.30 > 10.0) → 0 moves ✓
+  - Big-M P=5: moves (5.30 < 10.0) → 1 move ✓
+  - Flip threshold: P = 10.0 − 0.30 = 9.7 ✓
+  - Transient check: 3.0 + 1.0 + 2×1.0 = 6.0 > 5.0 → deadlock ✓
+  - P_min = 21.6 × 2²⁰ = 22649241.6 ✓
+  - Lexicographic: min_slack=0, then min obj_nr=10.0 → 0 moves ✓
+- **Cost model:** `ω_wipe` now separates the wipe load from the mirror load in both the cost
+  function (§7.1) and the saturation guard (§7.3 `ω_role` table). Verified that with
+  `saferemove: false` the payback numbers are unchanged.
+- **Generator architecture:** the rewritten `generate_expected.py` is a significant
+  improvement — it handles both fixtures, both solve paths, the threshold computation, and
+  the deadlock detection in a single 502-line file with clean separation between state
+  evaluation, objective computation, and ordering. The `Fixture` dataclass and the
+  `all_assignments()` iterator make the exhaustive enumeration readable and trustworthy.
 
 ---
 

@@ -64,6 +64,12 @@ plan the scheduler then refuses to order. Test the lexicographic path against th
 If a change makes the expected file stale, that is a signal — read the diff before regenerating.
 A change in those numbers means the model changed.
 
+**Round once, at the point of writing.** Never derive a value from an already-rounded record.
+The generator rounds to six decimals for the file; feeding one of those rounded values back into
+a later computation (`benefit = (E_before − E_after) · H` taken from the rounded `E_after`) shifts
+the result off the plan's prose by a fraction that is too small to notice and too annoying to
+explain. Keep the exact value in a private field and round it on output.
+
 ## What must never happen in a test
 
 - No network. Not to the PVE API, not to Prometheus, not to a package index.
