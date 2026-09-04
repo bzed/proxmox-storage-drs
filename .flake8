@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# flake8 cannot read pyproject.toml, so its configuration lives here. It is
+# written to agree with black rather than to compete with it:
+#
+#   max-line-length   MUST equal [tool.black] line-length in pyproject.toml.
+#   E203  whitespace before ':'      black writes `x[a + b : c]`; black is right.
+#   W503  break before binary operator   black breaks before operators, which is
+#                                        the currently recommended PEP 8 style.
+#   E704  statement on same line as def  black writes one-line `...` bodies.
+#
+# E501 stays enabled on purpose: what black cannot split (a long URL or string)
+# should be looked at by a human, not hidden.
+#
+# Do not silence anything else globally. Use a targeted `# noqa: CODE` with a
+# reason instead.
+[flake8]
+max-line-length = 100
+extend-ignore = E203, E704, W503
+max-complexity = 12
+exclude =
+    .git,
+    .venv,
+    venv,
+    __pycache__,
+    build,
+    dist,
+    *.egg-info
+per-file-ignores =
+    tests/*: S101

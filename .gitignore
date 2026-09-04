@@ -7,6 +7,14 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+build/
+dist/
+
+# Coverage artefacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # Local runtime state and secrets
 state.json

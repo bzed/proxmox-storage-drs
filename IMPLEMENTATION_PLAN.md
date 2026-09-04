@@ -139,6 +139,15 @@ Make `ortools` and `statsmodels` **optional extras**. The tool must run, plan an
 `requests` + `ruamel.yaml` + `jsonschema` installed, falling back to the heuristic solver and the
 quantile forecaster. This keeps it deployable on a locked-down management host.
 
+**Licence and contribution rules.** The project is **AGPL-3.0-or-later**, copyright
+Bernd Zeimetz <bernd@bzed.de>; every source file carries the two-line SPDX header. `AGENTS.md` and
+`.agents/` hold the working agreement that any implementer — human or model — is expected to follow:
+black + isort + flake8 + mypy with configurations written so the formatter and the linter cannot
+disagree, an enforced 85% coverage floor, feature branches merged only when `make check` is green,
+and the list of domain invariants (dry-run default, reserve never traded, no auto-delete) that a
+refactor must not quietly remove. A dependency whose licence is incompatible with AGPL-3.0-or-later
+cannot be added.
+
 **Deployment.** Runs on a management host — not necessarily a PVE node — needing outbound access to
 the PVE API (tcp/8006) and to Prometheus. It holds credentials and must be treated accordingly;
 prefer an API token over username/password for unattended operation.

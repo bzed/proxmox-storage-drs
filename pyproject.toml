@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proxmox-storage-drs"
+version = "0.0.0"
+description = "Storage DRS for Proxmox VE 9.2 — balances disk I/O across shared storage groups"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Bernd Zeimetz", email = "bernd@bzed.de" }]
+maintainers = [{ name = "Bernd Zeimetz", email = "bernd@bzed.de" }]
+keywords = ["proxmox", "pve", "storage", "drs", "load-balancing", "prometheus"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: System Administrators",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: System :: Systems Administration",
+]
+
+# Runtime dependencies, per IMPLEMENTATION_PLAN.md section 2.1.
+# The heuristic fallback path must stay importable with no solver installed —
+# `ortools` and `pulp` are therefore optional extras, not hard requirements.
+dependencies = [
+  "requests>=2.31",
+  "ruamel.yaml>=0.18",
+  "jsonschema>=4.20",
+]
+
+[project.optional-dependencies]
+solver = ["ortools>=9.8", "pulp>=2.7"]
+forecast = ["statsmodels>=0.14", "numpy>=1.26"]
+dev = [
+  "black>=24.1",
+  "flake8>=7.0",
+  "flake8-bugbear>=24.1",
+  "isort>=5.13",
+  "mypy>=1.8",
+  "pytest>=8.0",
+  "pytest-cov>=4.1",
+  "pytest-xdist>=3.5",
+  "PyYAML>=6.0",
+  "types-PyYAML",
+  "types-requests",
+]
+
+[project.scripts]
+drs = "proxmox_storage_drs.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/bzed/proxmox-storage-drs"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ---------------------------------------------------------------------------
+# Formatting. black owns layout; isort is configured to produce black-compatible
+# output so the two can never fight. `line-length` here MUST equal
+# `max-line-length` in .flake8 — see AGENTS.md section 1.
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["proxmox_storage_drs"]
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+# Paths come from the Makefile so the targets work before `src/` exists.
+strict = true
+warn_unreachable = true
+# Third-party stubs we do not control.
+[[tool.mypy.overrides]]
+module = ["ortools.*", "pulp.*", "statsmodels.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Tests. The 85 % floor is enforced here, not by convention — see
+# .agents/testing.md. `make test` tolerates "no tests collected" only while the
+# project is still at the design stage.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  "--cov=proxmox_storage_drs",
+  "--cov-report=term-missing:skip-covered",
+  "--cov-fail-under=85",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/proxmox_storage_drs"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@overload",
+]

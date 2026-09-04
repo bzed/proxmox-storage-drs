@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Optional but recommended: `pre-commit install` makes "always run black and
+# flake8 before committing" (AGENTS.md section 2) automatic rather than a habit.
+# It is a safety net, not a substitute for `make check` — pre-commit does not
+# run the test suite.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.1.1
+    hooks:
+      - id: flake8
+        additional_dependencies: [flake8-bugbear]
+
+  - repo: local
+    hooks:
+      - id: fixtures-current
+        name: fc-tier1.expected.json is current
+        entry: python3 tests/fixtures/generate_fc_tier1.py --check
+        language: system
+        pass_filenames: false
+        files: ^tests/fixtures/
