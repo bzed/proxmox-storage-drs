@@ -40,7 +40,9 @@ Sections 1-4 establish the data model, section 5 states the optimization problem
 6-9 cover when to act, what a migration costs, ordering, and execution. Section 14 is a fully worked
 numeric example that doubles as a test fixture.
 
-`config/drs.example.yaml` is the annotated reference configuration.
+`config/drs.example.yaml` is the annotated reference configuration. It installs to
+`/etc/pve/drs.yaml` — on the cluster filesystem, so every node reads the same file — and
+`pve-drs --config PATH` overrides that for a single run.
 
 `tests/fixtures/fc-tier1.yaml` is the section 14 example in machine-readable form;
 `fc-tier1.expected.json` holds its proven-optimal results.

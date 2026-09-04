@@ -1,5 +1,20 @@
 # proxmox-storage-drs — reference configuration
 # Every value shown is the default unless marked REQUIRED.
+#
+# Install this to /etc/pve/drs.yaml. That path is on the cluster filesystem, so
+# the file is replicated to every node and there is exactly one authoritative
+# copy; a management host that is not a cluster member provides the same path
+# locally. pve-drs looks for its config in this order, first match wins:
+#
+#   1. --config PATH  (-c)      missing or invalid -> hard error, no fallback
+#   2. $PVE_DRS_CONFIG          missing or invalid -> hard error, no fallback
+#   3. /etc/pve/drs.yaml        the default
+#
+# Two warnings that follow from the location (plan §11):
+#   - An edit here is live on every node immediately. There is no staging.
+#   - Files under /etc/pve are group-readable by www-data. Check `ls -l` before
+#     putting a password in this file, and prefer an API token plus
+#     PVE_TOKEN_SECRET from the environment.
 
 # Config format version. config.py rejects an unknown MAJOR version rather than
 # misinterpreting fields.
@@ -15,6 +30,8 @@ proxmox:
     # Password auth (as requested). An API token is supported and preferred for
     # unattended operation: set token_id/token_secret instead of username/password.
     username: drs@pve              # REQUIRED
+    # Leave the secret out of this file when the config lives in /etc/pve: both
+    # of these read from the environment when left null.
     password: null                 # REQUIRED unless token_* is set; env: PVE_PASSWORD
     token_id: null                 # e.g. "drs@pve!balancer"
     token_secret: null             # env: PVE_TOKEN_SECRET
