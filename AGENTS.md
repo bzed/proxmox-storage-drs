@@ -187,6 +187,106 @@ Details: [`.agents/domain-invariants.md`](.agents/domain-invariants.md).
 
 ---
 
-## 8. Review checklist
+## 8. Documentation we ship
+
+Documentation is a deliverable, not a courtesy. Three audiences, three artefacts, and **every one
+of them is generated from Markdown that lives in this repository** — nothing is authored directly
+in PDF or in roff.
+
+| Audience | Source | Generated |
+|---|---|---|
+| Whoever reads or changes the code | docstrings and comments, plus `docs/internals/*.md` | `docs/internals.pdf` |
+| The operator who runs it | `docs/manual/*.md` | `docs/drs-manual.pdf`, `man/drs.1` |
+| Somebody at a terminal, right now | the CLI's own option definitions | `drs --help`, `drs --manual` |
+
+**Status:** only the specification pipeline (`make pdf`, [`.agents/paper.md`](.agents/paper.md))
+exists today, because there is no code yet. The commit that first adds a CLI adds the rest —
+`docs/internals/`, `docs/manual/`, `man/drs.1.md`, the `docs`/`docs-check` targets — and wires
+`docs-check` into `make check`. `docs/paper/` is document-agnostic apart from its title block and
+is meant to be reused, not copied.
+
+### 8.1 Documentation inside the code
+
+- Every module opens with a docstring saying what it does and **which plan section it implements**.
+- Every public function and class: full type annotations, and a docstring that gives the units of
+  every quantity, what it raises, and what it does *not* handle.
+- Every non-obvious step carries a comment saying **why**, not what. "Why" includes the
+  Proxmox behaviour or the plan constraint that forces the code into that shape.
+- Docstrings are necessary and not sufficient: a reader must be able to understand the whole
+  pipeline from `docs/internals/` **without** reading the source.
+
+### 8.2 How the tool works: `docs/internals/`
+
+The internals documentation explains the machine, in prose, to somebody who has to modify it. At
+minimum it covers, each page naming the plan sections it expands and the modules it describes:
+
+- the data path end to end — Prometheus and the PVE API in, load vector, gates, solver, plan,
+  scheduler, executor, `state.json` out;
+- the load model, and why average in-flight I/O rather than IOPS or bytes;
+- the MILP: every variable, every constraint, the objective, and both solve paths;
+- the heuristic fallback, and exactly where it may differ from the MILP;
+- gating, hysteresis and cooldowns;
+- migration cost and the payback rule;
+- ordering and the transient invariant;
+- the execution lifecycle — mirroring, draining, done — locks, and why a finished task is not a
+  finished move;
+- what is in `state.json`, who writes it, and how to recover from a crash mid-plan;
+- failure modes, what the tool refuses to do, and why.
+
+The plan describes the design **as specified**; `docs/internals/` describes the implementation
+**as built**. When the two disagree, one of them is a bug — resolve it in the same commit, do not
+leave the reader to guess which is current.
+
+### 8.3 End-user documentation: `docs/manual/`
+
+Written for an operator with a cluster to run and no interest in the solver's variables. It must
+cover installation and requirements, mapping the metric names to their own Prometheus, the
+verification commands, a first dry run and how to read the plan it prints, the three execution
+modes, exit codes, troubleshooting, and the safety properties they are entitled to rely on
+(dry-run default, the reserve is never traded, nothing is ever auto-deleted).
+
+**Every configuration option is documented in full**: type, unit, default, what it interacts with,
+what happens if it is set too high and too low. A knob that exists in the schema or in
+`config/drs.example.yaml` but not in the manual is a bug, and so is the reverse.
+
+### 8.4 The manpage: `man/drs.1`
+
+Generated from `man/drs.1.md` with `pandoc -s -t man`. It is deliberately the short one — it
+refers onward to the manual PDF for anything that needs more than a paragraph — with one
+exception: **`OPTIONS` is complete**, because that is what people open a manpage for.
+
+Sections, in this order: `NAME`, `SYNOPSIS`, `DESCRIPTION` (a few paragraphs, no theory),
+`OPTIONS`, `CONFIGURATION` (the file's location and its top-level keys, then a pointer),
+`FILES`, `EXIT STATUS`, `SEE ALSO`, `AUTHOR`, `COPYRIGHT`. It ships with the package and installs
+to `share/man/man1`. It must never contradict the manual; when they disagree the manual wins and
+the manpage is fixed.
+
+### 8.5 `--help`
+
+- `drs --help` prints a usage summary: every subcommand, every option, **with its default**.
+  It is generated from the same argparse definitions the program runs on and the same constants
+  the config loader uses, so it cannot drift from the behaviour.
+- `drs <subcommand> --help` does the same for that subcommand.
+- `drs --manual` (and `drs help`) shows the manpage: exec `man drs` when the page is installed and
+  a pager makes sense, otherwise write the shipped plain-text rendering to stdout. Never answer
+  with a URL alone — this runs on machines with no browser.
+
+### 8.6 Keeping it all true
+
+- `make docs` builds every artefact; `make docs-check` asserts that each committed artefact matches
+  its Markdown by SHA-256 stamp, exactly as `make pdf-check` does, and is part of `make check`.
+  Generated artefacts are committed for the same reason the plan's PDF is: they are read outside a
+  checkout.
+- Documentation changes in the **same commit** as the behaviour it describes. A pull request that
+  changes a default and updates the manual later has shipped a lie in between.
+- Tests, not good intentions, enforce the cross-references: every CLI option appears in the
+  manpage's `OPTIONS` and in the manual; every config knob appears in the manual; every knob the
+  manual documents exists in the schema.
+
+Details: [`.agents/documentation.md`](.agents/documentation.md).
+
+---
+
+## 9. Review checklist
 
 Before declaring anything done, walk [`.agents/review-checklist.md`](.agents/review-checklist.md).
