@@ -68,8 +68,9 @@ Global options are accepted before the command.
   this does not change the result for the groups selected.
 
 **--mode** *dry-run*|*confirm*|*auto*
-: Override *execution.mode* for this run. Overriding a configured **dry-run** with **auto** is
-  logged at warning level, naming both values.
+: Override *execution.mode* for this run. Every override is logged; one that moves toward less
+  safety -- the modes order **dry-run** < **confirm** < **auto** -- is logged at warning level,
+  naming both values, because it removes a barrier the operator themselves configured.
 
 **--json**
 : Emit the machine-readable report instead of the human-readable one.

@@ -26,6 +26,13 @@ findings (K-01..K-02) were identified, both Low severity.
 A **fifth pass** (section 9) reviews the plan after the author addressed K-01..K-02. Both
 findings are resolved. No new findings. The plan and fixtures are clean.
 
+A **sixth pass** (section 10) reviews the substantial new material added after the fifth pass:
+the `pve-storage-drs` naming, full Debian packaging (`debian/`), two CI pipelines, the PDF
+paper pipeline (`docs/paper/`, `tools/check_paper_log.py`), the documentation policy and
+manpage, config-on-pmxcfs, state path, and global CLI options. Five new findings (L-01..L-05)
+are identified. The first three are Medium severity and concern packaging/CI consistency with
+the plan; the remaining two are Low and Info.
+
 ---
 
 ## 0. Overall assessment
@@ -956,6 +963,235 @@ config itself was corrected from `gamma_move_bytes` to `gamma_move_bytes_per_tib
 The plan and its fixtures are clean. Across five review passes, 40 findings (F-01..F-25,
 N-01..N-07, M-01..M-06, K-01..K-02) have been raised and all are resolved. The remaining
 open items are zero. The plan is ready for implementation.
+
+---
+
+## 10. Sixth-pass review of the updated plan
+
+Commits `06fe472..3db38d3` added substantial new infrastructure: the `pve-storage-drs` naming
+convention, full Debian packaging (`debian/` with control, rules, changelog, copyright, Salsa
+CI), two GitHub Actions workflows (`tests.yml`, `debian-package.yml`), the PDF paper pipeline
+(`docs/paper/header.tex`, `filters.lua`, `metadata.yaml`, `tools/check_paper_log.py`), the
+documentation policy (AGENTS.md §8, `.agents/documentation.md`), the manpage
+(`man/pve-storage-drs.1.md`), config-on-pmxcfs with resolution order and env-var support
+(§11), the state path move to `/var/lib/pve-storage-drs/state.json`, global CLI options
+(§11.3), Makefile `SYSTEM_TOOLS=1` support, `.codecov.yml`, and `.pre-commit-config.yaml`
+updates.
+
+The new material is well-structured and the packaging is thorough: the autopkgtest design
+correctly catches optional-dependency import-at-module-level bugs, the Salsa no-network sbuild
+proves the package builds from trixie alone, the PDF freshness stamp mechanism is sound, and
+the `check_paper_log.py` script catches the two classes of silent LaTeX damage (missing
+characters, overfull boxes). The manpage follows the AGENTS.md §8.4 section order exactly.
+Five new findings, three of them Medium.
+
+### 10.1 Summary of sixth-pass findings
+
+| ID | Severity | Section / File | Topic |
+|----|----------|----------------|-------|
+| L-01 | Medium | §2.1, pyproject.toml, debian/control | `pulp` classified inconsistently: not marked optional in the plan, but optional in pyproject.toml and Recommends in debian/control |
+| L-02 | Medium | §11.3, man/pve-storage-drs.1.md | Direct contradiction: plan says `-v, --quiet`; manpage says `-v, --verbose` |
+| L-03 | Medium | .github/workflows/, debian/control | CBC/PuLP primary solver path is not exercised in any CI pipeline |
+| L-04 | Low | §11.3 | `--mode auto` overriding a `confirm` config is not called out as a warning |
+| L-05 | Info | debian/changelog | Uses `bernd@debian.org` while the rest of the repo uses `bernd@bzed.de` |
+
+### 10.2 L-01 — `pulp` is not marked optional in the plan, but is optional in the packaging
+
+**Severity:** Medium
+**Files:** `IMPLEMENTATION_PLAN.md` §2.1, `pyproject.toml`, `debian/control`
+
+The plan §2.1 dependency table lists `pulp` alongside hard dependencies (`requests`,
+`ruamel.yaml`, `jsonschema`) without an "optional" qualifier:
+
+```
+| `pulp` | MILP via CBC — **the packaged solver path** | `python3-pulp` 2.7 + `coinor-cbc` 2.10 |
+```
+
+`ortools` is marked "optional and unpackaged" in the same table, but `pulp` gets no such
+marking. The "optional extras" sentence below the table names only ortools and statsmodels:
+
+> Make `ortools` and `statsmodels` **optional extras**. The tool must run, plan and execute
+> with only `requests` + `ruamel.yaml` + `jsonschema` installed, falling back to the heuristic
+> solver and the quantile forecaster.
+
+But the "must run with only requests + ruamel.yaml + jsonschema" requirement makes `pulp`
+functionally optional too: the heuristic path works without it. The packaging artifacts
+confirm this — `pyproject.toml` puts `pulp` under `[project.optional-dependencies] solver`
+(the comment there correctly says "ortools and pulp are therefore optional extras, not hard
+requirements"), and `debian/control` puts `python3-pulp` under `Recommends:`, not `Depends:`.
+
+The plan text creates an ambiguity: an implementer reading §2.1 in isolation could conclude
+`pulp` is a hard dependency (it is listed without "optional", called "the packaged solver
+path", and not mentioned in the "optional extras" sentence), while the packaging treats it as
+optional. The AGENTS.md §9.1 rule 3 ("not in trixie, and not vendorable — it must be optional")
+applies to ortools; pulp *is* in trixie, so the rule does not force it to be optional — yet
+the architecture requires it because the heuristic path must work standalone.
+
+**Recommendation:** Mark `pulp` as optional in the plan. Either add it to the "optional
+extras" sentence ("Make `ortools`, `pulp`, and `statsmodels` optional extras") or add a note to
+the table row (e.g., "optional, but `Recommends` on Debian — the MILP path needs it, the
+heuristic does not"). The key point is that the plan, `pyproject.toml`, and `debian/control`
+should agree on the classification, and right now the plan is the one that is ambiguous.
+
+### 10.3 L-02 — `-v` means `--quiet` in the plan but `--verbose` in the manpage
+
+**Severity:** Medium
+**Files:** `IMPLEMENTATION_PLAN.md` §11.3, `man/pve-storage-drs.1.md`
+
+The plan §11.3 global options table:
+
+```
+| `-v`, `--quiet` | normal | Log level; `--quiet` leaves only warnings and errors, for the timer |
+```
+
+This binds `-v` as the short form of `--quiet` (reduces verbosity). The plan does not mention
+`--verbose` anywhere.
+
+The manpage:
+
+```
+**-v**, **--verbose**
+: More detail on stderr. Repeatable.
+
+**--quiet**
+: Warnings and errors only. Intended for the systemd timer.
+```
+
+This binds `-v` as the short form of `--verbose` (increases verbosity) and treats `--quiet`
+as a separate, independent option.
+
+These are directly contradictory: `-v` makes the tool quieter in the plan and more verbose in
+the manpage. An operator who reads the manpage and then uses `-v` expecting more detail would
+get the opposite. The manpage is generated from `man/pve-storage-drs.1.md`, which is a
+hand-authored file (not generated from the plan), so there is no mechanical check that keeps
+the two in sync yet.
+
+**Recommendation:** Pick one design and align both. The manpage's design (`-v` = verbose,
+`--quiet` = quiet, as independent flags) is more conventional and less surprising than the
+plan's (`-v` = quiet). If the manpage design is chosen, update §11.3 to list `--verbose`
+and `--quiet` as separate options with `-v` as the short form of `--verbose`. If the plan's
+design is chosen, fix the manpage. Either way, the `--help` output (generated from argparse)
+will be the mechanical source of truth once the CLI exists; until then the two documents must
+agree by hand.
+
+### 10.4 L-03 — The CBC/PuLP solver path is not exercised in any CI pipeline
+
+**Severity:** Medium
+**Files:** `.github/workflows/tests.yml`, `.github/workflows/debian-package.yml`,
+`debian/control`
+
+The plan §2.1 states: "on a Debian install the MILP is solved by **CBC through
+`python3-pulp`**." This is the primary solver path on the target platform. However:
+
+- `tests.yml` installs `python3-jsonschema python3-pytest python3-pytest-cov
+  python3-pytest-xdist python3-requests python3-ruamel.yaml python3-yaml` — no `python3-pulp`
+  or `coinor-cbc`.
+- `debian-package.yml` installs build dependencies from `debian/control`, which has
+  `python3-pulp` under `Recommends:`, not `Build-Depends`.
+- The autopkgtest (`debian/tests/control`) runs with only `Depends: @` — `Recommends` are not
+  installed — so the installed-package test also runs without pulp.
+
+This means the CBC/MILP integration will not be tested in any CI pipeline once `optimize.py`
+exists. The fixture generator (`generate_expected.py`) is solver-independent (exhaustive
+enumeration), so it does not exercise the actual solver. The solver-integration tests that
+verify CBC produces the same assignments as the enumeration will need pulp available.
+
+The `tests.yml` "Is there code yet?" probe currently gates on `src/*/*.py`, and the MILP
+tests would be among the first things added. Without pulp in the CI install list, those
+tests will either fail (if they import pulp unconditionally) or skip (if they guard on
+`pytest.importorskip("pulp")`) — and if they skip, the primary solver path on the target
+platform is never tested in CI.
+
+**Recommendation:** When the solver module lands, add `python3-pulp` and `coinor-cbc` to
+`debian/control` `Build-Depends` with `<!nocheck>` (so `dh_auto_test` has them), and to the
+`tests.yml` apt install list. The autopkgtest should continue to run without pulp (it tests
+that the tool works with only `Depends`), but the build-time test suite should exercise the
+MILP path. This is a forward-looking finding — the infrastructure is already in place to miss
+it, so it is worth recording now rather than discovering when the first solver test
+mysteriously skips.
+
+### 10.5 L-04 — `--mode auto` on a `confirm` config is not warned
+
+**Severity:** Low
+**File:** `IMPLEMENTATION_PLAN.md` §11.3
+
+The plan §11.3 says:
+
+> `--mode` may make a run *safer* without ceremony, but `--mode auto` on a config that says
+> `dry-run` is an operator deliberately overriding their own safety setting: log it at
+> warning level, naming both values.
+
+This covers `dry-run → auto` (removing both the dry-run barrier and the confirmation
+barrier). But it does not mention `confirm → auto`, which also removes a safety barrier
+(the per-step confirmation prompt). An operator who set `execution.mode: confirm` in the
+config and then runs `--mode auto` is bypassing their own confirmation requirement, which is
+the same class of override. The plan only calls out the `dry-run` case.
+
+**Recommendation:** Extend the rule to cover any override that moves to a less safe mode:
+log at warning when `--mode` is less safe than the configured mode, not only when the
+configured mode is `dry-run`. "Less safe" is defined by the ordering `dry-run < confirm <
+auto`, so `confirm → auto` and `dry-run → confirm` are both overrides toward less safe. Or
+simply: warn whenever `--mode` is given and it differs from the configured mode, regardless
+of direction, since any override is a deliberate act the operator should see in the log.
+
+### 10.6 L-05 — `debian/changelog` uses a different email address
+
+**Severity:** Info
+**File:** `debian/changelog`
+
+The changelog entry uses `bernd@debian.org`:
+
+```
+-- Bernd Zeimetz <bernd@debian.org>  Fri, 04 Sep 2026 23:30:47 +0200
+```
+
+Every other file in the repository — `pyproject.toml` (`authors`), `debian/copyright`
+(`Upstream-Contact`), `man/pve-storage-drs.1.md` (`AUTHOR`), all SPDX headers, `AGENTS.md`
+section 0 — uses `bernd@bzed.de`. This may be intentional (the `debian.org` address is the
+Debian developer address, and some maintainers use it in changelogs by convention), but it is
+the only place in the tree that does. Worth noting for consistency; not actionable unless the
+maintainer wants uniformity.
+
+### 10.7 Verification
+
+- `python3 tests/fixtures/generate_expected.py --check` exits 0 — both expected files current.
+- `sha256sum --check docs/IMPLEMENTATION_PLAN.pdf.sha256` passes — the committed PDF matches
+  the committed Markdown.
+- The manpage section order (`NAME`, `SYNOPSIS`, `DESCRIPTION`, `COMMANDS`, `OPTIONS`,
+  `CONFIGURATION`, `ENVIRONMENT`, `FILES`, `EXIT STATUS`, `SEE ALSO`, `AUTHOR`,
+  `COPYRIGHT`) matches AGENTS.md §8.4, with `COMMANDS` and `ENVIRONMENT` added (the §8.4 list
+  is a minimum, not a maximum — `COMMANDS` is the manpage convention for subcommand listing
+  and `ENVIRONMENT` documents `PVE_STORAGE_DRS_CONFIG` / `PVE_PASSWORD` / `PVE_TOKEN_SECRET`).
+  This is correct.
+- The `debian/control` `Depends` list (`python3-jsonschema`, `python3-requests`,
+  `python3-ruamel.yaml`) matches the `pyproject.toml` `dependencies` list. `Recommends`
+  (`python3-pulp`, `coinor-cbc`) and `Suggests` (`python3-statsmodels`) match the optional
+  extras. The dependency declarations are consistent with the "must run with only
+  requests + ruamel.yaml + jsonschema" requirement — except for the plan's ambiguity about
+  pulp (L-01).
+- `debian/changelog` version `0.0.1` matches `pyproject.toml` version `0.0.1`.
+- The `import-all` autopkgtest correctly walks the package with `pkgutil.walk_packages` and
+  catches `BaseException` (not just `Exception`), so a `SystemExit` from a bad import is also
+  a failure.
+- The Salsa CI config (`debian/.gitlab-ci.yml`) correctly sets `RELEASE: 'trixie'`, disables
+  `BLHC` (nothing compiled), `APTLY`, and `BUILD_PACKAGE_ANY` (arch:all only), and leaves
+  `SALSA_CI_SBUILD_ARGS` empty with the `--enable-network` fallback commented out.
+- The Makefile `SYSTEM_TOOLS=1` path correctly avoids `.venv` for CI, and the `man` target
+  does not depend on `$(VENVDEP)`, so `debian/rules`' `$(MAKE) man` works in the build chroot
+  without a venv.
+- `tools/check_paper_log.py` correctly undoes the 79-column log hard-wrap before pattern
+  matching, and treats `SystemExit`-class exceptions as failures in the autopkgtest import
+  walker.
+
+### 10.8 Assessment
+
+The packaging, CI, and documentation infrastructure is well-designed and internally
+consistent in almost all respects. The autopkgtest-as-dependency-test pattern, the no-network
+Salsa build, the PDF freshness stamp, and the `check_paper_log.py` log checker are all the
+right mechanisms. The three Medium findings (L-01..L-03) are all in the same area: the
+boundary between the plan's dependency classification and the packaging/CI that implements
+it. Resolving them is a matter of documentation alignment (L-01, L-02) and a CI install-list
+addition when the solver code lands (L-03). None are architectural.
 
 ---
 

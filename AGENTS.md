@@ -20,7 +20,10 @@ and the short version.
   between nodes, and a name that does not say **storage** invites the reader to think this tool
   replaces that one. The Debian source and binary package carry the same name.
 - **Licence:** GNU **AGPL-3.0-or-later**. Full text in [`LICENSE`](LICENSE).
-- **Copyright holder:** `Bernd Zeimetz <bernd@bzed.de>`.
+- **Copyright holder:** `Bernd Zeimetz <bernd@bzed.de>`. One exception, and it is not a typo:
+  `debian/changelog` is signed `Bernd Zeimetz <bzed@debian.org>`, the Debian developer address,
+  because that is the identity for packaging work. Everything else — SPDX headers,
+  `debian/copyright`, `pyproject.toml`, the manpage — uses `bernd@bzed.de`.
 
 **Rules that must survive every edit session:**
 
