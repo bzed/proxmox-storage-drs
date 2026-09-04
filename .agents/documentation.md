@@ -21,10 +21,10 @@ docs/
     ...
   IMPLEMENTATION_PLAN.pdf  the specification, built from ../IMPLEMENTATION_PLAN.md
   internals.pdf            built from docs/internals/*.md
-  drs-manual.pdf           built from docs/manual/*.md
+  pve-drs-manual.pdf       built from docs/manual/*.md
 man/
-  drs.1.md               source
-  drs.1                   built with pandoc -s -t man; installed to share/man/man1
+  pve-drs.1.md             source
+  pve-drs.1                built with pandoc -s -t man; installed to share/man/man1
 ```
 
 Multi-file sources are concatenated in filename order, which is why the files are numbered. Keep
@@ -42,17 +42,17 @@ these documents use the same `docs/paper/` machinery.
 The manpage build is the one different invocation:
 
 ```sh
-pandoc man/drs.1.md --standalone --to=man --output=man/drs.1
+pandoc man/pve-drs.1.md --standalone --to=man --output=man/pve-drs.1
 ```
 
-with the metadata block at the top of `drs.1.md` supplying the title, section, date and footer.
+with the metadata block at the top of `pve-drs.1.md` supplying the title, section, date and footer.
 
 ## Writing the internals documentation
 
 The audience has to change the code and is entitled to understand why it is shaped as it is.
 
 - Start each page with the question it answers, then the answer. No preamble.
-- Name the plan sections it expands (`§7.3`) and the modules it describes (`drs/solver/milp.py`).
+- Name the plan sections it expands (`§7.3`) and the modules it describes (`proxmox_storage_drs/solver/milp.py`).
   Those two references are what make the page maintainable.
 - Explain the **why**. That the scheduler re-reads the VM's node before every move is visible in
   the code; that it does so because the PVE Dynamic Load Balancer may have moved the VM mid-plan
@@ -96,15 +96,15 @@ Type, default, unit, what it does, what happens at each extreme, what it interac
 Short on purpose — it refers onward — except `OPTIONS`, which is complete. Skeleton:
 
 ```markdown
-% DRS(1) drs VERSION | Proxmox Storage DRS
+% PVE-DRS(1) pve-drs VERSION | Proxmox Storage DRS
 % Bernd Zeimetz
 % BUILD DATE
 
 # NAME
-drs - balance disk I/O across Proxmox VE shared storages
+pve-drs - balance disk I/O across Proxmox VE shared storages
 
 # SYNOPSIS
-**drs** [*global options*] *command* [*command options*]
+**pve-drs** [*global options*] *command* [*command options*]
 
 # DESCRIPTION
 Three or four paragraphs. What it does, what it will never do without being asked, where the
@@ -114,7 +114,7 @@ configuration lives.  No theory.
 Every global option and every subcommand option, with defaults.
 
 # CONFIGURATION
-Where the file lives, its top-level keys, one line each, then: "see drs-manual.pdf".
+Where the file lives, its top-level keys, one line each, then: "see pve-drs-manual.pdf".
 
 # FILES
 # EXIT STATUS
@@ -134,10 +134,10 @@ Where the file lives, its top-level keys, one line each, then: "see drs-manual.p
   plus real default values in `add_argument` is enough; a hardcoded default in a help string is a
   bug.
 - Every option's help text says the **unit**.
-- `drs --manual` and `drs help`: `exec man drs` when the page is installed and stdout is a tty;
+- `pve-drs --manual` and `pve-drs help`: `exec man pve-drs` when the page is installed and stdout is a tty;
   otherwise write the shipped plain-text rendering to stdout so it pipes and greps. A URL is not an
   answer — these machines may have no browser.
-- `drs --help` must fit the "what can this thing do" question in one screen per subcommand. Detail
+- `pve-drs --help` must fit the "what can this thing do" question in one screen per subcommand. Detail
   belongs in the manual.
 
 ## The tests that keep it honest
@@ -146,7 +146,7 @@ Documentation rots silently, so it is tested like code:
 
 | Test | Asserts |
 |---|---|
-| `test_help_covers_options` | every argparse option appears in `man/drs.1.md` under `OPTIONS` |
+| `test_help_covers_options` | every argparse option appears in `man/pve-drs.1.md` under `OPTIONS` |
 | `test_manual_covers_config` | every key in the config schema appears in `docs/manual/` |
 | `test_config_covers_manual` | every key the manual documents exists in the schema |
 | `test_example_config_valid` | `config/drs.example.yaml` validates against the schema |

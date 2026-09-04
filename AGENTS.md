@@ -12,6 +12,10 @@ and the short version.
 - **Project:** a Storage DRS replacement for Proxmox VE 9.2 — see
   [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md), which is the specification and the
   source of truth for behaviour.
+- **Names, and they are not interchangeable:** the distribution is `proxmox-storage-drs`, the
+  import package is `proxmox_storage_drs`, and the **installed executable is `pve-drs`** — one
+  `[project.scripts]` entry point onto `cli.py`. Every command in the documentation, in `--help`,
+  in the manpage and in commit messages is written `pve-drs <subcommand>`. Never `drs`.
 - **Licence:** GNU **AGPL-3.0-or-later**. Full text in [`LICENSE`](LICENSE).
 - **Copyright holder:** `Bernd Zeimetz <bernd@bzed.de>`.
 
@@ -196,12 +200,12 @@ in PDF or in roff.
 | Audience | Source | Generated |
 |---|---|---|
 | Whoever reads or changes the code | docstrings and comments, plus `docs/internals/*.md` | `docs/internals.pdf` |
-| The operator who runs it | `docs/manual/*.md` | `docs/drs-manual.pdf`, `man/drs.1` |
-| Somebody at a terminal, right now | the CLI's own option definitions | `drs --help`, `drs --manual` |
+| The operator who runs it | `docs/manual/*.md` | `docs/pve-drs-manual.pdf`, `man/pve-drs.1` |
+| Somebody at a terminal, right now | the CLI's own option definitions | `pve-drs --help`, `pve-drs --manual` |
 
 **Status:** only the specification pipeline (`make pdf`, [`.agents/paper.md`](.agents/paper.md))
 exists today, because there is no code yet. The commit that first adds a CLI adds the rest —
-`docs/internals/`, `docs/manual/`, `man/drs.1.md`, the `docs`/`docs-check` targets — and wires
+`docs/internals/`, `docs/manual/`, `man/pve-drs.1.md`, the `docs`/`docs-check` targets — and wires
 `docs-check` into `make check`. `docs/paper/` is document-agnostic apart from its title block and
 is meant to be reused, not copied.
 
@@ -249,9 +253,9 @@ modes, exit codes, troubleshooting, and the safety properties they are entitled 
 what happens if it is set too high and too low. A knob that exists in the schema or in
 `config/drs.example.yaml` but not in the manual is a bug, and so is the reverse.
 
-### 8.4 The manpage: `man/drs.1`
+### 8.4 The manpage: `man/pve-drs.1`
 
-Generated from `man/drs.1.md` with `pandoc -s -t man`. It is deliberately the short one — it
+Generated from `man/pve-drs.1.md` with `pandoc -s -t man`. It is deliberately the short one — it
 refers onward to the manual PDF for anything that needs more than a paragraph — with one
 exception: **`OPTIONS` is complete**, because that is what people open a manpage for.
 
@@ -263,11 +267,11 @@ the manpage is fixed.
 
 ### 8.5 `--help`
 
-- `drs --help` prints a usage summary: every subcommand, every option, **with its default**.
+- `pve-drs --help` prints a usage summary: every subcommand, every option, **with its default**.
   It is generated from the same argparse definitions the program runs on and the same constants
   the config loader uses, so it cannot drift from the behaviour.
-- `drs <subcommand> --help` does the same for that subcommand.
-- `drs --manual` (and `drs help`) shows the manpage: exec `man drs` when the page is installed and
+- `pve-drs <subcommand> --help` does the same for that subcommand.
+- `pve-drs --manual` (and `pve-drs help`) shows the manpage: exec `man pve-drs` when the page is installed and
   a pager makes sense, otherwise write the shipped plain-text rendering to stdout. Never answer
   with a URL alone — this runs on machines with no browser.
 

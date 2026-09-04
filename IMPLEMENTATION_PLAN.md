@@ -113,7 +113,12 @@ The join between them is the disk identity `(vmid, device)`, which both sides ex
 | `payback.py` | Migration cost model and acceptance test |
 | `schedule.py` | Ordering under the transient reserve invariant |
 | `execute.py` | Three execution modes, task supervision |
-| `cli.py` | `plan`, `apply`, `verify-metrics`, `show-load`, `explain` |
+| `cli.py` | `plan`, `apply`, `verify-metrics`, `verify-storages`, `show-load`, `explain` |
+
+The installed executable is **`pve-drs`** — one `[project.scripts]` entry point onto
+`cli.py`. Every command in this document is written as `pve-drs <subcommand>`; the manpage
+is `pve-drs(1)`. The Python package keeps its distribution name `proxmox-storage-drs` and
+its import name `proxmox_storage_drs`.
 
 ### 2.1 Implementation, deployment and operations
 
@@ -213,7 +218,7 @@ carries `rd_operations`, `wr_operations`, `rd_bytes`, `wr_bytes`, `rd_total_time
 
 What remains genuinely unconfirmed is the **Telegraf-side naming** — the measurement/field join
 character, and whether the `instance` tag survived the collision described in §3.3. That varies per
-deployment and is exactly what `drs verify-metrics` exists to pin down. Treat §3.4's metric names as
+deployment and is exactly what `pve-drs verify-metrics` exists to pin down. Treat §3.4's metric names as
 defaults to be confirmed, not as constants.
 
 ### 3.2 Two paths deliberately not taken
@@ -244,7 +249,7 @@ this use case. (The plugin also only supports OTLP/JSON encoding, not protobuf.)
 ### 3.3 Metric name mapping and verification
 
 Telegraf naming is deployment-specific, so **every metric and label name is configuration**, not a
-constant. Implement `drs verify-metrics` as a first-class command that must be run before anything
+constant. Implement `pve-drs verify-metrics` as a first-class command that must be run before anything
 else. It shall:
 
 1. query `/api/v1/label/__name__/values` and confirm each configured metric name exists;
@@ -357,7 +362,7 @@ operator has explicitly opted in — converting raw→qcow2 on shared LVM is wha
 snapshots, but it is a deliberate storage-policy change, not something a balancer should do
 silently.
 
-**`drs verify-storages`.** A companion to `verify-metrics` (§3.3), run once per storage before
+**`pve-drs verify-storages`.** A companion to `verify-metrics` (§3.3), run once per storage before
 relying on any plan. For every storage in every group it reports `type`, `shared`, `content`,
 `saferemove`, `saferemove_throughput`, total/used, and the largest disk currently on it; then it
 derives the implied wipe time `z_max / saferemove_throughput` and warns when that exceeds
@@ -424,14 +429,14 @@ PVE picked. Be clear about which way that conservatism cuts: if `swtpm` does *no
 the both-storages assumption over-reserves during the move. Over-reserving can never cause a reserve
 breach, so it is safe; the only cost is that a `tpmstate0` move onto a nearly-full storage may fail
 the transient check when it would physically have fitted. Treat that exactly like any other
-infeasible move — **defer it, never force it** — and let `drs explain` say that the transient check
+infeasible move — **defer it, never force it** — and let `pve-drs explain` say that the transient check
 was the blocker. Given that TPM state is a few megabytes, a storage tight enough for this to bind is
 a storage with a much larger problem.
 
 **Metrics coverage differs by device type.** `efidisk0` is a QEMU drive and should appear in
 `blockstat`; `tpmstate0` and `unused{N}` are not QEMU block devices, so no series will exist for them
 and `ℓ_d = 0` under the `min_coverage` rule of §3.4. That is correct rather than a gap — they
-generate no guest I/O worth balancing. Have `drs verify-metrics` report which config keys resolved to
+generate no guest I/O worth balancing. Have `pve-drs verify-metrics` report which config keys resolved to
 a series and which did not, and classify these as **expected-absent** rather than as errors, so a
 genuine coverage problem on a `scsi0` still stands out. Treat the exact per-device-type coverage as a
 thing to observe on your cluster, not to assume from this table.
@@ -460,7 +465,7 @@ policy. Set `exclude.include_unused_disks: false` to pin them instead; they then
 except CD-ROM-media entries can be relocated with the guest running, and CD-ROM entries hold no
 storage-owned data except cloud-init volumes, which are regenerable. Where a full evacuation is *not*
 achievable it is because of a §3.7 snapshot or an explicit exclusion, never because of a device type.
-`drs explain` must name the actual blocker per VM — *"106: cannot fully consolidate, 2 snapshots on
+`pve-drs explain` must name the actual blocker per VM — *"106: cannot fully consolidate, 2 snapshots on
 scsi0"* — rather than emitting a plan that quietly leaves a stray volume behind.
 
 ### 3.7 Disks with snapshots are excluded, loudly
@@ -732,7 +737,7 @@ effectively hard:
    the model uses `P = max(configured, P_min)` and logs a warning when it had to raise it. That
    warning must be *checkable*, not just an announcement: log `P_configured`, `P_min`, `P_used`,
    and the four inputs the bound came from — `T_g`, `|D|`, `Σ_d z_d`, `|V|·(|S|−1)` — plus the `ε_r`
-   granularity, and repeat them in `drs explain`. `P_min` moves with `T_g`, so the same config file
+   granularity, and repeat them in `pve-drs explain`. `P_min` moves with `T_g`, so the same config file
    legitimately yields different effective penalties on a quiet group and a busy one, and on the
    same group at different times of day. An operator who sets `reserve_violation_penalty: 5000` and
    sees the engine using 2.3×10⁷ needs to be able to reconstruct that number rather than take it on
@@ -1062,7 +1067,7 @@ N_s = storages[].saturation_load     — the number of concurrent I/O requests s
 ```
 
 `N_s` has **no safe default and is `null` unless the operator sets it**, in which case the check is
-skipped for that storage and `drs explain` says so. We cannot infer it: the observed peak `L_s` is
+skipped for that storage and `pve-drs explain` says so. We cannot infer it: the observed peak `L_s` is
 not a capacity (an idle storage would get a tiny `N_s` and reject every migration onto it, which is
 exactly backwards), and neither `c_s` nor the LUN size tells us anything about queue depth. Obtain
 it from the array's documented queue depth, or empirically as the `L_s` at which measured latency
@@ -1081,7 +1086,7 @@ This naturally converges on the smaller subset of high-value moves rather than a
 usually the one or two disks with the highest `ℓ_d / z_d` ratio, which is exactly the right thing to
 move.
 
-`ℓ_d / z_d` — load per byte — is worth surfacing in `drs explain` output. It is the single best
+`ℓ_d / z_d` — load per byte — is worth surfacing in `pve-drs explain` output. It is the single best
 indicator of a good migration candidate: high I/O concentrated in a small disk.
 
 ---
@@ -1337,7 +1342,7 @@ implementer should not have to rediscover:
 
 - `gates.cooldown_per_storage` must exceed the expected wipe time for that storage's largest disk,
   or the next run will plan moves onto a storage that is still draining and stall in `9.3`'s wait
-  loop. `drs verify-storages` computes `z_max / saferemove_throughput` per storage and warns when
+  loop. `pve-drs verify-storages` computes `z_max / saferemove_throughput` per storage and warns when
   the configured cooldown is shorter, or when it exceeds `migration.max_single_move_duration`.
 - Keep `execution.max_concurrent_per_storage: 1`. Two moves off the same source mean two concurrent
   wipes sharing one throttle, so both take twice as long while both sources stay fully allocated.
@@ -1541,8 +1546,8 @@ Each phase is independently testable and useful on its own.
 
 | # | Phase | Done when |
 |---|---|---|
-| 1 | `config.py`, `metrics.py`, `drs verify-metrics` | Real metric/label names confirmed against the live Prometheus; per-disk load printed |
-| 2 | `pve.py`, `topology.py` | `drs show-load` prints every storage with its disks (all buses), sizes, loads and reserve status; pinned disks flagged with their reason; `drs verify-storages` reports saferemove and implied wipe times |
+| 1 | `config.py`, `metrics.py`, `pve-drs verify-metrics` | Real metric/label names confirmed against the live Prometheus; per-disk load printed |
+| 2 | `pve.py`, `topology.py` | `pve-drs show-load` prints every storage with its disks (all buses), sizes, loads and reserve status; pinned disks flagged with their reason; `pve-drs verify-storages` reports saferemove and implied wipe times |
 | 3 | `loadmodel.py` + gates | Correct act/no-act decision per group, with the reasoning shown |
 | 4 | `heuristic.py` + `schedule.py` | End-to-end plan in `dry-run`, ordered and transient-feasible; reproduces `expected_order` and `expected_final_reserve` in the §14 fixture |
 | 5 | `payback.py` | Plans rejected/trimmed on cost grounds, arithmetic shown |

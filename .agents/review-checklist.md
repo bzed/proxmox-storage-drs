@@ -38,7 +38,7 @@ Walk this list. It is short on purpose.
       `config/drs.example.yaml` and plan §15.1.
 - [ ] A new or changed CLI option appears in `--help` with its default and unit, and in the
       manpage's `OPTIONS`.
-- [ ] `make docs` was run and the regenerated PDFs and `man/drs.1` are in the same commit.
+- [ ] `make docs` was run and the regenerated PDFs and `man/pve-drs.1` are in the same commit.
 - [ ] §15 traceability and §15.1 knob→formula tables still complete.
 - [ ] `config/drs.example.yaml` carries any new knob, with a comment explaining what happens
       at the default and what happens if you get it wrong.

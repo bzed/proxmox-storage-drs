@@ -70,7 +70,7 @@ design constraint.
 
 The rule: read the PVE source, or ask the operator, or **label the claim as unverified in the
 text**. If a fetch of the source truncates, retry narrower — do not silently substitute a forum
-anecdote. `drs verify-metrics` and `drs verify-storages` exist precisely so claims about the live
+anecdote. `pve-drs verify-metrics` and `pve-drs verify-storages` exist precisely so claims about the live
 system are checked rather than assumed.
 
 ## 10. The plan is the specification
