@@ -1,0 +1,166 @@
+# proxmox-storage-drs — reference configuration
+# Every value shown is the default unless marked REQUIRED.
+
+# ---------------------------------------------------------------- connections
+proxmox:
+  host: pve01.example.com          # REQUIRED. Any cluster member.
+  port: 8006
+  verify_ssl: true
+  ca_file: null                    # optional path to a CA bundle
+  auth:
+    # Password auth (as requested). An API token is supported and preferred for
+    # unattended operation: set token_id/token_secret instead of username/password.
+    username: drs@pve              # REQUIRED
+    password: null                 # REQUIRED unless token_* is set; env: PVE_PASSWORD
+    token_id: null                 # e.g. "drs@pve!balancer"
+    token_secret: null             # env: PVE_TOKEN_SECRET
+  ticket_refresh_seconds: 3000     # PVE tickets last 2h; refresh well before
+
+prometheus:
+  url: http://prometheus.example.com:9090   # REQUIRED
+  timeout_seconds: 30
+  # Basic auth / bearer token if your Prometheus is protected
+  username: null
+  password: null
+  bearer_token: null
+
+# ------------------------------------------------------- metric name mapping
+# Telegraf/InfluxDB naming varies by deployment. Run `drs verify-metrics` after
+# editing this block; it validates every name against the live server and prints
+# a sample series before you rely on it.
+metrics:
+  # Metric names. Default assumes Telegraf's influxdb_listener with the
+  # measurement "blockstat" and fields joined by "_".
+  read_ops:      blockstat_rd_operations
+  write_ops:     blockstat_wr_operations
+  read_bytes:    blockstat_rd_bytes
+  write_bytes:   blockstat_wr_bytes
+  read_time_ns:  blockstat_rd_total_time_ns
+  write_time_ns: blockstat_wr_total_time_ns
+
+  labels:
+    vmid: vmid
+    # PVE emits the drive id (scsi0, virtio0) in a tag named "instance", which
+    # COLLIDES with Prometheus's own scrape "instance" label. Many Telegraf
+    # setups rename it. Confirm with `drs verify-metrics` and set it here.
+    device: instance
+    node: nodename
+
+  rate_window: 5m       # inner range for rate(); >= 4x the pvestatd push interval
+  step: 5m              # sampling step for range queries
+
+# ------------------------------------------------------------ decision window
+window:
+  lookback: 24h         # timeframe considered for decisions
+  quantile: 0.95        # robust reduction of the window to one scalar per disk
+  seasonal_lookback_days: 7   # for the seasonal-naive comparison; 0 disables
+  min_coverage: 0.80    # reject a disk's data if fewer than this fraction of
+                        # expected samples are present
+
+# ------------------------------------------------------------------ load model
+# load = w_iotime*avg_inflight + w_ops*(ops/s) + w_bytes*(bytes/s)
+# Terms are normalized to comparable scale first (see plan section 4).
+load_weights:
+  iotime: 1.0           # primary: rate(rd+wr_total_time_ns)/1e9, dimensionless
+  ops:    0.0
+  bytes:  0.0
+  # Optional asymmetry between reads and writes, applied within ops and bytes.
+  read_factor:  1.0
+  write_factor: 1.0
+
+# --------------------------------------------------------------------- groups
+# A disk may only ever move between storages listed in the SAME group.
+groups:
+  - name: fc-tier1
+    storages:
+      - id: san-a
+        capability_weight: 1.0     # relative share of load this storage should carry
+        reserve_factor: null       # null = inherit global snapshot_reserve.factor
+      - id: san-b
+        capability_weight: 1.0
+      - id: san-c
+        capability_weight: 0.5     # half the spindles -> carries half the load
+  - name: fc-tier2
+    storages:
+      - id: san-d
+      - id: san-e
+
+# --------------------------------------------------------- snapshot reserve
+snapshot_reserve:
+  # Keep factor * (largest disk on the storage) free at all times, including
+  # transiently during a migration. PVE 9 volume-chain snapshots allocate a new
+  # full-size LV per snapshot, which is what this protects.
+  factor: 2.0
+  # Also honour a flat floor, whichever is larger.
+  min_free_bytes: 0
+  # Count volumes not managed by DRS (templates, orphans, other clusters)
+  # against capacity. Strongly recommended.
+  count_foreign_volumes: true
+
+# ------------------------------------------------------------------- gating
+gates:
+  # Minimum relative change in the load vector since the last balance before we
+  # even re-plan. Prevents thrashing on noise.
+  drift_threshold: 0.10          # 10%
+  # Minimum relative I/O spread across a group before we act at all.
+  imbalance_threshold: 0.20      # 20%
+  cooldown_per_disk: 24h
+  cooldown_per_storage: 1h
+
+# --------------------------------------------------- migration cost / payback
+migration:
+  bwlimit_bytes_per_sec: 209715200     # 200 MiB/s; passed to move_disk
+  source_load_weight: 1.0              # added in-flight I/O on the source
+  target_load_weight: 1.0              # added in-flight I/O on the target
+  payback_horizon: 7d                  # H
+  payback_ratio: 10.0                  # lambda; benefit must exceed lambda * cost
+  max_single_move_duration: 6h         # reject any move slower than this
+  saturation_ceiling: 0.85             # never push a storage past this during a move
+  assume_thick_provisioning: true      # cost by provisioned size, not allocated
+
+# ------------------------------------------------------------ objective weights
+objective:
+  spread_metric: l1            # "l1" (sum of deviations) or "minmax" (makespan)
+  alpha_spread: 1.0            # weight on imbalance
+  beta_move_count: 0.25        # penalty per migration  -> "minimal number of migrations"
+  gamma_move_bytes: 0.05       # penalty per TiB migrated
+  kappa_vm_affinity: 0.50      # penalty per extra storage a VM's disks are spread over
+  reserve_violation_penalty: 1000.0   # soft, so an already-violating start is repairable
+
+solver:
+  backend: auto          # auto | cpsat | cbc | heuristic
+  time_limit_seconds: 60
+  mip_gap: 0.02
+  heuristic_iterations: 5000
+
+# ----------------------------------------------------------------- execution
+execution:
+  mode: dry-run          # dry-run | confirm | auto
+  max_concurrent_migrations: 1
+  max_migrations_per_run: 5
+  max_concurrent_per_storage: 1
+  abort_on_failure: true
+  poll_interval_seconds: 10
+  time_windows:          # empty = any time. Applies to "auto" mode only.
+    - days: [mon, tue, wed, thu, fri, sat, sun]
+      start: "22:00"
+      end:   "06:00"
+
+# ---------------------------------------------------------------- exclusions
+exclude:
+  vmids: []              # never move disks of these VMs
+  disks: []              # e.g. ["101:scsi1"]
+  storages: []           # never move onto/off these
+  tags: ["no-drs"]       # PVE VM tags that opt a VM out
+  skip_vms_with_snapshots: true   # volume chains complicate move_disk
+  running_only: true              # only consider running VMs
+
+state:
+  path: /var/lib/proxmox-storage-drs/state.json
+
+forecast:
+  model: quantile        # quantile | seasonal_naive | holt_winters
+  holt_winters:
+    seasonal_periods: 288      # 24h at 5m step
+    trend: add
+    seasonal: add

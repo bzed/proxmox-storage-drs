@@ -1,0 +1,29 @@
+# proxmox-storage-drs
+
+A Storage DRS replacement for Proxmox VE 9.2.
+
+It balances **disk I/O load across configurable groups of shared storages** (LVM/FC) by live-migrating
+individual VM disks between storages within a group, while guaranteeing a snapshot free-space reserve
+and performing as few migrations as possible.
+
+## Status
+
+Design stage. [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) is a complete, self-contained
+specification intended to be handed to an implementer (human or model). No application code yet.
+
+## Requirements
+
+- Proxmox VE 9.2 cluster with shared LVM/FC storages
+- A Prometheus (or VictoriaMetrics) instance already receiving PVE metrics via the
+  **InfluxDB external metric server → Telegraf → Prometheus** path, carrying per-disk `blockstat`
+  series (`rd_operations`, `wr_operations`, `rd_bytes`, `wr_bytes`, `rd_total_time_ns`,
+  `wr_total_time_ns`)
+- A PVE API user with permission to read cluster/storage/VM config and to run `move_disk`
+
+## How to read the plan
+
+Sections 1-4 establish the data model, section 5 states the optimization problem formally, sections
+6-9 cover when to act, what a migration costs, ordering, and execution. Section 14 is a fully worked
+numeric example that doubles as a test fixture.
+
+`config/drs.example.yaml` is the annotated reference configuration.
