@@ -179,10 +179,11 @@ objective:
   beta_move_count: 0.25        # penalty per migration  -> "minimal number of migrations"
   gamma_move_bytes: 0.05       # penalty per TiB migrated
   kappa_vm_affinity: 0.50      # penalty per extra storage a VM's disks are spread over
-  # efidisk0/tpmstate0 and snapshot-pinned disks cannot move while the VM runs. By
-  # default they are excluded from the affinity count, so a 1 MiB NVRAM volume cannot
-  # pin 2 TiB of data to its storage. true counts them: better co-location, worse
-  # balance. Plan sections 3.6 and 5.3 (C3).
+  # Disks that cannot move THIS RUN (snapshot-blocked, config-excluded, or on a
+  # locked VM) are excluded from the affinity count by default, so an unreachable
+  # disk cannot pin the rest of its VM to one storage. true counts them: better
+  # co-location, worse balance. Note efidisk0/tpmstate0 are NOT in this set --
+  # they move online on PVE 9.2. Plan sections 3.6 and 5.3 (C3).
   affinity_counts_pinned_disks: false
   # Soft slack so an already-violating start stays repairable rather than infeasible.
   # This is a FLOOR, not the value used: with the single-stage big-M formulation the

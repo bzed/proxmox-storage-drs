@@ -53,12 +53,11 @@ plan over a three-move plan on the same input.
   disks are moved only if a capacity constraint requires it.
 - Disks are thick-provisioned by default, so migration cost is proportional to *provisioned* size.
 - **A VM is never stopped, suspended or reconfigured.** The only write the engine issues is
-  `move_disk`. This is what puts `efidisk0` and `tpmstate0` out of reach (§3.6) and rules out the
-  offline path for snapshotted disks (§3.7): both are movable, but only with the guest down, which is
-  a maintenance-window decision for a human.
-- Every bus is in scope — `ide`, `sata`, `scsi`, `virtio`, plus `efidisk0`, `tpmstate0` and `unused`
-  volumes. A VM's disks are not all `scsi*`, and anything not enumerated is capacity the model cannot
-  see (§3.5).
+  `move_disk`. This is what rules out the offline path for snapshotted disks (§3.7), which are
+  movable only with the guest down — a maintenance-window decision for a human.
+- Every bus is in scope and every one of them moves online: `ide`, `sata`, `scsi`, `virtio`, plus
+  `efidisk0`, `tpmstate0` and `unused` volumes (§3.6). A VM's disks are not all `scsi*`, and anything
+  not enumerated is capacity the model cannot see (§3.5).
 - Storage-side cleanup is part of a migration, not an afterthought: with LVM `saferemove` the source
   volume is zeroed at a throttled rate after the mirror completes, and neither its space nor the VM
   is available until that finishes (§7.1, §9.3).
@@ -393,38 +392,48 @@ both the capacity model and the affinity objective.
 | Config key | In `D` (movable)? | Why |
 |---|---|---|
 | `ide0-3`, `sata0-5`, `scsi0-30`, `virtio0-15` | **yes** | ordinary QEMU block devices; `move_disk` mirrors them online |
-| `efidisk0` | **no while running** — pinned | it is a QEMU pflash device, and online `drive-mirror` of `drive-efidisk0` is widely reported to fail or be cancelled. Movable only with the VM stopped |
-| `tpmstate0` | **no while running** — pinned | not a QEMU block device at all; `swtpm` owns the file. There is no online move path |
+| `efidisk0` | **yes** | movable online — verified on PVE 9.2. Tiny (a few MiB), so its migration cost is effectively zero |
+| `tpmstate0` | **yes** | movable online — verified on PVE 9.2. Tiny. PVE may not use the `drive-mirror` path for it, since `swtpm` rather than QEMU owns the state; see the note below |
 | `unused0-N` | **yes**, with `ℓ_d = 0` | a real allocated volume detached from the VM. It occupies bytes and counts against the reserve, but generates no I/O |
 | anything with `media=cdrom` | no — not in `D`, counted in `Uˢᵉˣᵗ` | ISO mounts, empty drives, cloud-init volumes |
 
-**Verification status of the two "pinned" rows.** These come from consistent, repeated operator
-reports rather than from reading the PVE source, and they are the two rows most likely to change in a
-future release. Confirm them once against your own cluster — attempt an online `move_disk` of an
-`efidisk0` on a scratch VM — and record the result. `drs verify-storages` should offer this as an
-explicit opt-in probe rather than assuming. If a PVE version does support the online move, the fix is
-a single entry in the pinned-key set, and nothing else in the model changes: pinning is expressed
-purely as (C2) variable fixing.
+**`efidisk0` and `tpmstate0` move online.** This was confirmed empirically on a live PVE 9.2 cluster
+by the operator. Older Proxmox forum threads (PVE 6.x/7.x era) report online moves of these two
+failing, and that history is worth knowing only so nobody re-derives an obsolete restriction from a
+search result: it does not apply to 9.2. They are ordinary members of `D`.
 
-**Metrics coverage differs too.** `efidisk0` is a QEMU drive, so `blockstat` series exist for it and
-its (small) load is real. `tpmstate0` and `unused{N}` are not QEMU drives, so no series exists and
-`ℓ_d = 0` by the `min_coverage` rule of §3.4 — which is correct, not a gap: they genuinely generate
-no guest I/O. Do not let the missing-series path log these as metric errors; classify them as
-expected-absent so real coverage problems stay visible.
+Two practical notes. First, they are **small** — an EFI var store is a few MiB, TPM state likewise —
+so `γ·z_d` and the §7 payback cost are negligible for them, while `β` charges a full migration for
+each. A plan that drags a 4 MiB `efidisk0` across the group to satisfy `κ` therefore pays a real
+move-count penalty for near-zero bytes; that is the correct accounting (it *is* a task, with task
+overhead and a lock window), but it is the reason to tune `β` and `κ` together rather than in
+isolation. Second, PVE may not use the `drive-mirror` path for `tpmstate0`, because `swtpm` rather
+than QEMU holds that state. Do not depend on drive-mirror semantics for it. The transient invariant
+of §8.1 — the volume occupies **both** storages until the move completes — is the conservative
+assumption and stays correct under either mechanism, so no part of the model needs to know which one
+PVE picked.
 
-**Pinned disks are modelled, not ignored.** `efidisk0` and `tpmstate0` enter the MILP as ordinary
-disks with `x_{d,σ₀(d)} = 1` fixed by (C2). This is deliberately *not* the same as excluding them:
-pinned or not, their bytes must count toward `Σ_d z_d·x_{d,s}` and toward `Z_s` in the reserve
-constraint (C5), and their load — a TPM state volume is idle, but an EFI var store is not always —
-must count toward `L_s`. Treating them as foreign volumes instead would work for capacity but would
-lose the fact that they belong to a VM whose other disks we are placing.
+**Metrics coverage differs by device type.** `efidisk0` is a QEMU drive and should appear in
+`blockstat`; `tpmstate0` and `unused{N}` are not QEMU block devices, so no series will exist for them
+and `ℓ_d = 0` under the `min_coverage` rule of §3.4. That is correct rather than a gap — they
+generate no guest I/O worth balancing. Have `drs verify-metrics` report which config keys resolved to
+a series and which did not, and classify these as **expected-absent** rather than as errors, so a
+genuine coverage problem on a `scsi0` still stands out. Treat the exact per-device-type coverage as a
+thing to observe on your cluster, not to assume from this table.
 
-**They are excluded from the affinity term by default.** `κ` (§5.4) counts a VM's spread over
-storages; if a 1 MiB immovable firmware volume counted, every VM with an `efidisk0` would be
-permanently "fragmented" the moment any data disk moved, and `κ` would veto good placements to keep
-2 TiB of data next to 1 MiB of NVRAM. So the `y_{v,s}` linking of (C3) ranges over **movable** disks
-only unless `objective.affinity_counts_pinned_disks` is set. Both behaviours are defensible; the
-default is the one that does not let a firmware volume dictate data placement.
+**Pinned disks are modelled, not ignored.** Disks pinned by (C2) — snapshot-blocked (§3.7),
+config-excluded, or locked this run — enter the MILP as ordinary disks with `x_{d,σ₀(d)} = 1` fixed.
+This is deliberately *not* the same as excluding them: their bytes must still count toward
+`Σ_d z_d·x_{d,s}` and toward `Z_s` in the reserve constraint (C5), and their load toward `L_s`.
+Treating them as foreign volumes instead would work for capacity but would lose the fact that they
+belong to a VM whose other disks we are placing.
+
+**Pinned disks are excluded from the affinity term by default.** `κ` (§5.4) counts a VM's spread over
+storages. If an immovable disk counted, a VM with one snapshot-blocked volume would be permanently
+"fragmented" the moment any other disk moved, and `κ` would veto good placements to chase a
+co-location that cannot be achieved this run. So the `y_{v,s}` linking of (C3) ranges over **movable**
+disks only unless `objective.affinity_counts_pinned_disks` is set. Both behaviours are defensible;
+the default is the one that does not let an unreachable disk dictate placement of the rest.
 
 **Unused disks move only to repair the reserve, and that is correct.** They carry `ℓ_d = 0` — no
 series exists for a volume QEMU has not opened — so relocating one yields zero imbalance benefit
@@ -432,11 +441,12 @@ while incurring the full `γ·z_d` byte penalty and the full payback cost of §7
 therefore leave them alone until a capacity constraint forces the issue, which is exactly the desired
 policy. Set `exclude.include_unused_disks: false` to pin them instead; they then count via `Uˢᵉˣᵗ`.
 
-**Consequence to report, not to hide.** A running VM with an `efidisk0` on storage `a` can never be
-fully evacuated from `a` online. `drs explain` must say so per VM — *"101: cannot fully consolidate
-online, efidisk0 pinned on san-a (requires VM shutdown)"* — rather than emitting a plan that quietly
-leaves a stray volume behind. Draining a storage completely is therefore an operation that needs a
-maintenance window, and the tool's job is to make that visible up front.
+**Evacuating a storage completely is therefore possible online** — every disk type in the table above
+except CD-ROM-media entries can be relocated with the guest running, and CD-ROM entries hold no
+storage-owned data except cloud-init volumes, which are regenerable. Where a full evacuation is *not*
+achievable it is because of a §3.7 snapshot or an explicit exclusion, never because of a device type.
+`drs explain` must name the actual blocker per VM — *"106: cannot fully consolidate, 2 snapshots on
+scsi0"* — rather than emitting a plan that quietly leaves a stray volume behind.
 
 ### 3.7 Disks with snapshots are excluded, loudly
 
@@ -456,8 +466,8 @@ VM shut down (out of scope — this tool never stops a VM, §1). So the policy i
    `/storage/{s}/content` for volumes owned by the VM that its current config does not reference:
    under volume-chain storages those are chain members, and elsewhere they are orphans. Either way
    the disk is unsafe to move. Do not rely on volume-name patterns — they are storage-specific.
-2. **Pin, do not drop.** As with `efidisk0`, an excluded disk stays in the model with
-   `x_{d,σ₀(d)} = 1` so its bytes and load remain accounted for.
+2. **Pin, do not drop.** An excluded disk stays in the model with `x_{d,σ₀(d)} = 1` so its bytes and
+   load remain accounted for in (C4)/(C5)/(C6); it is not demoted to a foreign volume.
 3. **Complain, every run, at WARN.** List each affected VM with its pinned bytes and pinned load,
    and the group total of both. A one-line "3 VMs skipped" is not enough: the operator needs to know
    *which* snapshots to clear to unblock balancing.
@@ -632,8 +642,6 @@ small:
 - `s` does not have `images` in its `content` list;
 - `s` is not shared, or is restricted to nodes that cannot see the VM;
 - `s` cannot hold the disk's format;
-- `d` is `efidisk0` or `tpmstate0` — **pin** `x_{d,σ₀(d)} = 1` rather than dropping `d` from `D`, so
-  its bytes and load stay in (C4)/(C5)/(C6); it cannot move while the VM runs (§3.6);
 - `d` or `v(d)` is excluded by config (`exclude.vmids`, `exclude.disks`, tags, `no-drs`) — also pin;
 - `σ₀(d)` belongs to **no** configured group — such a disk is unmanaged: it is not in any `D`, it is
   pinned where it is, and its bytes count toward `Uˢᵉˣᵗ` of its storage. Report it in `show-load` as
@@ -653,10 +661,10 @@ x_{d,s}  ≤  y_{v(d),s}                                 ∀ d ∈ D^mov, s ∈ 
 y_{v,s}  ≤  Σ_{d ∈ D^mov : v(d)=v} x_{d,s}             ∀ v ∈ V, s ∈ S
 ```
 
-Ranging over `D^mov` rather than `D` keeps an immovable `efidisk0` or a snapshot-pinned volume from
-dictating where a VM's data disks may go (§3.6). Set `objective.affinity_counts_pinned_disks: true`
-to range over all of `D` instead, which is the right choice only if you intend the balancer to keep
-data next to firmware at the cost of worse balance.
+Ranging over `D^mov` rather than `D` keeps a disk that cannot move this run — snapshot-blocked,
+config-excluded or locked — from dictating where a VM's movable disks may go (§3.6). Set
+`objective.affinity_counts_pinned_disks: true` to range over all of `D` instead, which is the right
+choice only if you would rather chase an unreachable co-location than balance well.
 
 **(C4) Largest-disk linearization.** `Z_s = max{ z_d : x_{d,s}=1 }` is not linear, but because the
 reserve constraint pushes `Z_s` *down* while this pushes it *up*, a one-sided bound is exact at the
@@ -1304,8 +1312,8 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
 
   pinned (not movable this run):
     106  snapshots present (2)      1.0 TiB  ℓ 0.9  on san-a  → clear snapshots to unblock
-    101  efidisk0 pinned on san-a   1 MiB    ℓ 0.0            → requires VM shutdown
     107  locked: backup             0.5 TiB  ℓ 0.3  on san-b  → waited 0s, re-check next run
+    109  excluded by tag no-drs     0.2 TiB  ℓ 0.0  on san-c
   pinned load 1.2 of 8.6 (14%, warn at 25%);  best achievable spread given pins: 44.6%
 ```
 
@@ -1494,7 +1502,7 @@ production fallback for large groups. Do not start with the solver.
 | VM live-migrated between nodes mid-plan | Re-fetch node before each move (§9.2); mismatch → abort move, re-plan |
 | Disk has an existing snapshot chain | Pinned, load and bytes still counted, reported at WARN every run with the pinned load/bytes per VM (§3.7). `move_disk delete=1` is rejected by PVE on such volumes and would not carry the snapshots anyway |
 | Snapshot created between planning and execution | Re-checked immediately before every move (§9.2 step 5); the move is dropped and the plan re-planned |
-| VM has `efidisk0` / `tpmstate0` | Pinned — no online move path exists — but modelled in (C4)/(C5)/(C6) so capacity and reserve stay correct. Excluded from the `κ` affinity term by default so 1 MiB of NVRAM cannot pin 2 TiB of data (§3.6) |
+| VM has `efidisk0` / `tpmstate0` | Ordinary movable disks on PVE 9.2 (verified on a live cluster). Small, so `γ`/payback are negligible while `β` charges a full move — tune `β` and `κ` together. Do not assume `drive-mirror` semantics for `tpmstate0`; §8.1's both-storages invariant holds either way (§3.6) |
 | VM has disks on `ide`/`sata`/`virtio`, not just `scsi` | Full bus regex in §3.5; enumerating only `scsi*` silently mis-accounts capacity |
 | `unused{N}` volumes | Movable with `ℓ_d = 0`, so the solver relocates them only to repair a reserve violation — the intended policy |
 | VM is `lock`ed (backup, snapshot, migrate, …) | Pinned at planning time, waited for at execution time up to `execution.locks.wait_timeout`; the lock value set is treated as open-ended and never whitelisted (§9.3) |
