@@ -235,7 +235,14 @@ else. It shall:
 4. warn loudly if the device label is literally `instance` — **PVE's `instance` tag collides with
    Prometheus's own scrape-target `instance` label**, and many Telegraf configurations rename or
    overwrite it. The implementer must confirm the real label name here before proceeding;
-5. report per-disk sample coverage over the configured window, so gaps are visible up front.
+5. report per-disk sample coverage over the configured window, so gaps are visible up front;
+6. measure the **observed sample spacing** of a live series (the modal delta between consecutive
+   timestamps in a short `query_range`) and compare it against `metrics.pvestatd_push_interval`.
+   That interval is a PVE-side setting the tool cannot read from the API, so it is declared in
+   config; this step is what stops a stale declaration from silently invalidating the
+   `rate_window ≥ 4 × interval` rule of §11.1. Error if the two disagree by more than 20%, and
+   error if `rate_window` is below four times the *observed* spacing regardless of what config
+   claims.
 
 ### 3.4 PromQL
 
@@ -351,9 +358,10 @@ the old volume is left behind as an unreferenced volume and the reserve math wil
 
 ## 4. The load model
 
-For each disk `d`, reduce the three raw quantities to a single scalar. The terms have wildly
-different magnitudes (in-flight I/O ≈ 0–10, ops/s ≈ 0–50000, bytes/s ≈ 0–10⁹), so each is normalized
-by the group total before weighting; otherwise the configured weights would be meaningless.
+For each disk `d`, reduce the three raw quantities to a single scalar `ℓ_d`, expressed in
+**average in-flight I/O requests**. The three terms have wildly different magnitudes, so they are
+normalized against each other before weighting and the blend is then rescaled back onto the
+in-flight-I/O scale; the units matter downstream and are spelled out below.
 
 Read and write are combined **before** normalization, using the configurable asymmetry factors
 `ρ = load_weights.read_factor` and `ω = load_weights.write_factor` (both 1.0 by default). Reads and
@@ -369,21 +377,44 @@ raw_b(d) = ρ·rd_bytes_d + ω·wr_bytes_d      (bytes/s)
 
 Each term is then normalized by its group total, because the three have wildly different magnitudes
 (in-flight I/O ≈ 0–10, ops/s ≈ 0–50 000, bytes/s ≈ 0–10⁹) and unnormalized weights would be
-meaningless:
+meaningless. Normalization makes the three terms **commensurable**; it must not be the last step,
+because on its own it also destroys the physical meaning of the result. So blend in normalized space,
+then rescale back onto the in-flight-I/O scale:
 
 ```
         raw_t(d)              raw_o(d)             raw_b(d)
-î_d = ───────────── ,  ô_d = ───────────  ,  b̂_d = ─────────────
+i_d = ───────────── ,  o_d = ───────────  ,  b_d = ─────────────
        Σ_{e∈g} raw_t(e)      Σ_{e∈g} raw_o(e)     Σ_{e∈g} raw_b(e)
 
-ℓ_d  =  w_t·î_d  +  w_o·ô_d  +  w_b·b̂_d
+              w_t·i_d  +  w_o·o_d  +  w_b·b_d
+ℓ_d  =  T_g · ─────────────────────────────────      with  T_g = Σ_{e∈g} raw_t(e)
+                    w_t + w_o + w_b
 ```
 
 with `w_t = 1, w_o = w_b = 0` by default — **I/O time is the primary quantity**.
 
-Note that `ℓ` is normalized to sum to `w_t + w_o + w_b` over the group (1.0 with defaults). All
-objective weights in §5.4 are calibrated against that scale. Guard the division: if a group's total
-for a term is 0, that term contributes 0 for every disk rather than producing NaN.
+**Units of `ℓ`, and why the rescale is not cosmetic.** `T_g` is the group's total average in-flight
+I/O, so `Σ_{d∈g} ℓ_d = T_g` exactly and `ℓ_d` is measured in **average in-flight I/O requests** — the
+same physical unit as `raw_t`. Under the default weights the rescale is an exact identity,
+`ℓ_d = raw_t(d)`. Everything downstream depends on this absolute scale:
+
+- §7 compares a plan's benefit against a mirror's cost, where `ω = 1.0` means *one* sequential reader
+  or writer in flight. That comparison is only valid if `ℓ` is on the same absolute scale. Were `ℓ`
+  left normalized to sum to 1, `ω = 1.0` would silently be `T_g` times too large — on a busy group
+  with `T_g ≈ 20` every migration would look twenty times more expensive than it is and the payback
+  test of §7.3 would reject almost everything.
+- §7.3's saturation guard and §5.3's big-M bound both need an absolute load scale.
+- The worked example in §14 uses raw loads (`Σℓ = 7.4`, not 1.0) and is self-consistent only under
+  this definition.
+
+Only *ratios* between disks matter to the balance objective, so the rescale changes no optimal
+assignment; it changes every quantity that is compared against a physical constant. Guard the
+divisions: if a group's total for a term is 0 that term contributes 0 for every disk rather than
+producing NaN, and if `T_g = 0` the entire group is idle — skip it, there is nothing to balance.
+
+The objective weights of §5.4 are therefore calibrated in units of in-flight I/O per storage, which
+is what makes `α = 1.0` against `β = 0.25` a meaningful default pair: a migration must buy at least a
+0.25-request reduction in summed deviation to be worth making.
 
 Why I/O time is the right default. `rate(rd_total_time_ns + wr_total_time_ns) / 1e9` is, by Little's
 law, the **average number of I/O requests in flight** for that disk. It is dimensionless, it is
@@ -439,6 +470,7 @@ four groups is four small problems, not one large one.
 | `Uˢᵉˣᵗ` | bytes on `s` consumed by volumes DRS does not manage (§5.1.1) |
 | `c_s` | capability weight of `s` |
 | `f_s` | snapshot reserve factor for `s` (default 2.0) |
+| `N_s` | saturation load of `s`, in in-flight I/O requests; optional, §7.3 only — not part of the MILP |
 
 #### 5.1.1 Computing `Uˢᵉˣᵗ`
 
@@ -531,12 +563,32 @@ effectively hard:
    alone; then fix `Σ_s r_s` to that minimum as a constraint and minimize the §5.4 objective. Both
    CP-SAT and CBC support this by re-solving. The reserve is then never traded against balance at
    any weight, and `Σ r_s > 0` provably means *physically impossible*, not merely *unattractive*.
-2. **Single-stage big-M**, simpler: keep `P · Σ_s r_s` in the objective with `P` chosen to exceed
-   any achievable gain from the other terms. Since `ℓ` is normalized to sum to 1 per group (§4),
-   `Σ_s e_s ≤ 2` and the whole non-reserve objective is bounded by
-   `2α + β|D| + γ·Σz_d + κ|V|·(|S|−1)`; any `P` above that bound is dominant. The default
-   `P = 1000` clears it comfortably for realistic group sizes — but it is a *calibrated* constant,
-   not an infinite one, so validate it if the weights are retuned.
+2. **Single-stage big-M**, simpler but requiring calibration: keep `P · Σ_s r_s` in the objective
+   with `P` large enough that no achievable gain from the other terms can pay for a violation worth
+   caring about. `P` must be **computed at model-build time, not taken from config as a fixed
+   number**, because the bound depends on the group's absolute load `T_g` (§4):
+
+   ```
+   U_obj  =  2·α·T_g  +  β·|D|  +  γ·Σ_d z_d  +  κ·|V|·(|S|−1)      (upper bound on the
+                                                                     non-reserve objective)
+   P_min  =  U_obj / ε_r          with  ε_r = the smallest reserve shortfall we refuse to trade
+   ```
+
+   `Σ_s e_s ≤ 2·T_g` because every `u_s` lies in `[0, T_g/c_s]` and the deviations from `u*` sum to
+   at most twice the total. Take `ε_r = 1 MiB` expressed in the same size unit as `z_d` (2⁻²⁰ TiB if
+   sizes are TiB), which says: never accept even a one-mebibyte reserve shortfall in exchange for
+   balance. Config `objective.reserve_violation_penalty` is then a *floor*, not the value used:
+   the model uses `P = max(configured, P_min)` and logs a warning when it had to raise it.
+
+   Worked against §14 (`T_g = 7.4`, `|D| = 6`, `Σz = 6.5 TiB`, `|V| = 5`, `|S| = 3`, sizes in TiB):
+   `U_obj = 14.8 + 1.5 + 0.325 + 5.0 = 21.6`, so `P_min = 21.6 · 2²⁰ ≈ 2.27×10⁷`. The configured
+   default `P = 1000` is **four orders of magnitude too small** to be provably dominant at
+   mebibyte granularity — it is dominant for violations above roughly 22 GiB and silently tradeable
+   below that. This is precisely why option 1 is the default and this option needs the computed `P`.
+
+**Use the lexicographic solve (option 1) by default.** It needs no calibration, its correctness does
+not depend on `T_g`, and both backends support it by re-solving. Option 2 exists for a backend that
+cannot re-solve cheaply.
 
 Report any residual `r_s > 0` prominently as an unfixable shortfall, with the byte amount.
 
@@ -573,34 +625,74 @@ disk can never leave its group, a VM with disks in two different groups is not c
 fragmented — that spread is structural and no migration could ever repair it. This is a consequence
 of the decomposition, not an oversight.
 
-Scaling matters: normalize `z_d` to TiB and `ℓ_d` to fractions of group total (section 4) before
+Scaling matters: express `z_d` in TiB and `ℓ_d` in average in-flight I/O requests (§4) before
 applying the weights, so the defaults in the example config are meaningful.
 
 ### 5.5 Solver backends
 
-**CP-SAT (preferred).** All variables and coefficients must be integral. Use exactly two scale
-factors and apply them consistently:
+**CP-SAT (preferred).** All variables and coefficients must be integral. The single most important
+observation is that `ℓ_d`, `z_d`, `c_s`, `C_s` and `Uˢᵉˣᵗ` are **data, not variables** — every one of
+them appears only as a coefficient multiplying a binary. So they never need a shared scale factor of
+their own: fold each of them into its coefficient *once*, at full precision, and round the finished
+coefficient. Doing that removes both classes of scaling error that a naive "scale everything by `K`"
+approach introduces.
 
-| Quantity | Unit after scaling | Factor |
+Two scales are needed, one for quantities that appear as *variables* and one for the objective:
+
+| Scale | Applies to | Value |
 |---|---|---|
-| `ℓ_d`, `u_s`, `u*`, `e_s`, `t` | load micro-units | `K = 10⁶` |
-| `z_d`, `Z_s`, `R_s`, `C_s`, `Uˢᵉˣᵗ`, `r_s` | MiB | `1 MiB` |
+| `K` | the load-valued variables `e_s`, `t`, and the constants `u*`, `L_s` they are compared against | `10⁶` (micro-requests) |
+| — | the size-valued variables `Z_s`, `R_s`, `r_s` and the constants `z_d`, `C_s`, `Uˢᵉˣᵗ`, `min_free_bytes` | MiB (integers already) |
+| `W` | every objective weight, so `α`, `β`, `γ`, `κ`, `P` keep four decimals | `10⁴` |
 
-Because `ℓ` is normalized to sum to 1 per group (§4), `K = 10⁶` gives every disk's load ~6
-significant digits; rounding error is ≤ 1e-6 load units per disk and ≤ 1 MiB per size, both
-negligible against objective weights of order 0.05–1.0. `u_s = L_s / c_s` involves a division, so
-pre-multiply instead: scale each storage's load by `round(K / c_s)` rather than dividing, keeping
-everything integral. `β` and `κ` multiply integer counts and need no scaling. `γ` is expressed
-per-TiB in config, so use `γ_scaled = round(γ · K / 2²⁰)` per MiB.
-
-The scaled objective is then:
+**Constraint coefficients.** In (C6) the storage load enters as `Σ_d ℓ_d·x_{d,s} / c_s`. Do *not*
+compute `round(K/c_s)` and multiply — that rounds the capability weight itself and makes CP-SAT and
+CBC disagree for non-binary `c_s`. Fold both constants into one per-(disk, storage) coefficient:
 
 ```
-min  α·K · Σ e_s^int  +  β·K · Σ (1 − x)  +  γ_scaled · Σ z_d^MiB·(1 − x)
-   + κ·K · Σ (Σ y − 1)  +  P·K · Σ r_s^MiB
+a_{d,s} = round(K · ℓ_d / c_s)          →   Σ_d a_{d,s}·x_{d,s} − round(K·u*) ≤ e_s^int  (and the
+                                                                                mirror image)
 ```
 
-with all weights themselves rounded to integers after multiplication by `K`.
+The error is then a single rounding of the finished product: `|a_{d,s} − K·ℓ_d/c_s| ≤ 0.5`, i.e.
+`≤ 5×10⁻⁷` in load units per disk, **independent of `c_s`**. Summed over a group of even 1 000 disks
+that is `< 5×10⁻⁴` — three orders below the solver's `mip_gap` of 0.02, so it cannot change the
+selected plan and the two backends stay directly comparable. (C4)/(C5) are already integral in MiB.
+
+**Objective coefficients.** Same rule — `z_d` is a constant, so the `γ` term's coefficient is
+per-disk and needs no separate `γ_scaled`:
+
+```
+min   Σ_s round(α·W)              · e_s^int                     (imbalance)
+    + Σ_d round(β·W·K)            · (1 − x_{d,σ₀(d)})           (number of migrations)
+    + Σ_d round(γ·W·K·z_d^TiB)    · (1 − x_{d,σ₀(d)})           (bytes migrated)
+    + Σ_v round(κ·W·K)            · (Σ_s y_{v,s} − 1)           (fragmentation)
+    + Σ_s round(P·W·K / 2²⁰)      · r_s^MiB                     (reserve violation)
+```
+
+The `·K` on the count-valued terms puts them on the same footing as `α·W·e_s^int`, which already
+carries a factor `K` inside `e_s^int`.
+
+**Why this matters — the trap in the obvious formulation.** Factoring `γ` out as a standalone
+per-MiB integer, `γ_scaled = round(γ · K / 2²⁰)`, silently **zeroes the bytes-migrated term at the
+default weight**:
+
+```
+γ = 0.05/TiB,  K = 10⁶   →   round(0.05 · 10⁶ / 2²⁰) = round(0.0477) = 0
+```
+
+CP-SAT would then ignore disk size entirely when choosing what to move, diverging from CBC and the
+heuristic, which use continuous coefficients — and doing so with no error and no warning. Raising
+`K` is not a fix worth making: `γ·K/2²⁰ ≥ 0.5` requires `K ≥ 2²⁰/(2·0.05) ≈ 1.05×10⁷`, so even
+`K = 10⁷` still rounds to zero, and the first `K` that works yields `γ_scaled = 1` — a 100 %
+quantization error on the coefficient. Folding `z_d` in instead gives, for the §14 fixture's 0.5 TiB
+disk, `round(0.05 · 10⁴ · 10⁶ · 0.5) = 2.5×10⁸`: exact, with no minimum-`γ` restriction at all.
+
+**Magnitudes.** The largest coefficient is the reserve term, `round(P·W·K/2²⁰) ≈ 9.5×10⁶` per MiB at
+`P = 1000`; a 1 TiB shortfall gives ≈ 10¹³. The imbalance term reaches `α·W·K·Σe_s ≈ 1.5×10¹¹` for
+`Σe_s = 15`. Both are comfortably inside int64, which is what CP-SAT requires. Assert at model-build
+time that every coefficient is a non-zero integer wherever its unscaled weight is non-zero — the
+regression test for the `γ` trap above — and that the maximum objective magnitude is below 2⁶².
 
 Warm-start from the current assignment via `AddHint(x[d, σ₀(d)], 1)`, which typically finds the
 incumbent immediately and spends the rest of the time limit proving the gap. Assert after solving
@@ -721,8 +813,9 @@ with `H = 7d` and `λ = 10` by default. Additional **hard** rules, applied per m
 individual migrations regardless of the aggregate test:
 
 - `duration_d > migration.max_single_move_duration` (default 6h) → reject the move;
-- the move would push either endpoint above `migration.saturation_ceiling` during the mirror →
-  defer the move to a later run rather than reject the plan (see below);
+- the move would push either endpoint above `migration.saturation_ceiling · saturation_load` during
+  the mirror → defer the move to a later run rather than reject the plan (see below); skipped for a
+  storage with no `saturation_load` configured;
 - the move violates the transient reserve invariant of section 8 → reject.
 
 **Defining "during the mirror".** `u_s` as used everywhere else is a p95 over the lookback window —
@@ -730,21 +823,44 @@ a robust *statistic*, not an instantaneous reading — so adding an instantaneou
 two different kinds of quantity. Define the check explicitly:
 
 ```
-u_during(s)  =  û_s(duration_d)  +  Σ_{m in flight at s} ω_role(m,s)
+L_during(s)  =  L̂_s(duration_d)  +  Σ_{m in flight at s} ω_role(m,s)
 
-check:  u_during(src) ≤ saturation_ceiling · c_src
-        u_during(dst) ≤ saturation_ceiling · c_dst
+check:  L_during(s)  ≤  saturation_ceiling · N_s        for s ∈ {src, dst}
 ```
 
-where `û_s(Δ)` is the **forecaster's upper bound** for storage `s` over a horizon equal to the move's
-expected duration (§10), and `ω_role` is `ω_src` or `ω_dst` depending on whether `s` is the source or
-target of that in-flight move. Summing over all in-flight moves matters when
-`max_concurrent_migrations > 1`.
+where `L̂_s(Δ)` is the **forecaster's upper bound on `L_s`** — the storage's *aggregate* load over a
+horizon equal to the move's expected duration (§10), in average in-flight I/O requests, the same
+units as `ℓ` (§4) and as `ω`. It is **not** the capability-normalized `u_s`; mixing the two here was
+the original defect in this rule.
 
-This is deliberately a **best-effort guard**, not a physical limit: we have no model of the array's
-true saturation point, only the load we can attribute to guests. `max_single_move_duration` and the
-transient reserve invariant are the hard bounds; this one exists to avoid the obviously bad case of
-starting a long mirror onto a storage that is already the busiest in the group.
+**`N_s` is what the check is measured against, and it is not `c_s`.** `c_s` is a *relative*
+capability weight whose default is 1.0 and whose absolute value is meaningless — only the ratios
+between storages in a group affect the balance objective, so `saturation_ceiling · c_s` compares a
+physical queue depth against a dimensionless preference. That is dimensionally wrong in both
+directions: with `c_s = 1.0` a storage carrying an entirely healthy `L_s = 6.5` would fail a 0.85
+ceiling outright, and a storage weighted `c_s = 0.5` would be held to half the ceiling of its peer
+purely for being labelled less capable. Instead:
+
+```
+N_s = storages[].saturation_load     — the number of concurrent I/O requests storage s services
+                                       before queueing delay dominates. An absolute, physical
+                                       property of the array (roughly its effective queue depth).
+```
+
+`N_s` has **no safe default and is `null` unless the operator sets it**, in which case the check is
+skipped for that storage and `drs explain` says so. We cannot infer it: the observed peak `L_s` is
+not a capacity (an idle storage would get a tiny `N_s` and reject every migration onto it, which is
+exactly backwards), and neither `c_s` nor the LUN size tells us anything about queue depth. Obtain
+it from the array's documented queue depth, or empirically as the `L_s` at which measured latency
+starts climbing super-linearly. Sizing `N_s` in the same units as `ℓ` is straightforward because
+both come from the same Little's-law quantity.
+
+This is deliberately a **best-effort guard**, not a physical limit: even with `N_s` set we have no
+model of the array's true saturation point, only the load we can attribute to guests.
+`max_single_move_duration` and the transient reserve invariant of §8.1 are the hard bounds and are
+always active; this one exists to avoid the obviously bad case of starting a long mirror onto a
+storage that is already close to its service limit. A deployment that leaves every `saturation_load`
+unset is fully supported and loses only this one advisory check.
 
 If the plan fails the aggregate test, re-solve with `β` and `γ` doubled and retry, up to three times.
 This naturally converges on the smaller subset of high-value moves rather than abandoning the run —
@@ -981,6 +1097,12 @@ migrates a disk onto a storage that is about to be saturated. For the default `q
 this makes the distinction concrete rather than vacuous: the point estimate is `window.quantile`
 (p95) and the bound is `window.upper_quantile` (p99), so the optimizer sees p99.
 
+Forecasts are produced **per disk**. Where §7.3 needs a per-*storage* bound `L̂_s(Δ)`, it is the sum
+of the per-disk upper bounds over the disks assigned to `s` in the state being evaluated:
+`L̂_s(Δ) = Σ_{d : x_{d,s}=1} û_d(Δ)`. Summing upper bounds is conservative — it assumes the disks peak
+together — which is the right direction for a guard whose failure mode is starting a mirror onto an
+already-busy array.
+
 Config validation (§11.1) must **reject** a configuration whose Prometheus retention or whose
 selected forecaster and window are mutually inconsistent, rather than silently degrading. Enabling a
 seasonal model is a statement that the history exists to support it.
@@ -1040,10 +1162,11 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `quantile ∈ (0,1)`, `upper_quantile ∈ (0,1)`, `upper_quantile ≥ quantile` | The bound must not sit below the point estimate |
 | `min_coverage ∈ (0,1]` | A ratio; 0 would accept a disk with no data |
 | Metric names non-empty; label names non-empty and pairwise distinct | A duplicated label name silently collapses series |
-| `rate_window ≥ 4 × pvestatd push interval` | Below this, `rate()` sees too few points |
+| `rate_window ≥ 4 × metrics.pvestatd_push_interval` | Below this, `rate()` sees too few points. The interval is a PVE-side setting the tool cannot read, so it is declared in config (default `60s`, PVE's own default) and `verify-metrics` cross-checks it against the observed sample spacing of a live series, erroring if the two disagree by more than 20% |
 | `window.lookback ≥ forecaster.required_range()` | See §10.1 — otherwise the model can never run |
 | `payback_ratio > 0`, `payback_horizon > 0` | Zero disables the safety test |
-| `saturation_ceiling ∈ (0,1]` | A fraction of capability weight |
+| `saturation_ceiling ∈ (0,1]` | A fraction of `saturation_load`, not of `capability_weight` |
+| `saturation_load > 0` where set; warn once per run for each storage where it is unset | §7.3's guard is silently inactive without it |
 | `max_concurrent_* ≥ 1` | Zero would deadlock the scheduler |
 | Time windows: `start ≠ end`; crossing midnight allowed and explicit | Ambiguity here silently disables `auto` |
 | `execution.mode ∈ {dry-run, confirm, auto}` | Typo must not silently fall back to acting |
@@ -1091,9 +1214,9 @@ Each phase is independently testable and useful on its own.
 | 1 | `config.py`, `metrics.py`, `drs verify-metrics` | Real metric/label names confirmed against the live Prometheus; per-disk load printed |
 | 2 | `pve.py`, `topology.py` | `drs show-load` prints every storage with its disks, sizes, loads and reserve status |
 | 3 | `loadmodel.py` + gates | Correct act/no-act decision per group, with the reasoning shown |
-| 4 | `heuristic.py` + `schedule.py` | End-to-end plan in `dry-run`, ordered and transient-feasible |
+| 4 | `heuristic.py` + `schedule.py` | End-to-end plan in `dry-run`, ordered and transient-feasible; reproduces `expected_order` and `expected_final_reserve` in the §14 fixture |
 | 5 | `payback.py` | Plans rejected/trimmed on cost grounds, arithmetic shown |
-| 6 | `optimize.py` (MILP) | Matches or beats the heuristic on the section 14 fixture |
+| 6 | `optimize.py` (MILP) | Matches or beats the heuristic on the §14 fixture; CP-SAT and CBC agree on every `β` case, and the §5.5 coefficient assertions pass |
 | 7 | `execute.py` | `confirm` mode against a lab cluster |
 | 8 | `auto` mode + time windows | Unattended operation |
 | 9 | `forecast.py` beyond p95 | Seasonal-naive validated by backtest |
@@ -1137,15 +1260,24 @@ and (C5) is enforced before, during and after every move.
 A complete, self-consistent fixture. Implementations must reproduce these numbers exactly.
 
 The machine-readable form lives in **`tests/fixtures/fc-tier1.yaml`** (input) and
-**`tests/fixtures/fc-tier1.expected.json`** (expected derivations, both `β` cases, and both payback
-calculations). Assert against those files in CI rather than transcribing the tables below — the
-expectations were generated by exhaustive enumeration of all `3⁶ = 729` assignments, so they are the
-proven optimum under the stated weights, not a hand-worked guess.
+**`tests/fixtures/fc-tier1.expected.json`** (expected derivations for every `β` in the input's
+`beta_values` sweep, the execution order with its transient checks, the post-plan reserve state, and
+both payback calculations). Assert against those files in CI rather than transcribing the tables
+below.
+
+The expected file is **generated, not written**: `tests/fixtures/generate_fc_tier1.py` enumerates all
+`3⁶ = 729` assignments per `β`, so the recorded optimum is proven rather than hand-worked, and
+derives the order with the §8.2 rule and the §8.1 transient predicate. Run it with `--check` in CI to
+assert the committed file is current; that check is also the regression test for §5.5's coefficient
+scaling, since a scaling bug shows up as a different optimum.
 
 ### 14.1 Input
 
 Group `fc-tier1`, three storages of 8.0 TiB each, all `capability_weight = 1.0`, `f = 2.0`,
-no foreign volumes.
+no foreign volumes. `config/drs.example.yaml` uses the same group and storage names with the same
+weights, so the example config and this fixture agree; the differing-weight feature is illustrated on
+`fc-tier2` there instead. `ℓ_d` is in average in-flight I/O requests (§4), *not* normalized to sum to
+one — which is what makes the `ω = 1.0` per mirror endpoint in §14.5 commensurable with it.
 
 | Disk | VM | `z_d` (TiB) | `ℓ_d` | On |
 |---|---|---|---|---|
@@ -1292,9 +1424,11 @@ bug waiting to happen; this table is the audit.
 | `migration.source/target_load_weight` | §7.1 `ω_src`, `ω_dst` |
 | `migration.payback_horizon` / `payback_ratio` | §7.2, §7.3 acceptance test |
 | `migration.max_single_move_duration` | §7.3 hard per-move rule |
-| `migration.saturation_ceiling` | §7.3 `u_during(s)` |
+| `migration.saturation_ceiling` | §7.3 `L_during(s) ≤ saturation_ceiling · N_s` |
+| `groups[].storages[].saturation_load` | §7.3 `N_s`; guard skipped when unset |
 | `objective.alpha_spread/beta_move_count/gamma_move_bytes/kappa_vm_affinity` | §5.4 |
-| `objective.reserve_violation_penalty` | §5.3 (C5), single-stage `P` alternative |
+| `objective.reserve_violation_penalty` | §5.3 (C5), *floor* for the single-stage `P` alternative |
+| `metrics.pvestatd_push_interval` | §11.1 `rate_window` validation; §3.3 `verify-metrics` |
 | `objective.spread_metric` | §5.3 (C6), L1 vs min–max |
 | `solver.*` | §5.5 |
 | `execution.max_concurrent_migrations/per_storage` | §8.1 generalized invariant, `concurrency_ok` |

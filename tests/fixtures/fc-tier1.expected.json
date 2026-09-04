@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "generated_by": "tests/fixtures/generate_fc_tier1.py (exhaustive enumeration)",
   "derived": {
     "total_load": 7.4,
     "u_star": 2.466667,
@@ -41,10 +42,59 @@
         "102:scsi0:san-a->san-c",
         "105:scsi0:san-c->san-b"
       ],
+      "expected_order": [
+        {
+          "move": "102:scsi0:san-a->san-c",
+          "transient_target_used_tib": 2.0,
+          "transient_reserve_basis_tib": 1.5,
+          "transient_required_tib": 5.0,
+          "capacity_tib": 8.0,
+          "ok": true
+        },
+        {
+          "move": "101:scsi1:san-a->san-b",
+          "transient_target_used_tib": 2.5,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 4.5,
+          "capacity_tib": 8.0,
+          "ok": true
+        },
+        {
+          "move": "105:scsi0:san-c->san-b",
+          "transient_target_used_tib": 3.0,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 5.0,
+          "capacity_tib": 8.0,
+          "ok": true
+        }
+      ],
       "expected_final_loads": {
         "san-a": 3.0,
         "san-b": 1.9,
         "san-c": 2.5
+      },
+      "expected_final_reserve": {
+        "san-a": {
+          "load": 3.0,
+          "used_tib": 2.0,
+          "largest_tib": 2.0,
+          "required_tib": 6.0,
+          "violates_reserve": false
+        },
+        "san-b": {
+          "load": 1.9,
+          "used_tib": 3.0,
+          "largest_tib": 1.0,
+          "required_tib": 5.0,
+          "violates_reserve": false
+        },
+        "san-c": {
+          "load": 2.5,
+          "used_tib": 1.5,
+          "largest_tib": 1.5,
+          "required_tib": 4.5,
+          "violates_reserve": false
+        }
       },
       "expected_spread_after": 0.445946
     },
@@ -58,10 +108,51 @@
         "101:scsi1:san-a->san-b",
         "102:scsi0:san-a->san-c"
       ],
+      "expected_order": [
+        {
+          "move": "102:scsi0:san-a->san-c",
+          "transient_target_used_tib": 2.0,
+          "transient_reserve_basis_tib": 1.5,
+          "transient_required_tib": 5.0,
+          "capacity_tib": 8.0,
+          "ok": true
+        },
+        {
+          "move": "101:scsi1:san-a->san-b",
+          "transient_target_used_tib": 2.5,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 4.5,
+          "capacity_tib": 8.0,
+          "ok": true
+        }
+      ],
       "expected_final_loads": {
         "san-a": 3.0,
         "san-b": 1.7,
         "san-c": 2.7
+      },
+      "expected_final_reserve": {
+        "san-a": {
+          "load": 3.0,
+          "used_tib": 2.0,
+          "largest_tib": 2.0,
+          "required_tib": 6.0,
+          "violates_reserve": false
+        },
+        "san-b": {
+          "load": 1.7,
+          "used_tib": 2.5,
+          "largest_tib": 1.0,
+          "required_tib": 4.5,
+          "violates_reserve": false
+        },
+        "san-c": {
+          "load": 2.7,
+          "used_tib": 2.0,
+          "largest_tib": 1.5,
+          "required_tib": 5.0,
+          "violates_reserve": false
+        }
       },
       "expected_spread_after": 0.527027
     }
@@ -69,16 +160,16 @@
   "payback_two_move_plan": {
     "per_move": [
       {
-        "disk": "102:scsi0",
-        "size_tib": 1.5,
-        "duration_seconds": 7864.32,
-        "cost_load_seconds": 15728.64
-      },
-      {
         "disk": "101:scsi1",
         "size_tib": 1.0,
         "duration_seconds": 5242.88,
         "cost_load_seconds": 10485.76
+      },
+      {
+        "disk": "102:scsi0",
+        "size_tib": 1.5,
+        "duration_seconds": 7864.32,
+        "cost_load_seconds": 15728.64
       }
     ],
     "total_cost_load_seconds": 26214.4,

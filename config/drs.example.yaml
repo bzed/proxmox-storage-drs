@@ -53,8 +53,12 @@ metrics:
     device: instance
     node: nodename
 
-  rate_window: 5m       # inner range for rate(); >= 4x the pvestatd push interval
+  rate_window: 5m       # inner range for rate(); must be >= 4x pvestatd_push_interval
   step: 5m              # sampling step for range queries
+  # PVE-side push cadence of pvestatd. The tool cannot read this from the API, so
+  # declare it here; `drs verify-metrics` measures the real sample spacing of a
+  # live series and errors if this value is wrong by more than 20%.
+  pvestatd_push_interval: 60s
 
 # ------------------------------------------------------------ decision window
 window:
@@ -69,8 +73,14 @@ window:
 # ------------------------------------------------------------------ load model
 # Read and write series are fetched separately and combined ENGINE-SIDE:
 #   raw_X(d) = read_factor*rd_X + write_factor*wr_X    for X in {time, ops, bytes}
-# then each term is normalized by its group total, then weighted:
-#   load = w_iotime*iotime_hat + w_ops*ops_hat + w_bytes*bytes_hat
+# each term is normalized by its group total so the three are commensurable, the
+# blend is weighted, and the result is RESCALED back onto the in-flight-I/O scale:
+#   load = T_g * (w_iotime*iotime_hat + w_ops*ops_hat + w_bytes*bytes_hat)
+#              / (w_iotime + w_ops + w_bytes)
+# with T_g the group's total in-flight I/O. So `load` is in average in-flight I/O
+# requests -- the same physical unit as migration.source/target_load_weight, which
+# is what makes the section 7 payback comparison valid. With the defaults below the
+# whole expression collapses to load = rate(rd+wr_total_time_ns)/1e9 exactly.
 # See plan section 4.
 load_weights:
   iotime: 1.0           # primary: rate(rd+wr_total_time_ns)/1e9, dimensionless
@@ -87,19 +97,37 @@ load_weights:
 # --------------------------------------------------------------------- groups
 # A disk may only ever move between storages listed in the SAME group.
 groups:
+  # NOTE: this group intentionally mirrors the plan's section 14 worked example and
+  # tests/fixtures/fc-tier1.yaml -- same storage names, same capability weights (all
+  # 1.0). Keep them in sync; the differing-weight feature is illustrated on fc-tier2
+  # below so the fixture stays reproducible from this file.
   - name: fc-tier1
     storages:
       - id: san-a
-        capability_weight: 1.0     # relative share of load this storage should carry
+        capability_weight: 1.0     # RELATIVE share of load this storage should carry.
+                                   # Only ratios within a group matter; the absolute
+                                   # value is meaningless. Not a capacity.
         reserve_factor: null       # null = inherit global snapshot_reserve.factor
+        # Absolute number of concurrent I/O requests this array services before
+        # queueing delay dominates -- roughly its effective queue depth, in the same
+        # units as the load metric (plan section 4). Used ONLY by the section 7.3
+        # saturation guard. There is no safe default: leave it null and that advisory
+        # guard is skipped for this storage (the hard bounds -- max_single_move_duration
+        # and the transient reserve invariant -- always apply). Do not guess it from
+        # observed load; take it from the array's documented queue depth, or measure
+        # the load at which latency starts climbing super-linearly.
+        saturation_load: null
       - id: san-b
         capability_weight: 1.0
       - id: san-c
-        capability_weight: 0.5     # half the spindles -> carries half the load
+        capability_weight: 1.0
   - name: fc-tier2
     storages:
       - id: san-d
+        capability_weight: 1.0
+        saturation_load: 64        # this array services ~64 concurrent I/Os
       - id: san-e
+        capability_weight: 0.5     # half the spindles -> carries half the load
 
 # --------------------------------------------------------- snapshot reserve
 snapshot_reserve:
@@ -133,7 +161,9 @@ migration:
   payback_horizon: 7d                  # H
   payback_ratio: 10.0                  # lambda; benefit must exceed lambda * cost
   max_single_move_duration: 6h         # reject any move slower than this
-  saturation_ceiling: 0.85             # never push a storage past this during a move
+  # Fraction of a storage's saturation_load (NOT of capability_weight) that a move
+  # may drive it to. Inactive for any storage whose saturation_load is null.
+  saturation_ceiling: 0.85
   assume_thick_provisioning: true      # cost by provisioned size, not allocated
 
 # ------------------------------------------------------------ objective weights
@@ -143,7 +173,12 @@ objective:
   beta_move_count: 0.25        # penalty per migration  -> "minimal number of migrations"
   gamma_move_bytes: 0.05       # penalty per TiB migrated
   kappa_vm_affinity: 0.50      # penalty per extra storage a VM's disks are spread over
-  reserve_violation_penalty: 1000.0   # soft, so an already-violating start is repairable
+  # Soft slack so an already-violating start stays repairable rather than infeasible.
+  # This is a FLOOR, not the value used: with the single-stage big-M formulation the
+  # engine computes the provably-dominant P from the group's own load and sizes and
+  # uses max(this, computed), warning when it raises it. The default lexicographic
+  # two-stage solve (plan section 5.3) needs no penalty at all and is preferred.
+  reserve_violation_penalty: 1000.0
 
 solver:
   backend: auto          # auto | cpsat | cbc | heuristic

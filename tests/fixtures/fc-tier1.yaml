@@ -1,5 +1,13 @@
 # Machine-readable form of IMPLEMENTATION_PLAN.md section 14.
-# Regenerate expectations with the same exhaustive search; do not hand-edit.
+#
+# Fixture contract: a test harness reads this file, and for EACH value in
+# objective.beta_values solves the group and asserts the matching entry in
+# cases[] of fc-tier1.expected.json (same order). All other objective weights
+# are held fixed across the sweep. Sizes and capacities are TiB; loads are in
+# average-in-flight-I/O units (plan section 4), NOT normalised to sum to 1.
+#
+# Regenerate expectations with `python3 generate_fc_tier1.py`; do not hand-edit
+# fc-tier1.expected.json. `generate_fc_tier1.py --check` asserts it is current.
 schema_version: 1
 description: Section 14 worked example. Numbers verified by exhaustive enumeration
   of all 3^6 assignments.
@@ -65,5 +73,8 @@ migration:
   payback_ratio: 10.0
 objective:
   alpha_spread: 1.0
+  # Swept by the harness; one cases[] entry in the expected file per value.
+  beta_values: [0.25, 0.5]
   gamma_move_bytes_per_tib: 0.05
   kappa_vm_affinity: 0.5
+  reserve_violation_penalty: 1000.0
