@@ -1551,7 +1551,9 @@ misconfigured balancer moving production disks is worse than one that refuses to
 
 ### 11.2 `state.json`
 
-The only persistent state. Small, versioned, and written atomically (temp file + `os.replace`):
+The only persistent state, at `state.path`, default `/var/lib/pve-drs/state.json`. Local disk, one
+copy per host, deliberately **not** on `/etc/pve` for the reasons in §11. Small, versioned, and
+written atomically (temp file + `os.replace`):
 
 ```json
 {

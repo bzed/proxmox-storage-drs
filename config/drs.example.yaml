@@ -282,7 +282,9 @@ report:
   warn_pinned_load_fraction: 0.25
 
 state:
-  path: /var/lib/proxmox-storage-drs/state.json
+  # Local disk, never /etc/pve: this is rewritten on every run, pmxcfs writes
+  # need quorum, and the file is deliberately node-local (plan §11).
+  path: /var/lib/pve-drs/state.json
 
 forecast:
   model: quantile        # quantile | seasonal_naive | holt_winters
