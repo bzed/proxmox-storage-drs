@@ -160,7 +160,13 @@ migration:
   target_load_weight: 1.0              # added in-flight I/O on the target
   payback_horizon: 7d                  # H
   payback_ratio: 10.0                  # lambda; benefit must exceed lambda * cost
-  max_single_move_duration: 6h         # reject any move slower than this
+  max_single_move_duration: 6h         # reject any move slower than this (mirror + wipe)
+  # Account for the post-move source wipe in duration and cost. PVE's LVM
+  # "saferemove" zeroes the old volume at saferemove_throughput -- DEFAULT 10 MiB/s,
+  # so a 1.5 TiB disk takes ~44h to clean up against ~2h to mirror. Read per storage
+  # from GET /storage/{id}. Only set false if you have verified saferemove is off
+  # everywhere in the group. See plan sections 7.1 and 9.3.
+  account_saferemove_wipe: true
   # Fraction of a storage's saturation_load (NOT of capability_weight) that a move
   # may drive it to. Inactive for any storage whose saturation_load is null.
   saturation_ceiling: 0.85
@@ -173,6 +179,11 @@ objective:
   beta_move_count: 0.25        # penalty per migration  -> "minimal number of migrations"
   gamma_move_bytes: 0.05       # penalty per TiB migrated
   kappa_vm_affinity: 0.50      # penalty per extra storage a VM's disks are spread over
+  # efidisk0/tpmstate0 and snapshot-pinned disks cannot move while the VM runs. By
+  # default they are excluded from the affinity count, so a 1 MiB NVRAM volume cannot
+  # pin 2 TiB of data to its storage. true counts them: better co-location, worse
+  # balance. Plan sections 3.6 and 5.3 (C3).
+  affinity_counts_pinned_disks: false
   # Soft slack so an already-violating start stays repairable rather than infeasible.
   # This is a FLOOR, not the value used: with the single-stage big-M formulation the
   # engine computes the provably-dominant P from the group's own load and sizes and
@@ -198,6 +209,24 @@ execution:
   max_replans_per_run: 3          # bound on mid-execution re-plans (section 9.2)
   abort_on_failure: true
   poll_interval_seconds: 10
+
+  # A VM config lock (backup, snapshot, migrate, clone, rollback, ...) blocks
+  # move_disk. Locks are normal, not errors -- wait them out. The value set is
+  # treated as open-ended: ANY non-empty lock means wait, never a whitelist.
+  locks:
+    wait_timeout: 4h          # generous: a backup of a large VM easily runs hours
+    poll_interval: 30s
+    on_timeout: skip          # skip | abort -- skip this move, keep the rest of the plan
+
+  # A move_disk task reporting OK does NOT mean the source space is back. With
+  # saferemove the old volume is still fully allocated while it is being zeroed,
+  # and the storage lock it holds can block the NEXT move. A move counts as done
+  # only when the task succeeded AND the source volume is gone AND the VM is
+  # unlocked. See plan section 9.3.
+  source_release:
+    wait: true
+    timeout: 48h              # >= largest disk / saferemove_throughput
+
   time_windows:          # empty = any time. Applies to "auto" mode only.
     - days: [mon, tue, wed, thu, fri, sat, sun]
       start: "22:00"
@@ -209,8 +238,24 @@ exclude:
   disks: []              # e.g. ["101:scsi1"]
   storages: []           # never move onto/off these
   tags: ["no-drs"]       # PVE VM tags that opt a VM out
-  skip_vms_with_snapshots: true   # volume chains complicate move_disk
+  # move_disk delete=1 is REJECTED by PVE on a volume with snapshots, and would not
+  # carry the snapshots across if it were not. Setting this false does not make such
+  # moves work -- it only stops pre-filtering them so they fail at the API instead.
+  # Snapshotted disks are pinned (bytes and load still counted) and reported at WARN
+  # every run, naming the VMs whose snapshots must be cleared. Plan section 3.7.
+  skip_vms_with_snapshots: true
   running_only: true              # only consider running VMs
+  # unused{N} volumes are real allocated bytes with no I/O. Including them lets the
+  # solver relocate one to repair a reserve violation; it will never move one for
+  # balance, since the benefit is zero by construction. false pins them instead.
+  include_unused_disks: true
+
+report:
+  # If pinned load (snapshots, efidisk/tpmstate, exclusions, locks) exceeds this
+  # fraction of a group's total, the residual imbalance may be structural rather
+  # than a planning failure. Report the best ACHIEVABLE spread next to the actual
+  # one so the operator can see it is the snapshots, not the solver.
+  warn_pinned_load_fraction: 0.25
 
 state:
   path: /var/lib/proxmox-storage-drs/state.json

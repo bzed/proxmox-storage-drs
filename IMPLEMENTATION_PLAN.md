@@ -52,6 +52,16 @@ plan over a three-move plan on the same input.
 - Only **running** VMs are considered by default; a stopped VM generates no I/O to balance, and its
   disks are moved only if a capacity constraint requires it.
 - Disks are thick-provisioned by default, so migration cost is proportional to *provisioned* size.
+- **A VM is never stopped, suspended or reconfigured.** The only write the engine issues is
+  `move_disk`. This is what puts `efidisk0` and `tpmstate0` out of reach (§3.6) and rules out the
+  offline path for snapshotted disks (§3.7): both are movable, but only with the guest down, which is
+  a maintenance-window decision for a human.
+- Every bus is in scope — `ide`, `sata`, `scsi`, `virtio`, plus `efidisk0`, `tpmstate0` and `unused`
+  volumes. A VM's disks are not all `scsi*`, and anything not enumerated is capacity the model cannot
+  see (§3.5).
+- Storage-side cleanup is part of a migration, not an afterthought: with LVM `saferemove` the source
+  volume is zeroed at a throttled rate after the mirror completes, and neither its space nor the VM
+  is available until that finishes (§7.1, §9.3).
 
 ---
 
@@ -308,14 +318,27 @@ Read path:
 | `GET /nodes/{node}/qemu/{vmid}/config` | **disk → storage mapping and size** |
 | `GET /nodes/{node}/storage/{storage}/status` | authoritative `total`/`used`/`avail` |
 | `GET /nodes/{node}/storage/{storage}/content` | per-volume real allocated sizes, owner vmid |
-| `GET /nodes/{node}/qemu/{vmid}/snapshot` | detect existing snapshot/volume chains |
+| `GET /nodes/{node}/qemu/{vmid}/snapshot` | detect existing snapshot/volume chains (§3.7) |
+| `GET /storage/{storage}` | per-storage `saferemove` / `saferemove_throughput` — see §7.1 and §9.3 |
+| `GET /nodes/{node}/qemu/{vmid}/status/current` | `lock` state immediately before a move (§9.3) |
 
-Parsing a disk from the VM config: a key matching `^(scsi|virtio|sata|ide|efidisk|tpmstate)\d+$`
+Parsing a disk from the VM config: a key matching
+
+```
+^(?:ide[0-3]|sata[0-5]|scsi(?:[0-9]|[12][0-9]|30)|virtio(?:[0-9]|1[0-5])|efidisk0|tpmstate0|unused\d+)$
+```
+
 whose value looks like `san-a:vm-101-disk-0,size=512G,iothread=1`. The storage id is the part before
 the first `:`; the size comes from the `size=` parameter, cross-checked against
-`/storage/{storage}/content`, which is authoritative for what is actually allocated. Skip entries
-containing `media=cdrom`, and skip `efidisk`/`tpmstate` volumes — they are tiny and moving them is
-pointless and, for TPM state, unsupported alongside volume-chain snapshots.
+`/storage/{storage}/content`, which is authoritative for what is actually allocated. **Every bus
+counts** — a VM's boot disk on `ide0` or `sata0` occupies and loads a storage exactly as a `scsi0`
+does, and a tool that enumerates only `scsi*` will silently mis-account capacity and produce plans
+that cannot reach balance. §3.6 covers which of these can actually be moved.
+
+Skip only entries whose value contains `media=cdrom`. That covers ISO mounts, empty drives
+(`none,media=cdrom`) and cloud-init drives (`san-a:vm-101-cloudinit,media=cdrom`). A cloud-init
+volume does occupy real bytes on the storage, so it is not in `D` but it **is** counted in `Uˢᵉˣᵗ`
+(§5.1.1) like any other volume DRS does not manage.
 
 **Disk format.** Detect the source format from the volume returned by `/storage/{storage}/content`
 (`format: raw|qcow2|…`), falling back to the storage type's default (raw for LVM, qcow2 for
@@ -325,6 +348,13 @@ directory storages, raw for ZFS zvols). (C2) fixes `x_{d,s} = 0` when `s` cannot
 operator has explicitly opted in — converting raw→qcow2 on shared LVM is what enables volume-chain
 snapshots, but it is a deliberate storage-policy change, not something a balancer should do
 silently.
+
+**`drs verify-storages`.** A companion to `verify-metrics` (§3.3), run once per storage before
+relying on any plan. For every storage in every group it reports `type`, `shared`, `content`,
+`saferemove`, `saferemove_throughput`, total/used, and the largest disk currently on it; then it
+derives the implied wipe time `z_max / saferemove_throughput` and warns when that exceeds
+`migration.max_single_move_duration` or `gates.cooldown_per_storage` (§9.3). This is the command that
+turns "why has this balancer been stuck for two days" into a line of output before the first move.
 
 **Read-path cost and concurrency.** The topology read is `O(number of VMs)`: PVE has no batch
 config endpoint, so `/qemu/{vmid}/config` must be fetched per VM. For a few hundred VMs, serial
@@ -353,6 +383,93 @@ GET  /api2/json/nodes/{node}/tasks/{upid}/status   → status=running|stopped, e
 
 `bwlimit` is in **KiB/s**. `delete=1` removes the source volume after a successful mirror; without it
 the old volume is left behind as an unreferenced volume and the reserve math will silently drift.
+
+### 3.6 Which disks can actually be moved online
+
+Enumerating every bus (§3.5) is necessary but not sufficient: the set of disks that *exist* is larger
+than the set that can be relocated while the VM is running, and the difference is load-bearing for
+both the capacity model and the affinity objective.
+
+| Config key | In `D` (movable)? | Why |
+|---|---|---|
+| `ide0-3`, `sata0-5`, `scsi0-30`, `virtio0-15` | **yes** | ordinary QEMU block devices; `move_disk` mirrors them online |
+| `efidisk0` | **no while running** — pinned | it is a QEMU pflash device, and online `drive-mirror` of `drive-efidisk0` is widely reported to fail or be cancelled. Movable only with the VM stopped |
+| `tpmstate0` | **no while running** — pinned | not a QEMU block device at all; `swtpm` owns the file. There is no online move path |
+| `unused0-N` | **yes**, with `ℓ_d = 0` | a real allocated volume detached from the VM. It occupies bytes and counts against the reserve, but generates no I/O |
+| anything with `media=cdrom` | no — not in `D`, counted in `Uˢᵉˣᵗ` | ISO mounts, empty drives, cloud-init volumes |
+
+**Verification status of the two "pinned" rows.** These come from consistent, repeated operator
+reports rather than from reading the PVE source, and they are the two rows most likely to change in a
+future release. Confirm them once against your own cluster — attempt an online `move_disk` of an
+`efidisk0` on a scratch VM — and record the result. `drs verify-storages` should offer this as an
+explicit opt-in probe rather than assuming. If a PVE version does support the online move, the fix is
+a single entry in the pinned-key set, and nothing else in the model changes: pinning is expressed
+purely as (C2) variable fixing.
+
+**Metrics coverage differs too.** `efidisk0` is a QEMU drive, so `blockstat` series exist for it and
+its (small) load is real. `tpmstate0` and `unused{N}` are not QEMU drives, so no series exists and
+`ℓ_d = 0` by the `min_coverage` rule of §3.4 — which is correct, not a gap: they genuinely generate
+no guest I/O. Do not let the missing-series path log these as metric errors; classify them as
+expected-absent so real coverage problems stay visible.
+
+**Pinned disks are modelled, not ignored.** `efidisk0` and `tpmstate0` enter the MILP as ordinary
+disks with `x_{d,σ₀(d)} = 1` fixed by (C2). This is deliberately *not* the same as excluding them:
+pinned or not, their bytes must count toward `Σ_d z_d·x_{d,s}` and toward `Z_s` in the reserve
+constraint (C5), and their load — a TPM state volume is idle, but an EFI var store is not always —
+must count toward `L_s`. Treating them as foreign volumes instead would work for capacity but would
+lose the fact that they belong to a VM whose other disks we are placing.
+
+**They are excluded from the affinity term by default.** `κ` (§5.4) counts a VM's spread over
+storages; if a 1 MiB immovable firmware volume counted, every VM with an `efidisk0` would be
+permanently "fragmented" the moment any data disk moved, and `κ` would veto good placements to keep
+2 TiB of data next to 1 MiB of NVRAM. So the `y_{v,s}` linking of (C3) ranges over **movable** disks
+only unless `objective.affinity_counts_pinned_disks` is set. Both behaviours are defensible; the
+default is the one that does not let a firmware volume dictate data placement.
+
+**Unused disks move only to repair the reserve, and that is correct.** They carry `ℓ_d = 0` — no
+series exists for a volume QEMU has not opened — so relocating one yields zero imbalance benefit
+while incurring the full `γ·z_d` byte penalty and the full payback cost of §7. The solver will
+therefore leave them alone until a capacity constraint forces the issue, which is exactly the desired
+policy. Set `exclude.include_unused_disks: false` to pin them instead; they then count via `Uˢᵉˣᵗ`.
+
+**Consequence to report, not to hide.** A running VM with an `efidisk0` on storage `a` can never be
+fully evacuated from `a` online. `drs explain` must say so per VM — *"101: cannot fully consolidate
+online, efidisk0 pinned on san-a (requires VM shutdown)"* — rather than emitting a plan that quietly
+leaves a stray volume behind. Draining a storage completely is therefore an operation that needs a
+maintenance window, and the tool's job is to make that visible up front.
+
+### 3.7 Disks with snapshots are excluded, loudly
+
+`move_disk` is issued with `delete=1` throughout (§3.5), and PVE refuses that combination on a volume
+that has snapshots — *"you can't move a disk with snapshots and delete the source"*. Even where a
+move is accepted, PVE does not carry the snapshots across: they are left behind or lost. Under PVE 9
+volume-chain snapshots the situation is worse, because a snapshot is a *separate full-size volume* on
+the source storage, so a "moved" disk would leave most of its bytes behind and the reserve arithmetic
+would silently drift.
+
+There is no safe automatic remedy. The two real options both belong to the operator: delete the
+snapshots (a data-retention decision the balancer must not make), or move the disk offline with the
+VM shut down (out of scope — this tool never stops a VM, §1). So the policy is **skip, and complain**:
+
+1. **Detect per volume, not per VM.** `GET /nodes/{node}/qemu/{vmid}/snapshot` is authoritative for
+   VM-level snapshots and pins *every* disk of that VM. Independently, cross-check
+   `/storage/{s}/content` for volumes owned by the VM that its current config does not reference:
+   under volume-chain storages those are chain members, and elsewhere they are orphans. Either way
+   the disk is unsafe to move. Do not rely on volume-name patterns — they are storage-specific.
+2. **Pin, do not drop.** As with `efidisk0`, an excluded disk stays in the model with
+   `x_{d,σ₀(d)} = 1` so its bytes and load remain accounted for.
+3. **Complain, every run, at WARN.** List each affected VM with its pinned bytes and pinned load,
+   and the group total of both. A one-line "3 VMs skipped" is not enough: the operator needs to know
+   *which* snapshots to clear to unblock balancing.
+4. **Say when the goal has become unreachable.** If pinned load exceeds
+   `report.warn_pinned_load_fraction` of a group's total (default 0.25), the residual imbalance may
+   be structural rather than a planning failure. Report the best achievable spread *given the pins*
+   alongside the actual one, so a stubborn 40% spread is attributable to snapshots rather than
+   looking like a broken solver.
+
+`exclude.skip_vms_with_snapshots` stays as a knob but its `false` setting does not make such moves
+work — it merely stops pre-filtering them, and PVE will reject them at the API. Keep it `true`; the
+pre-flight check of §9.3 runs regardless.
 
 ---
 
@@ -514,21 +631,32 @@ small:
 
 - `s` does not have `images` in its `content` list;
 - `s` is not shared, or is restricted to nodes that cannot see the VM;
-- `s` cannot hold the disk's format, or the disk is `efidisk`/`tpmstate`;
-- `d` or `v(d)` is excluded by config (`exclude.vmids`, `exclude.disks`, tags, `no-drs`);
+- `s` cannot hold the disk's format;
+- `d` is `efidisk0` or `tpmstate0` — **pin** `x_{d,σ₀(d)} = 1` rather than dropping `d` from `D`, so
+  its bytes and load stay in (C4)/(C5)/(C6); it cannot move while the VM runs (§3.6);
+- `d` or `v(d)` is excluded by config (`exclude.vmids`, `exclude.disks`, tags, `no-drs`) — also pin;
 - `σ₀(d)` belongs to **no** configured group — such a disk is unmanaged: it is not in any `D`, it is
   pinned where it is, and its bytes count toward `Uˢᵉˣᵗ` of its storage. Report it in `show-load` as
   "ungrouped, not managed" so an unintended omission from `groups` is visible rather than silent;
-- `d` has an existing snapshot chain and `exclude.skip_vms_with_snapshots` is set — in which case
-  additionally pin `x_{d,σ₀(d)} = 1`;
-- `d` is within its per-disk cooldown — also pin to current.
+- `d`, or any disk of `v(d)`, has a snapshot or an unreferenced companion volume on its storage
+  (§3.7) — pin `x_{d,σ₀(d)} = 1`. `move_disk delete=1` cannot move such a volume and would not carry
+  the snapshots if it could;
+- `d` is within its per-disk cooldown — also pin to current;
+- `v(d)` is currently `lock`ed (§9.3) — pin for this run. A lock is transient, so this is a
+  *planning-time* pin only and carries no cooldown; the next run re-evaluates it.
 
-**(C3) VM affinity linking.** Couple `y` to `x` in both directions so the objective term is exact:
+**(C3) VM affinity linking.** Couple `y` to `x` in both directions so the objective term is exact.
+Let `D^mov ⊆ D` be the disks that are not pinned by (C2):
 
 ```
-x_{d,s}  ≤  y_{v(d),s}                                 ∀ d ∈ D, s ∈ S
-y_{v,s}  ≤  Σ_{d : v(d)=v} x_{d,s}                     ∀ v ∈ V, s ∈ S
+x_{d,s}  ≤  y_{v(d),s}                                 ∀ d ∈ D^mov, s ∈ S
+y_{v,s}  ≤  Σ_{d ∈ D^mov : v(d)=v} x_{d,s}             ∀ v ∈ V, s ∈ S
 ```
+
+Ranging over `D^mov` rather than `D` keeps an immovable `efidisk0` or a snapshot-pinned volume from
+dictating where a VM's data disks may go (§3.6). Set `objective.affinity_counts_pinned_disks: true`
+to range over all of `D` instead, which is the right choice only if you intend the balancer to keep
+data next to firmware at the cost of worse balance.
 
 **(C4) Largest-disk linearization.** `Z_s = max{ z_d : x_{d,s}=1 }` is not linear, but because the
 reserve constraint pushes `Z_s` *down* while this pushes it *up*, a one-sided bound is exact at the
@@ -779,17 +907,38 @@ soft `γ` penalty, because a penalty can always be outweighed by a large enough 
 
 A `move_disk` on a running VM performs a QEMU `drive-mirror`: it reads the whole source volume and
 writes it to the target, then switches over. For thick provisioning the full provisioned size is
-transferred.
+transferred. But the mirror is only the first half of the operation — `delete=1` then removes the
+source volume, and on a storage with `saferemove` enabled that removal is a full-size **zeroing
+pass**, throttled and often far slower than the mirror it follows:
 
 ```
-duration_d  =  z_d / min(bwlimit, headroom_src, headroom_dst)
+duration_mirror_d = z_d / min(bwlimit, headroom_src, headroom_dst)
 
-cost_d      =  duration_d · (ω_src + ω_dst)
+duration_wipe_d   = z_d / saferemove_throughput(σ₀(d))     if saferemove is enabled there
+                  = 0                                       otherwise
+
+duration_d        = duration_mirror_d + duration_wipe_d
+
+cost_d            = duration_mirror_d · (ω_src + ω_dst)  +  duration_wipe_d · ω_src
 ```
 
 `ω_src` and `ω_dst` (default 1.0 each) are the added in-flight I/O on source and target — a mirror is
 one sequential reader plus one sequential writer, so 1.0 each is the natural unit and is directly
-comparable to `ℓ`, which is measured in the same units. `cost_d` is therefore in **load-seconds**.
+comparable to `ℓ`, which is measured in the same units (§4). `cost_d` is therefore in
+**load-seconds**. The wipe is charged to the source only, because it is a sequential write over the
+old volume with nothing happening on the target.
+
+**Why the wipe term is not a rounding detail.** PVE's LVM `saferemove` ("Wipe Removed Volumes" in the
+UI) defaults to a throughput of **10 MiB/s**. At that rate the 1.5 TiB disk of the §14 example takes
+about **44 hours** to wipe, against roughly 2.2 hours to mirror it at 200 MiB/s — the cleanup is
+twenty times the move. A cost model that stops at the mirror understates such a migration by that
+factor and will happily schedule a plan that occupies the source array for two days.
+
+Read `saferemove` and `saferemove_throughput` from `GET /storage/{id}` per storage; never assume.
+`migration.account_saferemove_wipe: false` disables the term for an operator who has verified their
+storages do not wipe, but the default is to account for it. Note the knock-on effects, all covered in
+§9.3: the wipe also determines when the source's space is actually released, and it holds a
+storage-level lock while it runs.
 
 ### 7.2 Benefit
 
@@ -939,7 +1088,8 @@ while pending:
 
     m ← argmax over feasible of  (imbalance reduction) / cost_m
     order.append(m)
-    state ← apply(state, m)          # source freed, target charged
+    state ← apply(state, m)          # target charged immediately; the source is charged
+                                     # until its volume is observed gone (see below)
 ```
 
 Ordering by **imbalance reduction per unit cost** means the plan front-loads its value: if the
@@ -948,6 +1098,27 @@ run. Two exceptions take priority and are scheduled first regardless of ratio:
 
 1. moves that resolve a storage currently violating (C5);
 2. moves that *free* space on a storage which some later move needs.
+
+**The source is not freed when the task succeeds.** `apply(state, m)` must not optimistically credit
+the source with `z_d` bytes back. With `saferemove` on the source storage the old volume still exists
+— fully allocated — for the whole duration of the zeroing pass (§7.1), which can be far longer than
+the move itself. A move therefore leaves the in-flight set `M` in two stages:
+
+```
+mirroring  →  draining  →  done
+
+mirroring:  target charged z_d, source still charged z_d   (the drive-mirror window of §8.1)
+draining:   target charged z_d, source still charged z_d   (the move_disk task has reported OK,
+                                                            but the source volume is still there)
+done:       source volume absent from /storage/{a}/content
+```
+
+For the generalized transient invariant of §8.1 the *source-side* accounting of `mirroring` and
+`draining` is identical, so keep a move in `M` until it reaches `done` and the invariant needs no
+change at all. What does change is that ordering rule 2 — "moves that free space a later move needs"
+— cannot be satisfied within a run when the source wipes slowly. The scheduler must therefore treat a
+predicted free-space release as **unrealised until observed**, and a plan whose feasibility depends on
+one is split rather than executed on faith (§8.3, option 2).
 
 ### 8.3 Deadlock and staging
 
@@ -989,8 +1160,11 @@ POST /nodes/{node}/qemu/{vmid}/move_disk
      disk={device} storage={target} delete=1 bwlimit={KiB/s}
   → UPID
 poll GET /nodes/{node}/tasks/{upid}/status every execution.poll_interval_seconds
-  until status == "stopped"; success ⟺ exitstatus == "OK"
+  until status == "stopped"; task success ⟺ exitstatus == "OK"
 ```
+
+Task success is **not** the completion criterion — see §9.3. The move is done only once the source
+volume has actually disappeared and the VM's lock has cleared.
 
 `bwlimit` is **KiB/s** in the API, while `migration.bwlimit_bytes_per_sec` is bytes/s; convert at the
 call site and nowhere else.
@@ -1006,9 +1180,13 @@ Before **every** move, re-read the live state rather than trusting the plan:
    Dynamic Load Balancer (§1), changing `{node}`;
 2. re-fetch `/nodes/{node}/storage/{target}/status` and re-check the transient invariant against
    *actual* current free space;
-3. confirm the VM is still running and untagged for exclusion.
+3. confirm the VM is still running and untagged for exclusion;
+4. confirm `config.lock` is empty — if not, wait per §9.3 rather than failing;
+5. confirm no snapshot has appeared for the VM since planning (§3.7); if one has, drop the move and
+   re-plan — `delete=1` would be rejected by PVE anyway.
 
-These re-reads bypass the per-run topology cache (§3.5) for this VM and this storage only.
+These re-reads bypass the per-run topology cache (§3.5) for this VM and this storage only. Steps 4
+and 5 are cheap: both come from the same `/qemu/{vmid}/config` response as step 1.
 
 **Re-plan protocol.** A mismatch is a *normal* outcome in a live cluster, not an error, and must not
 be allowed to loop:
@@ -1025,7 +1203,75 @@ be allowed to loop:
 5. In `auto` mode, a re-plan inherits the remaining time window; if too little remains for the
    cheapest queued move, stop cleanly rather than starting one that cannot finish.
 
-### 9.3 Failure handling
+### 9.3 Locks, and why a completed move is not a finished move
+
+Two distinct mechanisms can make a VM untouchable, and the engine must handle both. Neither is an
+error condition — both are ordinary states in a working cluster — so the response to both is to
+**wait**, not to fail.
+
+**1. The VM config lock.** PVE writes a `lock:` line into the VM config for any operation that must
+not be interrupted. Its documented values are `backup`, `clone`, `create`, `migrate`, `rollback`,
+`snapshot`, `snapshot-delete`, `suspending` and `suspended`. Any of them makes `move_disk` fail with
+*"VM is locked"*.
+
+```
+before issuing move_disk for VM v:
+    lock ← config(v).lock                     # /qemu/{vmid}/config, or /status/current
+    while lock is set:
+        if waited > execution.locks.wait_timeout:  → apply execution.locks.on_timeout
+        sleep execution.locks.poll_interval
+        re-read lock
+```
+
+Treat the value set as **open-ended**. Never whitelist "harmless" locks and proceed anyway: a future
+PVE version may add a value, and the failure mode of guessing wrong is a half-completed operation on
+someone else's backup. Any non-empty `lock` means wait. Log which lock was seen and for how long —
+a VM stuck in `backup` for six hours is something the operator wants to know about, and it is the
+main reason the wait timeout is measured in hours rather than minutes.
+
+The pre-flight check is also a *planning*-time input: a VM locked when the run starts is pinned by
+(C2) for that run, so the solver does not build a plan around a disk it cannot touch. The check here
+is the second line of defence, because a lock can appear between planning and execution.
+
+**2. The post-move wipe — the one that is easy to miss.** When `move_disk delete=1` completes and
+the task reports `exitstatus: OK`, the migration is *not* over on a storage with `saferemove`
+enabled. PVE then zeroes the old volume at `saferemove_throughput` (default **10 MiB/s**, §7.1),
+which for a large disk runs for hours or days. During that window:
+
+- the source volume still exists and its space is **not** reclaimed — §8.2's `draining` state;
+- the operation holds a storage-level lock, so other volume operations on that storage queue behind
+  it, and a subsequent `move_disk` touching the same VM or storage can fail even though *our* move
+  finished cleanly;
+- the task list shows nothing running, so a naive "poll until the UPID stops" loop concludes the
+  move is done and immediately issues the next one — straight into the lock.
+
+This is why the executor's completion criterion is deliberately stronger than task success:
+
+```
+move m from a to b is DONE  ⟺  task(upid) exitstatus == OK
+                            ∧  volume(m) absent from GET /storage/{a}/content
+                            ∧  config(vmid(m)).lock is empty
+```
+
+Poll all three at `execution.poll_interval_seconds`, bounded by
+`execution.source_release.timeout` (default **48h**, sized for a multi-TiB wipe at 10 MiB/s). On
+timeout, do not fail the run: mark the storage `draining`, exclude it as both source and target for
+the remainder of the run, report it, and let the next run re-evaluate from observed reality. Set
+`execution.source_release.wait: false` only on storages verified not to wipe — with
+`saferemove` off, the volume disappears immediately and this condition costs one extra API call.
+
+**Sizing the knobs against each other.** With saferemove at its default throughput, one move can
+occupy its source storage for far longer than a whole planning cycle. Two consequences the
+implementer should not have to rediscover:
+
+- `gates.cooldown_per_storage` must exceed the expected wipe time for that storage's largest disk,
+  or the next run will plan moves onto a storage that is still draining and stall in `9.3`'s wait
+  loop. `drs verify-storages` computes `z_max / saferemove_throughput` per storage and warns when
+  the configured cooldown is shorter, or when it exceeds `migration.max_single_move_duration`.
+- Keep `execution.max_concurrent_per_storage: 1`. Two moves off the same source mean two concurrent
+  wipes sharing one throttle, so both take twice as long while both sources stay fully allocated.
+
+### 9.4 Failure handling
 
 `move_disk` is atomic from the caller's perspective: on failure QEMU cancels the mirror and the source
 volume remains authoritative, so there is nothing to roll back. The realistic hazards are:
@@ -1039,7 +1285,7 @@ volume remains authoritative, so there is nothing to roll back. The realistic ha
 - **Task supervision loss.** If the engine dies mid-move, the PVE task continues. On startup, check
   for running `move_disk` UPIDs owned by the DRS user before planning anything.
 
-### 9.4 Output
+### 9.5 Output
 
 Every mode emits the same machine-readable plan (JSON) plus a human summary. The example below
 is the section 14 fixture at `beta_move_count: 0.5` (the two-move variant):
@@ -1055,7 +1301,16 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
 
   after: san-a u=3.00  san-b u=1.70  san-c u=2.70   spread 53% (from 255%)
   payback: benefit 3.95e6 load·s vs cost 2.62e4 load·s → ratio 151 (need 10) ✓
+
+  pinned (not movable this run):
+    106  snapshots present (2)      1.0 TiB  ℓ 0.9  on san-a  → clear snapshots to unblock
+    101  efidisk0 pinned on san-a   1 MiB    ℓ 0.0            → requires VM shutdown
+    107  locked: backup             0.5 TiB  ℓ 0.3  on san-b  → waited 0s, re-check next run
+  pinned load 1.2 of 8.6 (14%, warn at 25%);  best achievable spread given pins: 44.6%
 ```
+
+The pinned block is not optional decoration — it is the "complain" half of the skip-and-complain
+policy of §3.7, and it is the only place an operator learns which snapshots to clear.
 
 ---
 
@@ -1168,6 +1423,10 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `saturation_ceiling ∈ (0,1]` | A fraction of `saturation_load`, not of `capability_weight` |
 | `saturation_load > 0` where set; warn once per run for each storage where it is unset | §7.3's guard is silently inactive without it |
 | `max_concurrent_* ≥ 1` | Zero would deadlock the scheduler |
+| `execution.locks.wait_timeout > 0`, `on_timeout ∈ {skip, abort}` | A zero timeout turns every ordinary backup window into a failed run |
+| `execution.source_release.timeout ≥ z_max / saferemove_throughput` for every storage where saferemove is on | Otherwise every large move times out into `draining` (§9.3) |
+| `gates.cooldown_per_storage ≥ z_max / saferemove_throughput` (warn, not error) | The next run would plan onto a still-draining storage |
+| `report.warn_pinned_load_fraction ∈ (0,1]` | A ratio |
 | Time windows: `start ≠ end`; crossing midnight allowed and explicit | Ambiguity here silently disables `auto` |
 | `execution.mode ∈ {dry-run, confirm, auto}` | Typo must not silently fall back to acting |
 
@@ -1212,12 +1471,12 @@ Each phase is independently testable and useful on its own.
 | # | Phase | Done when |
 |---|---|---|
 | 1 | `config.py`, `metrics.py`, `drs verify-metrics` | Real metric/label names confirmed against the live Prometheus; per-disk load printed |
-| 2 | `pve.py`, `topology.py` | `drs show-load` prints every storage with its disks, sizes, loads and reserve status |
+| 2 | `pve.py`, `topology.py` | `drs show-load` prints every storage with its disks (all buses), sizes, loads and reserve status; pinned disks flagged with their reason; `drs verify-storages` reports saferemove and implied wipe times |
 | 3 | `loadmodel.py` + gates | Correct act/no-act decision per group, with the reasoning shown |
 | 4 | `heuristic.py` + `schedule.py` | End-to-end plan in `dry-run`, ordered and transient-feasible; reproduces `expected_order` and `expected_final_reserve` in the §14 fixture |
 | 5 | `payback.py` | Plans rejected/trimmed on cost grounds, arithmetic shown |
 | 6 | `optimize.py` (MILP) | Matches or beats the heuristic on the §14 fixture; CP-SAT and CBC agree on every `β` case, and the §5.5 coefficient assertions pass |
-| 7 | `execute.py` | `confirm` mode against a lab cluster |
+| 7 | `execute.py` | `confirm` mode against a lab cluster, including a VM locked mid-run and a source storage with `saferemove` on — the run must wait, not fail |
 | 8 | `auto` mode + time windows | Unattended operation |
 | 9 | `forecast.py` beyond p95 | Seasonal-naive validated by backtest |
 
@@ -1233,7 +1492,14 @@ production fallback for large groups. Do not start with the solver.
 | Metric gap / disk below `min_coverage` | Use last known load from state; flag in output; never treat as zero |
 | Counter reset (VM reboot, node migration) | Handled by `rate()`; `sum by (vmid, device)` collapses node labels |
 | VM live-migrated between nodes mid-plan | Re-fetch node before each move (§9.2); mismatch → abort move, re-plan |
-| Disk has an existing snapshot chain | Excluded and pinned by default (`skip_vms_with_snapshots`) |
+| Disk has an existing snapshot chain | Pinned, load and bytes still counted, reported at WARN every run with the pinned load/bytes per VM (§3.7). `move_disk delete=1` is rejected by PVE on such volumes and would not carry the snapshots anyway |
+| Snapshot created between planning and execution | Re-checked immediately before every move (§9.2 step 5); the move is dropped and the plan re-planned |
+| VM has `efidisk0` / `tpmstate0` | Pinned — no online move path exists — but modelled in (C4)/(C5)/(C6) so capacity and reserve stay correct. Excluded from the `κ` affinity term by default so 1 MiB of NVRAM cannot pin 2 TiB of data (§3.6) |
+| VM has disks on `ide`/`sata`/`virtio`, not just `scsi` | Full bus regex in §3.5; enumerating only `scsi*` silently mis-accounts capacity |
+| `unused{N}` volumes | Movable with `ℓ_d = 0`, so the solver relocates them only to repair a reserve violation — the intended policy |
+| VM is `lock`ed (backup, snapshot, migrate, …) | Pinned at planning time, waited for at execution time up to `execution.locks.wait_timeout`; the lock value set is treated as open-ended and never whitelisted (§9.3) |
+| Source space not reclaimed after a successful move | `saferemove` zeroes the old volume at ~10 MiB/s; the move stays in the `draining` state and keeps charging the source until the volume is observed gone (§8.2, §9.3) |
+| Next move blocked by the previous move's wipe | Completion requires task OK **and** source volume absent **and** lock clear; `cooldown_per_storage` validated against the wipe time (§9.3) |
 | Thin provisioning | `assume_thick_provisioning: false` uses allocated size from `/content`; note allocation can *grow* during a move |
 | Foreign volumes on a storage | Counted via `count_foreign_volumes`; otherwise the reserve silently overstates free space |
 | Orphaned target volume after a failure | Detected and reported, never auto-deleted (§9.3) |
@@ -1350,7 +1616,8 @@ move 3 → san-b:  used 2.5 + 0.5 = 3.0,  max(Z_b, 0.5) = 1.0,  3.0 + 2.0 = 5.0 
 
 ### 14.5 Payback
 
-At `bwlimit = 200 MiB/s`, `ω_src = ω_dst = 1.0`, `H = 7d = 604800 s`, `λ = 10`, for the two-move plan:
+At `bwlimit = 200 MiB/s`, `ω_src = ω_dst = 1.0`, `H = 7d = 604800 s`, `λ = 10`, and **`saferemove`
+off on all three storages** so `duration_wipe_d = 0` (§7.1), for the two-move plan:
 
 | Move | Size | Duration | `cost = 2 × duration` |
 |---|---|---|---|
@@ -1423,7 +1690,14 @@ bug waiting to happen; this table is the audit.
 | `migration.bwlimit_bytes_per_sec` | §7.1 `duration_d`; converted to KiB/s at the API call |
 | `migration.source/target_load_weight` | §7.1 `ω_src`, `ω_dst` |
 | `migration.payback_horizon` / `payback_ratio` | §7.2, §7.3 acceptance test |
-| `migration.max_single_move_duration` | §7.3 hard per-move rule |
+| `migration.max_single_move_duration` | §7.3 hard per-move rule; compared against `duration_d` *including* the wipe |
+| `migration.account_saferemove_wipe` | §7.1 `duration_wipe_d` |
+| `execution.locks.*` | §9.3 lock wait loop; §5.3 (C2) planning-time pin |
+| `execution.source_release.*` | §9.3 completion criterion; §8.2 `draining` state |
+| `exclude.include_unused_disks` | §3.6 membership of `D` |
+| `exclude.skip_vms_with_snapshots` | §3.7, §5.3 (C2) pinning |
+| `objective.affinity_counts_pinned_disks` | §5.3 (C3) range of `D^mov` |
+| `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
 | `migration.saturation_ceiling` | §7.3 `L_during(s) ≤ saturation_ceiling · N_s` |
 | `groups[].storages[].saturation_load` | §7.3 `N_s`; guard skipped when unset |
 | `objective.alpha_spread/beta_move_count/gamma_move_bytes/kappa_vm_affinity` | §5.4 |
