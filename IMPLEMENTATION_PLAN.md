@@ -1455,6 +1455,49 @@ seasonal model is a statement that the history exists to support it.
 
 ## 11. Configuration
 
+**Where it lives: `/etc/pve/drs.yaml`.** That path is on pmxcfs, the cluster filesystem, so the
+file is replicated to every node automatically: one edit, one config, no per-node drift, and no
+question about which copy is authoritative. It is also an ordinary path, so a management host that
+is not a cluster member can simply provide it at the same location and every command, example and
+manpage stays true on both kinds of host.
+
+**Resolution order**, first match wins:
+
+| # | Source | On failure |
+|---|---|---|
+| 1 | `--config PATH` (`-c`) | Error and exit non-zero |
+| 2 | `$PVE_DRS_CONFIG` | Error and exit non-zero |
+| 3 | `/etc/pve/drs.yaml` | Error naming the path and pointing at the shipped example |
+
+An **explicitly requested** config that is missing, unreadable or invalid is a hard failure. Never
+fall through to the default: a run that silently balanced a production cluster from a different file
+than the operator named is the worst outcome in this document. Every run logs the resolved path and
+the SHA-256 of the file it actually read, in the first line of output and in the JSON report.
+
+Three consequences of living on pmxcfs, all of which the implementation must respect:
+
+1. **An edit is cluster-wide and immediate.** There is no staging step and no per-node rollout. A
+   typo is live everywhere the moment it is saved, which is why §11.1's validation is a hard failure
+   rather than a warning and why `dry-run` is the default mode.
+2. **Do not put the state file there.** `state.json` is written on every run; pmxcfs is a small,
+   quorum-gated, cluster-replicated store meant for configuration. Reads do not need quorum, so a
+   node that has lost quorum can still read its config and plan, but writes do — keep `state.path`
+   on local disk (§11.2).
+3. **Treat the file as readable by the web server.** Files under `/etc/pve` carry group ownership
+   `www-data` by default, which puts a plaintext `password:` within reach of anything running as
+   the PVE web server. Prefer an API token restricted to the privileges of §3.5, and keep the
+   secret out of the file entirely using `PVE_PASSWORD` / `PVE_TOKEN_SECRET` from the environment
+   or a systemd credential. **Verify the ownership and mode on the target cluster** (`ls -l
+   /etc/pve/drs.yaml`) before storing any secret in it — this document does not assume it.
+
+**A shared config does not make the tool cluster-aware.** The obvious next step after putting the
+config on pmxcfs is to enable the systemd timer on every node, and that is wrong: `state.json` is
+node-local, so each node keeps its own lock, its own cooldowns and its own drift baseline, and the
+`fcntl` lock of §11.2 cannot see the other nodes at all. What does cross the cluster is the startup
+scan for in-flight `move_disk` UPIDs owned by the DRS user (§13) — it is the only reason two
+concurrent instances degrade to "slow and redundant" instead of "conflicting". **Run the timer on
+exactly one host.**
+
 See [`config/drs.example.yaml`](config/drs.example.yaml) for the fully annotated reference. The
 requirement-to-setting mapping:
 
@@ -1538,6 +1581,26 @@ The only persistent state. Small, versioned, and written atomically (temp file +
 - Losing this file is safe but not free: cooldowns and drift history reset, so the next run may
   migrate sooner than intended. Treat it as state to back up, not as a cache.
 
+### 11.3 Global command-line options
+
+Accepted before the subcommand, and shown by `pve-drs --help` with their defaults:
+
+| Option | Default | Effect |
+|---|---|---|
+| `-c`, `--config PATH` | `/etc/pve/drs.yaml` | Read the configuration from `PATH`. Missing or invalid is a hard failure (§11) |
+| `--group NAME` | all groups | Restrict the run to one group; repeatable. Groups are independent (§5), so this changes nothing about the result for the groups selected |
+| `--mode {dry-run,confirm,auto}` | `execution.mode` | Override the execution mode for this run only |
+| `--json` | off | Emit the machine-readable report of §9.5 instead of the human one |
+| `-v`, `--quiet` | normal | Log level; `--quiet` leaves only warnings and errors, for the timer |
+| `--version` | — | Version, then exit |
+| `--manual` | — | Show `pve-drs(1)` (§8.5 of `AGENTS.md`) |
+
+Two rules the implementation must honour. `--mode` may make a run *safer* without ceremony, but
+`--mode auto` on a config that says `dry-run` is an operator deliberately overriding their own
+safety setting: log it at warning level, naming both values. And no option may set a value that
+`config.py` would have rejected in the file — the command line goes through the same validation
+(§11.1), because a knob that is only checked on one of its two paths is a knob that is not checked.
+
 ---
 
 ## 12. Implementation phases
@@ -1580,7 +1643,8 @@ production fallback for large groups. Do not start with the solver.
 | Foreign volumes on a storage | Counted via `count_foreign_volumes`; otherwise the reserve silently overstates free space |
 | Orphaned target volume after a failure | Detected and reported, never auto-deleted (§9.3) |
 | Storage already violating the reserve | Soft slack `r_s` keeps the model feasible; violation bypasses gates and is scheduled first |
-| Two DRS instances running | Advisory lock in `state.json` plus a startup scan for in-flight `move_disk` UPIDs owned by the DRS user |
+| Two DRS instances running | Advisory lock in `state.json` plus a startup scan for in-flight `move_disk` UPIDs owned by the DRS user. The lock is node-local; only the UPID scan crosses the cluster (§11) |
+| Config edited mid-run, cluster-wide | The config is read once at startup and never re-read; the resolved path and its SHA-256 are logged, so a plan can be traced to the exact file that produced it |
 | Solver infeasible or timing out | Fall back to the heuristic; never emit a partial/unvalidated assignment |
 | `bwlimit` misunderstood | It is **KiB/s** in the API; config is bytes/s and must be converted |
 | PVE Dynamic Load Balancer moves a VM mid-plan | Node re-fetched before every move (§9.2); mismatch triggers a bounded re-plan |

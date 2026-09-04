@@ -57,7 +57,25 @@ The run warns every time, naming the VMs.
 entries are excluded. A regex that only matches `scsi\d+` will silently leave volumes behind and
 make "evacuate this LUN" a lie.
 
-## 9. Do not state Proxmox behaviour you have not verified
+## 9. The config lives on the cluster filesystem (§11)
+
+The default is `/etc/pve/drs.yaml`, overridable with `-c/--config` or `$PVE_DRS_CONFIG`; an
+explicitly named config that cannot be read is a hard failure and never falls back to the default.
+Three things follow, and none of them are optional:
+
+- **Never write to it.** It is input. Nothing the tool learns goes back into `/etc/pve` — state
+  belongs in `state.path` on local disk, which is also the only place that survives a quorum loss.
+- **Assume the web server can read it.** `/etc/pve` files are group `www-data`. Secrets belong in
+  the environment (`PVE_PASSWORD`, `PVE_TOKEN_SECRET`), not in the file, and an API token beats a
+  password.
+- **A shared config is not cluster coordination.** `state.json` is node-local; the `fcntl` lock
+  cannot see another node. Only the in-flight UPID scan crosses the cluster. The timer runs on one
+  host.
+
+An edit to this file is live on every node the instant it is saved, which is the reason §11.1
+validation errors are fatal rather than advisory.
+
+## 10. Do not state Proxmox behaviour you have not verified
 
 This has bitten the project twice. Both times the mechanism was the same: a web search returned
 PVE 6.x/7.x-era forum threads, undated, and the summary was written into the plan as a current
@@ -73,7 +91,7 @@ text**. If a fetch of the source truncates, retry narrower — do not silently s
 anecdote. `pve-drs verify-metrics` and `pve-drs verify-storages` exist precisely so claims about the live
 system are checked rather than assumed.
 
-## 10. The plan is the specification
+## 11. The plan is the specification
 
 `IMPLEMENTATION_PLAN.md` §15 is a traceability table from the original requirements to the
 sections that satisfy them, and §15.1 maps every config knob to the formula that consumes it.
