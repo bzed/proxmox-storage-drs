@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Debian's Salsa CI pipeline: builds the package with sbuild and then runs
+# lintian, piuparts and the autopkgtests against it. Set the project's CI
+# configuration path to debian/.gitlab-ci.yml.
+include:
+ - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/salsa-ci.yml
+ - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/pipeline-jobs.yml
+
+variables:
+ # Proxmox VE 9.x is built on trixie; nothing else is a meaningful target.
+ RELEASE: 'trixie'
+
+ # What we want run, and why.
+ SALSA_CI_DISABLE_AUTOPKGTEST: 0   # the point of debian/tests: does it run once installed
+ SALSA_CI_DISABLE_LINTIAN: 0
+ SALSA_CI_DISABLE_PIUPARTS: 0      # install, upgrade and purge must be clean
+ SALSA_CI_DISABLE_REPROTEST: 0     # the package is arch:all Python; it should reproduce
+ SALSA_CI_DISABLE_BLHC: 1          # nothing is compiled, so there are no hardening flags
+ SALSA_CI_DISABLE_APTLY: 1
+ SALSA_CI_DISABLE_BUILD_PACKAGE_ANY: 1   # arch:all only
+ SALSA_CI_DISABLE_BUILD_PACKAGE_ALL: 0
+
+ # sbuild runs in an unshare chroot, where the default is already no network
+ # access -- and that is what we want: every dependency has to come from
+ # trixie. If a Python module ever has to be fetched during the build, set
+ # this to "--enable-network"; see .agents/packaging.md before you do,
+ # because vendoring it into the source package is usually the better answer.
+ SALSA_CI_SBUILD_ARGS: ''
+ # SALSA_CI_SBUILD_ARGS: '--enable-network'

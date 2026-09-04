@@ -62,6 +62,22 @@ manpage, all generated from Markdown in `docs/`, plus a `--help` that carries ev
 default. [`AGENTS.md`](AGENTS.md) section 8 and
 [`.agents/documentation.md`](.agents/documentation.md) specify what that means in practice.
 
+## Packaging
+
+The tool is delivered as the Debian package `pve-drs`, built from `debian/` in this repository and
+targeting **Debian trixie**, the base of Proxmox VE 9.x. Dependencies are chosen for being packaged
+in trixie, so the package installs on a management host with no outbound network; `debian/tests`
+installs the built package on a system carrying only its `Depends` and proves the command runs.
+
+```sh
+make deb      # local build; CI builds it in a debian:trixie container and with sbuild
+```
+
+Two pipelines: GitHub Actions runs lint, types, tests and coverage in `debian:trixie` with the
+Debian-packaged toolchain, builds the package and installs it; GitLab CI (`debian/.gitlab-ci.yml`)
+runs Debian's Salsa pipeline — sbuild without network, then lintian, piuparts, reprotest and
+autopkgtest. [`.agents/packaging.md`](.agents/packaging.md) explains both.
+
 ## Contributing
 
 [`AGENTS.md`](AGENTS.md) is the working agreement for this repository — for humans and for
@@ -73,8 +89,11 @@ documentation the project owes its users, and the domain rules that must not be 
 ```sh
 make venv     # bootstrap .venv with the dev tooling
 make check    # format, lint, types, tests, coverage, fixture and PDF freshness
-make pdf      # re-render docs/IMPLEMENTATION_PLAN.pdf after editing the plan
+make docs     # re-render the PDF and the manpage after editing them
 ```
+
+`make SYSTEM_TOOLS=1 <target>` runs the same targets against tools already on `PATH` instead of
+`.venv`, which is how CI and the Debian build run them.
 
 ## Licence
 

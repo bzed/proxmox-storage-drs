@@ -27,3 +27,16 @@ config/*.local.yaml
 
 # Claude Code local settings
 .claude/
+
+# Generated manpage (built by "make man" and by debian/rules)
+man/pve-drs.1
+
+# Debian build artefacts
+debian/.debhelper/
+debian/files
+debian/pve-drs/
+debian/pve-drs.debhelper.log
+debian/pve-drs.substvars
+debian/debhelper-build-stamp
+debian/*-build-deps_*
+.pybuild/

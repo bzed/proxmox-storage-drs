@@ -1,0 +1,10 @@
+pve-drs (0.0.1) UNRELEASED; urgency=medium
+
+  * Initial packaging: binary package pve-drs, the documentation, the example
+    configuration and an autopkgtest that proves the installed command runs
+    with only its declared dependencies.
+  * Not yet buildable: the specification is complete but src/ is not, so
+    dpkg-buildpackage has no Python package to install. The first commit that
+    adds code makes this build.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Fri, 04 Sep 2026 23:30:47 +0200

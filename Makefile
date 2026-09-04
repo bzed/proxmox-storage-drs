@@ -4,7 +4,23 @@
 # `make check` is what you run before every commit and what CI runs.
 # See AGENTS.md section 2.
 
+# SYSTEM_TOOLS=1 runs everything with the tools already on PATH instead of a
+# virtualenv. That is how CI and the Debian build run: the point of this
+# project's dependency policy is that Debian's packaged modules are enough, and
+# a `pip install` in CI would hide the day the policy stopped being true.
+ifeq ($(SYSTEM_TOOLS),1)
+VENV    :=
+VENVDEP :=
+PY      := python3
+PIP     := :
+BLACK   := black
+ISORT   := isort
+FLAKE8  := flake8
+MYPY    := mypy
+PYTEST  := python3 -m pytest
+else
 VENV    := .venv
+VENVDEP := venv
 PY      := $(VENV)/bin/python
 PIP     := $(VENV)/bin/pip
 BLACK   := $(VENV)/bin/black
@@ -12,6 +28,7 @@ ISORT   := $(VENV)/bin/isort
 FLAKE8  := $(VENV)/bin/flake8
 MYPY    := $(VENV)/bin/mypy
 PYTEST  := $(VENV)/bin/pytest
+endif
 
 # `src` does not exist yet at the design stage; wildcard keeps the targets usable
 # until it does, and picks it up automatically once it is created.
@@ -30,7 +47,10 @@ help:
 	@echo "cov        pytest with an HTML coverage report in htmlcov/"
 	@echo "fixtures   assert tests/fixtures/*.expected.json are current"
 	@echo "pdf        render IMPLEMENTATION_PLAN.md to docs/IMPLEMENTATION_PLAN.pdf"
-	@echo "pdf-check  assert the committed PDF matches IMPLEMENTATION_PLAN.md"
+	@echo "man        render man/pve-drs.1.md to man/pve-drs.1"
+	@echo "docs       pdf + man"
+	@echo "docs-check assert every generated document matches its Markdown"
+	@echo "deb        build the Debian package with dpkg-buildpackage"
 	@echo "check      fmt-check + lint + typecheck + test + fixtures + pdf-check"
 
 $(VENV)/bin/activate:
@@ -40,40 +60,40 @@ $(VENV)/bin/activate:
 
 venv: $(VENV)/bin/activate
 
-install: venv
+install: $(VENVDEP)
 	$(PIP) install -e ".[dev]"
 
-fmt: venv
+fmt: $(VENVDEP)
 	$(ISORT) $(SOURCES)
 	$(BLACK) $(SOURCES)
 
-fmt-check: venv
+fmt-check: $(VENVDEP)
 	$(ISORT) --check-only --diff $(SOURCES)
 	$(BLACK) --check --diff $(SOURCES)
 
-lint: venv
+lint: $(VENVDEP)
 	$(FLAKE8) $(SOURCES)
 
-typecheck: venv
+typecheck: $(VENVDEP)
 	$(MYPY) $(SOURCES)
 
 # There are no tests yet: the repository is still at the design stage and
 # IMPLEMENTATION_PLAN.md is the deliverable. Skip pytest until the first test
 # file exists, so `make check` stays usable; from the first test onwards the
 # 85 % floor in pyproject.toml applies with no escape hatch.
-test: venv
+test: $(VENVDEP)
 	@if [ -z "$$(find tests -name 'test_*.py' -print -quit 2>/dev/null)" ]; then \
 		echo "NOTE: no test_*.py under tests/ yet (design stage); skipping pytest"; \
 	else $(PYTEST); fi
 
-cov: venv
+cov: $(VENVDEP)
 	$(PYTEST) --cov-report=html
 	@echo "open htmlcov/index.html"
 
 fixtures:
 	python3 tests/fixtures/generate_expected.py --check
 
-check: fmt-check lint typecheck test fixtures pdf-check
+check: fmt-check lint typecheck test fixtures docs-check
 	@echo "check: OK"
 
 clean:
@@ -91,11 +111,12 @@ clean:
 PLAN       := IMPLEMENTATION_PLAN.md
 PAPER      := docs/IMPLEMENTATION_PLAN.pdf
 PAPER_SRC  := docs/paper
-PAPER_DEPS := $(PAPER_SRC)/header.tex $(PAPER_SRC)/filters.lua $(PAPER_SRC)/metadata.yaml
+PAPER_DEPS := $(PAPER_SRC)/header.tex $(PAPER_SRC)/filters.lua $(PAPER_SRC)/metadata.yaml \
+              Makefile tools/check_paper_log.py
 STAMP      := docs/IMPLEMENTATION_PLAN.pdf.sha256
 BUILDDIR   := docs/.build
 
-.PHONY: pdf pdf-check
+.PHONY: pdf pdf-check man man-check docs docs-check deb
 
 pdf: $(PAPER)
 
@@ -118,7 +139,7 @@ $(PAPER): $(PLAN) $(PAPER_DEPS)
 	   --include-in-header=$(PAPER_SRC)/header.tex \
 	   --include-in-header=$(BUILDDIR)/revision.tex \
 	   --toc --toc-depth=4 \
-	   --syntax-highlighting=tango \
+	   --highlight-style=tango \
 	   -M date="$$date" \
 	   --standalone -o $(BUILDDIR)/plan.tex; \
 	 cd $(BUILDDIR) && SOURCE_DATE_EPOCH=$$epoch FORCE_SOURCE_DATE=1 \
@@ -145,3 +166,41 @@ pdf-check:
 			echo "      install them and run 'make pdf' before committing the plan."; \
 		fi; \
 	fi
+
+MANPAGE  := man/pve-drs.1
+MAN_SRC  := man/pve-drs.1.md
+VERSION  := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+
+docs: pdf man
+docs-check: pdf-check man-check
+
+# Unlike the PDF the manpage is not committed: nobody reads roff outside a
+# checkout, and debian/rules builds it during the package build.
+man: $(MANPAGE)
+
+$(MANPAGE): $(MAN_SRC) pyproject.toml
+	@command -v pandoc >/dev/null || { echo "pandoc is not installed"; exit 1; }
+	@date=$$(git log -1 --format=%cs -- $(MAN_SRC) 2>/dev/null); \
+	 [ -n "$$date" ] || date=$$(date -u +%F); \
+	 sed -e 's/@VERSION@/$(VERSION)/' -e "s/@DATE@/$$date/" $(MAN_SRC) \
+	   | pandoc --standalone --from=markdown --to=man --output=$(MANPAGE)
+	@echo "man: $(MANPAGE) (version $(VERSION))"
+
+man-check:
+	@if command -v pandoc >/dev/null; then \
+		$(MAKE) --no-print-directory $(MANPAGE) >/dev/null; \
+		grep -q '^\.TH ' $(MANPAGE) \
+		  || { echo "man-check: $(MANPAGE) has no .TH header"; exit 1; }; \
+		if grep -q '@VERSION@\|@DATE@' $(MANPAGE); then \
+			echo "man-check: a placeholder survived into $(MANPAGE)"; exit 1; \
+		fi; \
+		if command -v groff >/dev/null; then \
+			groff -man -Tutf8 -ww -z $(MANPAGE) || exit 1; \
+		fi; \
+	else \
+		echo "NOTE: pandoc is not installed; not checking $(MANPAGE)"; \
+	fi
+
+# Builds in place, not in a chroot: a quick local check, not what CI does.
+deb:
+	dpkg-buildpackage -us -uc -b

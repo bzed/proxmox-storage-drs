@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Builds the package in debian:trixie -- the base of Proxmox VE 9.x -- and then
+# installs it and runs the autopkgtests against the installed package. The
+# build chroot has the Build-Depends available and so cannot detect a missing
+# runtime dependency; only the install-and-run step can.
+name: Debian package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build in debian:trixie
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - name: Install the packaging tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential devscripts equivs git lintian
+
+      - uses: actions/checkout@v7
+
+      # Only until src/ exists; see the same guard in tests.yml.
+      - name: Is there code yet?
+        id: probe
+        run: |
+          if ls src/*/*.py >/dev/null 2>&1; then
+            echo "code=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::src/ is empty; checking the packaging without building it"
+          fi
+
+      # debian/control is the single source of truth for build dependencies:
+      # mk-build-deps reads it, so a dependency that is missing there fails
+      # here rather than on somebody's machine.
+      - name: Install the build dependencies from debian/control
+        run: |
+          mk-build-deps --install --remove \
+            --tool 'apt-get -y --no-install-recommends' debian/control
+
+      - name: The packaging itself is well formed
+        run: |
+          dpkg-parsechangelog >/dev/null
+          changelog=$(dpkg-parsechangelog -S Version | sed 's/[-+~].*//')
+          pyproject=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          if [ "$changelog" != "$pyproject" ]; then
+            echo "debian/changelog says $changelog, pyproject.toml says $pyproject"
+            exit 1
+          fi
+          echo "version $changelog agrees in both places"
+
+      - name: Build the package
+        if: steps.probe.outputs.code == 'yes'
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Lintian
+        if: steps.probe.outputs.code == 'yes'
+        run: lintian --info --display-info --pedantic ../pve-drs_*.changes
+
+      # The real test of the dependency declarations: install the package on a
+      # system that never had the build dependencies, and run it.
+      - name: Install the package and run the autopkgtests
+        if: steps.probe.outputs.code == 'yes'
+        run: |
+          apt-get purge -y pve-drs-build-deps
+          apt-get autoremove -y
+          apt-get install -y ../pve-drs_*.deb
+          pve-drs --version
+          pve-drs --help
+          debian/tests/import-all
+
+      - name: Collect the artefacts
+        if: steps.probe.outputs.code == 'yes'
+        run: |
+          mkdir -p artefacts
+          cp ../pve-drs_*.deb ../pve-drs_*.changes artefacts/
+
+      - uses: actions/upload-artifact@v7
+        if: steps.probe.outputs.code == 'yes'
+        with:
+          name: debian-package
+          path: artefacts/

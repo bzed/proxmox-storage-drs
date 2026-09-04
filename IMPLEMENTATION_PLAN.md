@@ -128,21 +128,36 @@ reimplementation, and PVE hosts already ship Python, so operators can read and p
 Single-binary deployment is not a requirement here; if it ever becomes one, the dependency-free
 heuristic path (§5.5) is the portable subset worth porting.
 
-`pyproject.toml` dependencies:
+**Dependencies come from Debian.** The deployment target runs Proxmox VE 9.x, which is built on
+Debian trixie, so a module that trixie packages is a module the operator already trusts, already
+patches through their normal update path, and already has on a host with no outbound network. Every
+dependency below is therefore chosen for being in trixie, and the tool is packaged as a `.deb`
+(§2.2). A module that is *not* in Debian is only acceptable if it is pure Python and small enough
+to vendor into our own source package; anything else must be optional, with a code path that works
+without it.
 
-| Package | Purpose |
-|---|---|
-| `ortools>=9` | CP-SAT, the preferred solver backend |
-| `pulp>=2.7` | CBC fallback (bundled CBC wheel) |
-| `statsmodels>=0.14` | Holt-Winters, optional extra |
-| `requests>=2.31` | PVE API and Prometheus HTTP |
-| `ruamel.yaml` | Config (round-trips comments) |
-| `jsonschema` | Config validation (§11.1) |
-| `pytest`, `pytest-xdist` | Tests; groups are independent so they parallelize |
+| Package | Purpose | In Debian trixie |
+|---|---|---|
+| `requests` | PVE API and Prometheus HTTP | `python3-requests` 2.32 |
+| `ruamel.yaml` | Config (round-trips comments) | `python3-ruamel.yaml` 0.18 |
+| `jsonschema` | Config validation (§11.1) | `python3-jsonschema` 4.19 |
+| `pulp` | MILP via CBC — **the packaged solver path** | `python3-pulp` 2.7 + `coinor-cbc` 2.10 |
+| `statsmodels` | Holt-Winters, optional | `python3-statsmodels` 0.14 |
+| `ortools` | CP-SAT, optional and unpackaged | **not in Debian** |
+| `pytest`, `pytest-cov`, `pytest-xdist` | Tests; groups are independent so they parallelize | `python3-pytest*` |
+
+`ortools` is the one dependency Debian does not carry, and it is not a candidate for vendoring: it
+is a large C++ extension, not a pure-Python module. It therefore stays a **pip-only optional
+extra**, and CP-SAT is a bonus for whoever installs it rather than the assumed backend. §5.5 must
+be read accordingly: on a Debian install the MILP is solved by **CBC through `python3-pulp`**, with
+the dependency-free heuristic below that.
 
 Make `ortools` and `statsmodels` **optional extras**. The tool must run, plan and execute with only
 `requests` + `ruamel.yaml` + `jsonschema` installed, falling back to the heuristic solver and the
-quantile forecaster. This keeps it deployable on a locked-down management host.
+quantile forecaster. This keeps it deployable on a locked-down management host — and it is enforced
+rather than hoped for: the autopkgtest in §2.2 imports every module of the installed package with
+only the binary package's `Depends` present, so an optional dependency imported at module level
+fails the build.
 
 **Licence and contribution rules.** The project is **AGPL-3.0-or-later**, copyright
 Bernd Zeimetz <bernd@bzed.de>; every source file carries the two-line SPDX header. `AGENTS.md` and
@@ -168,6 +183,34 @@ Every run must log, at minimum: each gate decision with its computed value and t
 vector digest; the chosen plan and its objective breakdown; the payback arithmetic; every `move_disk`
 issued with its UPID; and every abort, re-plan and deadlock. In `auto` mode this log is the only
 record a human will see, so it must be sufficient to reconstruct why any migration happened.
+
+### 2.2 Packaging and continuous integration
+
+The tool is delivered as a Debian package, `pve-drs`, built from `debian/` in this repository
+(source format `3.0 (native)`, since upstream and packaging are the same tree). It installs the
+executable, the manpage, the example configuration and the generated documentation. Two rules
+follow from that and are not negotiable:
+
+- **`debian/control` is the single source of truth for dependencies.** Build-Depends and Depends
+  are updated in the same commit as the code or documentation that needs them. CI installs the
+  build dependencies *from* `debian/control` with `mk-build-deps`, so a stale declaration fails the
+  build rather than working by accident on a developer's machine.
+- **The autopkgtest asks the only question the build cannot.** The build chroot has the
+  Build-Depends installed and therefore cannot notice a missing runtime dependency. `debian/tests`
+  installs the built package on a system that has only its `Depends`, then runs `pve-drs --version`,
+  `pve-drs --help`, and an import of every module in the package.
+
+Two pipelines, deliberately different:
+
+| | Runs | Covers |
+|---|---|---|
+| GitHub Actions | `debian:trixie` containers | lint, types, tests and coverage with Debian's packaged tooling; the document build against trixie's older pandoc; `dpkg-buildpackage`, lintian, and install-then-run |
+| GitLab CI (Salsa) | Debian's Salsa CI pipeline | sbuild in an unshare chroot with **no network**, then lintian, piuparts, reprotest and autopkgtest |
+
+The Salsa build having no network is the load-bearing part: it is what proves the package builds
+from trixie alone. If a Python module ever has to be fetched during a build, the answer is to
+vendor it into the source package; enabling `--enable-network` for sbuild is the fallback, and it
+is a deliberate, visible change to `debian/.gitlab-ci.yml`, not a default.
 
 ---
 

@@ -1,0 +1,39 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Import every module of the installed package with only the binary package's
+# Depends available.  `pve-drs --version` exercises one import path; this
+# exercises all of them, which is what catches a module that imports an
+# optional dependency (ortools, statsmodels, pulp) at the top level instead of
+# where it is used.  Those are Recommends and Suggests: the tool must plan and
+# execute without them.
+set -eu
+
+python3 - <<'PY'
+import importlib
+import pkgutil
+import sys
+
+import proxmox_storage_drs as package
+
+failures = []
+names = [package.__name__]
+names += [m.name for m in pkgutil.walk_packages(package.__path__, package.__name__ + ".")]
+
+for name in names:
+    try:
+        importlib.import_module(name)
+    except BaseException as exc:  # noqa: B036 - a SystemExit here is also a bug
+        failures.append(f"{name}: {type(exc).__name__}: {exc}")
+    else:
+        print(f"ok      {name}")
+
+if failures:
+    print("", file=sys.stderr)
+    for failure in failures:
+        print(f"FAILED  {failure}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"\n{len(names)} modules imported cleanly")
+PY

@@ -1,0 +1,18 @@
+# The point of these is narrow and deliberate: with the binary package and its
+# declared dependencies installed -- and nothing else -- does pve-drs actually
+# run?  A missing Depends, a module that imports an optional dependency at the
+# top level, or an entry point that does not resolve all show up here and
+# nowhere else, because the build chroot has the Build-Depends installed and so
+# hides exactly these mistakes.
+
+Test-Command: pve-drs --version
+Depends: @
+Restrictions: allow-stderr
+
+Test-Command: pve-drs --help
+Depends: @
+Restrictions: allow-stderr
+
+Tests: import-all
+Depends: @, python3-all
+Restrictions: allow-stderr

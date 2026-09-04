@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# The 85 % floor is enforced by pytest itself (--cov-fail-under in
+# pyproject.toml); Codecov reports the trend and annotates the diff.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 85%
+
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: true
+
+ignore:
+  - "tests/**"
+  - "tools/**"
+  - "docs/**"
