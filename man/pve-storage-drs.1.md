@@ -1,18 +1,18 @@
-% PVE-DRS(1) pve-drs @VERSION@ | Proxmox Storage DRS
+% PVE-STORAGE-DRS(1) pve-storage-drs @VERSION@ | Proxmox Storage DRS
 %
 % @DATE@
 
 # NAME
 
-pve-drs - balance disk I/O across Proxmox VE shared storages
+pve-storage-drs - balance disk I/O across Proxmox VE shared storages
 
 # SYNOPSIS
 
-**pve-drs** \[*global options*\] *command* \[*command options*\]
+**pve-storage-drs** \[*global options*\] *command* \[*command options*\]
 
 # DESCRIPTION
 
-**pve-drs** equalizes disk I/O load across configurable groups of shared storages in a Proxmox VE
+**pve-storage-drs** equalizes disk I/O load across configurable groups of shared storages in a Proxmox VE
 cluster by live-migrating individual VM disks between the storages of a group. It reads the
 historical per-disk load from an existing Prometheus and the cluster topology from the Proxmox VE
 API, solves for a placement, and either prints the resulting plan or executes it with
@@ -24,7 +24,7 @@ merely before and after it, because a mirrored disk occupies both storages until
 completes. And a plan whose own migration cost exceeds the imbalance it removes is rejected
 outright rather than merely penalized.
 
-The default mode is **dry-run**: **pve-drs** prints the plan, the arithmetic behind it and the API
+The default mode is **dry-run**: **pve-storage-drs** prints the plan, the arithmetic behind it and the API
 calls it would issue, and changes nothing. Nothing is ever deleted automatically.
 
 The configuration is read from */etc/pve/drs.yaml*, which is on the cluster filesystem and so is
@@ -60,8 +60,8 @@ Global options are accepted before the command.
 
 **-c**, **--config** *PATH*
 : Read the configuration from *PATH* instead of */etc/pve/drs.yaml*. A file named here that is
-  missing, unreadable or invalid is an error; **pve-drs** never falls back to the default.
-  The environment variable **PVE_DRS_CONFIG** has the same effect and lower precedence.
+  missing, unreadable or invalid is an error; **pve-storage-drs** never falls back to the default.
+  The environment variable **PVE_STORAGE_DRS_CONFIG** has the same effect and lower precedence.
 
 **--group** *NAME*
 : Restrict the run to one storage group. May be given more than once. Groups are independent, so
@@ -87,12 +87,12 @@ Global options are accepted before the command.
 : Show this manual page.
 
 **-h**, **--help**
-: Print a usage summary with every option and its default, and exit. **pve-drs** *command*
+: Print a usage summary with every option and its default, and exit. **pve-storage-drs** *command*
   **--help** does the same for one command.
 
 # CONFIGURATION
 
-*/etc/pve/drs.yaml*, searched for in this order: **--config**, then **$PVE_DRS_CONFIG**, then the
+*/etc/pve/drs.yaml*, searched for in this order: **--config**, then **$PVE_STORAGE_DRS_CONFIG**, then the
 default path. It is validated in full at startup; every violation is a fatal error with a message
 naming the setting, because a misconfigured balancer that moves production disks is worse than one
 that refuses to start.
@@ -115,7 +115,7 @@ and in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**, and prefer an API token over a 
 
 # ENVIRONMENT
 
-**PVE_DRS_CONFIG**
+**PVE_STORAGE_DRS_CONFIG**
 : Path to the configuration file. Overridden by **--config**.
 
 **PVE_PASSWORD**, **PVE_TOKEN_SECRET**
@@ -126,12 +126,12 @@ and in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**, and prefer an API token over a 
 */etc/pve/drs.yaml*
 : The configuration. Cluster-replicated.
 
-*/var/lib/pve-drs/state.json*
+*/var/lib/pve-storage-drs/state.json*
 : Cooldowns, the load vector at the last balance, in-flight task ids and the run lock. Node-local
   and deliberately not on */etc/pve*: it is rewritten on every run. Losing it is safe but resets
   the cooldowns.
 
-*/usr/share/doc/pve-drs/*
+*/usr/share/doc/pve-storage-drs/*
 : The manual and the specification.
 
 # EXIT STATUS
@@ -149,10 +149,10 @@ and in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**, and prefer an API token over a 
 
 # SEE ALSO
 
-*/usr/share/doc/pve-drs/pve-drs-manual.pdf*, the operator manual, which documents every
+*/usr/share/doc/pve-storage-drs/pve-storage-drs-manual.pdf*, the operator manual, which documents every
 configuration option in detail.
 
-*/usr/share/doc/pve-drs/IMPLEMENTATION_PLAN.pdf*, the specification, for the load model, the
+*/usr/share/doc/pve-storage-drs/IMPLEMENTATION_PLAN.pdf*, the specification, for the load model, the
 optimization problem and the migration ordering rules.
 
 **pvesm**(1), **qm**(1), **pvecm**(1).

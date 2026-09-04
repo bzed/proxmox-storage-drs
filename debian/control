@@ -1,4 +1,4 @@
-Source: pve-drs
+Source: pve-storage-drs
 Section: admin
 Priority: optional
 Maintainer: Bernd Zeimetz <bernd@bzed.de>
@@ -21,7 +21,7 @@ Homepage: https://github.com/bzed/proxmox-storage-drs
 Vcs-Git: https://github.com/bzed/proxmox-storage-drs.git
 Vcs-Browser: https://github.com/bzed/proxmox-storage-drs
 
-Package: pve-drs
+Package: pve-storage-drs
 Architecture: all
 Depends:
  python3-jsonschema,
@@ -35,7 +35,7 @@ Recommends:
 Suggests:
  python3-statsmodels,
 Description: storage I/O load balancer for Proxmox VE
- pve-drs equalizes disk I/O load across configurable groups of shared storages
+ pve-storage-drs equalizes disk I/O load across configurable groups of shared storages
  in a Proxmox VE cluster by live-migrating individual VM disks between the
  storages of a group. It is the storage counterpart to the built-in Dynamic
  Load Balancer, which balances guests across nodes and has no notion of the

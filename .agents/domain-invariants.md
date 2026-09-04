@@ -59,7 +59,7 @@ make "evacuate this LUN" a lie.
 
 ## 9. The config lives on the cluster filesystem (§11)
 
-The default is `/etc/pve/drs.yaml`, overridable with `-c/--config` or `$PVE_DRS_CONFIG`; an
+The default is `/etc/pve/drs.yaml`, overridable with `-c/--config` or `$PVE_STORAGE_DRS_CONFIG`; an
 explicitly named config that cannot be read is a hard failure and never falls back to the default.
 Three things follow, and none of them are optional:
 
@@ -88,7 +88,7 @@ design constraint.
 
 The rule: read the PVE source, or ask the operator, or **label the claim as unverified in the
 text**. If a fetch of the source truncates, retry narrower — do not silently substitute a forum
-anecdote. `pve-drs verify-metrics` and `pve-drs verify-storages` exist precisely so claims about the live
+anecdote. `pve-storage-drs verify-metrics` and `pve-storage-drs verify-storages` exist precisely so claims about the live
 system are checked rather than assumed.
 
 ## 11. The plan is the specification

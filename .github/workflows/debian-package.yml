@@ -66,25 +66,25 @@ jobs:
 
       - name: Lintian
         if: steps.probe.outputs.code == 'yes'
-        run: lintian --info --display-info --pedantic ../pve-drs_*.changes
+        run: lintian --info --display-info --pedantic ../pve-storage-drs_*.changes
 
       # The real test of the dependency declarations: install the package on a
       # system that never had the build dependencies, and run it.
       - name: Install the package and run the autopkgtests
         if: steps.probe.outputs.code == 'yes'
         run: |
-          apt-get purge -y pve-drs-build-deps
+          apt-get purge -y pve-storage-drs-build-deps
           apt-get autoremove -y
-          apt-get install -y ../pve-drs_*.deb
-          pve-drs --version
-          pve-drs --help
+          apt-get install -y ../pve-storage-drs_*.deb
+          pve-storage-drs --version
+          pve-storage-drs --help
           debian/tests/import-all
 
       - name: Collect the artefacts
         if: steps.probe.outputs.code == 'yes'
         run: |
           mkdir -p artefacts
-          cp ../pve-drs_*.deb ../pve-drs_*.changes artefacts/
+          cp ../pve-storage-drs_*.deb ../pve-storage-drs_*.changes artefacts/
 
       - uses: actions/upload-artifact@v7
         if: steps.probe.outputs.code == 'yes'

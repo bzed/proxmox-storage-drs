@@ -31,5 +31,5 @@ endif
 
 override_dh_auto_clean:
 	dh_auto_clean
-	rm -f man/pve-drs.1
+	rm -f man/pve-storage-drs.1
 	rm -rf docs/.build .pytest_cache .mypy_cache
