@@ -3,7 +3,7 @@
   "generated_by": "tests/fixtures/generate_expected.py (exhaustive enumeration)",
   "assumptions": {
     "account_saferemove_wipe": false,
-    "omega_wipe": 1.0,
+    "wipe_load_weight": 1.0,
     "saferemove_by_storage": {
       "san-a": false,
       "san-b": false,
@@ -214,7 +214,7 @@
       }
     ],
     "total_cost_load_seconds": 26214.4,
-    "benefit_load_seconds": 3951360.2,
+    "benefit_load_seconds": 3951360.0,
     "ratio": 150.73,
     "accepted": true
   },

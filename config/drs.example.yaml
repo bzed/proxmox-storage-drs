@@ -183,7 +183,7 @@ objective:
   spread_metric: l1            # "l1" (sum of deviations) or "minmax" (makespan)
   alpha_spread: 1.0            # weight on imbalance
   beta_move_count: 0.25        # penalty per migration  -> "minimal number of migrations"
-  gamma_move_bytes: 0.05       # penalty per TiB migrated
+  gamma_move_bytes_per_tib: 0.05  # penalty per TiB migrated
   kappa_vm_affinity: 0.50      # penalty per extra storage a VM's disks are spread over
   # Disks that cannot move THIS RUN (snapshot-blocked, config-excluded, or on a
   # locked VM) are excluded from the affinity count by default, so an unreachable

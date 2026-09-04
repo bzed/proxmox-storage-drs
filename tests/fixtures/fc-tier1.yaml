@@ -8,6 +8,14 @@
 #
 # Regenerate expectations with `python3 generate_expected.py`; do not hand-edit
 # fc-tier1.expected.json. `generate_expected.py --check` asserts it is current.
+#
+# Field-naming convention: a knob that exists in config/drs.example.yaml uses
+# THE SAME NAME here -- source_load_weight, target_load_weight,
+# wipe_load_weight, gamma_move_bytes_per_tib, account_saferemove_wipe. Two
+# deliberate exceptions, both because a fixture is machine-fed and the config
+# is human-written: payback_horizon_seconds is an integer where the config
+# accepts "7d", and beta_values is a list the harness sweeps where the config
+# has a single beta_move_count.
 schema_version: 1
 description: Section 14 worked example. Numbers verified by exhaustive enumeration
   of all 3^6 assignments.
@@ -73,9 +81,9 @@ disks:
   current_storage: san-c
 migration:
   bwlimit_bytes_per_sec: 209715200
-  omega_src: 1.0
-  omega_dst: 1.0
-  omega_wipe: 1.0
+  source_load_weight: 1.0
+  target_load_weight: 1.0
+  wipe_load_weight: 1.0
   # Plan section 7.1. saferemove is off on every storage above, so
   # duration_wipe_d = 0 and duration_d = duration_mirror_d, which is what the
   # section 14.5 payback arithmetic assumes. Stated here rather than only in the
@@ -89,6 +97,6 @@ objective:
   alpha_spread: 1.0
   # Swept by the harness; one cases[] entry in the expected file per value.
   beta_values: [0.25, 0.5]
-  gamma_move_bytes_per_tib: 0.05
+  gamma_move_bytes_per_tib: 0.05   # penalty per TiB migrated
   kappa_vm_affinity: 0.5
   reserve_violation_penalty: 1000.0

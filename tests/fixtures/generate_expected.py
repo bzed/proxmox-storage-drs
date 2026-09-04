@@ -275,8 +275,8 @@ def duration(f: Fixture, key: str) -> float:
 
 def cost(f: Fixture, key: str) -> float:
     """Section 7.1 cost in load-seconds: mirror on both ends, wipe on the source."""
-    omega_mirror = float(f.migration["omega_src"] + f.migration["omega_dst"])
-    omega_wipe = float(f.migration.get("omega_wipe", 1.0))
+    omega_mirror = float(f.migration["source_load_weight"] + f.migration["target_load_weight"])
+    omega_wipe = float(f.migration.get("wipe_load_weight", 1.0))
     return duration_mirror(f, key) * omega_mirror + duration_wipe(f, key) * omega_wipe
 
 
@@ -360,6 +360,8 @@ def case_for(f: Fixture, beta: float) -> Dict[str, Any]:
 
     case: Dict[str, Any] = {
         "beta_move_count": beta,
+        # Unrounded, for the payback arithmetic; not written to the expected file.
+        "_exact_E_after": E_of(f, a),
         "expected_objective": round(val, R),
         "expected_move_count": len(moves_of(f, a)),
         "expected_E_after": round(E_of(f, a), R),
@@ -405,7 +407,14 @@ def case_for(f: Fixture, beta: float) -> Dict[str, Any]:
     return case
 
 
-def payback(f: Fixture, case: Dict[str, Any]) -> Dict[str, Any]:
+def payback(f: Fixture, case: Dict[str, Any], e_after: float) -> Dict[str, Any]:
+    """Section 7 payback arithmetic for one case.
+
+    `e_after` is the EXACT objective of the chosen assignment. Taking it from
+    `case["expected_E_after"]` instead would mix an exact E_before with a
+    6-decimal-rounded E_after and shift the recorded benefit off the section 14.5
+    value by a fraction of a load-second.
+    """
     keys = [m.split(":")[0] + ":" + m.split(":")[1] for m in case["expected_moves"]]
     per_move = [
         {
@@ -419,7 +428,7 @@ def payback(f: Fixture, case: Dict[str, Any]) -> Dict[str, Any]:
         for k in keys
     ]
     total_cost = sum(cost(f, k) for k in keys)
-    delta_e = E_of(f, f.current) - case["expected_E_after"]
+    delta_e = E_of(f, f.current) - e_after
     benefit = delta_e * float(f.migration["payback_horizon_seconds"])
     return {
         "beta_move_count": case["beta_move_count"],
@@ -443,7 +452,7 @@ def build(f: Fixture) -> Dict[str, Any]:
         # reading the plan prose for the saferemove assumption.
         "assumptions": {
             "account_saferemove_wipe": bool(f.migration.get("account_saferemove_wipe", True)),
-            "omega_wipe": f.migration.get("omega_wipe", 1.0),
+            "wipe_load_weight": f.migration.get("wipe_load_weight", 1.0),
             "saferemove_by_storage": {s: f.saferemove[s] for s in f.storages},
         },
         "derived": {
@@ -453,14 +462,14 @@ def build(f: Fixture) -> Dict[str, Any]:
             "E_before": round(E_of(f, f.current), R),
             "spread_before": round(spread(f, initial), R),
         },
-        "cases": cases,
+        "cases": [{k: v for k, v in c.items() if not k.startswith("_")} for c in cases],
     }
 
     two_move = [c for c in cases if c["expected_move_count"] == 2]
     if two_move:
-        out["payback_two_move_plan"] = payback(f, two_move[0])
+        out["payback_two_move_plan"] = payback(f, two_move[0], two_move[0]["_exact_E_after"])
         arch_size, arch_delta_e = 4.0, 0.05
-        omega = float(f.migration["omega_src"] + f.migration["omega_dst"])
+        omega = float(f.migration["source_load_weight"] + f.migration["target_load_weight"])
         # saferemove is off in this fixture, so there is no wipe term to add.
         arch_cost = arch_size * TIB / float(f.migration["bwlimit_bytes_per_sec"]) * omega
         arch_benefit = arch_delta_e * float(f.migration["payback_horizon_seconds"])
