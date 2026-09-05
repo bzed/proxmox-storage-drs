@@ -332,6 +332,9 @@ def test_show_load_human_output(
     assert "L=3.00 u=3.00" in out  # san-a's StorageLoad
     assert "ℓ 3.00" in out  # 101:scsi0's DiskLoad
     assert "102:scsi0: sample coverage 40%" in out  # the flagged disk
+    # san-a's reserve is violated in this fixture (see the json test's own
+    # comment) -- the gate must show the reserve override, not imbalance.
+    assert "Group fc-tier1 → ACT: reserve violated on san-a" in out
 
 
 def test_show_load_json_output(
@@ -353,6 +356,12 @@ def test_show_load_json_output(
     assert disk_101["load_flagged_reason"] is None
     disk_102 = next(d for d in group_payload["disks"] if d["key"] == "102:scsi0")
     assert disk_102["load_flagged_reason"] is not None
+    gate = group_payload["gate"]
+    assert gate["act"] is True
+    assert gate["reserve_override"] is True
+    assert gate["drift_fraction"] is None
+    assert gate["imbalance_fraction"] is None
+    assert "reserve violated on san-a" in gate["reason"]
     san_a = next(s for s in group_payload["storages"] if s["id"] == "san-a")
     # managed_used 3+2=5 TiB, largest=3 TiB, reserve=2.0*3=6 TiB, 5+6=11 > capacity 8 TiB.
     assert san_a["reserve_violated"] is True
@@ -389,6 +398,7 @@ def test_show_load_degrades_gracefully_on_a_metrics_error(
     out = capsys.readouterr().out
     assert "reserve short by" in out or "reserve OK" in out  # unaffected
     assert "per-disk load unavailable: connection refused" in out
+    assert "Group fc-tier1\n" in out  # no gate verdict possible without a GroupLoad
 
 
 def test_show_load_human_output_notes_an_idle_group(
@@ -426,6 +436,7 @@ def test_show_load_json_reports_a_metrics_error_per_group(
     assert group_payload["load_computed"] is False
     assert group_payload["idle"] is None
     assert group_payload["load_error"] == "connection refused"
+    assert group_payload["gate"] is None  # no GroupLoad to evaluate gates against
     disk_101 = next(d for d in group_payload["disks"] if d["key"] == "101:scsi0")
     assert "load" not in disk_101
 

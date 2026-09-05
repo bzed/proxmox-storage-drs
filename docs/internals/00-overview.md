@@ -8,12 +8,14 @@ section 2 architecture actually exists right now?
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
 gate, solve, cost, order, execute. As of this page, stages 1 (collect), 2
-(join) and the load-computation half of stage 3 (gate) exist; the
-act/no-act *decision* itself (drift/imbalance gates, cooldowns) through
-execute are `IMPLEMENTATION_PLAN.md` section 12 phases 3 (remainder)-9 and
-are not yet written. Do not take this page as a claim that the whole
-pipeline runs end to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
-is the authoritative per-command status.
+(join) and 3 (gate) exist; solve through execute are `IMPLEMENTATION_PLAN.md`
+section 12 phases 4-9 and are not yet written. Do not take this page as a
+claim that the whole pipeline runs end to end —
+[`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
+is the authoritative per-command status: `gates.py`'s verdict is real and
+`show-load` prints it, but nothing yet *acts* on it (no `plan`/`apply`),
+and every call site passes `last_load=None` since `state.json` (the real
+drift history) does not exist yet — see [`80-gates.md`](80-gates.md).
 
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
@@ -34,6 +36,9 @@ is the authoritative per-command status.
                               │                                             │
                               └──────────────────────┬──────────────────────┘
                                                       ▼
+                                     gates.py (evaluate_group_gates():
+                                     reserve override / drift / imbalance, section 6)
+                                                      │
         ┌───────────────────────────────────────────────────────────────────┐
         │            cli.py  (argument parsing, command dispatch,           │
         │            mode-override rule, show-load, verify-storages)        │
@@ -61,11 +66,13 @@ is the authoritative per-command status.
 | `topology.py` | `build_topology()`: the disk/storage/group join, `D`, `S`, `Uˢᵉˣᵗ`, (C2) pins | sections 3.5-3.7, 5.1, 5.3 (C2) |
 | `reserve.py` | `compute_reserve_status()`: (C4)/(C5), shared by `show-load` today and the solver later | section 5.3 (C4)/(C5) |
 | `loadmodel.py` | `compute_group_load()`: the raw-series-to-`ℓ_d` blend, `min_coverage` rejection, current `L_s`/`u_s` | section 4 |
+| `gates.py` | `evaluate_group_gates()`: reserve override, drift, imbalance — the act/no-act verdict, with reasoning | section 6 |
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages` | section 11.3 |
 
-Not yet written: the section 6 drift/imbalance gates (phase 3's other
-half), `optimize.py`, `heuristic.py`, `payback.py`, `schedule.py`,
-`execute.py`.
+Not yet written: `optimize.py`, `heuristic.py`, `payback.py`, `schedule.py`,
+`execute.py` — and, within `gates.py`'s own scope, cooldown handling
+(needs `state.json`'s per-disk/per-storage timestamps; see
+[`80-gates.md`](80-gates.md)).
 
 ## Why config.py depends on forecast.py
 
@@ -95,3 +102,6 @@ this.
 - [`70-loadmodel.md`](70-loadmodel.md) — the section 4 raw-series-to-`ℓ_d`
   blend, `min_coverage` rejection, and why `tpmstate0`/`unusedN` are exempt
   from it but `efidisk0` is not.
+- [`80-gates.md`](80-gates.md) — the section 6 act/no-act verdict, why
+  `show-load`'s gate line is diagnostic rather than a real decision today,
+  and why cooldowns are not in this module.

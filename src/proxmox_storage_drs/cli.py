@@ -34,6 +34,7 @@ from proxmox_storage_drs.config import (
     load_config,
 )
 from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
+from proxmox_storage_drs.gates import evaluate_group_gates
 from proxmox_storage_drs.loadmodel import GroupLoad, compute_group_load
 from proxmox_storage_drs.logging_setup import configure_logging
 from proxmox_storage_drs.metrics import PrometheusClient, VerifyMetricsReport, verify_metrics
@@ -265,14 +266,25 @@ def _render_show_load_human(
 ) -> str:
     lines: list[str] = []
     for group in topology.groups:
-        lines.append(f"Group {group.name}")
         group_load = group_loads.get(group.name)
         load_by_key = group_load.load_by_disk_key() if group_load else {}
         storage_loads = {s.storage_id: s for s in group_load.storages} if group_load else {}
-        for storage in group.storages:
-            status = compute_reserve_status(
+        reserve_statuses = {
+            storage.id: compute_reserve_status(
                 storage, group.disks, config.snapshot_reserve.min_free_bytes
             )
+            for storage in group.storages
+        }
+        header = f"Group {group.name}"
+        if group_load is not None:
+            decision = evaluate_group_gates(
+                group_load, reserve_statuses, config.gates, last_load=None
+            )
+            verdict = "ACT" if decision.act else "NO ACTION"
+            header += f" → {verdict}: {decision.reason}"
+        lines.append(header)
+        for storage in group.storages:
+            status = reserve_statuses[storage.id]
             reserve_str = (
                 f"⚠ reserve short by {format_bytes(status.shortfall_bytes)}"
                 if status.violated
@@ -329,11 +341,15 @@ def _render_show_load_json(
             {d.disk_key: d.flagged_reason for d in group_load.disks} if group_load else {}
         )
         storage_loads = {s.storage_id: s for s in group_load.storages} if group_load else {}
-        storages_out = []
-        for storage in group.storages:
-            status = compute_reserve_status(
+        reserve_statuses = {
+            storage.id: compute_reserve_status(
                 storage, group.disks, config.snapshot_reserve.min_free_bytes
             )
+            for storage in group.storages
+        }
+        storages_out = []
+        for storage in group.storages:
+            status = reserve_statuses[storage.id]
             entry: dict[str, object] = {
                 "id": storage.id,
                 "used_bytes": storage.used_bytes,
@@ -364,6 +380,18 @@ def _render_show_load_json(
                 disk_entry["load"] = load_by_key[d.key]
                 disk_entry["load_flagged_reason"] = flagged_by_key.get(d.key)
             disks_out.append(disk_entry)
+        gate_out: dict[str, object] | None = None
+        if group_load is not None:
+            decision = evaluate_group_gates(
+                group_load, reserve_statuses, config.gates, last_load=None
+            )
+            gate_out = {
+                "act": decision.act,
+                "reason": decision.reason,
+                "reserve_override": decision.reserve_override,
+                "drift_fraction": decision.drift_fraction,
+                "imbalance_fraction": decision.imbalance_fraction,
+            }
         groups_out.append(
             {
                 "name": group.name,
@@ -372,6 +400,7 @@ def _render_show_load_json(
                 "load_computed": group_load is not None,
                 "idle": group_load.idle if group_load is not None else None,
                 "load_error": load_errors.get(group.name),
+                "gate": gate_out,
             }
         )
     return {"groups": groups_out, "warnings": list(topology.warnings)}
