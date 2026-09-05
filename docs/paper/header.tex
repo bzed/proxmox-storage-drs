@@ -35,13 +35,24 @@
 \linespread{1.06}
 
 % Long identifiers set in \texttt -- metric names, config paths, API routes --
-% are unbreakable words and would otherwise stick out into the margin.  Allow a
-% break after every underscore in typewriter text (no hyphen is inserted, so a
-% broken identifier is not misread), and let TeX loosen a line rather than
-% overrun it.  `make pdf` fails on any remaining overfull box wider than 2pt.
-\newcommand{\drsbreakableunderscore}{\textunderscore\allowbreak}
-\let\drsorigtexttt\texttt
-\renewcommand{\texttt}[1]{{\let\_\drsbreakableunderscore\drsorigtexttt{#1}}}
+% are unbreakable words and would otherwise stick out into the margin.
+% filters.lua's Code() function is where the break-after-underscore trick
+% actually lives now: it hand-escapes inline code and inserts \allowbreak
+% after each underscore itself, emitting a plain \texttt{...} with no macro
+% override. An earlier version redefined \texttt itself (\let-ing the
+% original aside and inserting a local \let\_\drsbreakableunderscore), which
+% is the standard trick for this -- but \texttt is a font command the kernel
+% treats as robust, or dispatches to by name in "moving" arguments (a heading
+% that also has to go into the TOC, the PDF outline, and via filters.lua's
+% own \markboth, the running head), and redefining it that way sent this
+% kernel into unbounded recursion ("TeX capacity exceeded ... parameter stack
+% size") specifically on a heading built from nothing but
+% \texttt{...like_this...} -- exactly the style docs/internals/*.md's
+% per-symbol headings use. Rewriting the *content* in the Lua filter, before
+% it ever becomes a LaTeX command invocation, sidesteps the whole class of
+% problem. Also let TeX loosen a line rather than overrun it, for the cases
+% \allowbreak alone does not fully resolve; `make pdf` fails on any remaining
+% overfull box wider than 2pt regardless.
 \tolerance=1200
 \setlength{\emergencystretch}{3em}
 
@@ -83,12 +94,20 @@
 \newenvironment{plaincode}{\begin{snugshade}}{\end{snugshade}}
 
 % ------------------------------------------------------------ title page ----
-% `make pdf` writes \drssourcehash into a generated second header file; the
-% default keeps a bare `pandoc --include-in-header=header.tex` run working.
-% The hash of the Markdown source is the edition marker: it is reproducible,
-% it is what `make pdf-check` compares against, and a reader can verify that
-% this PDF is the plan they have in front of them.
+% The build writes \drssourcehash, \drssourcename and \drsverifycmd into a
+% generated second header file (docs/.build/revision.tex for the plan, the
+% equivalent for internals.pdf/pve-storage-drs-manual.pdf); the defaults here keep a bare
+% `pandoc --include-in-header=header.tex` run working and describe the plan,
+% since that is this project's original document. This block is shared by all
+% three PDFs (documentation.md: "docs/paper/ is document-agnostic apart from
+% its title block") -- \drssourcename and \drsverifycmd are what make it so:
+% each build supplies its own source description and its own stamp file, and
+% \drsverifycmd is always a `sha256sum --check` of that stamp rather than a
+% hardcoded filename, so it reads correctly whether the source was one file
+% or several concatenated.
 \providecommand{\drssourcehash}{unknown}
+\providecommand{\drssourcename}{IMPLEMENTATION\_PLAN.md}
+\providecommand{\drsverifycmd}{sha256sum --check docs/IMPLEMENTATION\_PLAN.pdf.sha256}
 
 \makeatletter
 \renewcommand{\maketitle}{%
@@ -104,10 +123,10 @@
     {\@date\par}%
     \vfill
     {\footnotesize
-     Rendered from \texttt{IMPLEMENTATION\_PLAN.md},
+     Rendered from \texttt{\drssourcename},
      SHA-256 \texttt{\drssourcehash}\\
-     (\texttt{sha256sum IMPLEMENTATION\_PLAN.md} in the repository must
-     print the same).\\[0.9em]
+     (\texttt{\drsverifycmd} in the repository must
+     succeed).\\[0.9em]
      Copyright \textcopyright{} 2026 Bernd Zeimetz.
      Licensed under the GNU Affero General Public License,
      version 3 or later.\par}

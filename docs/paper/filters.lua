@@ -29,7 +29,35 @@ function Header(el)
   return el
 end
 
--- 3. Give fenced blocks that carry no language a shaded box too.  Pandoc
+-- 3. Break long inline identifiers (metric names, config paths, API routes)
+--    after every underscore, so they wrap instead of overrunning the margin.
+--    This used to be a \texttt redefinition in header.tex; done here instead,
+--    on the AST, because \texttt is a font command LaTeX expects to be
+--    robust in a "moving" argument (a heading that also has to go into the
+--    TOC, the PDF outline, and, via Header() above, the running head), and
+--    overriding it that way sent LuaLaTeX into unbounded recursion on a
+--    heading built from nothing but `code`-only text -- exactly the style
+--    docs/internals/*.md's per-symbol headings use. Escaping by hand and
+--    emitting a plain \texttt{...} sidesteps the whole class of problem.
+local code_specials = {
+  ["\\"] = "\\textbackslash{}",
+  ["{"] = "\\{",
+  ["}"] = "\\}",
+  ["$"] = "\\$",
+  ["&"] = "\\&",
+  ["#"] = "\\#",
+  ["%"] = "\\%",
+  ["^"] = "\\^{}",
+  ["~"] = "\\~{}",
+  ["_"] = "\\_\\allowbreak{}",
+}
+
+function Code(el)
+  local escaped = el.text:gsub(".", code_specials)
+  return pandoc.RawInline("latex", "\\texttt{" .. escaped .. "}")
+end
+
+-- 4. Give fenced blocks that carry no language a shaded box too.  Pandoc
 --    renders those as a bare `verbatim` environment, visually unlike the
 --    highlighted ones, and 84 of the plan's 90 fences are unlabelled.
 --    Verbatim (fvextra) is used without commandchars, so the body needs no

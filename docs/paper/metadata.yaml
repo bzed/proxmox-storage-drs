@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Static pandoc metadata for the PDF rendering of IMPLEMENTATION_PLAN.md.
-# The volatile fields — date, revision, source hash — are passed on the command
-# line by `make pdf` so that this file never needs touching. See AGENTS.md § 7.
-title: "Proxmox Storage DRS"
-subtitle: "Balancing disk I/O across shared storages on Proxmox VE 9.2"
+# Shared pandoc metadata for every PDF this project builds (the plan,
+# internals, the operator manual) -- document-agnostic apart from the title
+# block, which is why title/subtitle are NOT here: tools/build_paper.sh
+# passes them with -M per document, along with date/revision/source-hash, so
+# this file never needs touching for a new document. See AGENTS.md section 7
+# and .agents/documentation.md.
 author:
   - "Bernd Zeimetz <bernd@bzed.de>"
 lang: en-GB

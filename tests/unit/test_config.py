@@ -78,6 +78,11 @@ def test_missing_default_config_points_at_the_example(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ loading
 
 
+@pytest.mark.skipif(
+    not EXAMPLE_CONFIG.is_file(),
+    reason="config/ sits outside the installed package; absent under dh_auto_test's pybuild "
+    "isolation (.agents/packaging.md), present in a full checkout",
+)
 def test_loads_the_shipped_example_config() -> None:
     resolved = config.load_config(str(EXAMPLE_CONFIG), env={})
     assert resolved.path == str(EXAMPLE_CONFIG)

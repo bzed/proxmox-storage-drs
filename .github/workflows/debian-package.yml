@@ -30,17 +30,6 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      # Only until src/ exists; see the same guard in tests.yml.
-      - name: Is there code yet?
-        id: probe
-        run: |
-          if ls src/*/*.py >/dev/null 2>&1; then
-            echo "code=yes" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=no" >> "$GITHUB_OUTPUT"
-            echo "::notice::src/ is empty; checking the packaging without building it"
-          fi
-
       # debian/control is the single source of truth for build dependencies:
       # mk-build-deps reads it, so a dependency that is missing there fails
       # here rather than on somebody's machine.
@@ -61,17 +50,14 @@ jobs:
           echo "version $changelog agrees in both places"
 
       - name: Build the package
-        if: steps.probe.outputs.code == 'yes'
         run: dpkg-buildpackage -us -uc -b
 
       - name: Lintian
-        if: steps.probe.outputs.code == 'yes'
         run: lintian --info --display-info --pedantic ../pve-storage-drs_*.changes
 
       # The real test of the dependency declarations: install the package on a
       # system that never had the build dependencies, and run it.
       - name: Install the package and run the autopkgtests
-        if: steps.probe.outputs.code == 'yes'
         run: |
           apt-get purge -y pve-storage-drs-build-deps
           apt-get autoremove -y
@@ -81,13 +67,11 @@ jobs:
           debian/tests/import-all
 
       - name: Collect the artefacts
-        if: steps.probe.outputs.code == 'yes'
         run: |
           mkdir -p artefacts
           cp ../pve-storage-drs_*.deb ../pve-storage-drs_*.changes artefacts/
 
       - uses: actions/upload-artifact@v7
-        if: steps.probe.outputs.code == 'yes'
         with:
           name: debian-package
           path: artefacts/
