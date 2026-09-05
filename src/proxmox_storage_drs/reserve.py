@@ -12,16 +12,28 @@ of every rule."
 
 Nothing here is specific to the *current* assignment: every function takes
 the disk-to-storage assignment as data (``current_storage`` on each `Disk`
-today; the solver will pass a candidate assignment through the identical
-shape later), so this module has no notion of "before" or "after" a plan.
+by default; ``storage_of`` lets ``heuristic.py`` pass a *candidate*
+assignment through the identical shape instead), so this module has no
+built-in notion of "before" or "after" a plan.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
 from proxmox_storage_drs.topology import Disk, Storage
+
+# The default assignment source: `Disk.current_storage`, i.e. "the real,
+# present-day placement." `heuristic.py` passes its own lookup (typically
+# `assignment.__getitem__` or `assignment.get`) to evaluate a *candidate*
+# assignment through these same functions instead -- see the module
+# docstring; this is that "identical shape" made concrete.
+StorageOf = Callable[[Disk], str]
+
+
+def _current_storage(disk: Disk) -> str:
+    return disk.current_storage
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,31 +50,44 @@ class ReserveStatus:
         return self.shortfall_bytes > 0
 
 
-def largest_disk_bytes(disks: Iterable[Disk], storage_id: str) -> int:
-    """Z_s: the largest disk currently on ``storage_id``, 0 if none (C4)."""
-    return max((d.size_bytes for d in disks if d.current_storage == storage_id), default=0)
+def largest_disk_bytes(
+    disks: Iterable[Disk], storage_id: str, *, storage_of: StorageOf = _current_storage
+) -> int:
+    """Z_s: the largest disk on ``storage_id`` under ``storage_of``, 0 if none (C4)."""
+    return max((d.size_bytes for d in disks if storage_of(d) == storage_id), default=0)
 
 
-def managed_used_bytes(disks: Iterable[Disk], storage_id: str) -> int:
-    """Sum_d z_d for every disk in `D` currently on ``storage_id`` -- the
-    part of a storage's usage this tool is actually tracking, as opposed to
-    ``Storage.foreign_used_bytes`` (section 5.1.1)."""
-    return sum(d.size_bytes for d in disks if d.current_storage == storage_id)
+def managed_used_bytes(
+    disks: Iterable[Disk], storage_id: str, *, storage_of: StorageOf = _current_storage
+) -> int:
+    """Sum_d z_d for every disk in `D` on ``storage_id`` under ``storage_of`` --
+    the part of a storage's usage this tool is actually tracking, as opposed
+    to ``Storage.foreign_used_bytes`` (section 5.1.1)."""
+    return sum(d.size_bytes for d in disks if storage_of(d) == storage_id)
 
 
 def compute_reserve_status(
-    storage: Storage, disks: Iterable[Disk], min_free_bytes: int
+    storage: Storage,
+    disks: Iterable[Disk],
+    min_free_bytes: int,
+    *,
+    storage_of: StorageOf = _current_storage,
 ) -> ReserveStatus:
-    """(C4)/(C5) evaluated for one storage at the assignment `disks` encode.
+    """(C4)/(C5) evaluated for one storage at the assignment ``storage_of`` encodes.
 
     ``min_free_bytes`` is ``snapshot_reserve.min_free_bytes`` -- a single
     cluster-wide floor, unlike ``reserve_factor`` which config.py already
-    resolves per storage onto ``storage.reserve_factor``.
+    resolves per storage onto ``storage.reserve_factor``. ``storage_of``
+    defaults to ``Disk.current_storage`` (today's real placement); pass a
+    candidate-assignment lookup (e.g. ``assignment.__getitem__``) to
+    evaluate a hypothetical one instead -- ``Storage.foreign_used_bytes``
+    is unaffected either way, since section 5.1.1 defines it as
+    assignment-invariant (foreign volumes are never members of `D`).
     """
     disks = list(disks)
-    largest = largest_disk_bytes(disks, storage.id)
+    largest = largest_disk_bytes(disks, storage.id, storage_of=storage_of)
     required = max(round(storage.reserve_factor * largest), min_free_bytes)
-    used = managed_used_bytes(disks, storage.id) + storage.foreign_used_bytes
+    used = managed_used_bytes(disks, storage.id, storage_of=storage_of) + storage.foreign_used_bytes
     shortfall = max(0, used + required - storage.capacity_bytes)
     return ReserveStatus(
         largest_disk_bytes=largest,

@@ -1,0 +1,370 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The dependency-free heuristic solver. See IMPLEMENTATION_PLAN.md section 5.5.
+
+Seed from the current assignment, repair any (C5) reserve violation first
+and unconditionally (never traded against balance -- section 13), then
+descend the section 5.4 objective with single-disk moves and pairwise
+swaps until nothing improves it or ``heuristic_iterations`` is reached.
+
+``evaluate_assignment()`` is the one place the section 5.4 objective is
+computed from an arbitrary candidate assignment -- built specifically so
+``optimize.py`` (the MILP path, not yet written) can call the identical
+function section 5.5 requires ("the heuristic must use the same
+feasibility and objective functions as the MILP path so the two backends
+are directly comparable"). Everything here is pure: no network I/O, no
+``state.json``.
+
+**Not implemented in this pass:** heuristic step 4, "polish" (reuniting a
+fragmented VM when doing so does not worsen imbalance beyond
+``imbalance_threshold``). The section 14 acceptance fixture's exact
+three-move and two-move solutions are both reachable by repair+descend
+alone (verified in ``tests/unit/test_heuristic.py``): the objective's own
+``kappa`` term already makes descend prefer co-location whenever it does
+not cost more than it is worth, which covers everything the fixture
+exercises. Polish exists for a case descend's single-move/pairwise-swap
+neighbourhood cannot reach on its own (an affinity fix needing three or
+more disks to move in a coordinated rotation) — a real gap, not forgotten,
+just not yet needed to pass the one fixture that exists to prove this
+module correct. **Also not implemented:** (C2)'s format-compatibility
+eligibility rule (a storage that cannot hold a disk's format is fixed
+`x_{d,s}=0`) — ``topology.Storage`` does not yet carry the type/format
+information that rule needs (see ``topology.py``'s ``_default_format``,
+which resolves it internally but does not expose it on `Storage`), so
+every group storage is treated as an eligible target for every movable
+disk today. The section 14 fixture is homogeneous (all three storages
+accept the same format) and does not exercise this gap.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Mapping
+
+from proxmox_storage_drs.config import ObjectiveConfig
+from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status
+from proxmox_storage_drs.topology import Disk, Group
+
+# Every byte-valued objective term (`gamma`, and `r_s` for reporting) is
+# expressed in TiB here, matching `objective.gamma_move_bytes_per_tib` and
+# the section 14 worked example's own units -- this is the plain,
+# floating-point heuristic objective, not CP-SAT's separately-scaled
+# integer one (section 5.5), so there is no reason to use anything but the
+# unit the config and the worked example already use.
+_BYTES_PER_TIB = 1 << 40
+
+Assignment = dict[str, str]  # topology.Disk.key -> storage id
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectiveBreakdown:
+    """The section 5.4 objective, evaluated for one candidate assignment,
+    broken into its five terms -- kept separate rather than collapsed into
+    only ``total`` because ``explain`` (not yet written) needs to show the
+    arithmetic, not just the answer, and because tests cross-checking this
+    against the section 14 worked example need each term individually."""
+
+    imbalance_term: float  # alpha * sum(e_s)
+    move_count_term: float  # beta * number of disks that moved
+    bytes_moved_term: float  # gamma * TiB moved
+    fragmentation_term: float  # kappa * sum(extra storages per VM)
+    reserve_penalty_term: float  # objective.reserve_violation_penalty * TiB short
+    spread_e: dict[str, float]  # storage id -> e_s, for reporting
+    reserve_statuses: dict[str, ReserveStatus]  # storage id -> (C4)/(C5) at this assignment
+    moved_disk_keys: frozenset[str]
+
+    @property
+    def total(self) -> float:
+        return (
+            self.imbalance_term
+            + self.move_count_term
+            + self.bytes_moved_term
+            + self.fragmentation_term
+            + self.reserve_penalty_term
+        )
+
+    @property
+    def moves(self) -> int:
+        return len(self.moved_disk_keys)
+
+
+@dataclass(frozen=True, slots=True)
+class HeuristicResult:
+    """One group's heuristic solve. ``assignment`` is the final target
+    placement (every disk, pinned or not -- a pinned disk's entry always
+    equals its ``current_storage``, by construction, never by having been
+    specially checked); ``initial`` is section 14.2's "before" for the same
+    breakdown, so a caller can report the improvement without re-deriving
+    it."""
+
+    assignment: Assignment
+    breakdown: ObjectiveBreakdown
+    initial_breakdown: ObjectiveBreakdown
+    repair_moves: int  # how many of `breakdown.moves` were forced by (C5)
+
+
+def _movable_disks(group: Group) -> tuple[Disk, ...]:
+    """`D^mov` (section 5.3): disks (C2) has not fixed in place. A pinned
+    disk's assignment entry is never touched by any function in this
+    module -- it is seeded to `current_storage` and every search step here
+    iterates `_movable_disks()`, never `group.disks`, when proposing a
+    change."""
+    return tuple(d for d in group.disks if d.pinned_reason is None)
+
+
+def seed_assignment(group: Group) -> Assignment:
+    """Section 5.5 step 1: "seed with the current assignment (not from
+    scratch -- we are minimizing *change*)." Every disk, pinned or not."""
+    return {d.key: d.current_storage for d in group.disks}
+
+
+def _group_average_utilization(group: Group, load_by_key: Mapping[str, float]) -> float:
+    """`u* = (Sum_d l_d) / (Sum_s c_s)` (C6) -- a constant under any
+    reassignment of `D`'s own disks (section 5.3): moving a disk changes
+    which storage its load counts toward, never the group's total load or
+    total capability. Computed once per group, not once per candidate."""
+    total_load = sum(load_by_key.get(d.key, 0.0) for d in group.disks)
+    total_capability = sum(s.capability_weight for s in group.storages)
+    return total_load / total_capability if total_capability else 0.0
+
+
+def evaluate_assignment(
+    group: Group,
+    assignment: Assignment,
+    load_by_key: Mapping[str, float],
+    objective: ObjectiveConfig,
+    min_free_bytes: int,
+    average_utilization: float,
+) -> ObjectiveBreakdown:
+    """Section 5.4's objective for one candidate ``assignment``.
+
+    ``average_utilization`` is ``u*`` (see ``_group_average_utilization``)
+    -- a parameter, not recomputed here, since every candidate evaluated
+    during a single heuristic run shares the same value and recomputing it
+    from scratch on every call would be pure waste.
+    """
+
+    def storage_of(disk: Disk) -> str:
+        return assignment.get(disk.key, disk.current_storage)
+
+    reserve_statuses: dict[str, ReserveStatus] = {}
+    spread_e: dict[str, float] = {}
+    for storage in group.storages:
+        status = compute_reserve_status(storage, group.disks, min_free_bytes, storage_of=storage_of)
+        reserve_statuses[storage.id] = status
+        load = sum(load_by_key.get(d.key, 0.0) for d in group.disks if storage_of(d) == storage.id)
+        u_s = load / storage.capability_weight if storage.capability_weight else 0.0
+        spread_e[storage.id] = abs(u_s - average_utilization)
+
+    moved = frozenset(
+        d.key for d in group.disks if assignment.get(d.key, d.current_storage) != d.current_storage
+    )
+    bytes_moved_tib = sum(d.size_bytes for d in group.disks if d.key in moved) / _BYTES_PER_TIB
+    reserve_shortfall_tib = (
+        sum(s.shortfall_bytes for s in reserve_statuses.values()) / _BYTES_PER_TIB
+    )
+
+    fragmentation_disks = (
+        group.disks if objective.affinity_counts_pinned_disks else _movable_disks(group)
+    )
+    storages_per_vm: dict[int, set[str]] = {}
+    for disk in fragmentation_disks:
+        storages_per_vm.setdefault(disk.vmid, set()).add(storage_of(disk))
+    fragmentation = sum(max(0, len(storages) - 1) for storages in storages_per_vm.values())
+
+    return ObjectiveBreakdown(
+        imbalance_term=objective.alpha_spread * sum(spread_e.values()),
+        move_count_term=objective.beta_move_count * len(moved),
+        bytes_moved_term=objective.gamma_move_bytes_per_tib * bytes_moved_tib,
+        fragmentation_term=objective.kappa_vm_affinity * fragmentation,
+        reserve_penalty_term=objective.reserve_violation_penalty * reserve_shortfall_tib,
+        spread_e=spread_e,
+        reserve_statuses=reserve_statuses,
+        moved_disk_keys=moved,
+    )
+
+
+def _repair(
+    group: Group,
+    assignment: Assignment,
+    min_free_bytes: int,
+) -> tuple[Assignment, int]:
+    """Section 5.5 step 2: "while any `s` violates (C5), move the disk from
+    `s` that most reduces the violation per byte moved, to the feasible
+    storage with the lowest `u_s`." One storage repaired per iteration --
+    the worst violator by shortfall -- so a group with several violating
+    storages fixes the most urgent one first; bounded by the movable disk
+    count since each successful iteration strictly reduces the group's
+    total shortfall (a repair move that does not is never selected)."""
+    assignment = dict(assignment)
+    movable = _movable_disks(group)
+    storages_by_id = {s.id: s for s in group.storages}
+    repairs = 0
+
+    def storage_of(disk: Disk) -> str:
+        return assignment.get(disk.key, disk.current_storage)
+
+    for _ in range(len(movable) + 1):
+        statuses = {
+            s.id: compute_reserve_status(s, group.disks, min_free_bytes, storage_of=storage_of)
+            for s in group.storages
+        }
+        violating = [sid for sid, status in statuses.items() if status.violated]
+        if not violating:
+            break
+        worst_id = max(violating, key=lambda sid: statuses[sid].shortfall_bytes)
+        worst_storage = storages_by_id[worst_id]
+
+        # (ratio, disk, target_id, target_becomes_violated, target_used_bytes) --
+        # picked by highest ratio, then not worsening the target, then the
+        # target with the least existing usage (section 5.5: "the feasible
+        # storage with the lowest u_s"; used bytes is a monotonic proxy for
+        # u_s here since this loop only ever compares targets within the
+        # same trial, where load has not been touched by this move).
+        best: tuple[float, Disk, str, bool, int] | None = None
+        for disk in movable:
+            if storage_of(disk) != worst_id or disk.size_bytes <= 0:
+                continue
+            for target in group.storages:
+                if target.id == worst_id:
+                    continue
+                trial = dict(assignment)
+                trial[disk.key] = target.id
+
+                def trial_storage_of(d: Disk, _trial: Assignment = trial) -> str:
+                    return _trial.get(d.key, d.current_storage)
+
+                new_source_status = compute_reserve_status(
+                    worst_storage, group.disks, min_free_bytes, storage_of=trial_storage_of
+                )
+                reduction = statuses[worst_id].shortfall_bytes - new_source_status.shortfall_bytes
+                if reduction <= 0:
+                    continue
+                ratio = reduction / disk.size_bytes
+
+                target_status = compute_reserve_status(
+                    target, group.disks, min_free_bytes, storage_of=trial_storage_of
+                )
+                candidate = (
+                    ratio,
+                    disk,
+                    target.id,
+                    target_status.violated,
+                    target_status.managed_used_bytes,
+                )
+                if best is None or (ratio, not candidate[3], -candidate[4]) > (
+                    best[0],
+                    not best[3],
+                    -best[4],
+                ):
+                    best = candidate
+
+        if best is None:
+            break  # no repair move helps: report the residual as unfixable (caller's job)
+        _ratio, disk, target_id, _worsens, _used = best
+        assignment[disk.key] = target_id
+        repairs += 1
+
+    return assignment, repairs
+
+
+def _descend(
+    group: Group,
+    assignment: Assignment,
+    load_by_key: Mapping[str, float],
+    objective: ObjectiveConfig,
+    min_free_bytes: int,
+    average_utilization: float,
+    max_iterations: int,
+) -> Assignment:
+    """Section 5.5 step 3: repeatedly apply whichever single-disk move or
+    pairwise swap most improves the full objective; stop when nothing does,
+    or after ``heuristic_iterations``. Swaps matter (the plan is explicit):
+    when every storage is near its cap, no single move is feasible-and-
+    improving, and only an exchange of two disks can help."""
+    assignment = dict(assignment)
+    movable = _movable_disks(group)
+    current = evaluate_assignment(
+        group, assignment, load_by_key, objective, min_free_bytes, average_utilization
+    ).total
+
+    for _ in range(max_iterations):
+        best_value = current
+        best_assignment: Assignment | None = None
+
+        for disk in movable:
+            here = assignment[disk.key]
+            for target in group.storages:
+                if target.id == here:
+                    continue
+                trial = dict(assignment)
+                trial[disk.key] = target.id
+                value = evaluate_assignment(
+                    group, trial, load_by_key, objective, min_free_bytes, average_utilization
+                ).total
+                if value < best_value:
+                    best_value = value
+                    best_assignment = trial
+
+        for i, disk_a in enumerate(movable):
+            for disk_b in movable[i + 1 :]:
+                if assignment[disk_a.key] == assignment[disk_b.key]:
+                    continue  # no-op swap
+                trial = dict(assignment)
+                trial[disk_a.key], trial[disk_b.key] = (
+                    assignment[disk_b.key],
+                    assignment[disk_a.key],
+                )
+                value = evaluate_assignment(
+                    group, trial, load_by_key, objective, min_free_bytes, average_utilization
+                ).total
+                if value < best_value:
+                    best_value = value
+                    best_assignment = trial
+
+        if best_assignment is None:
+            break
+        assignment = best_assignment
+        current = best_value
+
+    return assignment
+
+
+def run_heuristic(
+    group: Group,
+    load_by_key: Mapping[str, float],
+    objective: ObjectiveConfig,
+    min_free_bytes: int,
+    heuristic_iterations: int = 5000,
+) -> HeuristicResult:
+    """Section 5.5's four-step heuristic (minus "polish"; see the module
+    docstring), producing a :class:`HeuristicResult` for one group.
+
+    ``load_by_key`` is ``loadmodel.GroupLoad.load_by_disk_key()``;
+    ``min_free_bytes`` is ``config.snapshot_reserve.min_free_bytes``.
+    """
+    average_utilization = _group_average_utilization(group, load_by_key)
+    initial = seed_assignment(group)
+    initial_breakdown = evaluate_assignment(
+        group, initial, load_by_key, objective, min_free_bytes, average_utilization
+    )
+
+    repaired, repair_moves = _repair(group, initial, min_free_bytes)
+    final = _descend(
+        group,
+        repaired,
+        load_by_key,
+        objective,
+        min_free_bytes,
+        average_utilization,
+        heuristic_iterations,
+    )
+    final_breakdown = evaluate_assignment(
+        group, final, load_by_key, objective, min_free_bytes, average_utilization
+    )
+    return HeuristicResult(
+        assignment=final,
+        breakdown=final_breakdown,
+        initial_breakdown=initial_breakdown,
+        repair_moves=repair_moves,
+    )

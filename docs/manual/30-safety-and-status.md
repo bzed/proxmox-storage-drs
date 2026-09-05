@@ -37,7 +37,7 @@ than a document that reads as if the tool were finished:
 | `verify-metrics` | Implemented: all six `IMPLEMENTATION_PLAN.md` section 3.3 checks, human and `--json` output. |
 | `show-load` | Implemented: every storage in every group, its disks (all buses), sizes, reserve status ((C4)/(C5)), per-disk/per-storage I/O load (`ℓ_d`/`L_s`/`u_s`, section 4), and a section 6 act/no-act verdict per group with its reasoning, pinned and low-coverage disks flagged with their reason, human and `--json` output. A Prometheus outage degrades this one group's load (and its gate verdict) to "unavailable" rather than failing the whole command — sizes and reserve status are unaffected. The gate verdict always evaluates as a first run (no `state.json` yet), so it can only ever be a reserve override or an imbalance check, never a drift-suppressed one — see `docs/internals/80-gates.md`. |
 | `verify-storages` | Implemented: `saferemove` and the implied wipe time per storage, warning when `gates.cooldown_per_storage` or `migration.max_single_move_duration` is shorter than it. |
-| `plan` | Not implemented yet — needs cooldown handling, the scheduler and the solver (phases 4-6); the gates themselves (section 6) are implemented and already visible via `show-load`. |
+| `plan` | Not implemented yet — needs the scheduler (section 8) and, for the preferred backend, the MILP solver (phase 6); the gates (section 6) and the heuristic solver's target-assignment search (section 5.4/5.5) are both implemented but not yet wired into any command — see `docs/internals/90-heuristic.md`. |
 | `explain` | Not implemented yet — needs the same, plus the payback and scheduling machinery it explains. |
 | `apply` | Not implemented yet — needs `execute.py` (phase 7 onward). |
 

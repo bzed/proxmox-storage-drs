@@ -8,14 +8,18 @@ section 2 architecture actually exists right now?
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
 gate, solve, cost, order, execute. As of this page, stages 1 (collect), 2
-(join) and 3 (gate) exist; solve through execute are `IMPLEMENTATION_PLAN.md`
-section 12 phases 4-9 and are not yet written. Do not take this page as a
-claim that the whole pipeline runs end to end —
-[`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
+(join), 3 (gate) and the heuristic half of 4 (solve) exist; the MILP path,
+cost (payback) and order (scheduling) through execute are
+`IMPLEMENTATION_PLAN.md` section 12 phases 4 (remainder)-9 and are not yet
+written. Do not take this page as a claim that the whole pipeline runs end
+to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
 is the authoritative per-command status: `gates.py`'s verdict is real and
 `show-load` prints it, but nothing yet *acts* on it (no `plan`/`apply`),
 and every call site passes `last_load=None` since `state.json` (the real
 drift history) does not exist yet — see [`80-gates.md`](80-gates.md).
+`heuristic.py` can already produce a target assignment for a group, but
+nothing yet orders its moves under section 8's transient reserve invariant
+or calls it from `cli.py` — see [`90-heuristic.md`](90-heuristic.md).
 
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
@@ -38,6 +42,10 @@ drift history) does not exist yet — see [`80-gates.md`](80-gates.md).
                                                       ▼
                                      gates.py (evaluate_group_gates():
                                      reserve override / drift / imbalance, section 6)
+                                                      │
+                                     heuristic.py (run_heuristic():
+                                     seed / repair / descend, section 5.4/5.5)
+                                     -- not yet called from cli.py
                                                       │
         ┌───────────────────────────────────────────────────────────────────┐
         │            cli.py  (argument parsing, command dispatch,           │
@@ -67,12 +75,14 @@ drift history) does not exist yet — see [`80-gates.md`](80-gates.md).
 | `reserve.py` | `compute_reserve_status()`: (C4)/(C5), shared by `show-load` today and the solver later | section 5.3 (C4)/(C5) |
 | `loadmodel.py` | `compute_group_load()`: the raw-series-to-`ℓ_d` blend, `min_coverage` rejection, current `L_s`/`u_s` | section 4 |
 | `gates.py` | `evaluate_group_gates()`: reserve override, drift, imbalance — the act/no-act verdict, with reasoning | section 6 |
+| `heuristic.py` | `run_heuristic()`: seed/repair/descend, and `evaluate_assignment()`, the section 5.4 objective shared with the (unwritten) MILP path | sections 5.4/5.5 |
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages` | section 11.3 |
 
-Not yet written: `optimize.py`, `heuristic.py`, `payback.py`, `schedule.py`,
-`execute.py` — and, within `gates.py`'s own scope, cooldown handling
-(needs `state.json`'s per-disk/per-storage timestamps; see
-[`80-gates.md`](80-gates.md)).
+Not yet written: `optimize.py`, `payback.py`, `schedule.py`, `execute.py`
+— and, within modules that do exist, cooldown handling in `gates.py`
+(needs `state.json`'s timestamps; see [`80-gates.md`](80-gates.md)),
+heuristic step 4 "polish" and (C2) format-compatibility eligibility in
+`heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)).
 
 ## Why config.py depends on forecast.py
 
@@ -105,3 +115,6 @@ this.
 - [`80-gates.md`](80-gates.md) — the section 6 act/no-act verdict, why
   `show-load`'s gate line is diagnostic rather than a real decision today,
   and why cooldowns are not in this module.
+- [`90-heuristic.md`](90-heuristic.md) — the section 5.4/5.5 objective and
+  the seed/repair/descend search, cross-checked against section 14's exact
+  objective totals, and what "polish" and format eligibility still owe.
