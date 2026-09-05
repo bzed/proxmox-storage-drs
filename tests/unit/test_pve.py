@@ -2,17 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """PveClient and build_client(). See proxmox_storage_drs/pve.py.
 
-No test here talks to a real Proxmox VE API (.agents/testing.md).
-FakeProxmoxResource replicates proxmoxer's own ProxmoxResource protocol --
-attribute access and calling both extend a path, and only a terminal
-get()/post() actually "does" anything -- closely enough that PveClient
-cannot tell it apart from the real proxmoxer.ProxmoxAPI it is normally
-constructed with.
+No test here talks to a real Proxmox VE API (.agents/testing.md); see
+tests/unit/fakes.py for FakeProxmoxResource, shared with test_topology.py.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -21,44 +16,7 @@ from proxmoxer import AuthenticationError, ResourceException
 from proxmox_storage_drs.config import AuthConfig, ProxmoxConfig
 from proxmox_storage_drs.exceptions import PveApiError
 from proxmox_storage_drs.pve import PveClient, build_client
-
-
-@dataclass
-class FakeProxmoxResource:
-    """A minimal stand-in for proxmoxer's dynamic ProxmoxResource."""
-
-    responses: dict[str, Any]
-    calls: list[tuple[str, str, dict[str, Any]]]
-    error: BaseException | None = None
-    _path: tuple[str, ...] = field(default_factory=tuple)
-
-    def __getattr__(self, item: str) -> "FakeProxmoxResource":
-        if item.startswith("_"):
-            raise AttributeError(item)
-        return FakeProxmoxResource(self.responses, self.calls, self.error, self._path + (item,))
-
-    def __call__(self, resource_id: object) -> "FakeProxmoxResource":
-        return FakeProxmoxResource(
-            self.responses, self.calls, self.error, self._path + (str(resource_id),)
-        )
-
-    def _resolve(self, method: str, kwargs: dict[str, Any]) -> Any:
-        path = "/".join(self._path)
-        self.calls.append((method, path, kwargs))
-        if self.error is not None:
-            raise self.error
-        return self.responses[path]
-
-    def get(self, **params: Any) -> Any:
-        return self._resolve("GET", params)
-
-    def post(self, **data: Any) -> Any:
-        return self._resolve("POST", data)
-
-
-def fake_api(responses: dict[str, Any], error: BaseException | None = None) -> FakeProxmoxResource:
-    return FakeProxmoxResource(responses=responses, calls=[], error=error)
-
+from tests.unit.fakes import fake_api
 
 # --------------------------------------------------------------------- read path
 

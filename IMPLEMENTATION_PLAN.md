@@ -482,10 +482,19 @@ fetching dominates run time. Specify:
 - the pre-move re-validation in §9.2 **must bypass this cache** for the specific VM and target
   storage it is about to touch, and only for those; everything else may be reused;
 - `/cluster/resources` is a single call and gives the VM inventory, node placement and coarse
-  storage usage, so fetch it first and use it to decide which per-VM configs are needed at all
-  (excluded, stopped and ungrouped VMs need none).
+  storage usage, so fetch it first and use it to decide which per-VM configs are needed at all —
+  in practice this means only a **stopped** VM, when `exclude.running_only` is set, can be skipped
+  without fetching its config, since that is the only exclusion `cluster/resources`'s own fields
+  (`status`) can decide. A VM excluded by `exclude.vmids`/tags still needs its config fetched: (C2)
+  *pins* such a disk into `D` rather than dropping it (§5.1.1's note on why), which needs its size.
+  A disk turning out to be "ungrouped" (§3.6) is only discoverable *after* fetching the config that
+  reveals which storage it is actually on, so it costs a fetch too — the saving from this
+  optimization is real but smaller than a naive reading suggests.
 
-Expected call count per run: `2 + |VMs considered| + 2·|storages|`.
+Expected call count per run: `3 + 2·|VMs considered| + 2·|storages|` — three cluster-wide calls
+(VM inventory, storage inventory, storage definitions), two per considered VM (config, which also
+carries `lock` per §9.3's pseudocode so no separate `/status/current` call is needed at planning
+time; and `/snapshot`, per §3.7), and two per storage (`status`, `content`).
 
 Write path:
 
@@ -562,6 +571,16 @@ series exists for a volume QEMU has not opened — so relocating one yields zero
 while incurring the full `γ·z_d` byte penalty and the full payback cost of §7. The solver will
 therefore leave them alone until a capacity constraint forces the issue, which is exactly the desired
 policy. Set `exclude.include_unused_disks: false` to pin them instead; they then count via `Uˢᵉˣᵗ`.
+
+**An `unusedN` volume can be absent from `GET /storage/{s}/content` on at least one real backend.**
+Verified against a live PVE 9.2.11 cluster on Ceph RBD storage: a VM's `unused0` entry named a volume
+(`VM:vm-104-disk-2`) that PVE's own config still tracked, but that volume did not appear anywhere in
+that storage's content listing, while the same VM's two active (`scsiN`) disks did. Whether the
+underlying RBD image still exists and is simply not enumerated for detached volumes, or the reference
+is stale, was not established — this is exactly the kind of claim §domain-invariants.md rule 10 says
+to verify or label, not assume. `topology.py` treats this the same as any other content-listing gap
+(§3.5): it falls back to the VM config's own `size=` for that disk and logs a warning naming it as
+unauthoritative, rather than silently treating the disk as zero bytes or dropping it.
 
 **Evacuating a storage completely is therefore possible online** — every disk type in the table above
 except CD-ROM-media entries can be relocated with the guest running, and CD-ROM entries hold no
@@ -729,12 +748,25 @@ Uˢᵉˣᵗ = Σ { size(vol) : vol ∈ GET /nodes/{node}/storage/{s}/content ,
 ```
 
 where `identity(vol)` is the `(vmid, device)` pair the volume belongs to, resolved by matching the
-volume id against the owning VM's config. Everything that is not a movable disk of this group counts
-as foreign: templates, ISOs and backups, disks of stopped/excluded/ungrouped VMs, disks belonging to
-another group that shares the storage, unreferenced orphans, and **orphaned target volumes left by a
-previously failed move** (§9.3). Counting those orphans is intentional — they really do occupy the
-LUN, and letting them inflate `Uˢᵉˣᵗ` is what makes their cost visible rather than silently eroding
-the reserve.
+volume id against the owning VM's config, and `D` here means *every* disk (C2)'s eligibility pass
+tracks for this group, pinned or not — `Σ_{s∈S} x_{d,s} = 1` holds for `d ∈ D` regardless of whether
+a specific `x` is fixed. Everything that is **not** a member of `D` counts as foreign: templates,
+ISOs and backups, disks of stopped or ungrouped VMs (§3.6/(C2): never fetched, never entered into any
+`D` at all), disks belonging to another group that shares the storage, unreferenced orphans, and
+**orphaned target volumes left by a previously failed move** (§9.3). Counting those orphans is
+intentional — they really do occupy the LUN, and letting them inflate `Uˢᵉˣᵗ` is what makes their
+cost visible rather than silently eroding the reserve.
+
+**Config-excluded disks (`exclude.vmids`/`exclude.disks`/tags/`no-drs`) are *not* on this list.**
+Section 5.3 (C2) pins them into `D` rather than dropping them, precisely so their bytes still count
+toward `Σ_d z_d·x_{d,s}` in (C4)/(C5) and their fragmentation toward `κ` — see "Pinned disks are
+modelled, not ignored" in §3.6. Treating a config-excluded disk as foreign instead would double the
+inconsistency: it would still occupy the reserve calculation correctly by accident (foreign bytes are
+also subtracted from capacity) but would silently break the affinity accounting for the rest of that
+VM's disks, which is exactly the failure mode §3.6's rule exists to prevent. An earlier draft of this
+section listed "excluded" alongside "stopped" and "ungrouped" here, which was a direct contradiction
+of (C2) rather than a second valid path — fixed in the same commit that first implemented this join
+in `topology.py`.
 
 Set `Uˢᵉˣᵗ = 0` only if `snapshot_reserve.count_foreign_volumes` is false, which is not recommended.
 

@@ -7,10 +7,9 @@ section 2 architecture actually exists right now?
 ## The pipeline, as specified and as built
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
-gate, solve, cost, order, execute. As of this page, stage 1 (collect — both
-Prometheus and the PVE API) and the surrounding configuration/CLI
-scaffolding exist; join through execute are `IMPLEMENTATION_PLAN.md` section
-12 phases 2-9 and are not yet written. Do not take this page as a claim that
+gate, solve, cost, order, execute. As of this page, stages 1 (collect) and 2
+(join) exist; gate through execute are `IMPLEMENTATION_PLAN.md` section 12
+phases 3-9 and are not yet written. Do not take this page as a claim that
 the whole pipeline runs end to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
 is the authoritative per-command status.
 
@@ -23,10 +22,16 @@ is the authoritative per-command status.
               │ PromQL builders,                    │ build_client()
               │ verify_metrics()                    │
               ▼                                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │            cli.py  (argument parsing,              │
-        │            command dispatch, mode-override rule)   │
-        └───────────────────────┬───────────────────────────┘
+                                         topology.py (build_topology():
+                                         the disk/storage/group join, D/S/U^ext)
+                                                     │
+                                         reserve.py (compute_reserve_status():
+                                         (C4)/(C5), shared with the solver)
+                                                     │
+        ┌───────────────────────────────────────────┴───────────────────────┐
+        │            cli.py  (argument parsing, command dispatch,           │
+        │            mode-override rule, show-load, verify-storages)        │
+        └───────────────────────┬─────────────────────────────────────────┘
                                  │
                      config.py (load + validate)
                      forecast.py (Forecaster protocol + 3 models)
@@ -47,10 +52,12 @@ is the authoritative per-command status.
 | `logging_setup.py` | Structured JSON logging to **stderr** | section 2.1 (amended, see [`40-cli-and-logging.md`](40-cli-and-logging.md)) |
 | `metrics.py` | `PrometheusClient`, PromQL construction, `verify_metrics()` | sections 3.1-3.4 |
 | `pve.py` | `PveClient` (built on `proxmoxer`), `build_client()` | section 3.5 |
-| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule | section 11.3 |
+| `topology.py` | `build_topology()`: the disk/storage/group join, `D`, `S`, `Uˢᵉˣᵗ`, (C2) pins | sections 3.5-3.7, 5.1, 5.3 (C2) |
+| `reserve.py` | `compute_reserve_status()`: (C4)/(C5), shared by `show-load` today and the solver later | section 5.3 (C4)/(C5) |
+| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages` | section 11.3 |
 
-Not yet written: `topology.py`, `loadmodel.py`, `optimize.py`,
-`heuristic.py`, `payback.py`, `schedule.py`, `execute.py`.
+Not yet written: `loadmodel.py`, `optimize.py`, `heuristic.py`, `payback.py`,
+`schedule.py`, `execute.py`.
 
 ## Why config.py depends on forecast.py
 
@@ -75,3 +82,5 @@ this.
   `--mode` escalation rule, and why logs go to stderr.
 - [`50-pve-api.md`](50-pve-api.md) — the PVE API client, why it is built on
   `proxmoxer`, and two things verified against a real cluster.
+- [`60-topology.md`](60-topology.md) — the disk/storage/group join, the
+  section 5.1.1 foreign-volume accounting, and the shared (C4)/(C5) evaluator.

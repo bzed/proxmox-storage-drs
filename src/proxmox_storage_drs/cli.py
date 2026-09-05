@@ -24,7 +24,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from proxmox_storage_drs import __version__
 from proxmox_storage_drs.config import (
@@ -36,6 +36,10 @@ from proxmox_storage_drs.config import (
 from proxmox_storage_drs.exceptions import ConfigError, DrsError
 from proxmox_storage_drs.logging_setup import configure_logging
 from proxmox_storage_drs.metrics import PrometheusClient, VerifyMetricsReport, verify_metrics
+from proxmox_storage_drs.pve import build_client as build_pve_client
+from proxmox_storage_drs.reserve import compute_reserve_status, largest_disk_bytes
+from proxmox_storage_drs.topology import Topology, build_topology
+from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -252,10 +256,200 @@ def _handle_verify_metrics(resolved: ResolvedConfig, args: argparse.Namespace, m
     return 0 if report.ok else 1
 
 
+def _render_show_load_human(topology: Topology, config: Any) -> str:
+    lines: list[str] = []
+    for group in topology.groups:
+        lines.append(f"Group {group.name}")
+        for storage in group.storages:
+            status = compute_reserve_status(
+                storage, group.disks, config.snapshot_reserve.min_free_bytes
+            )
+            reserve_str = (
+                f"⚠ reserve short by {format_bytes(status.shortfall_bytes)}"
+                if status.violated
+                else "reserve OK"
+            )
+            lines.append(
+                f"  {storage.id}  used {format_bytes(storage.used_bytes)}/"
+                f"{format_bytes(storage.capacity_bytes)}  {reserve_str}  "
+                f"(largest disk {format_bytes(status.largest_disk_bytes)}, "
+                f"requires {format_bytes(status.required_reserve_bytes)} free)"
+            )
+            disks_here = sorted(
+                (d for d in group.disks if d.current_storage == storage.id),
+                key=lambda d: (d.vmid, d.device),
+            )
+            for disk in disks_here:
+                pin = f"  [pinned: {disk.pinned_reason}]" if disk.pinned_reason else ""
+                lines.append(
+                    f"    {disk.key:<14} {format_bytes(disk.size_bytes):>10}  "
+                    f"{disk.format:<6}{pin}"
+                )
+        lines.append("")
+    if topology.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in topology.warnings)
+        lines.append("")
+    lines.append(
+        "Note: per-disk I/O load is not yet computed -- loadmodel.py "
+        "(IMPLEMENTATION_PLAN.md section 12 phase 3) is not implemented yet; "
+        "sizes and reserve status above are accurate."
+    )
+    return "\n".join(lines)
+
+
+def _render_show_load_json(topology: Topology, config: Any) -> dict[str, object]:
+    groups_out = []
+    for group in topology.groups:
+        storages_out = []
+        for storage in group.storages:
+            status = compute_reserve_status(
+                storage, group.disks, config.snapshot_reserve.min_free_bytes
+            )
+            storages_out.append(
+                {
+                    "id": storage.id,
+                    "used_bytes": storage.used_bytes,
+                    "capacity_bytes": storage.capacity_bytes,
+                    "foreign_used_bytes": storage.foreign_used_bytes,
+                    "largest_disk_bytes": status.largest_disk_bytes,
+                    "required_reserve_bytes": status.required_reserve_bytes,
+                    "reserve_violated": status.violated,
+                    "reserve_shortfall_bytes": status.shortfall_bytes,
+                }
+            )
+        disks_out = [
+            {
+                "key": d.key,
+                "vmid": d.vmid,
+                "device": d.device,
+                "vm_name": d.vm_name,
+                "size_bytes": d.size_bytes,
+                "current_storage": d.current_storage,
+                "format": d.format,
+                "pinned_reason": d.pinned_reason,
+            }
+            for d in group.disks
+        ]
+        groups_out.append({"name": group.name, "storages": storages_out, "disks": disks_out})
+    return {"groups": groups_out, "warnings": list(topology.warnings), "load_computed": False}
+
+
+def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+    del mode
+    client = build_pve_client(resolved.config.proxmox)
+    topology = build_topology(client, resolved.config)
+    if args.json:
+        print(
+            json.dumps(_render_show_load_json(topology, resolved.config), indent=2, sort_keys=True)
+        )
+    else:
+        print(_render_show_load_human(topology, resolved.config))
+    return 0
+
+
+def _implied_wipe_seconds(disk_bytes: int, throughput_bytes_per_sec: float | None) -> float | None:
+    """Sections 3.5/7.1/9.3: ``z_max / saferemove_throughput``.
+
+    Not yet shared with ``payback.py``'s identical ``duration_wipe_d``
+    formula (section 7.1), since that module does not exist yet -- extract
+    this to one shared function the day it does (AGENTS.md section 5).
+    """
+    if not throughput_bytes_per_sec:
+        return None
+    return disk_bytes / throughput_bytes_per_sec
+
+
+def _render_verify_storages_human(topology: Topology, config: Any) -> str:
+    lines: list[str] = []
+    for group in topology.groups:
+        lines.append(f"Group {group.name}")
+        for storage in group.storages:
+            largest = largest_disk_bytes(group.disks, storage.id)
+            state = "on" if storage.saferemove else "off"
+            lines.append(f"  {storage.id}  saferemove={state}")
+            wipe_seconds = _implied_wipe_seconds(
+                largest, storage.saferemove_throughput_bytes_per_sec
+            )
+            if wipe_seconds is None:
+                lines.append("    saferemove is off or throughput unknown; no wipe-time check")
+                continue
+            lines.append(
+                f"    implied wipe time for the largest disk ({format_bytes(largest)}): "
+                f"{format_duration_seconds(wipe_seconds)}"
+            )
+            if wipe_seconds > config.gates.cooldown_per_storage_seconds:
+                lines.append(
+                    "    ⚠ gates.cooldown_per_storage "
+                    f"({format_duration_seconds(config.gates.cooldown_per_storage_seconds)}) "
+                    "is shorter than the implied wipe time -- the next run may plan onto a "
+                    "still-draining storage (section 9.3)"
+                )
+            max_move_seconds = config.migration.max_single_move_duration_seconds
+            if wipe_seconds > max_move_seconds:
+                lines.append(
+                    "    ⚠ migration.max_single_move_duration "
+                    f"({format_duration_seconds(max_move_seconds)}) "
+                    "is shorter than the implied wipe time -- a move of the largest disk would "
+                    "be rejected outright (section 7.3)"
+                )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, object]:
+    groups_out = []
+    for group in topology.groups:
+        storages_out = []
+        for storage in group.storages:
+            largest = largest_disk_bytes(group.disks, storage.id)
+            wipe_seconds = _implied_wipe_seconds(
+                largest, storage.saferemove_throughput_bytes_per_sec
+            )
+            storages_out.append(
+                {
+                    "id": storage.id,
+                    "saferemove": storage.saferemove,
+                    "saferemove_throughput_bytes_per_sec": (
+                        storage.saferemove_throughput_bytes_per_sec
+                    ),
+                    "largest_disk_bytes": largest,
+                    "implied_wipe_seconds": wipe_seconds,
+                    "cooldown_per_storage_too_short": (
+                        wipe_seconds is not None
+                        and wipe_seconds > config.gates.cooldown_per_storage_seconds
+                    ),
+                    "max_single_move_duration_too_short": (
+                        wipe_seconds is not None
+                        and wipe_seconds > config.migration.max_single_move_duration_seconds
+                    ),
+                }
+            )
+        groups_out.append({"name": group.name, "storages": storages_out})
+    return {"groups": groups_out}
+
+
+def _handle_verify_storages(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+    del mode
+    client = build_pve_client(resolved.config.proxmox)
+    topology = build_topology(client, resolved.config)
+    if args.json:
+        print(
+            json.dumps(
+                _render_verify_storages_json(topology, resolved.config), indent=2, sort_keys=True
+            )
+        )
+    else:
+        print(_render_verify_storages_human(topology, resolved.config))
+    return 0
+
+
 _COMMAND_HANDLERS: dict[str, CommandHandler] = {
     name: _make_not_yet_implemented_handler(name) for name in _SUBCOMMANDS
 }
 _COMMAND_HANDLERS["verify-metrics"] = _handle_verify_metrics
+_COMMAND_HANDLERS["show-load"] = _handle_show_load
+_COMMAND_HANDLERS["verify-storages"] = _handle_verify_storages
 
 
 # ------------------------------------------------------------------- main
