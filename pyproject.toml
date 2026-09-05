@@ -58,6 +58,11 @@ Homepage = "https://github.com/bzed/proxmox-storage-drs"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# config_schema.json is read at runtime via importlib.resources (config.py),
+# so it must ship inside the installed package, not just the sdist.
+[tool.setuptools.package-data]
+proxmox_storage_drs = ["config_schema.json"]
+
 # ---------------------------------------------------------------------------
 # Formatting. black owns layout; isort is configured to produce black-compatible
 # output so the two can never fight. `line-length` here MUST equal
@@ -80,9 +85,11 @@ python_version = "3.11"
 # Paths come from the Makefile so the targets work before `src/` exists.
 strict = true
 warn_unreachable = true
-# Third-party stubs we do not control.
+# Third-party stubs we do not control. jsonschema is a hard dependency (it is
+# in Debian trixie) but ships no py.typed marker and Debian has no
+# types-jsonschema, so it is treated the same as the optional solvers here.
 [[tool.mypy.overrides]]
-module = ["ortools.*", "pulp.*", "statsmodels.*"]
+module = ["jsonschema.*", "ortools.*", "pulp.*", "statsmodels.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
@@ -93,6 +100,11 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
+# CI's SYSTEM_TOOLS mode (tests.yml) runs `python3 -m pytest` straight from a
+# checkout with no `pip install -e .` step -- deliberately, since the project
+# never pip-installs its way around anything in CI (AGENTS.md section 9.3).
+# This is pytest's own mechanism for making src/ importable without one.
+pythonpath = ["src"]
 addopts = [
   "-ra",
   "--strict-markers",

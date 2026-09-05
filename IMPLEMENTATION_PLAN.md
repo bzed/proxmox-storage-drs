@@ -184,11 +184,14 @@ the *invocation* cadence is independent of `execution.time_windows`, which const
 The drift and imbalance gates (§6) make frequent invocation cheap — most runs exit at a gate having
 issued only read queries.
 
-**Logging.** Structured JSON lines to stdout (captured by journald) plus an optional file sink.
-Every run must log, at minimum: each gate decision with its computed value and threshold; the load
-vector digest; the chosen plan and its objective breakdown; the payback arithmetic; every `move_disk`
-issued with its UPID; and every abort, re-plan and deadlock. In `auto` mode this log is the only
-record a human will see, so it must be sufficient to reconstruct why any migration happened.
+**Logging.** Structured JSON lines to **stderr** (captured by journald) plus an optional file sink.
+Logging goes to stderr rather than stdout specifically so that `--json`'s machine-readable plan
+report (section 9.5) can be safely captured from stdout alone; a systemd service unit captures both
+streams into the same journal, so nothing is lost when run under the timer. Every run must log, at
+minimum: each gate decision with its computed value and threshold; the load vector digest; the
+chosen plan and its objective breakdown; the payback arithmetic; every `move_disk` issued with its
+UPID; and every abort, re-plan and deadlock. In `auto` mode this log is the only record a human will
+see, so it must be sufficient to reconstruct why any migration happened.
 
 ### 2.2 Packaging and continuous integration
 

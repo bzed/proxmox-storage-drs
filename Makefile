@@ -30,9 +30,7 @@ MYPY    := $(VENV)/bin/mypy
 PYTEST  := $(VENV)/bin/pytest
 endif
 
-# `src` does not exist yet at the design stage; wildcard keeps the targets usable
-# until it does, and picks it up automatically once it is created.
-SOURCES := $(wildcard src) tests tools
+SOURCES := src tests tools
 
 .PHONY: help venv install fmt fmt-check lint typecheck test cov fixtures check clean
 
@@ -47,8 +45,10 @@ help:
 	@echo "cov        pytest with an HTML coverage report in htmlcov/"
 	@echo "fixtures   assert tests/fixtures/*.expected.json are current"
 	@echo "pdf        render IMPLEMENTATION_PLAN.md to docs/IMPLEMENTATION_PLAN.pdf"
+	@echo "internals  render docs/internals/*.md to docs/internals.pdf"
+	@echo "manual     render docs/manual/*.md to docs/pve-storage-drs-manual.pdf"
 	@echo "man        render man/pve-storage-drs.1.md to man/pve-storage-drs.1"
-	@echo "docs       pdf + man"
+	@echo "docs       pdf + internals + manual + man"
 	@echo "docs-check assert every generated document matches its Markdown"
 	@echo "deb        build the Debian package with dpkg-buildpackage"
 	@echo "check      fmt-check + lint + typecheck + test + fixtures + pdf-check"
@@ -77,14 +77,8 @@ lint: $(VENVDEP)
 typecheck: $(VENVDEP)
 	$(MYPY) $(SOURCES)
 
-# There are no tests yet: the repository is still at the design stage and
-# IMPLEMENTATION_PLAN.md is the deliverable. Skip pytest until the first test
-# file exists, so `make check` stays usable; from the first test onwards the
-# 85 % floor in pyproject.toml applies with no escape hatch.
 test: $(VENVDEP)
-	@if [ -z "$$(find tests -name 'test_*.py' -print -quit 2>/dev/null)" ]; then \
-		echo "NOTE: no test_*.py under tests/ yet (design stage); skipping pytest"; \
-	else $(PYTEST); fi
+	$(PYTEST)
 
 cov: $(VENVDEP)
 	$(PYTEST) --cov-report=html
@@ -101,78 +95,74 @@ clean:
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 
 # ---------------------------------------------------------------- paper ----
-# The PDF rendering of the plan.  It is a build product, but it is committed:
-# it is a deliverable people read outside a git checkout, and a stale PDF is
-# worse than none.  `make pdf-check` is part of `make check`, so a plan edit
-# that is not accompanied by a rebuilt PDF fails before it can be committed.
-# The stamp records the SHA-256 of the Markdown the PDF was built from, which
-# survives clones and checkouts, unlike mtimes.
+# The PDF rendering of the plan, the internals and the operator manual. Each
+# is a build product but is committed: all three are deliverables people read
+# outside a git checkout, and a stale PDF is worse than none. `make docs-check`
+# is part of `make check`, so a source edit not accompanied by a rebuild fails
+# before it can be committed. tools/build_paper.sh is the single
+# implementation of the pandoc+LuaLaTeX pipeline (AGENTS.md section 5); this
+# file only declares, per document, its sources, title and subtitle. Each
+# stamp is a `sha256sum` manifest of its sources, which survives clones and
+# checkouts unlike mtimes, and works identically for one file (the plan) or
+# many (internals, manual).
 
-PLAN       := IMPLEMENTATION_PLAN.md
-PAPER      := docs/IMPLEMENTATION_PLAN.pdf
+PLAN          := IMPLEMENTATION_PLAN.md
+PAPER         := docs/IMPLEMENTATION_PLAN.pdf
+INTERNALS_SRC := $(sort $(wildcard docs/internals/*.md))
+INTERNALS_PDF := docs/internals.pdf
+MANUAL_SRC    := $(sort $(wildcard docs/manual/*.md))
+MANUAL_PDF    := docs/pve-storage-drs-manual.pdf
+
 PAPER_SRC  := docs/paper
 PAPER_DEPS := $(PAPER_SRC)/header.tex $(PAPER_SRC)/filters.lua $(PAPER_SRC)/metadata.yaml \
-              Makefile tools/check_paper_log.py
-STAMP      := docs/IMPLEMENTATION_PLAN.pdf.sha256
+              Makefile tools/check_paper_log.py tools/build_paper.sh
 BUILDDIR   := docs/.build
 
-.PHONY: pdf pdf-check man man-check docs docs-check deb
+.PHONY: pdf pdf-check internals internals-check manual manual-check man man-check docs docs-check deb
 
-pdf: $(PAPER)
+empty :=
+comma := ,
 
-$(PAPER): $(PLAN) $(PAPER_DEPS)
-	@command -v pandoc  >/dev/null || { echo "pandoc is not installed"; exit 1; }
-	@command -v lualatex >/dev/null || { echo "lualatex is not installed (texlive-luatex)"; exit 1; }
-	@mkdir -p $(BUILDDIR) $(dir $(PAPER))
-	@hash=$$(sha256sum $(PLAN) | cut -d' ' -f1); \
-	 if git diff --quiet HEAD -- $(PLAN) 2>/dev/null; then \
-	   date=$$(git log -1 --format=%cs -- $(PLAN)); \
-	   epoch=$$(git log -1 --format=%ct -- $(PLAN)); \
-	 fi; \
-	 [ -n "$$date" ] || date=$$(date -u +%F); \
-	 [ -n "$$epoch" ] || epoch=$$(date +%s); \
-	 printf '\\def\\drssourcehash{%s}\n' "$$hash" > $(BUILDDIR)/revision.tex; \
-	 pandoc $(PLAN) \
-	   --from=markdown \
-	   --metadata-file=$(PAPER_SRC)/metadata.yaml \
-	   --lua-filter=$(PAPER_SRC)/filters.lua \
-	   --include-in-header=$(PAPER_SRC)/header.tex \
-	   --include-in-header=$(BUILDDIR)/revision.tex \
-	   --toc --toc-depth=4 \
-	   --highlight-style=tango \
-	   -M date="$$date" \
-	   --standalone -o $(BUILDDIR)/plan.tex; \
-	 cd $(BUILDDIR) && SOURCE_DATE_EPOCH=$$epoch FORCE_SOURCE_DATE=1 \
-	   latexmk -lualatex -interaction=nonstopmode -halt-on-error plan.tex >latexmk.log 2>&1 \
-	   || { echo "lualatex failed; see $(BUILDDIR)/plan.log"; \
-	        grep -m5 -A3 '^!' plan.log; exit 1; }
-	@python3 tools/check_paper_log.py $(BUILDDIR)/plan.log
-	@cp $(BUILDDIR)/plan.pdf $(PAPER)
-	@sha256sum $(PLAN) > $(STAMP)
-	@echo "pdf: $(PAPER) ($$(pdfinfo $(PAPER) 2>/dev/null | awk '/^Pages/{print $$2}') pages)"
+# $(call PAPER_DOC,<make-target-stem>,<output.pdf>,<sources>,<title>,<subtitle>)
+# defines <stem>, <stem>-check and the .pdf rule itself. A comma in <subtitle>
+# must be written as $(comma) since `call` splits its own arguments on commas.
+define PAPER_DOC
+$(2): $(3) $(PAPER_DEPS)
+	tools/build_paper.sh $(2) $(2).sha256 $(BUILDDIR) $(1) "$(4)" "$(5)" $(3)
 
-# Fails when the committed PDF was built from a different plan than the one in
-# the tree.  Skipped, loudly, where the document toolchain is not installed.
-pdf-check:
-	@if [ ! -f $(PAPER) ] || [ ! -f $(STAMP) ]; then \
-		echo "pdf-check: $(PAPER) or its stamp is missing; run 'make pdf'"; exit 1; \
+.PHONY: $(1) $(1)-check
+$(1): $(2)
+
+$(1)-check:
+	@if [ ! -f $(2) ] || [ ! -f $(2).sha256 ]; then \
+		echo "$(1)-check: $(2) or its stamp is missing; run 'make $(1)'"; exit 1; \
 	fi
-	@if ! sha256sum --check --status $(STAMP); then \
+	@if ! sha256sum --check --status $(2).sha256; then \
 		if command -v pandoc >/dev/null && command -v lualatex >/dev/null; then \
-			echo "pdf-check: $(PLAN) changed since $(PAPER) was built; run 'make pdf'"; \
+			echo "$(1)-check: source changed since $(2) was built; run 'make $(1)'"; \
 			exit 1; \
 		else \
-			echo "NOTE: $(PAPER) is stale but pandoc/lualatex are not installed;"; \
-			echo "      install them and run 'make pdf' before committing the plan."; \
+			echo "NOTE: $(2) is stale but pandoc/lualatex are not installed;"; \
+			echo "      install them and run 'make $(1)' before committing."; \
 		fi; \
 	fi
+endef
+
+$(eval $(call PAPER_DOC,pdf,$(PAPER),$(PLAN),$(strip Proxmox Storage DRS),$(strip \
+  Balancing disk I/O across shared storages on Proxmox VE 9.2)))
+$(eval $(call PAPER_DOC,internals,$(INTERNALS_PDF),$(INTERNALS_SRC),$(strip \
+  Proxmox Storage DRS -- Internals),$(strip \
+  How the tool works$(comma) for whoever changes it)))
+$(eval $(call PAPER_DOC,manual,$(MANUAL_PDF),$(MANUAL_SRC),$(strip \
+  Proxmox Storage DRS -- Operator Manual),$(strip \
+  Installing$(comma) configuring and running it safely)))
 
 MANPAGE  := man/pve-storage-drs.1
 MAN_SRC  := man/pve-storage-drs.1.md
 VERSION  := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
 
-docs: pdf man
-docs-check: pdf-check man-check
+docs: pdf internals manual man
+docs-check: pdf-check internals-check manual-check man-check
 
 # Unlike the PDF the manpage is not committed: nobody reads roff outside a
 # checkout, and debian/rules builds it during the package build.

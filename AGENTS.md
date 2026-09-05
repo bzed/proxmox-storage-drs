@@ -209,11 +209,14 @@ in PDF or in roff.
 | The operator who runs it | `docs/manual/*.md` | `docs/pve-storage-drs-manual.pdf`, `man/pve-storage-drs.1` |
 | Somebody at a terminal, right now | the CLI's own option definitions | `pve-storage-drs --help`, `pve-storage-drs --manual` |
 
-**Status:** only the specification pipeline (`make pdf`, [`.agents/paper.md`](.agents/paper.md))
-exists today, because there is no code yet. The commit that first adds a CLI adds the rest —
-`docs/internals/`, `docs/manual/`, `man/pve-storage-drs.1.md`, the `docs`/`docs-check` targets — and wires
-`docs-check` into `make check`. `docs/paper/` is document-agnostic apart from its title block and
-is meant to be reused, not copied.
+**Status:** all three pipelines exist. `docs/paper/` and `tools/build_paper.sh` are the one shared
+pandoc+LuaLaTeX implementation behind `make pdf`, `make internals` and `make manual`
+([`.agents/paper.md`](.agents/paper.md)); `make docs`/`make docs-check` build and verify all three
+PDFs plus the manpage, and `docs-check` is part of `make check`. `docs/internals/*.md` and
+`docs/manual/*.md` grow with the code: a phase that adds a module or a command adds the internals
+page and manual section that describe it, in the same commit — they do not need to describe the
+whole plan on day one, only what is actually built, and must say so honestly where it is not
+(see `docs/manual/30-safety-and-status.md`'s per-command status table for the pattern).
 
 ### 8.1 Documentation inside the code
 

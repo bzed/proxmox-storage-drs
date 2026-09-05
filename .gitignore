@@ -37,6 +37,8 @@ debian/files
 debian/pve-storage-drs/
 debian/pve-storage-drs.debhelper.log
 debian/pve-storage-drs.substvars
+debian/pve-storage-drs.postinst.debhelper
+debian/pve-storage-drs.prerm.debhelper
 debian/debhelper-build-stamp
 debian/*-build-deps_*
 .pybuild/

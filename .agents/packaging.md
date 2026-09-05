@@ -57,21 +57,24 @@ upstream tarball to track. `debian/gbp.conf` points at `main` for the same reaso
 It **builds the manpage** from `man/pve-storage-drs.1.md`, because that is generated from source and nobody
 should be reading a committed roff file.
 
-It **does not rebuild the PDFs**. They are committed, reproducible artefacts whose freshness
-`make check` and CI already enforce, and re-running LuaLaTeX in the chroot would pull the better
-part of TeX Live in to produce a byte-identical file. Instead `debian/rules` verifies them:
+It **does not rebuild the PDFs** — the plan, `docs/internals.pdf` and `docs/pve-storage-drs-manual.pdf`.
+All three are committed, reproducible artefacts whose freshness `make check` and CI already
+enforce, and re-running LuaLaTeX in the chroot three times would pull the better part of TeX Live in
+to produce byte-identical files. Instead `debian/rules` verifies each one:
 
 ```make
 sha256sum --check docs/IMPLEMENTATION_PLAN.pdf.sha256
+sha256sum --check docs/internals.pdf.sha256
+sha256sum --check docs/pve-storage-drs-manual.pdf.sha256
 ```
 
-written out rather than calling `make pdf-check`, because that target degrades to a warning when
+written out rather than calling `make docs-check`, because that target degrades to a warning when
 the document toolchain is absent — which it is, in the chroot. A check that can silently not run is
 not a check. The GitHub Actions `docs` job does the full rebuild in trixie, so the
 document pipeline is still exercised on the target distribution — but it does not compare the
-result byte-for-byte with the committed PDF. `make pdf` is reproducible for a *fixed* toolchain,
+result byte-for-byte with the committed PDFs. `make docs` is reproducible for a *fixed* toolchain,
 and trixie's pandoc is a different one; what the job proves is that the documents build there at
-all, which is a real statement given that `make pdf` fails on a missing glyph or an overfull box.
+all, which is a real statement given that the build fails on a missing glyph or an overfull box.
 
 ### The autopkgtest is the only real dependency test
 
@@ -126,9 +129,3 @@ The Salsa build runs **without network**, which in sbuild's unshare mode is simp
 build genuinely needs to fetch something, vendor it first; `SALSA_CI_SBUILD_ARGS: '--enable-network'`
 is the documented fallback and is a deliberate, reviewable edit.
 
-## Until there is code
-
-`src/` does not exist yet, so `dpkg-buildpackage` has nothing to install and pytest has nothing to
-cover. Both workflows probe for `src/*/*.py` and skip the steps that need it, with a notice in the
-job log. **Delete those probes in the commit that adds the first module** — they exist so the
-pipeline is meaningful before the first line of code, not so it stays green afterwards.
