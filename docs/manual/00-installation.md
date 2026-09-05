@@ -14,7 +14,46 @@
 - **A PVE user or API token** with read access to VM and storage inventory
   and permission to call `move_disk`. An API token is preferred for
   unattended operation (`execution.mode: auto`); a username/password pair
-  works for interactive use.
+  works for interactive use. See "Setting up the PVE credential" below for
+  the exact privileges — the obvious-looking "just grant Audit everywhere"
+  is not enough, and the gap is silent rather than an error.
+
+## Setting up the PVE credential
+
+Grant, on **every storage the tool will manage** (the shared, image-holding
+storages in your `groups`, not backup targets):
+
+- `Datastore.Audit` **and `Datastore.Allocate`** — not Audit alone.
+  `GET /nodes/{node}/storage/{storage}/content`, which the tool uses to
+  cross-check each disk's real allocated size, silently returns an empty
+  list under Audit-only permission: a clean `200` response with no content
+  and no error, indistinguishable from "this storage genuinely has nothing
+  on it" unless you already know to be suspicious. Audit alone is enough for
+  every *other* read call the tool makes; this one endpoint is the
+  exception, verified against a live PVE 9.2.11 cluster (see
+  `IMPLEMENTATION_PLAN.md` section 3.5's note). Getting this wrong does not
+  make the tool fail loudly — it makes it under-count what already occupies
+  each storage, which quietly erodes the section 5.3 snapshot reserve it
+  exists to protect.
+- Grant it **at each storage's own path** (`/storage/<id>`), not only at the
+  parent `/storage` — that is the grant confirmed to work.
+- Also add `VM.Audit` cluster-wide (`/`) for VM inventory and config, which
+  `PVEAuditor` already includes if you use that built-in role as a base.
+
+**If you are using an API token** (recommended — see above), Proxmox's
+privilege separation means **the token has its own, separate ACL entries
+from its owning user**. A role granted to the user alone has no effect on
+the token, and a role granted to the token alone has no effect either unless
+the user has it too: the token's effective permission is the *intersection*
+of the two. Grant the same roles to both the user and `user@realm!tokenid`,
+or disable privilege separation on the token (Datacenter → Permissions →
+API Tokens → uncheck "Privilege Separation") so it always matches its
+user's permissions exactly.
+
+A concrete, minimal setup: create a role (e.g. `pve-storage-drs`) with
+`Datastore.Allocate,Datastore.Audit,VM.Audit`, then add it as an ACL entry
+for both the user and the token at `/` for `VM.Audit`, and at each managed
+storage's `/storage/<id>` path for the datastore privileges.
 
 ## Installing the package
 
