@@ -1552,6 +1552,182 @@ lint typecheck` clean.
 
 ---
 
+## 15. Ninth-pass review — phases 4-5 (schedule, payback, plan command)
+
+Reviewed commit range `9a7c270..HEAD` (commits `9495f95` through `2ad37a5`).
+Changes: Q-01/Q-02 fixes, `schedule.py` (new, 245 lines), `payback.py` (new, 229
+lines), `heuristic.py` refactor (repair oscillation fix, `spread_metric` support,
+`group_average_utilization` made public, `ObjectiveBreakdown.utilization` field
+added), `cli.py` `_handle_plan` wired (336 new lines), 4 new test files (934 new
+lines), 2 new internals pages, 1 new manual page, manpage and status-table
+updates.
+
+### Verification run
+
+- `python3 -m pytest`: **311 passed, 1 skipped** (statsmodels), **98.54% coverage**.
+- `python3 tests/fixtures/generate_expected.py --check`: OK (fixtures current).
+- `sha256sum --check` on all three PDF stamps: all OK.
+- §14.5 arithmetic independently re-derived: m1 cost 15728.64, m2 cost 10485.76,
+  total 26214.4, benefit 3951360, ratio 150.73 — all match. Archive-disk ratio
+  0.721 — matches.
+- §14 three-move plan (manual's `plan` example): cost 31457, benefit 4193320,
+  ratio 133.3, before→after spread 255.4%→44.6%, all Δimbalance and ℓ/z values —
+  all match.
+
+### Findings
+
+| ID | Severity | Module | Summary |
+|---|---|---|---|
+| R-01 | Medium | `payback.py`/`cli.py` | Payback benefit uses `alpha`-scaled `imbalance_term`, not the plan's raw `Σ_s e_s` |
+| R-02 | Medium | `cli.py` | `plan`'s `after:`/`after_spread` shows the target assignment, not the scheduled state — misleading when moves deadlock |
+| R-03 | Low | `cli.py` | `--group` flag is accepted but silently ignored by every handler, including `plan` |
+| R-04 | Low | `docs/internals/95-schedule.md` | Stale: says `payback.py` "does not exist yet" — it was added in this same review window |
+| R-05 | Low | `cli.py` | Human-output payback warning conflates economic failure and hard-duration-rule failure |
+| R-06 | Low | `cli.py` | `load_per_tib` division by zero when `move.size_bytes == 0` (unguarded) |
+
+### 15.1 R-01 — Payback benefit is `alpha`-scaled, but the plan's `E` is not
+
+**Plan §7.2** defines `E_before = Σ_s e_s` — the raw sum of per-storage deviations
+from `u*`, with no `alpha_spread` multiplier. **The code** passes
+`heuristic.ObjectiveBreakdown.imbalance_term` to
+`compute_benefit_load_seconds()`, and `imbalance_term = alpha_spread * spread`
+(where `spread` is `Σ_s e_s` for L1 or `max(u_s)` for minmax).
+
+With the default `alpha_spread = 1.0` the two are identical and every §14
+fixture cross-checks pass. But with `alpha_spread ≠ 1.0`:
+
+- `benefit` is scaled by `alpha_spread` on both sides, so `(E_before - E_after)`
+  is scaled by `alpha` while the migration cost is not.
+- A higher `alpha` makes the payback ratio easier to pass; a lower one makes
+  it harder. The economic acceptance test thus depends on the solver's tuning
+  knob, not just on the imbalance reduction and migration cost.
+- The `compute_benefit_load_seconds()` docstring calls this "the *unweighted*
+  (`alpha_spread`-scaled, which defaults to 1.0)" — "unweighted" and
+  "alpha_spread-scaled" are contradictory.
+
+This is either a code bug (should pass `sum(spread_e.values())` for L1, or the
+raw `max(utilization.values())` for minmax) or a plan gap (§7.2 should say
+`E_before = alpha * Σ_s e_s` if the scaling is intentional). Either way, the
+plan and the code should agree, and the docstring's "unweighted" label should
+be corrected.
+
+**No test exercises `alpha_spread ≠ 1.0` with payback** — the gap is invisible
+to the suite.
+
+### 15.2 R-02 — `after:`/`after_spread` reflects the target, not the schedule
+
+`_render_plan_human` and `_render_plan_json` compute `after_spread` from
+`heuristic_result.breakdown.utilization` — the heuristic's *target* assignment,
+which includes every move the heuristic proposed. When `order_moves()`
+deadlocks some of those moves (transient infeasibility), the `after:` line and
+`spread:` line still show the utilization *as if all moves completed*,
+overstating the achievable result.
+
+The `after:`/`spread:` lines are gated on `if schedule_result.order:` (human)
+and on `heuristic_result is not None` (JSON), so a *fully* deadlocked plan
+(order is empty) does not show them. But a *partially* deadlocked plan — some
+moves scheduled, some not — shows the full target's spread, not the scheduled
+subset's. No test covers a partial-deadlock scenario; the existing deadlock
+tests all have either zero or all moves deadlocked.
+
+The scheduled state is tracked inside `order_moves()` (the `state` dict) but
+not exposed in `ScheduleResult`. Fix: either expose the final scheduled state
+in `ScheduleResult` and compute `after_spread` from it, or compute it in
+`cli.py` by applying `schedule_result.order` to the initial assignment.
+
+### 15.3 R-03 — `--group` flag silently ignored
+
+The `--group` argument is defined in `build_parser()` (`action="append"`,
+`default=None`) and documented in the manpage's OPTIONS section, but
+`args.group` is never read by any handler — not `show-load`, not
+`verify-storages`, not the new `plan`. `build_topology()` does not accept a
+group filter. Every handler iterates `for group in topology.groups:` without
+filtering.
+
+This is pre-existing (the flag predates this review window) but the new `plan`
+command inherits it: `pve-storage-drs --group fc-tier2 plan` silently runs
+all groups, contradicting the manpage's "Restrict the run to one storage
+group."
+
+### 15.4 R-04 — Stale reference in `95-schedule.md`
+
+`docs/internals/95-schedule.md` line 78:
+
+> Reasoning correctly about overlapping in-flight windows needs move duration
+> estimates from `payback.py`, which does not exist yet.
+
+`payback.py` was added in commit `f0f955d`, within this review window. The
+sentence should be updated to say the module exists but the concurrent
+scheduling that would use its duration estimates is not yet implemented.
+
+### 15.5 R-05 — Payback warning conflates two failure modes
+
+`_render_plan_payback_lines` shows `"⚠ this plan does not pass section 7.3's
+payback test"` whenever `payback_result.accepted` is False. But `accepted =
+aggregate_ok and not rejected_moves`, so the warning fires for two distinct
+cases:
+
+1. **Economic failure**: `aggregate_ok` is False (benefit < ratio * cost).
+2. **Hard-duration failure**: `aggregate_ok` is True but `rejected_moves` is
+   non-empty (a move exceeds `max_single_move_duration`).
+
+The existing test `test_plan_human_output_shows_the_payback_verdict` hits case
+2 (a reserve-exempted plan with a slow `saferemove` wipe), and the warning text
+says "does not pass section 7.3's payback test" even though the *economic* test
+did pass — only the hard per-move rule blocked it. The JSON output keeps
+`aggregate_ok` and `accepted` separate, so this is human-output only, but the
+message is misleading for an operator reading the terminal.
+
+### 15.6 R-06 — `load_per_tib` division by zero
+
+`_render_plan_move_line` computes `load_per_tib = load / (move.size_bytes /
+_BYTES_PER_TIB)`. If `move.size_bytes == 0` the denominator is 0.0 and the
+division raises `ZeroDivisionError`. The same expression appears in
+`_render_plan_json` (line 600-601).
+
+PVE does not report zero-size disks in practice, and the schema does not
+forbid `size_bytes: 0` explicitly (it is an `integer` with no `minimum` in
+`config_schema.json`, but the value comes from the PVE API, not config). This
+is a defense-in-depth gap, not a live bug.
+
+### What this pass confirms
+
+- The `_repair` oscillation fix (group-wide shortfall, not source-only) is
+  correct and well-tested. The extracted `_best_repair_candidate` preserves the
+  original comparison logic exactly.
+- The `spread_metric: "minmax"` implementation is correct: `alpha * max(u_s)`,
+  not `alpha * max(e_s)`, with both `spread_e` and `utilization` always
+  populated. The test built from the manual's own "indifferent to a second
+  nearly-as-bad storage" claim is a good regression guard.
+- The reserve-override exemption in `evaluate_plan_payback` is sound: a
+  reserve-fixing plan always passes the economic test (section 13), but the
+  hard per-move duration rule still applies. Both halves are tested.
+- `compute_wipe_duration_seconds` is correctly shared between `payback.py`
+  and `verify-storages` (one implementation, not two — AGENTS.md §5).
+- All §14 fixture arithmetic cross-checks pass. The manual's three-move `plan`
+  example (ratio 133, spread 255.4%→44.6%) is internally consistent.
+
+---
+
+## 16. Resolution of ninth-pass findings (R-01..R-06)
+
+All six findings were real; all six are fixed, not refuted.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| R-01 | Resolved | Added `heuristic.raw_spread(breakdown, spread_metric)`, returning the true unweighted §7.2 `E` (`sum(e_s)` or `max(u_s)`), and switched `cli._handle_plan()` to pass that to `compute_benefit_load_seconds()` instead of `ObjectiveBreakdown.imbalance_term` (which is `alpha_spread`-scaled). `payback.compute_benefit_load_seconds()`'s docstring no longer calls `imbalance_term` "unweighted" — it names `raw_spread()` as the required input and explains why `imbalance_term` is the wrong one. No behavior change at the default `alpha_spread: 1.0` (every existing §14 cross-check still passes byte-for-byte); a plan with `alpha_spread != 1.0` now gets a payback ratio independent of that tuning knob. |
+| R-02 | Resolved | `ScheduleResult` gained `final_assignment`: the assignment actually reachable by applying `order` in sequence, computed by `order_moves()` itself (it already tracked this internally as `state`). `_handle_plan()` now evaluates a fresh `ObjectiveBreakdown` against `final_assignment` (via `heuristic.evaluate_assignment()`) and uses *that* — not the heuristic's own `.breakdown` on its full target assignment — for `after_spread`, the `after:` line, and (extending the same reasoning) the payback benefit's `E_after`. A partially- or fully-deadlocked plan is now scored and reported on what it can actually achieve, not on moves that never got scheduled. New test: `test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_deadlock`, which stubs `run_heuristic()`/`order_moves()` for an exact one-scheduled/one-deadlocked scenario and asserts the reported numbers match the scheduled-only state and *not* the aspirational target's. |
+| R-03 | Resolved | Added `cli._filter_groups(topology, args.group)`, called by `show-load`, `verify-storages` and `plan` immediately after `build_topology()` (`verify-metrics` does not iterate groups at all, so it is correctly left alone). An unknown group name is a hard failure (`DrsError`, exit 1) rather than a silent no-op, matching the project's existing "an explicitly named thing that cannot be found is an error" rule for `-c`/`--config PATH`. Manpage and `docs/internals/40-cli-and-logging.md` updated; four new tests cover restriction, repeatability, and the unknown-name failure. |
+| R-04 | Resolved | Both `schedule.py`'s own module docstring and `docs/internals/95-schedule.md` no longer say `payback.py` "does not exist yet" — they now say concurrent scheduling could use its duration estimates but does not yet, and (a related staleness the same lines implied) that `cost_m = z_d`'s "exact, not an approximation" ordering argument now has a caveat: `payback.py` gives moves individually different costs (per-storage `saferemove` throughput), so `z_d` alone is only mirror-duration-exact, not full-cost-exact, whenever wipe costs differ enough across candidates. |
+| R-05 | Resolved | `_render_plan_payback_lines()` now checks `aggregate_ok` and `rejected_moves` separately and emits a distinct line for each: an economic failure ("this plan's balance benefit does not outweigh its migration cost") and a hard-duration failure ("blocked by the hard per-move duration rule", naming the disk keys) never share text, and either, both or neither can appear on the same plan. `docs/manual/27-plan.md`'s payback section explains the distinction and why it matters (different fixes for different failures). New direct test `test_render_plan_payback_lines_separates_economic_and_duration_failures` exercises all four combinations; the existing `test_plan_human_output_shows_the_payback_verdict` (case 2, hard-duration-only) now asserts the specific new message and asserts the economic-failure message is *absent*. |
+| R-06 | Resolved | Extracted `_load_per_tib()`, returning `0.0` for `move.size_bytes <= 0` instead of dividing by zero; used by both the human move line and the JSON `load_per_tib` field (one implementation, not two — AGENTS.md §5). New direct test `test_load_per_tib_is_zero_not_a_division_error_for_a_zero_size_disk`. |
+
+As a side effect of R-01/R-02 together, `_render_plan_human()`/`_render_plan_json()` no longer take a `heuristic_results` parameter at all — everything they previously read from it (`.breakdown.utilization` for "after") is now read from the new, more correct `final_breakdowns` dict instead, and nothing else in either render function ever needed the raw `HeuristicResult`.
+
+Verification: `python3 -m pytest` — 317 passed, 1 skipped (`statsmodels` not installed), 98.68% coverage. `make check` clean (fmt, lint, typecheck, test, fixtures, docs-check — internals PDF rebuilt to 23 pages, manual PDF to 26).
+
+---
+
 ## Appendix A — Independent verification of the §14 worked example
 
 All values re-derived by hand from §14.1's input.

@@ -31,6 +31,11 @@ Group fc-tier1 → ACT: reserve violated on san-a; bypassing the drift and imbal
   payback: benefit 4.19e+06 load·s vs cost 3.15e+04 load·s → ratio 133 (need 10) ✓
 ```
 
+The `after:`/`spread:` lines (and the payback numbers) reflect what the
+scheduler actually managed to order, not the solver's target assignment —
+identical here since all three moves scheduled cleanly, but see the
+deadlock note below for when a plan cannot schedule everything it proposed.
+
 A group the gate does not act on prints one line and stops:
 
 ```
@@ -67,18 +72,40 @@ order for, `plan` says so explicitly (`IMPLEMENTATION_PLAN.md` section
 8.3's "report, never force" path — staging and plan-splitting are not yet
 implemented, so this is where a genuine cycle or an unavoidable capacity
 shortfall currently surfaces) rather than silently omitting the move or,
-worse, telling you a plan is clean when part of it is not achievable.
+worse, telling you a plan is clean when part of it is not achievable. When
+only *some* moves deadlock, the `after:`/`spread:`/`payback:` lines report
+the state reachable by the moves that did schedule, never the fuller
+picture the undeliverable ones would have produced.
 
 ## The `payback:` line
 
 Section 7.3's acceptance test: `benefit >= migration.payback_ratio * cost`,
 both sides in load-seconds. `benefit` is `(E_before - E_after) *
-migration.payback_horizon` (section 7.2 — the imbalance reduction this
-plan buys, projected over the horizon); `cost` sums every move's
-`duration_mirror * (source_load_weight + target_load_weight) +
-duration_wipe * wipe_load_weight` (section 7.1). A ✓ plan passed; a ✗ one
-did not, and gets an extra line saying so plainly — `plan` still shows you
-the numbers either way, it just does not pretend a failing plan is fine.
+migration.payback_horizon` (section 7.2's own *unweighted* `E`, not the
+solver's `alpha_spread`-scaled objective term — the two agree numerically
+at the default `alpha_spread: 1.0`, but the payback ratio must not depend
+on that tuning knob); `E_after` is evaluated against what `plan`'s own
+scheduler actually managed to order, not the solver's aspirational target,
+so a partially-deadlocked plan is scored on the moves it can really make,
+not ones it cannot. `cost` sums every *scheduled* move's `duration_mirror *
+(source_load_weight + target_load_weight) + duration_wipe *
+wipe_load_weight` (section 7.1). A ✓ plan passed; a ✗ one did not.
+
+A ✗ plan can fail for two different reasons, reported as two different
+lines, because they call for different fixes:
+
+- **Economic failure** — the balance benefit does not outweigh the
+  migration cost. Adjust `objective`'s weights, `migration.payback_ratio`,
+  or accept the plan is not worth running.
+- **Hard-duration failure** — some move's own `duration_mirror +
+  duration_wipe` exceeds `migration.max_single_move_duration`, regardless
+  of whether the plan as a whole is profitable. Fix `saferemove`
+  throughput, `migration.bwlimit_bytes_per_sec`, or the duration limit
+  itself.
+
+Either, both, or neither can apply to the same plan; `plan` names exactly
+which happened rather than one generic "does not pass the payback test"
+line for both.
 
 **A plan resolving a reserve violation always passes this test**,
 regardless of the ratio shown — the example above happens to pass on

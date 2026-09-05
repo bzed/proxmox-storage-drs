@@ -482,6 +482,59 @@ def test_verify_storages_json_output(
     assert san_b["implied_wipe_seconds"] is None
 
 
+def _two_group_topology() -> Topology:
+    """`_sample_topology()`'s one group plus a second, empty one -- enough
+    to prove `--group` actually restricts which groups a handler visits
+    (REVIEW.md R-03), without needing a second `GroupLoad` fixture for
+    handlers that don't need one (`verify-storages`)."""
+    base = _sample_topology()
+    second = Group(name="fc-tier2", storages=base.groups[0].storages, disks=())
+    return Topology(groups=(base.groups[0], second), warnings=())
+
+
+def test_group_flag_restricts_verify_storages_to_the_named_group(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _two_group_topology()
+    )
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--group", "fc-tier1", "verify-storages"]) == 0
+    out = capsys.readouterr().out
+    assert "Group fc-tier1" in out
+    assert "Group fc-tier2" not in out
+
+
+def test_group_flag_is_repeatable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _two_group_topology()
+    )
+    path = write_config(tmp_path)
+    args = ["-c", str(path), "--group", "fc-tier1", "--group", "fc-tier2", "verify-storages"]
+    assert cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert "Group fc-tier1" in out
+    assert "Group fc-tier2" in out
+
+
+def test_group_flag_with_an_unknown_name_is_a_hard_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _sample_topology()
+    )
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--group", "no-such-group", "verify-storages"]) == 1
+    err = capsys.readouterr().err
+    assert "no-such-group" in err
+    assert "fc-tier1" in err  # names the groups that do exist
+
+
 # --------------------------------------------------------------------------- plan
 
 
@@ -635,7 +688,85 @@ def test_plan_human_output_shows_the_payback_verdict(
     out = capsys.readouterr().out
     assert "payback: benefit" in out
     assert "⚠ exceeds migration.max_single_move_duration" in out
-    assert "does not pass section 7.3's payback test" in out
+    # aggregate_ok is True here (exempted -- resolves a reserve violation), so
+    # the *economic* failure line must not appear; only the hard-duration one
+    # should (REVIEW.md R-05 -- these are reported separately, not conflated).
+    assert "this plan's balance benefit does not outweigh its migration cost" not in out
+    assert "blocked by the hard per-move duration rule" in out
+    assert "101:scsi0" in out
+
+
+def test_load_per_tib_is_zero_not_a_division_error_for_a_zero_size_disk() -> None:
+    """REVIEW.md R-06: `move.size_bytes == 0` must not raise
+    `ZeroDivisionError` -- PVE does not report zero-size disks in practice,
+    but `config_schema.json` does not forbid it either, and the value comes
+    from the PVE API rather than validated config."""
+    from proxmox_storage_drs.schedule import ScheduledMove
+
+    zero_size_move = ScheduledMove(
+        disk_key="101:scsi0",
+        vmid=101,
+        device="scsi0",
+        from_storage="san-a",
+        to_storage="san-b",
+        size_bytes=0,
+        imbalance_reduction=0.0,
+        resolves_reserve_violation=False,
+    )
+    assert cli._load_per_tib({"101:scsi0": 3.0}, zero_size_move) == 0.0
+
+
+def test_render_plan_payback_lines_separates_economic_and_duration_failures() -> None:
+    """REVIEW.md R-05: an economic failure (benefit < ratio*cost) and a hard
+    per-move duration failure are different problems with different fixes,
+    and must produce different warning text -- never the same generic
+    "does not pass section 7.3's payback test" for both."""
+    from proxmox_storage_drs.payback import MoveCost, PaybackResult
+
+    def make_result(
+        *, aggregate_ok: bool, rejected_moves: tuple[str, ...], resolves: bool = False
+    ) -> PaybackResult:
+        move_cost = MoveCost(
+            disk_key="101:scsi0",
+            duration_mirror_seconds=100.0,
+            duration_wipe_seconds=0.0,
+            cost_load_seconds=100.0,
+            exceeds_max_duration=bool(rejected_moves),
+            resolves_reserve_violation=resolves,
+        )
+        return PaybackResult(
+            move_costs=(move_cost,),
+            benefit_load_seconds=10.0,
+            rejected_moves=rejected_moves,
+            aggregate_ok=aggregate_ok,
+        )
+
+    # Economic failure only: no move exceeds the duration rule.
+    economic = make_result(aggregate_ok=False, rejected_moves=())
+    lines = cli._render_plan_payback_lines(economic, payback_ratio=10.0)
+    text = "\n".join(lines)
+    assert "does not outweigh its migration cost" in text
+    assert "hard per-move duration rule" not in text
+
+    # Hard-duration failure only: passes economically (e.g. reserve-exempt).
+    duration = make_result(aggregate_ok=True, rejected_moves=("101:scsi0",), resolves=True)
+    lines = cli._render_plan_payback_lines(duration, payback_ratio=10.0)
+    text = "\n".join(lines)
+    assert "does not outweigh its migration cost" not in text
+    assert "hard per-move duration rule" in text
+    assert "101:scsi0" in text
+
+    # Both failures at once: both lines present.
+    both = make_result(aggregate_ok=False, rejected_moves=("101:scsi0",))
+    lines = cli._render_plan_payback_lines(both, payback_ratio=10.0)
+    text = "\n".join(lines)
+    assert "does not outweigh its migration cost" in text
+    assert "hard per-move duration rule" in text
+
+    # Fully accepted: neither warning line.
+    accepted = make_result(aggregate_ok=True, rejected_moves=())
+    lines = cli._render_plan_payback_lines(accepted, payback_ratio=10.0)
+    assert len(lines) == 1
 
 
 def test_plan_reports_a_deadlock_when_even_the_best_target_still_violates(
@@ -660,6 +791,156 @@ def test_plan_reports_a_deadlock_when_even_the_best_target_still_violates(
     assert group_payload["deadlocked"] == ["101:scsi0"]
     assert group_payload["deadlock_message"] is not None
     assert "section 8.1" in group_payload["deadlock_message"]
+
+
+def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_deadlock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW.md R-02: when the scheduler can only order *some* of the
+    heuristic's target moves, `after_spread` and the payback benefit must
+    be computed from what actually got scheduled (`final_assignment`), not
+    from the solver's full, partly-unreachable target. `run_heuristic()`
+    and `order_moves()` are stubbed here so the scenario -- one move
+    scheduled, one deadlocked -- is exact and deterministic, rather than
+    relying on the heuristic and scheduler to happen to produce a partial
+    deadlock on some fixture (that combination is `schedule.py`'s own
+    concern, not this module's)."""
+    from proxmox_storage_drs.config import load_config
+    from proxmox_storage_drs.heuristic import (
+        HeuristicResult,
+        evaluate_assignment,
+        group_average_utilization,
+        raw_spread,
+        seed_assignment,
+    )
+    from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult
+
+    disks = (
+        Disk(
+            key="101:scsi0",
+            vmid=101,
+            device="scsi0",
+            vm_name="a",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason=None,
+        ),
+        Disk(
+            key="102:scsi0",
+            vmid=102,
+            device="scsi0",
+            vm_name="b",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason=None,
+        ),
+    )
+    storages = (
+        Storage(
+            id="san-a",
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=8 * (1 << 40),
+            used_bytes=2 * (1 << 40),
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        ),
+        Storage(
+            id="san-b",
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=8 * (1 << 40),
+            used_bytes=0,
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        ),
+    )
+    group = Group(name="fc-tier1", storages=storages, disks=disks)
+    topology = Topology(groups=(group,), warnings=())
+    load_by_key = {"101:scsi0": 3.0, "102:scsi0": 1.0}
+    group_load = GroupLoad(
+        group_name="fc-tier1",
+        idle=False,
+        average_utilization=2.0,
+        disks=(
+            DiskLoad(disk_key="101:scsi0", load=3.0, flagged_reason=None),
+            DiskLoad(disk_key="102:scsi0", load=1.0, flagged_reason=None),
+        ),
+        storages=(
+            StorageLoad(storage_id="san-a", load=4.0, utilization=4.0),
+            StorageLoad(storage_id="san-b", load=0.0, utilization=0.0),
+        ),
+    )
+    _patch_plan_deps(monkeypatch, topology, group_load)
+    path = write_config(tmp_path)
+    resolved = load_config(str(path))
+    objective = resolved.config.objective
+    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
+    u_star = group_average_utilization(group, load_by_key)
+
+    initial_breakdown = evaluate_assignment(
+        group, seed_assignment(group), load_by_key, objective, min_free_bytes, u_star
+    )
+    # The heuristic's aspirational target: both disks move to san-b.
+    target_assignment = {"101:scsi0": "san-b", "102:scsi0": "san-b"}
+    target_breakdown = evaluate_assignment(
+        group, target_assignment, load_by_key, objective, min_free_bytes, u_star
+    )
+    heuristic_result = HeuristicResult(
+        assignment=target_assignment,
+        breakdown=target_breakdown,
+        initial_breakdown=initial_breakdown,
+        repair_moves=0,
+    )
+    # The scheduler can only actually order 101:scsi0's move; 102:scsi0 is
+    # left deadlocked, so the real reachable state keeps it on san-a.
+    final_assignment = {"101:scsi0": "san-b", "102:scsi0": "san-a"}
+    scheduled_move = ScheduledMove(
+        disk_key="101:scsi0",
+        vmid=101,
+        device="scsi0",
+        from_storage="san-a",
+        to_storage="san-b",
+        size_bytes=1 * (1 << 40),
+        imbalance_reduction=1.0,
+        resolves_reserve_violation=False,
+    )
+    schedule_result = ScheduleResult(
+        order=(scheduled_move,), deadlocked=("102:scsi0",), final_assignment=final_assignment
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli.run_heuristic", lambda *a, **k: heuristic_result)
+    monkeypatch.setattr("proxmox_storage_drs.cli.order_moves", lambda *a, **k: schedule_result)
+
+    final_breakdown = evaluate_assignment(
+        group, final_assignment, load_by_key, objective, min_free_bytes, u_star
+    )
+    expected_after_spread = cli._spread_fraction(
+        final_breakdown.utilization, group_load.average_utilization
+    )
+    target_after_spread = cli._spread_fraction(
+        target_breakdown.utilization, group_load.average_utilization
+    )
+    assert expected_after_spread != pytest.approx(target_after_spread)  # fixture sanity
+    expected_benefit = (
+        raw_spread(initial_breakdown, objective.spread_metric)
+        - raw_spread(final_breakdown, objective.spread_metric)
+    ) * resolved.config.migration.payback_horizon_seconds
+
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    group_payload = payload["groups"][0]
+    assert group_payload["deadlocked"] == ["102:scsi0"]
+    assert group_payload["after_spread"] == pytest.approx(expected_after_spread)
+    assert group_payload["after_spread"] != pytest.approx(target_after_spread)
+    assert group_payload["payback"]["benefit_load_seconds"] == pytest.approx(expected_benefit)
 
 
 def test_plan_human_output_shows_the_deadlock_warning_line(

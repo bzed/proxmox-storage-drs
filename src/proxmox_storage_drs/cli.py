@@ -18,6 +18,7 @@ hand-kept list of options anywhere in this module or in the manpage/manual.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import shutil
@@ -35,7 +36,14 @@ from proxmox_storage_drs.config import (
 )
 from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
 from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
-from proxmox_storage_drs.heuristic import HeuristicResult, run_heuristic
+from proxmox_storage_drs.heuristic import (
+    HeuristicResult,
+    ObjectiveBreakdown,
+    evaluate_assignment,
+    group_average_utilization,
+    raw_spread,
+    run_heuristic,
+)
 from proxmox_storage_drs.loadmodel import GroupLoad, compute_group_load
 from proxmox_storage_drs.logging_setup import configure_logging
 from proxmox_storage_drs.metrics import PrometheusClient, VerifyMetricsReport, verify_metrics
@@ -235,6 +243,37 @@ def _make_not_yet_implemented_handler(command: str) -> CommandHandler:
     return handler
 
 
+def _filter_groups(topology: Topology, names: list[str] | None) -> Topology:
+    """``--group NAME`` (repeatable, section 11.3/the manpage): restrict a
+    run to the named groups. Every group-iterating handler
+    (``show-load``, ``verify-storages``, ``plan``) calls this right after
+    ``build_topology()`` so there is one place implementing the flag, not
+    one per handler (AGENTS.md section 5); ``verify-metrics`` does not,
+    because it validates configured metric/label names against Prometheus
+    directly and never iterates ``topology.groups`` at all.
+
+    A name that matches no configured group is a hard failure, not a
+    silent no-op -- the same "an explicitly named thing that cannot be
+    found is an error" rule this codebase already applies to
+    ``--config PATH`` (`docs/manual/30-safety-and-status.md`), and it is
+    what keeps a typo'd ``--group`` from looking exactly like "this group
+    has nothing to report" (REVIEW.md R-03: previously ``--group`` was
+    parsed and documented but never read by any handler at all)."""
+    if not names:
+        return topology
+    known = {g.name for g in topology.groups}
+    unknown = sorted(set(names) - known)
+    if unknown:
+        raise DrsError(
+            "--group named a group that does not exist in this configuration: "
+            f"{', '.join(unknown)} (configured groups: {', '.join(sorted(known)) or 'none'})"
+        )
+    selected = set(names)
+    return dataclasses.replace(
+        topology, groups=tuple(g for g in topology.groups if g.name in selected)
+    )
+
+
 def _render_verify_metrics_human(report: VerifyMetricsReport) -> str:
     lines = [f"[{f.level:>7}] {f.message}" for f in report.findings]
     lines.append("")
@@ -419,7 +458,7 @@ def _render_show_load_json(
 def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
     client = build_pve_client(resolved.config.proxmox)
-    topology = build_topology(client, resolved.config)
+    topology = _filter_groups(build_topology(client, resolved.config), args.group)
     prom_client = PrometheusClient(resolved.config.prometheus)
     group_loads: dict[str, GroupLoad] = {}
     load_errors: dict[str, str] = {}
@@ -463,6 +502,17 @@ def _spread_fraction(utilization: dict[str, float], average_utilization: float) 
 _BYTES_PER_TIB = 1 << 40
 
 
+def _load_per_tib(load_by_key: dict[str, float], move: ScheduledMove) -> float:
+    """Section 7.3's advisory ``ell/z`` ratio for one move -- ``0.0`` for a
+    zero-size disk rather than a ``ZeroDivisionError`` (PVE does not report
+    these in practice, and ``config_schema.json`` does not forbid
+    ``size_bytes: 0`` since that value comes from the PVE API, not config;
+    defense in depth, not a live bug -- REVIEW.md R-06)."""
+    if move.size_bytes <= 0:
+        return 0.0
+    return load_by_key.get(move.disk_key, 0.0) / (move.size_bytes / _BYTES_PER_TIB)
+
+
 def _render_plan_move_line(
     index: int, move: ScheduledMove, move_cost: MoveCost | None, load_by_key: dict[str, float]
 ) -> str:
@@ -475,7 +525,7 @@ def _render_plan_move_line(
         if move_cost.exceeds_max_duration:
             flag = "  ⚠ exceeds migration.max_single_move_duration"
     change = -move.imbalance_reduction
-    load_per_tib = load_by_key.get(move.disk_key, 0.0) / (move.size_bytes / _BYTES_PER_TIB)
+    load_per_tib = _load_per_tib(load_by_key, move)
     return (
         f"  {index}. {move.disk_key:<14} {move.from_storage} → {move.to_storage}   "
         f"{format_bytes(move.size_bytes):>10}   {duration_str}   "
@@ -484,17 +534,33 @@ def _render_plan_move_line(
 
 
 def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: float) -> list[str]:
+    """The economic test (``aggregate_ok``) and the hard per-move duration
+    rule (``rejected_moves``) are reported separately here, not folded into
+    one "does not pass payback" warning -- they are different failures with
+    different remedies: an economic failure means the balance gained is not
+    worth the migration cost (adjust weights, or accept the plan is not
+    worth doing), while a hard-duration failure means a specific move would
+    take too long regardless of benefit (`migration.max_single_move_duration`
+    or `saferemove` throughput needs attention). Conflating them under one
+    "payback test" label previously misdescribed a reserve-exempted plan
+    that passed its economic test but still had a too-slow move as failing
+    "section 7.3's payback test" outright (REVIEW.md R-05)."""
     mark = "✓" if payback_result.accepted else "✗"
     lines = [
         f"  payback: benefit {payback_result.benefit_load_seconds:.3g} load·s vs "
         f"cost {payback_result.total_cost_load_seconds:.3g} load·s → "
         f"ratio {payback_result.ratio:.3g} (need {payback_ratio:g}) {mark}"
     ]
-    if not payback_result.accepted:
+    if not payback_result.aggregate_ok:
         lines.append(
-            "  ⚠ this plan does not pass section 7.3's payback test -- "
-            "automatically re-solving with adjusted weights is not yet "
-            "implemented (phase 5 gap); review before applying"
+            "  ⚠ this plan's balance benefit does not outweigh its migration cost "
+            "(section 7.3) -- automatically re-solving with adjusted weights is "
+            "not yet implemented (phase 5 gap); review before applying"
+        )
+    if payback_result.rejected_moves:
+        lines.append(
+            "  ⚠ blocked by the hard per-move duration rule (migration."
+            "max_single_move_duration): " + ", ".join(payback_result.rejected_moves)
         )
     return lines
 
@@ -503,9 +569,9 @@ def _render_plan_human(
     topology: Topology,
     group_loads: dict[str, GroupLoad],
     gate_decisions: dict[str, GateDecision],
-    heuristic_results: dict[str, HeuristicResult],
     schedule_results: dict[str, ScheduleResult],
     payback_results: dict[str, PaybackResult],
+    final_breakdowns: dict[str, ObjectiveBreakdown],
     load_errors: dict[str, str],
     payback_ratio: float,
 ) -> str:
@@ -539,18 +605,15 @@ def _render_plan_human(
         if schedule_result.deadlocked_msg:
             lines.append(f"  ⚠ {schedule_result.deadlocked_msg}")
 
-        heuristic_result = heuristic_results[group.name]
+        final_breakdown = final_breakdowns[group.name]
         before_spread = _spread_fraction(
             {s.storage_id: s.utilization for s in group_load.storages},
             group_load.average_utilization,
         )
-        after_spread = _spread_fraction(
-            heuristic_result.breakdown.utilization, group_load.average_utilization
-        )
+        after_spread = _spread_fraction(final_breakdown.utilization, group_load.average_utilization)
         if schedule_result.order:
             after_line = "  after: " + "  ".join(
-                f"{sid}={u:.2f}"
-                for sid, u in sorted(heuristic_result.breakdown.utilization.items())
+                f"{sid}={u:.2f}" for sid, u in sorted(final_breakdown.utilization.items())
             )
             lines.append(after_line)
             lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
@@ -568,9 +631,9 @@ def _render_plan_json(
     topology: Topology,
     group_loads: dict[str, GroupLoad],
     gate_decisions: dict[str, GateDecision],
-    heuristic_results: dict[str, HeuristicResult],
     schedule_results: dict[str, ScheduleResult],
     payback_results: dict[str, PaybackResult],
+    final_breakdowns: dict[str, ObjectiveBreakdown],
     load_errors: dict[str, str],
 ) -> dict[str, object]:
     groups_out = []
@@ -597,8 +660,7 @@ def _render_plan_json(
                         "size_bytes": move.size_bytes,
                         "imbalance_reduction": move.imbalance_reduction,
                         "resolves_reserve_violation": move.resolves_reserve_violation,
-                        "load_per_tib": load_by_key.get(move.disk_key, 0.0)
-                        / (move.size_bytes / _BYTES_PER_TIB),
+                        "load_per_tib": _load_per_tib(load_by_key, move),
                         "duration_mirror_seconds": (
                             move_cost.duration_mirror_seconds if move_cost else None
                         ),
@@ -620,16 +682,16 @@ def _render_plan_json(
                 "drift_fraction": decision.drift_fraction,
                 "imbalance_fraction": decision.imbalance_fraction,
             }
-        heuristic_result = heuristic_results.get(group.name)
+        final_breakdown = final_breakdowns.get(group.name)
         before_spread = after_spread = None
         if group_load is not None:
             before_spread = _spread_fraction(
                 {s.storage_id: s.utilization for s in group_load.storages},
                 group_load.average_utilization,
             )
-            if heuristic_result is not None:
+            if final_breakdown is not None:
                 after_spread = _spread_fraction(
-                    heuristic_result.breakdown.utilization, group_load.average_utilization
+                    final_breakdown.utilization, group_load.average_utilization
                 )
         payback_out = None
         if payback_result is not None:
@@ -660,7 +722,7 @@ def _render_plan_json(
 def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
     client = build_pve_client(resolved.config.proxmox)
-    topology = build_topology(client, resolved.config)
+    topology = _filter_groups(build_topology(client, resolved.config), args.group)
     prom_client = PrometheusClient(resolved.config.prometheus)
     min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
 
@@ -669,6 +731,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
     heuristic_results: dict[str, HeuristicResult] = {}
     schedule_results: dict[str, ScheduleResult] = {}
     payback_results: dict[str, PaybackResult] = {}
+    final_breakdowns: dict[str, ObjectiveBreakdown] = {}
     load_errors: dict[str, str] = {}
 
     for group in topology.groups:
@@ -716,14 +779,33 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
         )
         schedule_results[group.name] = schedule_result
 
+        # The heuristic's own `.breakdown` is the *target* assignment's
+        # objective -- every move it proposed, whether or not `order_moves()`
+        # could actually schedule it. `final_breakdown` is instead evaluated
+        # against `schedule_result.final_assignment`, the state reachable by
+        # the moves that actually got ordered, so "after" reporting and the
+        # payback benefit below both reflect the plan as it will really run,
+        # not an aspirational one a partial deadlock never reaches
+        # (REVIEW.md R-02).
+        final_breakdown = evaluate_assignment(
+            group,
+            schedule_result.final_assignment,
+            group_load.load_by_disk_key(),
+            resolved.config.objective,
+            min_free_bytes,
+            group_average_utilization(group, group_load.load_by_disk_key()),
+        )
+        final_breakdowns[group.name] = final_breakdown
+
         storages_by_id = {s.id: s for s in group.storages}
         move_costs = [
             compute_move_cost(move, storages_by_id[move.from_storage], resolved.config.migration)
             for move in schedule_result.order
         ]
+        spread_metric = resolved.config.objective.spread_metric
         benefit = compute_benefit_load_seconds(
-            heuristic_result.initial_breakdown.imbalance_term,
-            heuristic_result.breakdown.imbalance_term,
+            raw_spread(heuristic_result.initial_breakdown, spread_metric),
+            raw_spread(final_breakdown, spread_metric),
             resolved.config.migration.payback_horizon_seconds,
         )
         payback_results[group.name] = evaluate_plan_payback(
@@ -737,9 +819,9 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                     topology,
                     group_loads,
                     gate_decisions,
-                    heuristic_results,
                     schedule_results,
                     payback_results,
+                    final_breakdowns,
                     load_errors,
                 ),
                 indent=2,
@@ -752,9 +834,9 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                 topology,
                 group_loads,
                 gate_decisions,
-                heuristic_results,
                 schedule_results,
                 payback_results,
+                final_breakdowns,
                 load_errors,
                 resolved.config.migration.payback_ratio,
             )
@@ -834,7 +916,7 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
 def _handle_verify_storages(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
     client = build_pve_client(resolved.config.proxmox)
-    topology = build_topology(client, resolved.config)
+    topology = _filter_groups(build_topology(client, resolved.config), args.group)
     if args.json:
         print(
             json.dumps(

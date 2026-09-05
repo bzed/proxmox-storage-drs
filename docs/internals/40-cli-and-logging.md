@@ -40,6 +40,23 @@ function if you are tempted to simplify it back to a one-liner.
 implemented command is exactly this: write the handler, assign it into the
 dict, done — `main()`'s dispatch does not change.
 
+## `--group`: filtered once, right after `build_topology()`
+
+`_filter_groups(topology, args.group)` is the one place `--group` is
+actually read. `show-load`, `verify-storages` and `plan` each call it
+immediately after `build_topology()`, replacing that `Topology`'s
+`groups` tuple with the (still topology-order) subset named — every
+render function downstream just iterates `topology.groups` as before and
+needs no `--group` awareness of its own. `verify-metrics` does not call
+it: that command validates configured metric/label names against
+Prometheus directly and never iterates groups at all, so there is nothing
+for `--group` to restrict there. A name that matches no configured group
+raises `DrsError` rather than silently producing an empty report — the
+same "an explicitly named thing that doesn't resolve is a hard failure"
+rule `config.load_config()` already applies to `-c`/`--config PATH`
+(REVIEW.md R-03: `--group` was previously parsed and documented, but no
+handler ever read `args.group` at all).
+
 ## The `--mode` escalation rule
 
 `apply_mode_override(configured_mode, override)` is the entire
