@@ -55,6 +55,17 @@ A concrete, minimal setup: create a role (e.g. `pve-storage-drs`) with
 for both the user and the token at `/` for `VM.Audit`, and at each managed
 storage's `/storage/<id>` path for the datastore privileges.
 
+**Two further, VM-level privileges are needed once `apply` executes a
+move** — `VM.Config.Disk` and `VM.Migrate`, both cluster-wide (`/`) or at
+least on every VM whose disks live in a managed group, granted to both the
+user and the token exactly as above. Neither is needed for anything this
+build actually runs today: `verify-metrics`, `show-load` and
+`verify-storages` only read, and only `move_disk` (called by `apply`, not
+yet implemented — `30-safety-and-status.md`) needs them. Grant them now
+alongside the privileges above so the credential does not need revisiting
+later; if you set up the credential read-only for now, add
+`VM.Config.Disk,VM.Migrate` to the role before you first run `apply`.
+
 ## Installing the package
 
 On a Debian trixie host (which is what Proxmox VE 9.x is built on):

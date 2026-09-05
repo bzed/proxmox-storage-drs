@@ -16,13 +16,16 @@ imported at module level because there is no meaningful code path in this
 project that does not eventually need the PVE API.
 
 Every method here is exactly one API call, with no caching and no retry
-logic -- the per-run topology cache belongs to ``topology.py`` (section 3.5:
-"a per-run topology cache -- one snapshot at the start of the run").
+logic beyond the one reauthenticate-and-retry-once step described on
+:meth:`PveClient._call` (REVIEW.md P-01) -- the per-run topology cache
+belongs to ``topology.py`` (section 3.5: "a per-run topology cache -- one
+snapshot at the start of the run").
 """
 
 from __future__ import annotations
 
-from typing import Any
+import threading
+from typing import Any, Callable
 
 import requests
 from proxmoxer import AuthenticationError, ProxmoxAPI, ResourceException
@@ -33,18 +36,24 @@ from proxmox_storage_drs.exceptions import PveApiError
 # proxmoxer's own https-backend default (5s) is tuned for an interactive CLI
 # rather than a bounded thread pool fetching hundreds of VM configs; 10s is a
 # "short" per-request timeout in the sense section 3.5 means (as opposed to
-# unbounded), not yet the configurable value that section's read-path
-# thread-pool retry logic will eventually need -- that lands with
-# topology.py's concurrent fetch implementation, not here.
+# unbounded). topology.py's concurrent fetch (config.proxmox.read_workers
+# threads, REVIEW.md P-02) shares this one client and its one timeout --
+# there is no per-thread override yet, since nothing so far has needed one.
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
-def build_client(config: ProxmoxConfig) -> "PveClient":
-    """Construct a :class:`PveClient` from ``config.py``'s ``ProxmoxConfig``.
+def _build_api(config: ProxmoxConfig) -> Any:
+    """Construct one fresh, logged-in ``proxmoxer.ProxmoxAPI``.
 
-    Always the ``https`` ``proxmoxer`` backend today; see this module's
-    docstring for why switching to an SSH backend later needs no change
-    beyond this function.
+    Split out of :func:`build_client` so it can also serve as the
+    reauthenticate callback :class:`PveClient` uses when a ticket that
+    ``proxmoxer`` itself thought was still valid gets rejected mid-run
+    (section P-01 of REVIEW.md: a long confirm-mode wait, or any other gap
+    between calls, can outlast the ticket's server-side lifetime even
+    though ``proxmoxer``'s own lazy renewal never noticed). Raises
+    ``AuthenticationError``/``requests.RequestException`` uncaught -- both
+    callers wrap them into :class:`PveApiError` themselves, with a message
+    appropriate to which situation they are in.
     """
     auth = config.auth
     # requests (and so proxmoxer's https backend) accepts either a bool or a
@@ -78,11 +87,55 @@ def build_client(config: ProxmoxConfig) -> "PveClient":
             "proxmox.auth needs either token_id and token_secret, or username and password"
         )
 
+    api = ProxmoxAPI(**kwargs)
+    _apply_ticket_refresh_seconds(api, config)
+    return api
+
+
+def _apply_ticket_refresh_seconds(api: Any, config: ProxmoxConfig) -> None:
+    """REVIEW.md P-01: wire ``proxmox.ticket_refresh_seconds`` through, best-effort.
+
+    Password/ticket auth's ``proxmoxer`` backend refreshes its ticket
+    lazily -- on whichever request happens to run once its ``renew_age``
+    (a hard-coded 3600s *class* attribute, not a ``ProxmoxAPI(...)`` keyword
+    argument) has elapsed since login. There is no supported, public way to
+    pass ``ticket_refresh_seconds`` through ``ProxmoxAPI``'s constructor in
+    ``proxmoxer`` 2.x, so this reaches into ``_backend.auth`` -- internal,
+    undocumented attribute access, not part of ``proxmoxer``'s public API --
+    to override that instance's ``renew_age`` after construction. This is a
+    deliberate, narrow exception to this module's own "no hand-rolled ticket
+    client" rationale: it is strictly additive to what ``proxmoxer`` already
+    does, never a replacement for it.
+
+    API-token auth has no ticket to refresh at all (``auth`` is a
+    ``ProxmoxHTTPApiTokenAuth`` with no ``renew_age``), and any shape this
+    can't reach -- a non-``https`` backend, or a future ``proxmoxer`` version
+    that restructures this -- is a silent no-op, never a crash: worst case,
+    the knob stays a no-op and :meth:`PveClient._call`'s
+    reauthenticate-and-retry-once still catches a ticket that expired
+    despite it.
+    """
+    auth = getattr(getattr(api, "_backend", None), "auth", None)
+    if auth is not None and hasattr(auth, "renew_age"):
+        auth.renew_age = config.ticket_refresh_seconds
+
+
+def build_client(config: ProxmoxConfig) -> "PveClient":
+    """Construct a :class:`PveClient` from ``config.py``'s ``ProxmoxConfig``.
+
+    Always the ``https`` ``proxmoxer`` backend today; see this module's
+    docstring for why switching to an SSH backend later needs no change
+    beyond this function. The returned client can rebuild its own session
+    from scratch exactly once per failed call (see
+    :meth:`PveClient._call`) by calling back into :func:`_build_api` with
+    this same ``config`` -- a full fresh login, not a reuse of the ticket
+    that just got rejected.
+    """
     try:
-        api = ProxmoxAPI(**kwargs)
+        api = _build_api(config)
     except (AuthenticationError, requests.RequestException) as exc:
         raise PveApiError(f"could not authenticate to the Proxmox VE API: {exc}") from exc
-    return PveClient(api)
+    return PveClient(api, reauthenticate=lambda: _build_api(config))
 
 
 class PveClient:
@@ -95,8 +148,25 @@ class PveClient:
     (.agents/testing.md).
     """
 
-    def __init__(self, api: Any) -> None:
+    def __init__(self, api: Any, *, reauthenticate: Callable[[], Any] | None = None) -> None:
         self._api = api
+        # REVIEW.md P-01: how to get a completely fresh, logged-in ``api``
+        # object when a ticket ``proxmoxer`` itself thought was still valid
+        # gets rejected mid-run -- e.g. a long confirm-mode wait, or any
+        # other gap between calls, outlasting the ticket's actual
+        # server-side lifetime. ``None`` (the default, and what every test
+        # double uses) means "no recovery is possible" -- a bare
+        # ``PveClient(fake_api)`` behaves exactly as before this was added.
+        self._reauthenticate = reauthenticate
+        # Guards `_reauthenticate` itself, not the retried call: if several
+        # of topology.py's `read_workers` threads hit an expired ticket at
+        # the same moment, this serializes them onto one fresh login instead
+        # of a stampede of concurrent ones. It does not *deduplicate* that
+        # work (a thread that queues behind the lock still re-authenticates
+        # once released, even though the ticket is fresh by then) -- a
+        # correctness-preserving, if not maximally efficient, simplification
+        # given re-authentication is expected to be rare.
+        self._reauth_lock = threading.Lock()
 
     def _call(self, description: str, action: Any) -> Any:
         """Run one ``proxmoxer`` call, wrapping every failure as :class:`PveApiError`.
@@ -104,11 +174,40 @@ class PveClient:
         ``ResourceException`` covers HTTP-level API errors (4xx/5xx);
         ``requests.RequestException`` covers transport failures (connection
         refused, timeout) that ``proxmoxer``'s https backend does not wrap
-        itself.
+        itself. ``AuthenticationError`` gets one extra chance (P-01): rebuild
+        the session from scratch via ``reauthenticate`` and retry ``action``
+        exactly once before giving up -- covers a ticket that expired for a
+        reason external to any single call (the operator took a long time to
+        confirm a plan, the process was suspended, the clock jumped), not
+        just a call that was doomed from the start. ``action`` always reads
+        the API object through ``self._api`` (never a captured local), so
+        reassigning it here is enough for the retried ``action()`` to use
+        the new session with no other change.
         """
         try:
             return action()
-        except (ResourceException, AuthenticationError) as exc:
+        except AuthenticationError as exc:
+            if self._reauthenticate is None:
+                raise PveApiError(f"{description}: {exc}") from exc
+            with self._reauth_lock:
+                try:
+                    self._api = self._reauthenticate()
+                except (AuthenticationError, requests.RequestException) as reauth_exc:
+                    raise PveApiError(
+                        f"{description}: authentication ticket was rejected and "
+                        f"re-authenticating failed too: {reauth_exc}"
+                    ) from reauth_exc
+            try:
+                return action()
+            except (ResourceException, AuthenticationError) as retry_exc:
+                raise PveApiError(
+                    f"{description}: still failed after re-authenticating: {retry_exc}"
+                ) from retry_exc
+            except requests.RequestException as retry_exc:
+                raise PveApiError(
+                    f"{description}: request failed after re-authenticating: {retry_exc}"
+                ) from retry_exc
+        except ResourceException as exc:
             raise PveApiError(f"{description}: {exc}") from exc
         except requests.RequestException as exc:
             raise PveApiError(f"{description}: request failed: {exc}") from exc

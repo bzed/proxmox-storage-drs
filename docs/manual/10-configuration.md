@@ -94,7 +94,12 @@ Duration, default `3000` (50 minutes).
 How often a username/password ticket is refreshed. PVE tickets last
 approximately two hours; refreshing well before that avoids a mid-run
 authentication failure. Not used for API-token authentication, which needs
-no ticket.
+no ticket. Implemented by overriding `proxmoxer`'s own (otherwise
+fixed-at-3600s) refresh interval after login, since `proxmoxer` has no
+constructor option for it; if a ticket somehow still gets rejected mid-run
+regardless (a long `confirm`-mode wait, a suspended process, a clock jump —
+see `50-pve-api.md`), the client transparently logs in again from scratch
+and retries the one call that failed, once, before giving up.
 
 ### `proxmox.read_workers`
 
@@ -105,7 +110,9 @@ Size of the bounded thread pool used to fetch per-VM configuration —
 keeps a several-hundred-VM cluster's topology read from being serial.
 Raising it trades API server load for wall-clock time; 8–16 is the range the
 plan suggests. Too high a value on a small PVE API server can itself become
-the bottleneck.
+the bottleneck. Only the per-VM fetch is parallelized; the cluster-wide and
+per-storage calls (`50-pve-api.md`) still run once each, sequentially,
+before it starts.
 
 ## `prometheus` — the metrics source
 

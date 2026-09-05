@@ -33,6 +33,17 @@ manpage, config-on-pmxcfs, state path, and global CLI options. Five new findings
 are identified. The first three are Medium severity and concern packaging/CI consistency with
 the plan; the remaining two are Low and Info.
 
+A **seventh pass** (section 11) reviews the first actual implementation: phases 1 and 2 of the
+plan (config, metrics, forecast, CLI skeleton, PVE API client, topology, reserve), plus the
+full documentation suite (`docs/internals/`, `docs/manual/`), the generalized paper pipeline
+(`tools/build_paper.sh`), and the L-finding fixes. Three new findings (P-01..P-03) are
+identified, all concerning config knobs documented as functional but not yet wired through in
+the code, or VM-level privileges the manual omits. **Section 12** records how all three were
+resolved: `ticket_refresh_seconds` and `read_workers` are now both wired through (the former
+also gained a reauthenticate-and-retry-once path for a ticket that expires from an external
+cause, e.g. a long `apply --confirm` wait), and the manual now names the VM-level privileges
+`apply` will need.
+
 ---
 
 ## 0. Overall assessment
@@ -1192,6 +1203,189 @@ right mechanisms. The three Medium findings (L-01..L-03) are all in the same are
 boundary between the plan's dependency classification and the packaging/CI that implements
 it. Resolving them is a matter of documentation alignment (L-01, L-02) and a CI install-list
 addition when the solver code lands (L-03). None are architectural.
+
+---
+
+## 11. Seventh-pass review of the first implementation
+
+Commits `37c6392..cf532f2` are the transition from design to code: the L-finding fixes
+(`aceb5e6`), then phase 1 (config loading, forecasting, CLI skeleton, metrics), phase 2 (PVE
+API client, topology, reserve), and the full documentation suite (`docs/internals/*.md`,
+`docs/manual/*.md`, `tools/build_paper.sh`). This is the largest single addition to the
+repository since the plan itself: ~8300 lines across 60 files, including 2700 lines of tests.
+
+The implementation is high quality. The code follows the plan closely, the frozen-dataclass
+style from AGENTS.md is used throughout, optional dependencies (`statsmodels`) are imported
+inside the function that needs them (not at module level), every public function has a
+docstring referencing the plan section, and the test suite (223 tests, 1 skipped for
+`statsmodels`) achieves 98.61% coverage — well above the 85% floor. The `FakeProxmoxResource`
+test double correctly replicates `proxmoxer`'s dynamic attribute-chaining protocol. The
+documentation cross-reference tests (`test_documentation.py`) enforce that every config
+schema key appears in the manual and vice versa, and that every CLI option appears in the
+manpage.
+
+### 11.1 Resolution of sixth-pass findings
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| L-01 | Resolved | The plan §2.1 table now marks `pulp` as "optional", and the "optional extras" sentence names `pulp` alongside `ortools` and `statsmodels`, with the distinction spelled out: "the packaged solver path" describes which MILP backend a Debian install gets, not that the MILP is mandatory. |
+| L-02 | Resolved | Resolved in the manpage's favour: `-v`/`--verbose` and `--quiet` are now separate options in both the plan §11.3 and the manpage, with `-v` meaning more output. The CLI (`cli.py`) implements them correctly as `action="count"` and `action="store_true"` respectively. |
+| L-03 | Resolved | `coinor-cbc` and `python3-pulp` are now `Build-Depends` under `<!nocheck>` and in the GitHub Actions install list. The autopkgtest deliberately keeps running without them. Both halves documented in `.agents/packaging.md`. |
+| L-04 | Resolved | The warning rule now orders the modes `dry-run < confirm < auto` and warns on any move *up* that order, not only `dry-run -> auto`. `cli.py`'s `apply_mode_override()` implements this correctly using `_MODE_RANK`. |
+| L-05 | Refuted | The finding's premise was wrong: the changelog uses `bzed@debian.org` (the Debian developer address), not `bernd@debian.org` as I wrote. The split is now documented in AGENTS.md §0 and `.agents/packaging.md`. |
+
+### 11.2 Summary of seventh-pass findings
+
+| ID | Severity | Section / File | Topic |
+|----|----------|----------------|-------|
+| P-01 | Medium | §3.5, config.py, pve.py, manual | `proxmox.ticket_refresh_seconds` is a dead config knob — parsed and documented but never passed to proxmoxer |
+| P-02 | Medium | §3.5, config.py, topology.py, manual | `proxmox.read_workers` is a dead config knob — documented as the thread pool size but topology.py fetches sequentially |
+| P-03 | Low | §3.5, manual/00-installation.md | Manual does not document `VM.Config.Disk` and `VM.Migrate` privileges needed for `move_disk` |
+
+### 11.3 P-01 — `proxmox.ticket_refresh_seconds` is a dead config knob
+
+**Severity:** Medium
+**Files:** `config.py:68`, `pve.py`, `docs/manual/10-configuration.md:90`, `config/drs.example.yaml:38`
+
+The plan §3.5 says: "Tickets are valid ~2h; `proxmoxer` refreshes them itself on its own
+internal interval when using password auth." The `pve.py` `build_client()` function does not
+pass `ticket_refresh_seconds` to `proxmoxer.ProxmoxAPI` — proxmoxer manages its own refresh.
+
+Meanwhile, `ProxmoxConfig.ticket_refresh_seconds` exists as a field, is parsed from the config
+file (`config.py:403-404`), is in the JSON schema (`config_schema.json:28`), is documented in
+the example config (`config/drs.example.yaml:38` with a comment "PVE tickets last 2h; refresh
+well before"), and the manual (`docs/manual/10-configuration.md:90-97`) describes it as "How
+often a username/password ticket is refreshed" — as if the operator setting this value
+controls the refresh interval.
+
+The manual's description is misleading: the knob does nothing. An operator who sets
+`ticket_refresh_seconds: 600` expecting more frequent refresh will get proxmoxer's own
+internal interval regardless. The `30-safety-and-status.md` per-command status table is honest
+about what commands are implemented, but the configuration reference does not distinguish
+between knobs that are wired through and knobs that exist for future use.
+
+**Recommendation:** Either wire `ticket_refresh_seconds` through to proxmoxer (if proxmoxer
+exposes a way to configure it — it may not, in which case this is not possible), or remove
+the field, the schema entry, the example config line, and the manual entry, and document in
+the plan that proxmoxer handles ticket refresh internally and the knob is not needed. If the
+field is kept as a placeholder for a future hand-rolled client, mark it clearly in the manual
+as "not yet effective; proxmoxer manages its own refresh" — the manual must not describe a
+knob as functional when the code ignores it.
+
+### 11.4 P-02 — `proxmox.read_workers` is a dead config knob
+
+**Severity:** Medium
+**Files:** `config.py:69`, `topology.py`, `docs/manual/10-configuration.md:99`,
+`config/drs.example.yaml:41`
+
+The manual documents `proxmox.read_workers` as: "Size of the bounded thread pool used to
+fetch per-VM configuration — `GET /nodes/{node}/qemu/{vmid}/config` has no batch form, so this
+is what keeps a several-hundred-VM cluster's topology read from being serial."
+
+But `topology.py`'s `build_topology()` fetches VM configs sequentially in a `for` loop
+(`topology.py:448-455`), with no thread pool, no `concurrent.futures`, and no use of
+`config.proxmox.read_workers` anywhere. The field is parsed by `config.py` (`config.py:406`)
+but never consumed by any module.
+
+The plan §3.5 specifies the concurrent read path and the updated call count formula
+(`3 + 2|VMs| + 2|S|`), and the config knob is the right design for when the thread pool is
+implemented. But the manual describes it as if it works now. An operator with 500 VMs who sets
+`read_workers: 1` expecting serial fetches would get... serial fetches regardless (which is
+what happens), but an operator who sets `read_workers: 20` expecting parallelism would also
+get serial fetches. The manual's claim "this is what keeps a several-hundred-VM cluster's
+topology read from being serial" is currently false.
+
+**Recommendation:** Either implement the concurrent fetch path in `topology.py` (the plan
+specifies it), or add a note to the manual entry saying the thread pool is not yet
+implemented and `read_workers` has no effect in this build. The `30-safety-and-status.md`
+table is the right pattern: be honest about what the code does, not what the plan says it will
+do. A config knob that is parsed but silently ignored is exactly the kind of gap
+`30-safety-and-status.md` exists to prevent.
+
+### 11.5 P-03 — Manual omits `VM.Config.Disk` and `VM.Migrate` privileges
+
+**Severity:** Low
+**Files:** `docs/manual/00-installation.md`, `IMPLEMENTATION_PLAN.md` §3.5
+
+The plan §3.5 says: "move_disk needs nothing beyond that on the storage side (the VM side
+needs `VM.Config.Disk` and `VM.Migrate` or equivalent, out of scope for this note). Document
+this precisely in the operator manual rather than repeating the more comfortable but wrong
+'Audit is enough' claim."
+
+The manual's installation section (`00-installation.md`) documents `Datastore.Allocate`,
+`Datastore.Audit`, and `VM.Audit` in detail (including the silent-empty-list failure mode for
+Audit-only on `/content`), but does not mention `VM.Config.Disk` or `VM.Migrate` at all. The
+requirements section says "permission to call `move_disk`" without specifying what that means
+in terms of PVE privileges. An operator setting up the credential today would not know to
+grant these VM-level privileges, and would only discover the gap when `apply` is implemented
+and fails with a permission error.
+
+Since `apply` (which calls `move_disk`) is not yet implemented, this is forward-looking. But
+the manual says "permission to call `move_disk`" in the requirements now, and the plan says
+to document it precisely in the operator manual. The `Datastore.Allocate` finding is
+documented excellently; the VM-level privileges should get the same treatment, even if only
+as a note that these will be needed when `apply` is implemented.
+
+**Recommendation:** Add a section to `00-installation.md` (or a note in the existing
+"Setting up the PVE credential" section) naming `VM.Config.Disk` and `VM.Migrate` as the
+privileges `move_disk` requires on the VM side, noting they are only needed for `apply` (not
+for `verify-metrics`, `show-load`, or `verify-storages`, which only read).
+
+### 11.6 Verification
+
+- `python3 -m pytest`: 223 passed, 1 skipped (statsmodels not installed), 98.61% coverage —
+  above the 85% floor. No failures.
+- `python3 tests/fixtures/generate_expected.py --check`: exits 0 — both fixture expected
+  files current.
+- `sha256sum --check docs/IMPLEMENTATION_PLAN.pdf.sha256 docs/internals.pdf.sha256
+  docs/pve-storage-drs-manual.pdf.sha256`: all pass — all three committed PDFs match their
+  Markdown sources.
+- `python3 -m pytest tests/unit/test_documentation.py -v`: 12 passed — every config schema
+  key appears in the manual, the manual documents no nonexistent keys, the example config
+  validates against the schema, every CLI option appears in the manpage, and the manpage has
+  all required sections.
+- `__version__` in `__init__.py` (`0.0.1`), `pyproject.toml` (`0.0.1`), and
+  `debian/changelog` (`0.0.1`): all agree.
+- `proxmoxer` is consistently classified as a hard dependency: `pyproject.toml`
+  `dependencies`, `debian/control` `Depends` and `Build-Depends`, and `mypy.overrides`
+  (`ignore_missing_imports` for no type stubs). The `pve.py` module-level import is safe
+  because `python3-proxmoxer` is in `Depends`, so the autopkgtest's `import-all` will succeed.
+- `config_schema.json` is packaged via `[tool.setuptools.package-data]`, so the
+  `importlib.resources` load in `config.py` works from the installed package.
+- The "Is there code yet?" probes in both GitHub Actions workflows were correctly removed
+  now that `src/` exists, and the Makefile `test` target no longer has the "skip if no tests"
+  guard.
+- `tools/build_paper.sh` is a clean generalization of the previous inline Makefile recipe:
+  one shared pandoc+LuaLaTeX pipeline for all three PDFs, with per-document title/subtitle.
+- The `docs/manual/30-safety-and-status.md` per-command status table honestly reports which
+  commands are implemented and which are not, including the note that `show-load` does not yet
+  compute per-disk I/O load (needs `loadmodel.py`).
+
+### 11.7 Assessment
+
+The first implementation is strong. The code matches the plan, the test coverage is
+excellent, the documentation cross-reference tests are the right mechanism, and the
+honest "not implemented yet" handling in both the CLI and the manual's status table is
+exactly the discipline the project's own rules demand. The three findings (P-01..P-03) are
+all in the same category: config knobs or privileges that are documented as functional but
+are not yet wired through. P-01 and P-02 are Medium because an operator could change a value
+and see no effect, which erodes trust in the configuration system; P-03 is Low because
+`apply` is not implemented yet, so the missing privileges cannot currently cause a failure.
+None are architectural — resolving them is a matter of either implementing the feature or
+marking the manual entry as "not yet effective in this build."
+
+---
+
+## 12. Resolution of seventh-pass findings (P-01..P-03)
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| P-01 | Resolved | `proxmoxer` 2.x has no constructor argument for a password/ticket auth's refresh interval (`ProxmoxHTTPAuth.renew_age` is a hard-coded `3600` class attribute, confirmed by reading the installed `proxmoxer` 2.3.0 source, not guessed) — this was genuinely "not possible" via `proxmoxer`'s public interface, as the finding's own recommendation anticipated. `pve.py`'s `_apply_ticket_refresh_seconds()` now wires `ticket_refresh_seconds` through anyway by overriding that instance attribute after login (reaching into `api._backend.auth`, undocumented but stable across the installed version; `getattr`/`hasattr`-guarded, a silent no-op for API-token auth or a future `proxmoxer` shape). Going beyond the finding's own ask: `PveClient._call()` now also reauthenticates from scratch and retries once on any `AuthenticationError`, covering the case the operator raised directly — a ticket that expires for reasons external to any call (a long `apply --confirm` wait, a suspended process, a clock jump) where `proxmoxer`'s own lazy renewal, and even a correctly-tuned `renew_age`, cannot help, because the gap between calls is what invalidated it, not the passage of the process's own clock. |
+| P-02 | Resolved | `topology.py`'s per-VM fetch (`vm_config`/`vm_snapshots`) now runs across a `concurrent.futures.ThreadPoolExecutor` bounded by `config.proxmox.read_workers`, split into a network-only fetch phase (`_fetch_vm`, run by the pool) and a pure join phase (`_join_vm_disks`, run single-threaded afterward in `ThreadPoolExecutor.map()`'s original order) so `disks_by_group`/`referenced_volids`/`warnings` stay byte-for-byte identical to a fully sequential run regardless of `read_workers` or thread scheduling. `PveClient` is shared across the pool's threads; its new P-01 reauthenticate path takes a lock so concurrently-expiring tickets serialize onto one fresh login rather than stampeding. |
+| P-03 | Resolved | `docs/manual/00-installation.md` now names `VM.Config.Disk` and `VM.Migrate` explicitly, in the same "Setting up the PVE credential" section as the datastore privileges, with the same honesty discipline the rest of that section already has: stated as needed only once `apply` executes a move, not for any command implemented today. |
+
+Verification: `python3 -m pytest` — 231 passed, 1 skipped (`statsmodels` not installed), 98.78%
+coverage (`pve.py` at 100%, both new lines this round). `make lint typecheck` clean.
 
 ---
 

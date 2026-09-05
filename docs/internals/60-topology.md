@@ -44,6 +44,24 @@ calling `_collect_vm_disks` per VM, then `_build_storages`):
    whether a specific disk turns out to be "ungrouped" is only knowable
    after seeing which storage it is actually on, and a config-excluded
    VM's disk still needs its size for (C4)/(C5) (previous section).
+
+   This is the one step that runs across a bounded thread pool
+   (`config.proxmox.read_workers`, REVIEW.md P-02): section 3.5's whole
+   point is that `GET .../qemu/{vmid}/config` has no batch form, so for a
+   several-hundred-VM cluster this is the read phase concurrency actually
+   helps. It is split into `_fetch_vm()` (network I/O only, run by the
+   pool, one call per considered VM) and `_join_vm_disks()` (pure —
+   the same function the old sequential `_collect_vm_disks()` was renamed
+   from, unchanged in what it computes). `ThreadPoolExecutor.map()`
+   returns each VM's fetch in the same order `client.vm_resources()`
+   listed it, even though the fetches themselves complete in whatever order
+   the pool schedules them, so the join phase runs single-threaded and in
+   the original order — `disks_by_group`, `referenced_volids` and
+   `warnings` end up byte-for-byte identical to a fully sequential run
+   regardless of `read_workers` or of thread scheduling, and never need a
+   lock. `PveClient` itself may reauthenticate mid-fetch if several threads
+   hit an expired ticket at once (`50-pve-api.md`'s P-01 note); that
+   reauthentication is what its own lock serializes, not this join.
 5. Non-QEMU resources (`type != "qemu"`) are skipped outright — this tool
    never touches LXC containers, and section 3.5's read/write paths are
    qemu-only throughout.
