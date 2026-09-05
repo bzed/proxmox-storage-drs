@@ -10,6 +10,7 @@ Build-Depends:
  pybuild-plugin-pyproject,
  python3-all,
  python3-jsonschema <!nocheck>,
+ python3-proxmoxer <!nocheck>,
  python3-pulp <!nocheck>,
  python3-pytest <!nocheck>,
  python3-pytest-cov <!nocheck>,
@@ -27,6 +28,7 @@ Package: pve-storage-drs
 Architecture: all
 Depends:
  python3-jsonschema,
+ python3-proxmoxer,
  python3-requests,
  python3-ruamel.yaml,
  ${misc:Depends},

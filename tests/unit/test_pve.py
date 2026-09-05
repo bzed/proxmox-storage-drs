@@ -1,0 +1,276 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""PveClient and build_client(). See proxmox_storage_drs/pve.py.
+
+No test here talks to a real Proxmox VE API (.agents/testing.md).
+FakeProxmoxResource replicates proxmoxer's own ProxmoxResource protocol --
+attribute access and calling both extend a path, and only a terminal
+get()/post() actually "does" anything -- closely enough that PveClient
+cannot tell it apart from the real proxmoxer.ProxmoxAPI it is normally
+constructed with.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+import pytest
+from proxmoxer import AuthenticationError, ResourceException
+
+from proxmox_storage_drs.config import AuthConfig, ProxmoxConfig
+from proxmox_storage_drs.exceptions import PveApiError
+from proxmox_storage_drs.pve import PveClient, build_client
+
+
+@dataclass
+class FakeProxmoxResource:
+    """A minimal stand-in for proxmoxer's dynamic ProxmoxResource."""
+
+    responses: dict[str, Any]
+    calls: list[tuple[str, str, dict[str, Any]]]
+    error: BaseException | None = None
+    _path: tuple[str, ...] = field(default_factory=tuple)
+
+    def __getattr__(self, item: str) -> "FakeProxmoxResource":
+        if item.startswith("_"):
+            raise AttributeError(item)
+        return FakeProxmoxResource(self.responses, self.calls, self.error, self._path + (item,))
+
+    def __call__(self, resource_id: object) -> "FakeProxmoxResource":
+        return FakeProxmoxResource(
+            self.responses, self.calls, self.error, self._path + (str(resource_id),)
+        )
+
+    def _resolve(self, method: str, kwargs: dict[str, Any]) -> Any:
+        path = "/".join(self._path)
+        self.calls.append((method, path, kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.responses[path]
+
+    def get(self, **params: Any) -> Any:
+        return self._resolve("GET", params)
+
+    def post(self, **data: Any) -> Any:
+        return self._resolve("POST", data)
+
+
+def fake_api(responses: dict[str, Any], error: BaseException | None = None) -> FakeProxmoxResource:
+    return FakeProxmoxResource(responses=responses, calls=[], error=error)
+
+
+# --------------------------------------------------------------------- read path
+
+
+def test_vm_resources() -> None:
+    api = fake_api({"cluster/resources": [{"vmid": 101}]})
+    client = PveClient(api)
+    assert client.vm_resources() == [{"vmid": 101}]
+    assert api.calls == [("GET", "cluster/resources", {"type": "vm"})]
+
+
+def test_storage_resources() -> None:
+    api = fake_api({"cluster/resources": [{"storage": "san-a"}]})
+    client = PveClient(api)
+    assert client.storage_resources() == [{"storage": "san-a"}]
+    assert api.calls == [("GET", "cluster/resources", {"type": "storage"})]
+
+
+def test_storage_definitions() -> None:
+    api = fake_api({"storage": [{"storage": "san-a", "type": "lvm", "saferemove": 1}]})
+    client = PveClient(api)
+    assert client.storage_definitions() == [{"storage": "san-a", "type": "lvm", "saferemove": 1}]
+    # The list form, not one call per storage -- see the method's docstring.
+    assert api.calls == [("GET", "storage", {})]
+
+
+def test_vm_config() -> None:
+    api = fake_api({"nodes/pve01/qemu/101/config": {"scsi0": "san-a:vm-101-disk-0,size=32G"}})
+    client = PveClient(api)
+    cfg = client.vm_config("pve01", 101)
+    assert cfg["scsi0"].startswith("san-a:")
+
+
+def test_storage_status() -> None:
+    api = fake_api({"nodes/pve01/storage/san-a/status": {"total": 100, "used": 50}})
+    client = PveClient(api)
+    assert client.storage_status("pve01", "san-a")["total"] == 100
+
+
+def test_storage_content() -> None:
+    api = fake_api({"nodes/pve01/storage/san-a/content": [{"volid": "san-a:vm-101-disk-0"}]})
+    client = PveClient(api)
+    assert client.storage_content("pve01", "san-a")[0]["volid"] == "san-a:vm-101-disk-0"
+
+
+def test_vm_snapshots() -> None:
+    api = fake_api({"nodes/pve01/qemu/101/snapshot": [{"name": "current"}]})
+    client = PveClient(api)
+    assert client.vm_snapshots("pve01", 101) == [{"name": "current"}]
+
+
+def test_vm_status_current() -> None:
+    api = fake_api({"nodes/pve01/qemu/101/status/current": {"lock": "backup"}})
+    client = PveClient(api)
+    assert client.vm_status_current("pve01", 101)["lock"] == "backup"
+
+
+# -------------------------------------------------------------------- write path
+
+
+def test_move_disk_defaults_delete_true_and_omits_optional_params() -> None:
+    api = fake_api({"nodes/pve01/qemu/101/move_disk": "UPID:pve01:...:qmmove:"})
+    client = PveClient(api)
+    upid = client.move_disk("pve01", 101, "scsi0", "san-c")
+    assert upid.startswith("UPID:")
+    method, path, params = api.calls[0]
+    assert method == "POST"
+    assert path == "nodes/pve01/qemu/101/move_disk"
+    assert params == {"disk": "scsi0", "storage": "san-c", "delete": 1}
+
+
+def test_move_disk_delete_false() -> None:
+    api = fake_api({"nodes/pve01/qemu/101/move_disk": "UPID:x"})
+    client = PveClient(api)
+    client.move_disk("pve01", 101, "scsi0", "san-c", delete=False)
+    _, _, params = api.calls[0]
+    assert params["delete"] == 0
+
+
+def test_move_disk_converts_bwlimit_bytes_to_kib_at_this_call_site() -> None:
+    """Section 9.2: "convert at the call site and nowhere else" -- this is that site."""
+    api = fake_api({"nodes/pve01/qemu/101/move_disk": "UPID:x"})
+    client = PveClient(api)
+    client.move_disk("pve01", 101, "scsi0", "san-c", bwlimit_bytes_per_sec=209_715_200)
+    _, _, params = api.calls[0]
+    assert params["bwlimit"] == 204800  # 200 MiB/s -> 204800 KiB/s
+
+
+def test_move_disk_format_is_omitted_unless_explicitly_given() -> None:
+    api = fake_api({"nodes/pve01/qemu/101/move_disk": "UPID:x"})
+    client = PveClient(api)
+    client.move_disk("pve01", 101, "scsi0", "san-c")
+    _, _, params = api.calls[0]
+    assert "format" not in params
+
+
+def test_move_disk_passes_format_when_given() -> None:
+    api = fake_api({"nodes/pve01/qemu/101/move_disk": "UPID:x"})
+    client = PveClient(api)
+    client.move_disk("pve01", 101, "scsi0", "san-c", format="qcow2")
+    _, _, params = api.calls[0]
+    assert params["format"] == "qcow2"
+
+
+def test_task_status() -> None:
+    api = fake_api({"nodes/pve01/tasks/UPID:x/status": {"status": "stopped", "exitstatus": "OK"}})
+    client = PveClient(api)
+    status = client.task_status("pve01", "UPID:x")
+    assert status["exitstatus"] == "OK"
+
+
+# -------------------------------------------------------------------- error wrapping
+
+
+def test_resource_exception_is_wrapped() -> None:
+    api = fake_api({}, error=ResourceException(404, "Not Found", "no such VM"))
+    client = PveClient(api)
+    with pytest.raises(PveApiError, match="404"):
+        client.vm_resources()
+
+
+def test_authentication_error_is_wrapped() -> None:
+    api = fake_api({}, error=AuthenticationError("bad ticket"))
+    client = PveClient(api)
+    with pytest.raises(PveApiError, match="bad ticket"):
+        client.vm_resources()
+
+
+def test_request_exception_is_wrapped() -> None:
+    import requests
+
+    api = fake_api({}, error=requests.ConnectionError("refused"))
+    client = PveClient(api)
+    with pytest.raises(PveApiError, match="request failed"):
+        client.vm_resources()
+
+
+# --------------------------------------------------------------------- build_client
+
+
+def _config(**auth_kwargs: object) -> ProxmoxConfig:
+    return ProxmoxConfig(
+        host="pve.example.com",
+        port=8006,
+        verify_ssl=True,
+        auth=AuthConfig(**auth_kwargs),  # type: ignore[arg-type]
+    )
+
+
+def test_build_client_uses_token_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_proxmox_api(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "the-api-object"
+
+    monkeypatch.setattr("proxmox_storage_drs.pve.ProxmoxAPI", fake_proxmox_api)
+    config = _config(token_id="drs@pve!balancer", token_secret="s3cret")
+    client = build_client(config)
+    assert client._api == "the-api-object"
+    assert captured["user"] == "drs@pve"
+    assert captured["token_name"] == "balancer"
+    assert captured["token_value"] == "s3cret"
+    assert captured["host"] == "pve.example.com"
+
+
+def test_build_client_uses_password_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "proxmox_storage_drs.pve.ProxmoxAPI",
+        lambda **kwargs: captured.update(kwargs) or "api",
+    )
+    config = _config(username="drs@pve", password="hunter2")
+    build_client(config)
+    assert captured["user"] == "drs@pve"
+    assert captured["password"] == "hunter2"
+    assert "token_name" not in captured
+
+
+def test_build_client_ca_file_overrides_verify_ssl(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "proxmox_storage_drs.pve.ProxmoxAPI",
+        lambda **kwargs: captured.update(kwargs) or "api",
+    )
+    config = ProxmoxConfig(
+        host="pve.example.com",
+        verify_ssl=True,
+        ca_file="/etc/ssl/certs/mycorp-ca.pem",
+        auth=AuthConfig(token_id="drs@pve!balancer", token_secret="s3cret"),
+    )
+    build_client(config)
+    assert captured["verify_ssl"] == "/etc/ssl/certs/mycorp-ca.pem"
+
+
+def test_build_client_no_credentials_raises() -> None:
+    config = _config()
+    with pytest.raises(PveApiError, match="needs either"):
+        build_client(config)
+
+
+def test_build_client_malformed_token_id_raises() -> None:
+    config = _config(token_id="not-in-the-right-form", token_secret="x")
+    with pytest.raises(PveApiError, match="user@realm!tokenname"):
+        build_client(config)
+
+
+def test_build_client_wraps_authentication_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def raise_auth_error(**kwargs: Any) -> None:
+        raise AuthenticationError("nope")
+
+    monkeypatch.setattr("proxmox_storage_drs.pve.ProxmoxAPI", raise_auth_error)
+    config = _config(username="drs@pve", password="wrong")
+    with pytest.raises(PveApiError, match="nope"):
+        build_client(config)

@@ -140,7 +140,8 @@ without it.
 
 | Package | Purpose | In Debian trixie |
 |---|---|---|
-| `requests` | PVE API and Prometheus HTTP | `python3-requests` 2.32 |
+| `requests` | Prometheus HTTP, and the transport `proxmoxer`'s https backend uses | `python3-requests` 2.32 |
+| `proxmoxer` | PVE API client (§3.5) | `python3-proxmoxer` 2.2 |
 | `ruamel.yaml` | Config (round-trips comments) | `python3-ruamel.yaml` 0.18 |
 | `jsonschema` | Config validation (§11.1) | `python3-jsonschema` 4.19 |
 | `pulp` | MILP via CBC — **the packaged solver path**, optional | `python3-pulp` 2.7 + `coinor-cbc` 2.10 |
@@ -361,7 +362,19 @@ Notes for the implementer:
 
 ### 3.5 PVE API
 
-Authentication (username/password as specified):
+**`pve.py` is built on `proxmoxer`, not a hand-rolled ticket/CSRF client.** `proxmoxer` implements
+the ticket exchange and API-token auth below itself, behind a `ProxmoxAPI` object whose attribute
+chaining (`proxmox.nodes(node).qemu(vmid).config.get()`) maps directly onto the endpoint table below.
+The decisive reason is its **backend abstraction**: the same `ProxmoxAPI` interface is available over
+plain HTTPS (`backend="https"`, the default and the only one this project uses today), or over SSH —
+either `openssh` (shells out to the system's own `ssh` + `pvesh`) or `ssh_paramiko` (an in-process SSH
+client). A deployment that cannot or will not open tcp/8006 to the management host can switch to an
+SSH-based backend as a **configuration change in one factory function** (`pve.build_client`), with no
+change to `PveClient`'s methods or to anything that calls them — exactly the shape a hand-rolled
+HTTPS-only client would not have offered. `python3-proxmoxer` is packaged for Debian trixie (§2.1).
+
+Authentication, as `proxmoxer`'s `https` backend performs it (username/password as originally
+specified, API token preferred and what this project actually configures by default):
 
 ```
 POST /api2/json/access/ticket        {username, password}
@@ -369,9 +382,11 @@ POST /api2/json/access/ticket        {username, password}
   → data.CSRFPreventionToken         → header CSRFPreventionToken on every write
 ```
 
-Tickets are valid ~2h; refresh on the interval in `proxmox.ticket_refresh_seconds`. API tokens
-(`Authorization: PVEAPIToken=USER@REALM!TOKENID=SECRET`) need no CSRF header and are preferred for
-unattended `auto` mode.
+Tickets are valid ~2h; `proxmoxer` refreshes them itself on its own internal interval when using
+password auth. API tokens (`Authorization: PVEAPIToken=USER@REALM!TOKENID=SECRET`) need no CSRF
+header, no refresh, and are preferred for unattended `auto` mode; `proxmox.auth.token_id`'s
+`user@realm!tokenname` format is split into `proxmoxer`'s separate `user`/`token_name` arguments at
+the one place `pve.py` constructs the client.
 
 Read path:
 
@@ -379,13 +394,23 @@ Read path:
 |---|---|
 | `GET /cluster/resources?type=vm` | VM inventory: vmid, node, status, name, tags |
 | `GET /cluster/resources?type=storage` | Storage inventory, `shared` flag, used/total per node |
-| `GET /storage` | Storage definitions: type, `content`, `shared`, `nodes` restriction |
+| `GET /storage` | Storage definitions: type, `content`, `shared`, `nodes` restriction, **and** per-storage `saferemove` / `saferemove_throughput` — see §7.1 and §9.3 |
 | `GET /nodes/{node}/qemu/{vmid}/config` | **disk → storage mapping and size** |
 | `GET /nodes/{node}/storage/{storage}/status` | authoritative `total`/`used`/`avail` |
 | `GET /nodes/{node}/storage/{storage}/content` | per-volume real allocated sizes, owner vmid |
 | `GET /nodes/{node}/qemu/{vmid}/snapshot` | detect existing snapshot/volume chains (§3.7) |
-| `GET /storage/{storage}` | per-storage `saferemove` / `saferemove_throughput` — see §7.1 and §9.3 |
 | `GET /nodes/{node}/qemu/{vmid}/status/current` | `lock` state immediately before a move (§9.3) |
+
+**Use `GET /storage` (the list form), never `GET /storage/{storage}`, for a storage's own config
+including `saferemove`.** Verified empirically against a live PVE 9.2.11 cluster: an API token
+granted only `Datastore.Audit` can list every storage's full config via `GET /storage`, but the
+same token gets `403 Forbidden (Datastore.Allocate)` calling `GET /storage/{storage}` for the exact
+same storage — the single-item form apparently backs an edit-UI code path gated by the ability to
+change the config, not merely read it. The list form returns the identical per-storage object for
+every storage in one call, so nothing is lost by preferring it; it is also one call instead of
+`|storages|` calls. This keeps the tool's required privilege set to `*.Audit` roles only, which
+matters because a Storage DRS token is exactly the kind of credential that should never need more
+than read access until the moment it calls `move_disk`.
 
 Parsing a disk from the VM config: a key matching
 
@@ -1029,7 +1054,8 @@ about **44 hours** to wipe, against roughly 2.2 hours to mirror it at 200 MiB/s 
 twenty times the move. A cost model that stops at the mirror understates such a migration by that
 factor and will happily schedule a plan that occupies the source array for two days.
 
-Read `saferemove` and `saferemove_throughput` from `GET /storage/{id}` per storage; never assume.
+Read `saferemove` and `saferemove_throughput` from `GET /storage` (§3.5 — the list form, not
+`GET /storage/{id}`) per storage; never assume.
 `migration.account_saferemove_wipe: false` disables the term for an operator who has verified their
 storages do not wipe, but the default is to account for it. Note the knock-on effects, all covered in
 §9.3: the wipe also determines when the source's space is actually released, and it holds a

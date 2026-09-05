@@ -7,8 +7,8 @@ section 2 architecture actually exists right now?
 ## The pipeline, as specified and as built
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
-gate, solve, cost, order, execute. As of this page, stages 1 (partially —
-Prometheus only, no PVE API yet) and the surrounding configuration/CLI
+gate, solve, cost, order, execute. As of this page, stage 1 (collect — both
+Prometheus and the PVE API) and the surrounding configuration/CLI
 scaffolding exist; join through execute are `IMPLEMENTATION_PLAN.md` section
 12 phases 2-9 and are not yet written. Do not take this page as a claim that
 the whole pipeline runs end to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
@@ -17,11 +17,12 @@ is the authoritative per-command status.
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
    │  Prometheus          │        │   Proxmox VE API           │
-   │  (metrics.py)         │        │   (pve.py -- NOT YET BUILT)│
-   └──────────┬────────────┘        └─────────────────────────────┘
-              │ implemented: PrometheusClient,
-              │ PromQL builders, verify_metrics()
-              ▼
+   │  (metrics.py)         │        │   (pve.py, via proxmoxer)  │
+   └──────────┬────────────┘        └──────────────┬─────────────┘
+              │ PrometheusClient,                   │ PveClient,
+              │ PromQL builders,                    │ build_client()
+              │ verify_metrics()                    │
+              ▼                                     ▼
         ┌───────────────────────────────────────────────────┐
         │            cli.py  (argument parsing,              │
         │            command dispatch, mode-override rule)   │
@@ -45,9 +46,10 @@ is the authoritative per-command status.
 | `forecast.py` | The `Forecaster` protocol, `required_range_seconds`, and `quantile`/`seasonal_naive`/`holt_winters` | section 10 |
 | `logging_setup.py` | Structured JSON logging to **stderr** | section 2.1 (amended, see [`40-cli-and-logging.md`](40-cli-and-logging.md)) |
 | `metrics.py` | `PrometheusClient`, PromQL construction, `verify_metrics()` | sections 3.1-3.4 |
+| `pve.py` | `PveClient` (built on `proxmoxer`), `build_client()` | section 3.5 |
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule | section 11.3 |
 
-Not yet written: `pve.py`, `topology.py`, `loadmodel.py`, `optimize.py`,
+Not yet written: `topology.py`, `loadmodel.py`, `optimize.py`,
 `heuristic.py`, `payback.py`, `schedule.py`, `execute.py`.
 
 ## Why config.py depends on forecast.py
@@ -71,3 +73,5 @@ this.
   `verify-metrics` checks.
 - [`40-cli-and-logging.md`](40-cli-and-logging.md) — command dispatch, the
   `--mode` escalation rule, and why logs go to stderr.
+- [`50-pve-api.md`](50-pve-api.md) — the PVE API client, why it is built on
+  `proxmoxer`, and two things verified against a real cluster.
