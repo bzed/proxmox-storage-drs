@@ -15,6 +15,7 @@ verification report.
 from __future__ import annotations
 
 import statistics
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -345,8 +346,12 @@ def _check_coverage(
     expr = build_rate_promql(
         metric_name, metrics.labels.vmid, metrics.labels.device, metrics.rate_window_seconds
     )
-    end = 0.0
-    start = -window.lookback_seconds
+    # Prometheus's query_range API takes absolute start/end (Unix time or
+    # RFC3339), never an offset relative to "now" -- anchoring to time.time()
+    # here is not optional. An unanchored negative value was rejected outright
+    # by a live server during development; see the git history for the fix.
+    end = time.time()
+    start = end - window.lookback_seconds
     try:
         result = client.range_query(expr, start, end, metrics.step_seconds)
     except MetricsError as exc:
@@ -393,10 +398,10 @@ def _check_observed_spacing(
     """
     metric_name = metrics.read_ops
     probe_window_seconds = max(metrics.pvestatd_push_interval_seconds * 20, 600.0)
+    end = time.time()
+    start = end - probe_window_seconds
     try:
-        result = client.range_query(
-            metric_name, -probe_window_seconds, 0.0, metrics.pvestatd_push_interval_seconds
-        )
+        result = client.range_query(metric_name, start, end, metrics.pvestatd_push_interval_seconds)
     except MetricsError as exc:
         return [Finding("error", f"spacing check failed: {exc}")], None
 

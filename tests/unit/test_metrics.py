@@ -348,6 +348,43 @@ def test_verify_metrics_no_device_label_collision_when_not_instance() -> None:
     assert not any("collides" in f.message for f in report.findings)
 
 
+def test_coverage_and_spacing_use_absolute_not_relative_start_end() -> None:
+    """Regression: start/end must be real epoch timestamps, not `-lookback`.
+
+    Prometheus's (and VictoriaMetrics's) query_range API takes absolute
+    start/end -- Unix time or RFC3339 -- never an offset relative to "now".
+    Found against a live server: an unanchored `-window.lookback_seconds`
+    was rejected with a time-parsing error rather than silently
+    misinterpreted, but the bug shipped past every prior mocked test because
+    the fakes never checked what value was actually sent.
+    """
+    from proxmox_storage_drs.metrics import _check_coverage, _check_observed_spacing
+
+    metrics = _full_metrics_config()
+    window = WindowConfig(lookback_seconds=600)
+    session = FakeSession(
+        {
+            "/api/v1/query_range": success(
+                {"result": [{"metric": {"vmid": "1", "instance": "scsi0"}, "values": []}]}
+            )
+        }
+    )
+    client = PrometheusClient(PROM_CONFIG, session=session)
+
+    _check_coverage(client, metrics, window)
+    _check_observed_spacing(client, metrics)
+
+    # A timestamp from any time this test could plausibly run, not a small
+    # offset like -600 or 0.
+    year_2024_epoch = 1_700_000_000.0
+    assert len(session.calls) == 2
+    for _, params in session.calls:
+        start, end = float(params["start"]), float(params["end"])
+        assert start > year_2024_epoch, params
+        assert end > year_2024_epoch, params
+        assert end > start, params
+
+
 def test_coverage_skips_series_with_bad_labels() -> None:
     from proxmox_storage_drs.metrics import _check_coverage
 
