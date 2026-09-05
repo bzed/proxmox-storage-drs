@@ -87,12 +87,13 @@ writes it yet, since only `execute.py` (not yet written) has a reason to.
 | `payback.py` | `evaluate_plan_payback()`: the cost/benefit acceptance test, with a reserve-override exemption mirroring `gates.py`'s | section 7 |
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan` | section 11.3 |
 
-Not yet written: `optimize.py`, `execute.py` — and, within modules that do
-exist, cooldown handling in `gates.py`/`topology.py`/`heuristic.py` (needs
-`state.json`'s cooldown timestamps to be *read* somewhere, which nothing
-does yet even though `state.py` stores and round-trips them fine; see
-[`15-state.md`](15-state.md) and [`80-gates.md`](80-gates.md)), heuristic step 4 "polish" and (C2)
-format-compatibility eligibility in `heuristic.py` (see
+Not yet written: `optimize.py`, `execute.py`. Cooldowns are now read:
+`topology.py`'s (C2) per-disk pin and `heuristic.py`'s per-storage
+target exclusion both consume `state.py`'s cooldown data (see
+[`15-state.md`](15-state.md), [`60-topology.md`](60-topology.md) and
+[`90-heuristic.md`](90-heuristic.md)) — only *writing* a cooldown still
+waits on `execute.py`. Within modules that do exist: heuristic step 4
+"polish" and (C2) format-compatibility eligibility in `heuristic.py` (see
 [`90-heuristic.md`](90-heuristic.md)), concurrent scheduling, priority-2
 ordering and staging in `schedule.py` (see [`95-schedule.md`](95-schedule.md)),
 and the payback re-solve-and-retry loop plus the section 7.3 saturation
@@ -115,8 +116,9 @@ this.
   validated `Config`, and where every default actually lives.
 - [`15-state.md`](15-state.md) — `state.json`'s dataclasses, why reading it
   degrades but writing raises, the real `flock()` lock and the rename-vs
-  -in-place bug it takes to get that wrong, and what `show-load`/`plan`
-  actually get from it today.
+  -in-place bug it takes to get that wrong, what `show-load`/`plan`
+  actually get from it today, and how its cooldown data reaches
+  `topology.py`/`heuristic.py`.
 - [`20-forecasting.md`](20-forecasting.md) — the forecaster protocol and its
   three implementations.
 - [`30-metrics.md`](30-metrics.md) — the Prometheus client and the six
@@ -126,16 +128,18 @@ this.
 - [`50-pve-api.md`](50-pve-api.md) — the PVE API client, why it is built on
   `proxmoxer`, and two things verified against a real cluster.
 - [`60-topology.md`](60-topology.md) — the disk/storage/group join, the
-  section 5.1.1 foreign-volume accounting, and the shared (C4)/(C5) evaluator.
+  section 5.1.1 foreign-volume accounting, the shared (C4)/(C5) evaluator,
+  and the per-disk cooldown pin.
 - [`70-loadmodel.md`](70-loadmodel.md) — the section 4 raw-series-to-`ℓ_d`
   blend, `min_coverage` rejection, and why `tpmstate0`/`unusedN` are exempt
   from it but `efidisk0` is not.
 - [`80-gates.md`](80-gates.md) — the section 6 act/no-act verdict, how
-  `state.json`'s drift history now reaches it, and why cooldowns are not
-  in this module.
+  `state.json`'s drift history now reaches it, and why the per-disk/
+  per-storage cooldowns live in `topology.py`/`heuristic.py` instead.
 - [`90-heuristic.md`](90-heuristic.md) — the section 5.4/5.5 objective and
   the seed/repair/descend search, cross-checked against section 14's exact
-  objective totals, and what "polish" and format eligibility still owe.
+  objective totals, the storage-cooldown destination filter and its
+  repair-side exemption, and what "polish" and format eligibility still owe.
 - [`95-schedule.md`](95-schedule.md) — ordering a target assignment's
   moves under the section 8 transient invariant, why `cost_m = z_d` is
   exact today (not an approximation), and why the heuristic accepting a

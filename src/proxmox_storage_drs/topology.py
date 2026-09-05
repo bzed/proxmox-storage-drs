@@ -24,11 +24,14 @@ from __future__ import annotations
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from proxmox_storage_drs.config import Config, GroupConfig, StorageConfig
 from proxmox_storage_drs.exceptions import TopologyError
 from proxmox_storage_drs.pve import PveClient
+from proxmox_storage_drs.state import State, active_disk_cooldowns, empty_state
+from proxmox_storage_drs.units import format_duration_seconds
 
 # Section 3.5's disk-key regex, verbatim. Every bus counts (AGENTS.md section
 # 6 domain rule 8) -- a regex that only matched scsi* would silently
@@ -276,18 +279,30 @@ def _pin_reason(
     vm_excluded: bool,
     disk_excluded: bool,
     snapshot_reason: str | None,
+    cooldown_remaining_seconds: float,
     lock: str | None,
     device: str,
     include_unused_disks: bool,
 ) -> str | None:
-    """Section 5.3 (C2)'s pin conditions, in the order they are checked --
-    the first that applies is reported; a disk can only have one reason."""
+    """Section 5.3 (C2)'s pin conditions, in the order the plan lists them
+    -- the first that applies is reported; a disk can only have one
+    reason. ``cooldown_remaining_seconds`` (``> 0`` means still pinned) is
+    a precomputed value, not a `state.State` lookup done here -- this
+    function stays a pure decision over already-resolved flags, exactly
+    like `snapshot_reason` already is, per AGENTS.md section 5 ("one
+    implementation" of the cooldown-expiry arithmetic itself lives in
+    `state.cooldown_remaining_seconds()`, not duplicated here)."""
     if vm_excluded:
         return "excluded by config"
     if disk_excluded:
         return "excluded by config (exclude.disks)"
     if snapshot_reason is not None:
         return snapshot_reason
+    if cooldown_remaining_seconds > 0:
+        return (
+            f"cooldown: moved recently, {format_duration_seconds(cooldown_remaining_seconds)} "
+            "left on gates.cooldown_per_disk"
+        )
     if lock:
         return f"locked: {lock}"
     if device.startswith("unused") and not include_unused_disks:
@@ -348,13 +363,19 @@ def _join_vm_disks(
     disks_by_group: dict[str, list[Disk]],
     referenced_volids: dict[str, set[str]],
     warnings: list[str],
+    cooldowns_by_group: dict[str, dict[str, float]],
 ) -> None:
     """Join one already-fetched VM's disks into `disks_by_group`, appending
     any warnings (ungrouped disks, unauthoritative sizes) in place. Pure
     (no network I/O) so `build_topology` can run it single-threaded, in
     cluster-resource order, right after the concurrent fetch phase --
     keeping `disks_by_group`/`warnings` ordering identical to a fully
-    sequential run regardless of `config.proxmox.read_workers`."""
+    sequential run regardless of `config.proxmox.read_workers`.
+
+    ``cooldowns_by_group`` is ``build_topology()``'s one-time-per-group
+    ``state.active_disk_cooldowns()`` result (bare ``vmid:device`` ->
+    seconds remaining), computed once up front rather than re-read from
+    `state.State` per disk here."""
     resource = fetch.resource
     raw_config = fetch.raw_config
     vmid = int(resource["vmid"])
@@ -402,6 +423,7 @@ def _join_vm_disks(
             vm_excluded=vm_excluded,
             disk_excluded=key in excluded_disk_keys,
             snapshot_reason=snapshot_reason,
+            cooldown_remaining_seconds=cooldowns_by_group.get(group_name, {}).get(key, 0.0),
             lock=lock,
             device=device,
             include_unused_disks=config.exclude.include_unused_disks,
@@ -460,17 +482,41 @@ def _build_storages(
     return tuple(storages)
 
 
-def build_topology(client: PveClient, config: Config) -> Topology:
+def build_topology(
+    client: PveClient,
+    config: Config,
+    state: State | None = None,
+    now: datetime | None = None,
+) -> Topology:
     """Build the whole cluster's :class:`Topology` for this run.
 
     One pass: every read call this needs is made exactly once, in the order
     section 3.5 lists them, and the result is handed to every later stage
     (the load model, the solver, the scheduler) rather than re-fetched.
+
+    ``state``/``now`` are section 5.3 (C2)'s "``d`` is within its per-disk
+    cooldown -> also pin to current": ``state`` defaults to
+    ``state.empty_state()`` (no cooldowns recorded, matching every call
+    site until `execute.py` writes any), and ``now`` defaults to the real
+    current time -- an explicit parameter, per `.agents/testing.md`'s
+    "inject the clock", since this function is already a real I/O boundary
+    (like `metrics.py`'s own `time.time()` calls) that a test can override
+    without monkeypatching a module-global clock.
     """
+    if state is None:
+        state = empty_state()
+    if now is None:
+        now = datetime.now(timezone.utc)
     data, warnings = _fetch_cluster_data(client, config)
 
     disks_by_group: dict[str, list[Disk]] = {group.name: [] for group in config.groups}
     referenced_volids: dict[str, set[str]] = {sid: set() for sid in data.storage_group_of}
+    cooldowns_by_group: dict[str, dict[str, float]] = {
+        group.name: active_disk_cooldowns(
+            state, group.name, config.gates.cooldown_per_disk_seconds, now
+        )
+        for group in config.groups
+    }
 
     considered: list[dict[str, Any]] = []
     for resource in client.vm_resources():
@@ -495,7 +541,9 @@ def build_topology(client: PveClient, config: Config) -> Topology:
         fetched = []
 
     for fetch in fetched:
-        _join_vm_disks(config, fetch, data, disks_by_group, referenced_volids, warnings)
+        _join_vm_disks(
+            config, fetch, data, disks_by_group, referenced_volids, warnings, cooldowns_by_group
+        )
 
     groups = tuple(
         Group(

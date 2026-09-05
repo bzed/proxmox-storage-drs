@@ -12,8 +12,21 @@ computed from an arbitrary candidate assignment -- built specifically so
 ``optimize.py`` (the MILP path, not yet written) can call the identical
 function section 5.5 requires ("the heuristic must use the same
 feasibility and objective functions as the MILP path so the two backends
-are directly comparable"). Everything here is pure: no network I/O, no
-``state.json``.
+are directly comparable"). Everything here is pure: no network I/O, and
+no ``state.json`` access of its own -- ``run_heuristic()``'s
+``cooldown_storages`` parameter is a plain, already-derived
+``frozenset[str]`` its caller (`cli.py`, via
+``state.active_storage_cooldowns()``) computes, not a `state.State` this
+module reads itself.
+
+**Implements** section 6's "a storage involved in a migration within
+`cooldown_per_storage` accepts no new incoming moves": `_descend()`
+excludes any storage in ``cooldown_storages`` as a move/swap
+*destination* (never as a source -- a disk is always free to move away
+from one). `_repair()` deliberately does **not** consult it at all; see
+that function's own docstring for why a live (C5) violation is never
+deferred for a storage cooldown, mirroring the reserve-override exemption
+already established in `gates.py`/`payback.py`.
 
 **Not implemented in this pass:** heuristic step 4, "polish" (reuniting a
 fragmented VM when doing so does not worsen imbalance beyond
@@ -26,9 +39,11 @@ exercises. Polish exists for a case descend's single-move/pairwise-swap
 neighbourhood cannot reach on its own (an affinity fix needing three or
 more disks to move in a coordinated rotation) — a real gap, not forgotten,
 just not yet needed to pass the one fixture that exists to prove this
-module correct. **Also not implemented:** (C2)'s format-compatibility
-eligibility rule (a storage that cannot hold a disk's format is fixed
-`x_{d,s}=0`) — ``topology.Storage`` does not yet carry the type/format
+module correct. **Also not implemented:** (C2)'s *format-compatibility*
+eligibility rule -- a different target-exclusion rule from the storage
+cooldown above, not yet subsumed by it -- (a storage that cannot hold a
+disk's format is fixed `x_{d,s}=0`) — ``topology.Storage`` does not yet
+carry the type/format
 information that rule needs (see ``topology.py``'s ``_default_format``,
 which resolves it internally but does not expose it on `Storage`), so
 every group storage is treated as an eligible target for every movable
@@ -309,6 +324,18 @@ def _repair(
     since "one repair per disk" is not actually how many steps a multi-
     storage violation can need; the strict-decrease requirement is what
     actually guarantees termination, this bound is only a defensive cap.
+
+    **Never consults ``gates.cooldown_per_storage``.** A storage's
+    cooldown exists to reduce churn/wear on a target that was just written
+    to -- a purely economic, hysteresis-style throttle, exactly the kind
+    section 13's "the reserve is never traded against balance" already
+    overrides everywhere else in this codebase (`gates.py`'s reserve
+    override bypasses drift/imbalance; `payback.py`'s aggregate test is
+    exempted for a reserve-fixing plan). A storage actively needed to
+    resolve a live (C4)/(C5) violation is not a candidate an operator gets
+    to defer because it was recently written to -- see
+    ``docs/internals/15-state.md`` for this reasoning applied to
+    `_descend()`'s own, non-exempt use of the same cooldown data.
     """
     assignment = dict(assignment)
     movable = _movable_disks(group)
@@ -349,12 +376,22 @@ def _descend(
     min_free_bytes: int,
     average_utilization: float,
     max_iterations: int,
+    cooldown_storages: frozenset[str] = frozenset(),
 ) -> Assignment:
     """Section 5.5 step 3: repeatedly apply whichever single-disk move or
     pairwise swap most improves the full objective; stop when nothing does,
     or after ``heuristic_iterations``. Swaps matter (the plan is explicit):
     when every storage is near its cap, no single move is feasible-and-
-    improving, and only an exchange of two disks can help."""
+    improving, and only an exchange of two disks can help.
+
+    ``cooldown_storages`` (section 6: "a storage involved in a migration
+    within `cooldown_per_storage` accepts no new incoming moves") excludes
+    a storage as a *destination* only -- a disk already on one is free to
+    move away, and a swap involving one is skipped only because a swap
+    always sends a disk *to* both storages it touches. Deliberately not
+    consulted by ``_repair()`` -- see that function's own docstring for
+    why a (C5) repair move ignores this the same way it ignores every
+    other form of hysteresis (section 13)."""
     assignment = dict(assignment)
     movable = _movable_disks(group)
     current = evaluate_assignment(
@@ -368,7 +405,7 @@ def _descend(
         for disk in movable:
             here = assignment[disk.key]
             for target in group.storages:
-                if target.id == here:
+                if target.id == here or target.id in cooldown_storages:
                     continue
                 trial = dict(assignment)
                 trial[disk.key] = target.id
@@ -381,13 +418,14 @@ def _descend(
 
         for i, disk_a in enumerate(movable):
             for disk_b in movable[i + 1 :]:
-                if assignment[disk_a.key] == assignment[disk_b.key]:
+                here_a = assignment[disk_a.key]
+                here_b = assignment[disk_b.key]
+                if here_a == here_b:
                     continue  # no-op swap
+                if here_a in cooldown_storages or here_b in cooldown_storages:
+                    continue  # the swap would send a disk to each of these
                 trial = dict(assignment)
-                trial[disk_a.key], trial[disk_b.key] = (
-                    assignment[disk_b.key],
-                    assignment[disk_a.key],
-                )
+                trial[disk_a.key], trial[disk_b.key] = here_b, here_a
                 value = evaluate_assignment(
                     group, trial, load_by_key, objective, min_free_bytes, average_utilization
                 ).total
@@ -409,12 +447,18 @@ def run_heuristic(
     objective: ObjectiveConfig,
     min_free_bytes: int,
     heuristic_iterations: int = 5000,
+    cooldown_storages: frozenset[str] = frozenset(),
 ) -> HeuristicResult:
     """Section 5.5's four-step heuristic (minus "polish"; see the module
     docstring), producing a :class:`HeuristicResult` for one group.
 
     ``load_by_key`` is ``loadmodel.GroupLoad.load_by_disk_key()``;
     ``min_free_bytes`` is ``config.snapshot_reserve.min_free_bytes``.
+    ``cooldown_storages`` -- storage ids currently within
+    ``gates.cooldown_per_storage`` (``state.active_storage_cooldowns()``,
+    bare ids for this group) -- is passed to ``_descend()`` only, never to
+    ``_repair()``; see ``_repair()``'s own docstring for why a (C5) repair
+    move is never blocked by it.
     """
     average_utilization = group_average_utilization(group, load_by_key)
     initial = seed_assignment(group)
@@ -431,6 +475,7 @@ def run_heuristic(
         min_free_bytes,
         average_utilization,
         heuristic_iterations,
+        cooldown_storages,
     )
     final_breakdown = evaluate_assignment(
         group, final, load_by_key, objective, min_free_bytes, average_utilization

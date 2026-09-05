@@ -299,6 +299,86 @@ def test_repair_does_not_oscillate_when_no_target_can_fully_absorb_the_violation
     assert status.shortfall_bytes == round(1.0 * TIB)
 
 
+# ------------------------------------------------------------- storage cooldowns
+
+
+def test_descend_blocks_new_arrivals_onto_a_cooldown_storage() -> None:
+    """Section 6: "a storage involved in a migration within
+    `cooldown_per_storage` accepts no new incoming moves." Structural, not
+    an exact-assignment check, so it holds regardless of exactly which
+    alternative the search settles on."""
+    group = section_14_group()
+    loads = section_14_loads()
+    original_storage = {key: storage for key, _s, _l, storage in _SECTION_14_DISKS}
+
+    result = run_heuristic(
+        group,
+        loads,
+        DEFAULT_OBJECTIVE,
+        min_free_bytes=0,
+        cooldown_storages=frozenset({"san-b"}),
+    )
+
+    for disk_key, target in result.assignment.items():
+        if target == "san-b":
+            assert original_storage[disk_key] == "san-b"  # never a *new* arrival
+    # The cooldown had a real effect: the baseline's own san-b arrival
+    # (see test_beta_025_reproduces_the_three_move_solution) is blocked.
+    assert result.assignment["101:scsi1"] != "san-b"
+
+
+def test_descend_still_allows_a_disk_to_move_away_from_a_cooldown_storage() -> None:
+    """san-a is only ever a *source* in the section 14 three-move optimum
+    -- nothing arrives there -- so putting it in cooldown must not change
+    the result at all: cooldown blocks incoming moves, never outgoing
+    ones."""
+    group = section_14_group()
+    loads = section_14_loads()
+
+    result = run_heuristic(
+        group,
+        loads,
+        DEFAULT_OBJECTIVE,
+        min_free_bytes=0,
+        cooldown_storages=frozenset({"san-a"}),
+    )
+
+    assert result.assignment == {
+        "101:scsi0": "san-a",
+        "101:scsi1": "san-b",
+        "102:scsi0": "san-c",
+        "103:scsi0": "san-b",
+        "104:scsi0": "san-b",
+        "105:scsi0": "san-b",
+    }
+
+
+def test_run_heuristic_repair_ignores_storage_cooldown() -> None:
+    """A repair move fixing a live (C5) violation must still happen even
+    when its only viable target is in `cooldown_storages` -- section 13's
+    reserve-override principle applies to the storage cooldown exactly as
+    it already does to `gates.py`'s drift/imbalance gates and
+    `payback.py`'s economic test (see `_repair()`'s own docstring)."""
+    disks = (
+        make_disk("101:scsi0", 3.0, 3.0, "san-a"),
+        make_disk("102:scsi0", 2.0, 0.0, "san-a", pinned="locked: backup"),
+    )
+    storages = (make_storage("san-a"), make_storage("san-b", capacity_tib=16.0))
+    group = Group(name="g", storages=storages, disks=disks)
+    loads = {"101:scsi0": 3.0, "102:scsi0": 0.0}
+
+    result = run_heuristic(
+        group,
+        loads,
+        DEFAULT_OBJECTIVE,
+        min_free_bytes=0,
+        cooldown_storages=frozenset({"san-b"}),
+    )
+
+    assert result.assignment["101:scsi0"] == "san-b"  # repaired despite the cooldown
+    assert not result.breakdown.reserve_statuses["san-a"].violated
+
+
 # ------------------------------------------------------------------- pinned disks
 
 

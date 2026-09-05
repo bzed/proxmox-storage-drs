@@ -82,9 +82,31 @@ conditions: config exclusion (VM-level, then `exclude.disks`), a real
 snapshot or an unreferenced companion volume (section 3.7,
 `_disk_snapshot_or_orphan_reason` — the `"current"` entry `GET
 .../snapshot` always returns, verified on a live cluster, is filtered out
-before counting), a VM lock, then an `unusedN` disk when
-`exclude.include_unused_disks` is false. A disk gets at most one reason;
-the first that applies wins, matching how an operator would explain it.
+before counting), the per-disk cooldown (below), a VM lock, then an
+`unusedN` disk when `exclude.include_unused_disks` is false. A disk gets
+at most one reason; the first that applies wins, matching how an operator
+would explain it.
+
+## The per-disk cooldown pin
+
+`build_topology()` takes an optional `state: state.State` and `now:
+datetime` (both default to "no cooldowns"/the real clock — see
+`docs/internals/15-state.md`) and computes
+`state.active_disk_cooldowns()` once per group, before the per-VM join
+loop, into `cooldowns_by_group: dict[str, dict[str, float]]` (bare
+`vmid:device` -> seconds remaining). Inside the loop, once a disk's
+`group_name` is known, `cooldowns_by_group[group_name].get(key, 0.0)` is
+passed to `_pin_reason()` as `cooldown_remaining_seconds` — a plain float,
+not a second `State` lookup inside that function, keeping `_pin_reason()`
+a pure decision over already-resolved flags exactly like every other
+condition it checks. The reported reason names how much of
+`gates.cooldown_per_disk` remains: `cooldown: moved recently, 1.0h left on
+gates.cooldown_per_disk`.
+
+This pin is **not** exempted when the disk's storage is actively
+violating (C4)/(C5) — see `docs/internals/15-state.md`'s "Deliberately not
+implemented" section for why, and why that gap is bounded and safe rather
+than silently wrong.
 
 ## Sizes: content is authoritative, config is the fallback
 

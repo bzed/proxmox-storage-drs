@@ -97,24 +97,53 @@ would otherwise trigger — see
 below), behaviour is unchanged from before this module existed:
 `last_load=None`, drift gate skipped, "reserve override, else imbalance".
 
+## Cooldowns: read by `topology.py` and `heuristic.py`, not by this module
+
+`state.py` only stores and queries cooldown timestamps
+(`active_disk_cooldowns()`/`active_storage_cooldowns()`); it does not
+decide what a cooldown *means* to the solver. `build_topology()` (via a
+new `state`/`now` parameter, both defaulting to "no cooldowns"/"real
+clock") computes each group's active disk cooldowns once and feeds them
+into `topology._pin_reason()` — section 5.3 (C2)'s "`d` is within its
+per-disk cooldown -> also pin to current", reported as `cooldown: moved
+recently, <time> left on gates.cooldown_per_disk`, in the plan's own
+priority order (after a snapshot pin, before a lock pin). `cli.py`
+separately computes each group's active *storage* cooldowns and passes
+them to `heuristic.run_heuristic()`, which excludes them as a move/swap
+**destination** in `_descend()` only — see `docs/internals/60-topology.md`
+and `docs/internals/90-heuristic.md` for the two halves in detail,
+including the deliberate asymmetry: a live (C4)/(C5) repair move ignores
+the storage cooldown entirely (section 13's reserve-override principle),
+while nothing yet exempts a disk-cooldown pin from blocking a repair the
+same way — a known, documented limitation, not an oversight.
+
+Like `last_balance`, this is **read-only wiring**: nothing calls
+`with_recorded_cooldown()` yet, so every cooldown query returns empty
+until `execute.py` records one.
+
 ## Deliberately not implemented in this pass
 
-- **Nothing calls `acquire_lock()` or `with_recorded_balance()` yet.** Both
-  exist and are fully tested, but only `execute.py` (phase 7, not yet
-  written) has a reason to take the lock or record a balance — section
-  11.2 itself says `last_balance` is "updated only after a run that
-  executed at least one migration", and neither `show-load` nor `plan`
-  ever does.
-- **Cooldowns are stored and round-tripped (`Cooldowns`,
-  `with_recorded_cooldown()`) but not yet *read* by anything that pins a
-  disk or excludes a migration target.** Section 5.3 (C2)'s "within its
-  per-disk cooldown -> pin to current" belongs with `topology.py`'s other
-  (C2) pin reasons (locked, excluded, snapshotted — see
-  `topology._pin_reason()`); the storage-side "accepts no new incoming
-  moves" belongs with `heuristic.py`'s target eligibility. Both need a
-  `State`/cooldown lookup threaded into a function that does not accept
-  one today — a real, separately-scoped change to two other modules, not
-  this one.
+- **Nothing calls `acquire_lock()` or `with_recorded_balance()`/
+  `with_recorded_cooldown()` yet.** All exist and are fully tested, but
+  only `execute.py` (phase 7, not yet written) has a reason to take the
+  lock or record anything — section 11.2 itself says `last_balance` is
+  "updated only after a run that executed at least one migration", and
+  neither `show-load` nor `plan` ever does.
+- **A disk-cooldown pin is not exempted for an active reserve violation
+  the way the storage cooldown is.** `topology.py` decides a disk's pin
+  before the group's `reserve.ReserveStatus` is even computable (it needs
+  every disk in the group, which is still being built), so there is no
+  cheap way today to ask "would un-pinning this disk help fix a live
+  violation?" at the point the pin decision is made. The practical effect
+  is bounded and safe, never silently wrong: `heuristic._repair()` already
+  reports an unresolvable residual violation via `reserve_penalty_term`
+  whenever no movable disk can fix it (the same path
+  `test_repair_does_not_oscillate_when_no_target_can_fully_absorb_the_violation`
+  exercises) — a disk-cooldown pin can only ever add to the set of cases
+  that hit that path, never bypass it. Revisiting this needs restructuring
+  `topology.py` into two passes (build every disk first, compute reserve
+  status per storage, then finalize cooldown pins), which is a real,
+  separately-scoped change.
 - **`inflight_upids`/`staged_disks`** exist in the dataclass and round-trip
   correctly, but nothing writes or reads them yet — they belong to
   `execute.py` (crash recovery, section 13) and `schedule.py`'s staging

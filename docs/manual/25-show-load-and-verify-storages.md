@@ -63,10 +63,12 @@ and `docs/internals/15-state.md` have the detail; nothing yet *writes*
 the common case until a migration has actually run.
 
 A pinned disk carries `[pinned: <reason>]` after its size and format —
-`snapshots present (N)`, `locked: <lock>`, `excluded by config`, or
-`excluded: unused disk (exclude.include_unused_disks=false)`, matching
-`IMPLEMENTATION_PLAN.md` section 5.3 (C2) exactly; that reason is the
-answer to "why won't it move this disk."
+`snapshots present (N)`, `locked: <lock>`, `excluded by config`,
+`excluded: unused disk (exclude.include_unused_disks=false)`, or
+`cooldown: moved recently, <time> left on gates.cooldown_per_disk`
+whenever `state.json` records that disk having moved within
+`gates.cooldown_per_disk` — matching `IMPLEMENTATION_PLAN.md` section 5.3
+(C2) exactly; that reason is the answer to "why won't it move this disk."
 
 A disk whose measured I/O falls below `window.min_coverage` (section 3.4)
 gets a `⚠ <disk> : <reason>` line of its own, right after that group's

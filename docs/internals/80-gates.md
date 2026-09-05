@@ -71,9 +71,10 @@ moment a plan is built or applied, that is authoritative.
 `gates.cooldown_per_disk`/`cooldown_per_storage` decide which *individual*
 disks or storages are movable once a plan is already being built — the
 same kind of decision (C2)'s other pin reasons make in `topology.py`, not
-a group-wide act/no-act verdict. They need `state.json`'s per-disk/
-per-storage "last moved at" timestamps, which do not exist yet either, so
-implementing them here now would be speculative machinery with no caller
-and no real timestamp source to test against. They belong with whichever
-module builds the solver's movable-disk set (`heuristic.py`/`schedule.py`,
-phase 4) when that is written.
+a group-wide act/no-act verdict, so this module still has no cooldown
+logic of its own. Both are now implemented, in the modules this page
+always said they belonged with: the per-disk cooldown is a `topology.py`
+(C2) pin (`docs/internals/60-topology.md`), and the per-storage cooldown
+is a `heuristic.py` target-eligibility filter
+(`docs/internals/90-heuristic.md`), both reading `state.py`'s cooldown
+data (`docs/internals/15-state.md`).

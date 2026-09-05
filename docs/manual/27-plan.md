@@ -141,12 +141,17 @@ and left for you to review, not silently adjusted. See
   `docs/internals/15-state.md`), but nothing writes `last_balance` yet --
   that needs `execute.py` (phase 7), so a group stays "first run" (drift
   gate skipped) until a migration has actually run.
-- **No cooldowns, no staging, no concurrent scheduling.** Cooldown
-  timestamps are stored and round-tripped by `state.py` but not yet *read*
-  by `topology.py`'s (C2) pinning or `heuristic.py`'s target eligibility.
-  All documented as deliberate, not forgotten, in
-  `docs/internals/15-state.md`, `docs/internals/90-heuristic.md` and
-  `docs/internals/95-schedule.md`.
+- **Cooldowns are read, never written.** A disk moved within
+  `gates.cooldown_per_disk` is pinned (`show-load`/`plan` both show it as
+  `[pinned: cooldown: ...]`), and a storage touched within
+  `gates.cooldown_per_storage` accepts no new incoming moves from the
+  heuristic. Like drift history above, both depend entirely on
+  `state.json` already having a recorded timestamp -- nothing writes one
+  yet, so this stays inactive until `execute.py` (phase 7) exists. See
+  `docs/internals/15-state.md`, `docs/internals/60-topology.md` and
+  `docs/internals/90-heuristic.md`.
+- **No staging, no concurrent scheduling.** Documented as deliberate, not
+  forgotten, in `docs/internals/95-schedule.md`.
 
 `--json` emits `groups[]`, each with `gate` (identical shape to
 `show-load`'s), `moves[]` (`disk_key`, `vmid`, `device`, `from_storage`,
