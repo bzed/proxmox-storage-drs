@@ -44,6 +44,26 @@ term is exactly zero and does not influence descend's choices at all.
 is the regression test for this: `beta=100` (so no purely-cosmetic balance
 move could ever be worth a migration) still sees the repair move happen.
 
+**A candidate is judged by the group-wide total shortfall, not the source
+storage's own.** Moving a disk off a violating storage always reduces
+*that* storage's own shortfall — it has fewer bytes, and if anything a
+smaller largest-disk requirement — which makes "does the source's
+shortfall fall" a tempting but wrong test: it says yes even when the disk
+only relocates the problem to whichever storage receives it, or makes the
+group's total worse. An earlier version of `_repair` used exactly that
+test and would oscillate a disk back and forth between two storages
+neither of which can fully hold it, "successfully" reducing the current
+worst offender's shortfall on every iteration while never making net
+progress. Requiring the *group* total to strictly decrease fixes this and
+is also what makes the loop's iteration bound (movable disks times
+storages, generously sized rather than tightly) actually a correct
+termination argument rather than a lucky one.
+`test_repair_does_not_oscillate_when_no_target_can_fully_absorb_the_violation`
+is the regression test: a 3 TiB disk that cannot fit, alone, on either of
+two 8 TiB/`reserve_factor: 2.0` storages is moved exactly once (repairing
+what can be repaired, from a 3 TiB group-wide shortfall down to 1 TiB), not
+shuffled back and forth forever.
+
 ## Descend explores swaps, not only single moves
 
 Section 5.5 is explicit that swaps are not an optional refinement: "when
@@ -120,9 +140,7 @@ consistent.
   `optimize.py`, not yet written. `evaluate_assignment()`'s plain
   floating-point objective is what the MILP path will need to agree with,
   not a stand-in for its own separately-scaled integer objective.
-- **Wiring into any CLI command.** `heuristic.py` is not yet called from
-  `cli.py` — `plan`/`explain`/`apply` remain stubs
-  (`docs/manual/30-safety-and-status.md`). The next piece is `schedule.py`
-  (section 8: ordering a target assignment's moves under the transient
-  reserve invariant), after which both can be wired into `plan`'s
-  `dry-run` output together.
+`heuristic.py` is wired into `cli.py`'s `plan` command, together with
+`schedule.py` (section 8's move ordering) — see `95-schedule.md` and
+`docs/manual/27-plan.md`. `explain`/`apply` remain stubs
+(`docs/manual/30-safety-and-status.md`).

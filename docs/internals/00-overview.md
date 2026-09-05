@@ -7,19 +7,18 @@ section 2 architecture actually exists right now?
 ## The pipeline, as specified and as built
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
-gate, solve, cost, order, execute. As of this page, stages 1 (collect), 2
-(join), 3 (gate) and the heuristic half of 4 (solve) exist; the MILP path,
-cost (payback) and order (scheduling) through execute are
-`IMPLEMENTATION_PLAN.md` section 12 phases 4 (remainder)-9 and are not yet
-written. Do not take this page as a claim that the whole pipeline runs end
-to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
-is the authoritative per-command status: `gates.py`'s verdict is real and
-`show-load` prints it, but nothing yet *acts* on it (no `plan`/`apply`),
-and every call site passes `last_load=None` since `state.json` (the real
-drift history) does not exist yet — see [`80-gates.md`](80-gates.md).
-`heuristic.py` can already produce a target assignment for a group, but
-nothing yet orders its moves under section 8's transient reserve invariant
-or calls it from `cli.py` — see [`90-heuristic.md`](90-heuristic.md).
+gate, solve, cost, order, execute. As of this page, stages 1 (collect)
+through 4 (order) exist for the heuristic path — the MILP path (stage 4's
+other backend), cost (payback) and execute are `IMPLEMENTATION_PLAN.md`
+section 12 phases 5-9 and are not yet written. Do not take this page as a
+claim that the whole pipeline runs end to end —
+[`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
+is the authoritative per-command status: `plan` is real and prints an
+ordered, transient-feasible dry-run plan (see
+[`../manual/27-plan.md`](../manual/27-plan.md)), but nothing yet *executes*
+one (no `apply`), no cost/benefit (payback) check exists yet, and every
+call site passes `last_load=None` since `state.json` (the real drift
+history) does not exist yet — see [`80-gates.md`](80-gates.md).
 
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
@@ -45,11 +44,13 @@ or calls it from `cli.py` — see [`90-heuristic.md`](90-heuristic.md).
                                                       │
                                      heuristic.py (run_heuristic():
                                      seed / repair / descend, section 5.4/5.5)
-                                     -- not yet called from cli.py
+                                                      │
+                                     schedule.py (order_moves():
+                                     transient reserve invariant, section 8)
                                                       │
         ┌───────────────────────────────────────────────────────────────────┐
         │            cli.py  (argument parsing, command dispatch,           │
-        │            mode-override rule, show-load, verify-storages)        │
+        │      mode-override rule, show-load, verify-storages, plan)        │
         └───────────────────────┬─────────────────────────────────────────┘
                                  │
                      config.py (load + validate)
@@ -76,13 +77,16 @@ or calls it from `cli.py` — see [`90-heuristic.md`](90-heuristic.md).
 | `loadmodel.py` | `compute_group_load()`: the raw-series-to-`ℓ_d` blend, `min_coverage` rejection, current `L_s`/`u_s` | section 4 |
 | `gates.py` | `evaluate_group_gates()`: reserve override, drift, imbalance — the act/no-act verdict, with reasoning | section 6 |
 | `heuristic.py` | `run_heuristic()`: seed/repair/descend, and `evaluate_assignment()`, the section 5.4 objective shared with the (unwritten) MILP path | sections 5.4/5.5 |
-| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages` | section 11.3 |
+| `schedule.py` | `order_moves()`: transient-feasible ordering of a target assignment's moves, deadlock reporting | section 8 |
+| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan` | section 11.3 |
 
-Not yet written: `optimize.py`, `payback.py`, `schedule.py`, `execute.py`
-— and, within modules that do exist, cooldown handling in `gates.py`
-(needs `state.json`'s timestamps; see [`80-gates.md`](80-gates.md)),
-heuristic step 4 "polish" and (C2) format-compatibility eligibility in
-`heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)).
+Not yet written: `optimize.py`, `payback.py`, `execute.py` — and, within
+modules that do exist, cooldown handling in `gates.py` (needs
+`state.json`'s timestamps; see [`80-gates.md`](80-gates.md)), heuristic
+step 4 "polish" and (C2) format-compatibility eligibility in `heuristic.py`
+(see [`90-heuristic.md`](90-heuristic.md)), and concurrent scheduling,
+priority-2 ordering and staging in `schedule.py` (see
+[`95-schedule.md`](95-schedule.md)).
 
 ## Why config.py depends on forecast.py
 
@@ -118,3 +122,7 @@ this.
 - [`90-heuristic.md`](90-heuristic.md) — the section 5.4/5.5 objective and
   the seed/repair/descend search, cross-checked against section 14's exact
   objective totals, and what "polish" and format eligibility still owe.
+- [`95-schedule.md`](95-schedule.md) — ordering a target assignment's
+  moves under the section 8 transient invariant, why `cost_m = z_d` is
+  exact today (not an approximation), and why the heuristic accepting a
+  residual violation can still mean the scheduler reports a deadlock.

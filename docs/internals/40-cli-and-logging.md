@@ -28,8 +28,7 @@ present does it call `config.load_config()`.
 
 `_COMMAND_HANDLERS: dict[str, CommandHandler]` maps each subcommand name to
 a function of `(ResolvedConfig, argparse.Namespace, effective_mode) -> int`.
-Every subcommand not yet implemented (`plan`, `apply`, `show-load`,
-`explain`, `verify-storages` — see
+Every subcommand not yet implemented (`apply`, `explain` — see
 [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md) for
 which ones that currently is) gets a handler from
 `_make_not_yet_implemented_handler(name)`, a closure factory rather than a
