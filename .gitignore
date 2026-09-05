@@ -27,6 +27,7 @@ config/*.local.yaml
 
 # Throwaway dev-only diagnostics against a real cluster; never shipped source
 check_pve_permissions.py
+BUG_REPORT_*.md
 
 # Claude Code local settings
 .claude/
