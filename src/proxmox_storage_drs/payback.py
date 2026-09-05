@@ -172,11 +172,18 @@ def compute_benefit_load_seconds(
     imbalance_before: float, imbalance_after: float, payback_horizon_seconds: float
 ) -> float:
     """Section 7.2: ``benefit = (E_before - E_after) * H``. Both
-    ``imbalance_before``/``imbalance_after`` are a
-    ``heuristic.ObjectiveBreakdown.imbalance_term`` -- the *unweighted*
-    (``alpha_spread``-scaled, which defaults to 1.0) section 5.4 imbalance
-    term, evaluated at the pre-plan and post-plan assignments
-    respectively. A negative result (the plan made imbalance *worse*,
+    ``imbalance_before``/``imbalance_after`` must be the *raw*, unweighted
+    section 7.2 spread quantity -- ``heuristic.raw_spread()``'s
+    ``sum(e_s)`` (``"l1"``) or ``max(u_s)`` (``"minmax"``) -- evaluated at
+    the pre-plan and post-plan assignments respectively. **Not**
+    ``ObjectiveBreakdown.imbalance_term``: that is the same quantity scaled
+    by ``objective.alpha_spread`` for the section 5.4 *solver* objective,
+    and passing it here would make the payback ratio depend on that
+    tuning knob rather than only on the imbalance reduction and migration
+    cost a plan produces (REVIEW.md R-01 -- earlier code passed
+    ``imbalance_term`` directly; only invisible while ``alpha_spread``'s
+    default of ``1.0`` made the two numerically identical). A negative
+    result (the plan made imbalance *worse*,
     which a beta/gamma/kappa-dominated objective can in principle choose)
     is returned as computed, not clamped -- ``evaluate_plan_payback()``'s
     acceptance test already rejects it correctly without special-casing

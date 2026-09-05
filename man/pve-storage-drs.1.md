@@ -65,7 +65,10 @@ Global options are accepted before the command.
 
 **--group** *NAME*
 : Restrict the run to one storage group. May be given more than once. Groups are independent, so
-  this does not change the result for the groups selected.
+  this does not change the result for the groups selected. A name that does not match any group
+  in the configuration is a hard failure (exit code 1), not a silently empty report. Applies to
+  **show-load**, **verify-storages** and **plan**; **verify-metrics** validates the configured
+  metric/label names globally and is not restricted by this flag.
 
 **--mode** *dry-run*|*confirm*|*auto*
 : Override *execution.mode* for this run. Every override is logged; one that moves toward less

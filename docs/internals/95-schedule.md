@@ -20,19 +20,21 @@ that produced it did.
 ## `cost_m` is `z_d` — and that is not an approximation today
 
 Section 8.2's ratio is "imbalance reduction / `cost_m`". `cost_m` here is
-simply the disk's size in bytes. That looks like a placeholder for the
-real duration-based cost section 7 defines, and it will need to become one
-once `payback.py` exists and storages can have different `bwlimit`s or
-wipe times — but as of this module, `migration.bwlimit_bytes_per_sec` is
-one global config value, so every move's mirror duration is
-`z_d / bwlimit`, a constant divided into every disk's size equally.
-Dividing an imbalance reduction by `z_d` and dividing it by `z_d / bwlimit`
-produce the **same ordering** (`bwlimit` is a positive constant common to
-every candidate in the comparison), so `cost_m = z_d` is not an
-approximation of "cost by mirror duration" here, it is that ordering
-exactly, until `payback.py` gives moves individually different costs
-(saferemove wipe time, per-storage throughput) that this equivalence no
-longer holds for.
+simply the disk's size in bytes, not `payback.py`'s real duration-based
+cost (mirror time plus, when `saferemove` is on, wipe time — and wipe
+*throughput* is a per-storage config value, so two candidate moves off
+different sources can have genuinely different wipe costs even for the
+same `z_d`). `migration.bwlimit_bytes_per_sec` is one global config value,
+so every move's *mirror* duration alone is `z_d / bwlimit`, a constant
+divided into every disk's size equally — dividing an imbalance reduction
+by `z_d` and dividing it by `z_d / bwlimit` produce the **same ordering**
+(`bwlimit` is a positive constant common to every candidate). So
+`cost_m = z_d` reproduces the true mirror-only ordering exactly, but is an
+approximation once a group has moves whose `saferemove` wipe cost differs
+enough to change the ranking `payback.py`'s full cost would produce.
+Scoring candidates by `payback.compute_move_cost()` instead of `z_d` is a
+natural follow-up, not yet done: this module predates `payback.py` and
+has not been revisited to consume it (REVIEW.md R-04).
 
 ## The transient invariant, called with a single-move set always
 
@@ -71,14 +73,29 @@ not a false all-clear. See
 `test_plan_reports_a_deadlock_when_even_the_best_target_still_violates`
 in `tests/unit/test_cli.py` for the exact scenario reproduced end to end.
 
+## `final_assignment` is the schedule's own truth, not the heuristic's target
+
+`ScheduleResult.final_assignment` is the assignment produced by actually
+applying `order` in sequence, starting from the current placement — every
+disk, not only the moved ones. When nothing deadlocks it is identical to
+the heuristic's target assignment, but when `deadlocked` is non-empty
+(fully or, more subtly, only partially) it is not: a caller reporting an
+"after" utilization/spread must evaluate `final_assignment`, not
+`heuristic.HeuristicResult.assignment`, or it reports numbers for moves
+that were never actually scheduled (REVIEW.md R-02 — `cli.py`'s `plan`
+originally did exactly this, correct only when `order_moves()` scheduled
+every move a plan proposed).
+
 ## What this pass deliberately does not do
 
 - **Concurrent scheduling** (`execution.max_concurrent_migrations > 1`).
-  Reasoning correctly about overlapping in-flight windows needs move
-  duration estimates from `payback.py`, which does not exist yet. This
-  module schedules strictly sequentially regardless of the configured
-  value; section 8.1's own generalized invariant is what a future version
-  would evaluate against the real in-flight set instead of `{m}`.
+  `payback.py` now provides the move-duration estimates this would need,
+  but reasoning correctly about overlapping in-flight windows — which
+  pairs of moves can safely run together under the generalized section
+  8.1 invariant — is not implemented. This module schedules strictly
+  sequentially regardless of the configured value; section 8.1's own
+  generalized invariant is what a future version would evaluate against
+  the real in-flight set instead of `{m}`.
 - **Ordering priority 2** ("moves that free space a later move needs") and
   **staging** (section 8.3 option 1). Both are refinements over a plan
   that is already feasible and safe without them — priority 2 only
@@ -90,7 +107,8 @@ in `tests/unit/test_cli.py` for the exact scenario reproduced end to end.
 - **Cooldowns**, for the same reason `gates.py` doesn't implement them yet:
   `state.json` (section 11.2), which would record the timestamps a real
   cooldown check needs, does not exist.
-- **The section 7.3 saturation check** — belongs with `payback.py`.
+- **The section 7.3 saturation check** — belongs with `payback.py`
+  (implemented; see `96-payback.md` for why the check itself is deferred).
 
 ## Wired into `plan`, not yet into `apply`
 

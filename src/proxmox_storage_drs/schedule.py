@@ -25,13 +25,15 @@ forgotten -- see ``docs/internals/95-schedule.md``):
 - **Concurrent scheduling** (``execution.max_concurrent_migrations > 1``).
   This module schedules strictly sequentially -- each move is assumed to
   fully complete (including any ``saferemove`` wipe) before the next
-  starts -- regardless of the configured concurrency. Reasoning about
-  overlapping in-flight windows needs move-duration estimates
-  (``payback.py``, not yet written); the plan's own generalized invariant
-  is stated so scheduling can be extended to it later without changing
-  this module's shape (section 8.1: "implement this as the single
-  feasibility predicate and call it with M = {m} for the sequential
-  case"), which is exactly what this module does.
+  starts -- regardless of the configured concurrency. ``payback.py`` now
+  provides the move-duration estimates concurrent scheduling would need,
+  but reasoning about overlapping in-flight windows -- which pairs of
+  moves can safely run together under the generalized section 8.1
+  invariant -- is not implemented here yet; the plan's own generalized
+  invariant is stated so scheduling can be extended to it later without
+  changing this module's shape (section 8.1: "implement this as the
+  single feasibility predicate and call it with M = {m} for the
+  sequential case"), which is exactly what this module does.
 - **Ordering priority 2** ("moves that free space a later move needs")
   and **staging** (section 8.3 option 1). Both are optimizations over a
   plan that is already feasible without them (front-loading value, or
@@ -44,8 +46,9 @@ forgotten -- see ``docs/internals/95-schedule.md``):
   needs; every move here is scheduled as if no cooldown applies and no
   other run's moves are already in flight, the same simplification
   ``gates.py`` already documents for ``last_load=None``.
-- **The section 7.3 saturation check.** Belongs with ``payback.py``, which
-  also does not exist yet.
+- **The section 7.3 saturation check.** Belongs with ``payback.py``
+  (implemented), which itself documents why the check is deferred (needs
+  a forecaster upper bound over an arbitrary horizon, not yet available).
 """
 
 from __future__ import annotations
@@ -86,6 +89,15 @@ class ScheduleResult:
     # for -- section 8.3 option 3, "report the blocking set and stop."
     # Empty unless a real deadlock was hit.
     deadlocked: tuple[str, ...]
+    # The assignment actually reachable by applying `order` in sequence,
+    # starting from the current (pre-plan) placement -- every disk, not
+    # only the moved ones. Equal to the heuristic's target assignment when
+    # `deadlocked` is empty; when it is not, this is what the group will
+    # actually look like if every schedulable move runs, as distinct from
+    # the target assignment's own numbers, which include moves that never
+    # got scheduled (REVIEW.md R-02). A caller reporting "after" state
+    # should evaluate this, not the heuristic's target assignment.
+    final_assignment: Assignment
 
     @property
     def deadlocked_msg(self) -> str | None:
@@ -242,4 +254,6 @@ def order_moves(
         )
         state[best_key] = target_id
 
-    return ScheduleResult(order=tuple(order), deadlocked=tuple(sorted(pending)))
+    return ScheduleResult(
+        order=tuple(order), deadlocked=tuple(sorted(pending)), final_assignment=dict(state)
+    )

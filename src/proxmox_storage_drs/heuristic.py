@@ -129,6 +129,22 @@ def group_average_utilization(group: Group, load_by_key: Mapping[str, float]) ->
     return total_load / total_capability if total_capability else 0.0
 
 
+def raw_spread(breakdown: ObjectiveBreakdown, spread_metric: str) -> float:
+    """Section 7.2's unweighted ``E`` -- ``sum(e_s)`` (``"l1"``) or
+    ``max(u_s)`` (``"minmax"``) -- as distinct from
+    ``breakdown.imbalance_term``, which is that same quantity multiplied by
+    ``objective.alpha_spread`` for section 5.4's *solver* objective.
+    ``payback.py``'s ``compute_benefit_load_seconds()`` needs this raw
+    quantity: section 7.2 defines ``E_before = Sum_s e_s`` with no alpha
+    factor, so passing ``imbalance_term`` instead would make the payback
+    ratio depend on a solver tuning knob rather than only on the imbalance
+    reduction and migration cost a plan actually produces (REVIEW.md
+    R-01)."""
+    if spread_metric == "minmax":
+        return max(breakdown.utilization.values()) if breakdown.utilization else 0.0
+    return sum(breakdown.spread_e.values())
+
+
 def evaluate_assignment(
     group: Group,
     assignment: Assignment,
