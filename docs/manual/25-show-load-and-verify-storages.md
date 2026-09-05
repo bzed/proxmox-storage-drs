@@ -100,6 +100,17 @@ after the arrow), `reserve_override` (bool), and `drift_fraction`/
 `imbalance_fraction` (float or `null` — `null` means that gate was never
 reached, not that it evaluated to zero).
 
+**A config with several groups issues Prometheus queries per group.**
+Computing one group's load takes seven queries (six raw metrics plus one
+coverage check), unfiltered by group — the fastest correct way to get one
+group's numbers, but it means a config with `N` groups makes `7N` queries
+in total on every `show-load`, not 7, since each group's coverage and
+data-quality decisions are independent and so cannot share a single
+fetch. For the typical one-to-three-group deployment this is a handful of
+fast instant queries and not worth worrying about; an operator running
+many groups against an already-busy Prometheus should be aware of the
+multiplier.
+
 ## `verify-storages`
 
 Reports `saferemove` and the wipe time it implies for the largest disk on
