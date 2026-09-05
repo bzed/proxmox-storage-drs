@@ -40,9 +40,38 @@ Every method is a single API call, wrapped through the private `_call()`
 helper, which is the one place `proxmoxer.ResourceException` (HTTP-level API
 errors) and `requests.RequestException` (transport failures `proxmoxer`'s
 https backend does not wrap itself) both become `PveApiError`. No method
-caches anything and none retries — the per-run topology cache and any retry
-policy belong to `topology.py` (not yet written), which is also where the
-section 3.5 bounded thread pool for the O(VMs) config fetch will live.
+caches anything, and the per-run topology cache belongs to `topology.py`
+(section 3.5), which is also where the bounded thread pool for the O(VMs)
+config fetch lives (`60-topology.md`, REVIEW.md P-02).
+
+`_call()` does retry exactly one failure mode: `proxmoxer.AuthenticationError`
+gets one reauthenticate-and-retry cycle (REVIEW.md P-01) before becoming a
+`PveApiError`, via a `reauthenticate` callback `build_client()` wires in —
+a full fresh login through `_build_api()` again, not a reuse of the
+rejected ticket. This is not a general retry policy (a `ResourceException`
+or a transport failure still fails immediately, on the first attempt); it
+exists specifically because a ticket can expire for reasons with nothing to
+do with the call that hits it — a long `apply --confirm` wait, a suspended
+process, a clock jump — and `proxmoxer`'s own lazy per-request renewal only
+notices the age of its *own* clock, not whether the server-side ticket
+actually outlived a gap that long. A test double built with a bare
+`PveClient(fake_api)` (no `reauthenticate=`) gets none of this — it behaves
+exactly as it did before P-01, which is what every existing fake in
+`tests/unit/fakes.py` relies on.
+
+`build_client()` also applies `proxmox.ticket_refresh_seconds` to the
+constructed session, best-effort: `proxmoxer` 2.x has no constructor
+argument for a password/ticket auth's refresh interval (it is a hard-coded
+`renew_age = 3600` class attribute on `ProxmoxHTTPAuth`, checked lazily on
+whichever request happens to run after it elapses), so
+`_apply_ticket_refresh_seconds()` reaches into `api._backend.auth` —
+undocumented `proxmoxer` internals, not its public interface — to override
+that instance's `renew_age` after login. Deliberately narrow: it only ever
+*tightens* proxmoxer's own schedule, never replaces its refresh logic, and
+if a future `proxmoxer` version reshapes this (or the backend is not
+`https`, or the auth is API-token, which has no ticket at all), the
+`getattr`/`hasattr` guards make it a silent no-op — the P-01
+reauthenticate-and-retry above still catches the case this can't reach.
 
 **`storage_definitions()` deliberately uses `GET /storage` (the list form),
 never the singular `GET /storage/{id}`, even though only one storage's

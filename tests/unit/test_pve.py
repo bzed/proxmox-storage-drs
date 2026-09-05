@@ -154,6 +154,61 @@ def test_request_exception_is_wrapped() -> None:
         client.vm_resources()
 
 
+# --------------------------------- REVIEW.md P-01: reauthenticate-and-retry-once
+
+
+def test_reauthenticates_and_retries_once_on_authentication_error() -> None:
+    """A ticket that expired for reasons external to this call (a long
+    confirm-mode wait, a suspended process) gets one fresh login and one
+    retry, transparently -- the caller never sees the first failure."""
+    stale = fake_api({}, error=AuthenticationError("ticket expired"))
+    fresh = fake_api({"cluster/resources": [{"vmid": 101}]})
+    client = PveClient(stale, reauthenticate=lambda: fresh)
+    assert client.vm_resources() == [{"vmid": 101}]
+    assert client._api is fresh  # the client adopted the new session
+
+
+def test_reports_clearly_when_reauthentication_itself_fails() -> None:
+    def reauth() -> None:
+        raise AuthenticationError("still bad credentials")
+
+    stale = fake_api({}, error=AuthenticationError("ticket expired"))
+    client = PveClient(stale, reauthenticate=reauth)
+    with pytest.raises(PveApiError, match="re-authenticating failed too"):
+        client.vm_resources()
+
+
+def test_reports_clearly_when_the_retry_after_reauthentication_still_fails() -> None:
+    """A successful re-login does not guarantee the retried call succeeds --
+    e.g. the token was genuinely revoked, not merely stale."""
+    stale = fake_api({}, error=AuthenticationError("ticket expired"))
+    still_broken = fake_api({}, error=ResourceException(403, "Forbidden", "no access"))
+    client = PveClient(stale, reauthenticate=lambda: still_broken)
+    with pytest.raises(PveApiError, match="still failed after re-authenticating"):
+        client.vm_resources()
+
+
+def test_reports_transport_failure_after_reauthentication() -> None:
+    import requests
+
+    stale = fake_api({}, error=AuthenticationError("ticket expired"))
+    unreachable = fake_api({}, error=requests.ConnectionError("refused"))
+    client = PveClient(stale, reauthenticate=lambda: unreachable)
+    with pytest.raises(PveApiError, match="request failed after re-authenticating"):
+        client.vm_resources()
+
+
+def test_no_reauthenticate_callback_means_no_retry() -> None:
+    """The default (and what every other test double in this suite uses):
+    a bare ``PveClient(fake_api)`` behaves exactly as it did before P-01."""
+    api = fake_api({}, error=AuthenticationError("bad ticket"))
+    client = PveClient(api)
+    assert client._reauthenticate is None
+    with pytest.raises(PveApiError, match="bad ticket"):
+        client.vm_resources()
+    assert len(api.calls) == 1  # no retry attempted
+
+
 # --------------------------------------------------------------------- build_client
 
 
@@ -232,3 +287,64 @@ def test_build_client_wraps_authentication_error(monkeypatch: pytest.MonkeyPatch
     config = _config(username="drs@pve", password="wrong")
     with pytest.raises(PveApiError, match="nope"):
         build_client(config)
+
+
+# ------------------------------- REVIEW.md P-01: ticket_refresh_seconds wiring
+
+
+class _FakeTicketAuth:
+    renew_age = 3600  # proxmoxer's own hard-coded default
+
+
+class _FakeHttpsBackend:
+    def __init__(self) -> None:
+        self.auth = _FakeTicketAuth()
+
+
+class _FakeProxmoxApiWithBackend:
+    def __init__(self) -> None:
+        self._backend = _FakeHttpsBackend()
+
+
+def test_build_client_applies_ticket_refresh_seconds_to_password_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeProxmoxApiWithBackend()
+    monkeypatch.setattr("proxmox_storage_drs.pve.ProxmoxAPI", lambda **kwargs: fake)
+    config = ProxmoxConfig(
+        host="pve.example.com",
+        verify_ssl=True,
+        ticket_refresh_seconds=120.0,
+        auth=AuthConfig(username="drs@pve", password="hunter2"),
+    )
+    build_client(config)
+    assert fake._backend.auth.renew_age == 120.0
+
+
+def test_apply_ticket_refresh_seconds_is_a_silent_no_op_without_a_backend() -> None:
+    """Token auth, a non-https backend, or a future proxmoxer shape this
+    can't reach must never crash -- see the function's own docstring."""
+    from proxmox_storage_drs.pve import _apply_ticket_refresh_seconds
+
+    config = _config(token_id="drs@pve!balancer", token_secret="s3cret")
+    _apply_ticket_refresh_seconds("just-a-string", config)  # must not raise
+    _apply_ticket_refresh_seconds(object(), config)  # must not raise
+
+
+def test_build_client_reauthenticate_callback_rebuilds_a_fresh_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_proxmox_api(**kwargs: Any) -> object:
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr("proxmox_storage_drs.pve.ProxmoxAPI", fake_proxmox_api)
+    config = _config(token_id="drs@pve!balancer", token_secret="s3cret")
+    client = build_client(config)
+    assert len(calls) == 1
+    assert client._reauthenticate is not None
+    second_api = client._reauthenticate()
+    assert len(calls) == 2
+    assert second_api is not client._api  # a genuinely new object, not the same one

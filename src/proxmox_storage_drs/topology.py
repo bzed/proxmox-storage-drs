@@ -22,6 +22,7 @@ or a disk whose current storage is not in any configured group) is what
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -317,20 +318,47 @@ def _resolve_disk_size_and_format(
     return size_bytes, _default_format(storage_type), warning
 
 
-def _collect_vm_disks(
-    client: PveClient,
+@dataclass(frozen=True, slots=True)
+class _VmFetch:
+    """One VM's network-fetched data, before the join. Section 3.5/P-02:
+    the fetch itself (this dataclass's construction, `_fetch_vm`) is what
+    runs concurrently across `config.proxmox.read_workers` threads; the join
+    that follows (`_join_vm_disks`) is pure and stays single-threaded so
+    `disks_by_group`/`referenced_volids`/`warnings` never need locking."""
+
+    resource: dict[str, Any]
+    raw_config: dict[str, Any]
+    real_snapshots: list[dict[str, Any]]
+
+
+def _fetch_vm(client: PveClient, resource: dict[str, Any]) -> _VmFetch:
+    """The two per-VM network calls (section 3.5), with nothing else --
+    this is the unit `ThreadPoolExecutor` runs concurrently."""
+    vmid = int(resource["vmid"])
+    node = resource["node"]
+    raw_config = client.vm_config(node, vmid)
+    real_snapshots = [s for s in client.vm_snapshots(node, vmid) if s.get("name") != "current"]
+    return _VmFetch(resource=resource, raw_config=raw_config, real_snapshots=real_snapshots)
+
+
+def _join_vm_disks(
     config: Config,
-    resource: dict[str, Any],
+    fetch: _VmFetch,
     data: _ClusterData,
     disks_by_group: dict[str, list[Disk]],
     referenced_volids: dict[str, set[str]],
     warnings: list[str],
 ) -> None:
-    """Fetch and join one VM's disks into `disks_by_group`, appending any
-    warnings (ungrouped disks, unauthoritative sizes) in place."""
+    """Join one already-fetched VM's disks into `disks_by_group`, appending
+    any warnings (ungrouped disks, unauthoritative sizes) in place. Pure
+    (no network I/O) so `build_topology` can run it single-threaded, in
+    cluster-resource order, right after the concurrent fetch phase --
+    keeping `disks_by_group`/`warnings` ordering identical to a fully
+    sequential run regardless of `config.proxmox.read_workers`."""
+    resource = fetch.resource
+    raw_config = fetch.raw_config
     vmid = int(resource["vmid"])
     node = resource["node"]
-    raw_config = client.vm_config(node, vmid)
     vm_name = raw_config.get("name", resource.get("name", str(vmid)))
     lock = raw_config.get("lock")  # section 9.3: config carries it, no extra call needed
     tags = _split_tags(resource.get("tags", ""))
@@ -345,9 +373,8 @@ def _collect_vm_disks(
             continue  # section 3.5: ISO/empty/cloudinit media -- never in D
         disk_specs[device] = (storage_id, volume_name, params)
 
-    real_snapshots = [s for s in client.vm_snapshots(node, vmid) if s.get("name") != "current"]
     snapshot_reason = _disk_snapshot_or_orphan_reason(
-        vmid, disk_specs, real_snapshots, data.content_by_id
+        vmid, disk_specs, fetch.real_snapshots, data.content_by_id
     )
     excluded_disk_keys = set(config.exclude.disks)
 
@@ -445,14 +472,30 @@ def build_topology(client: PveClient, config: Config) -> Topology:
     disks_by_group: dict[str, list[Disk]] = {group.name: [] for group in config.groups}
     referenced_volids: dict[str, set[str]] = {sid: set() for sid in data.storage_group_of}
 
+    considered: list[dict[str, Any]] = []
     for resource in client.vm_resources():
         if resource.get("type") != "qemu":
             continue  # section 3.5 scopes this tool to QEMU VMs only, never LXC
         if config.exclude.running_only and resource.get("status") != "running":
             continue  # never fetched: section 3.5's read-path cost note
-        _collect_vm_disks(
-            client, config, resource, data, disks_by_group, referenced_volids, warnings
-        )
+        considered.append(resource)
+
+    # REVIEW.md P-02: `config.proxmox.read_workers` bounds a thread pool for
+    # the per-VM fetch (section 3.5's "no batch config endpoint, so
+    # concurrency is the only lever"), not for the join that follows --
+    # `Executor.map` returns results in `considered`'s order even though the
+    # fetches themselves complete out of order, so the join phase below sees
+    # exactly the same per-VM order a sequential run would, keeping
+    # `disks_by_group`/`warnings` ordering (and so `show-load`'s output)
+    # independent of `read_workers` and of thread scheduling.
+    if considered:
+        with ThreadPoolExecutor(max_workers=max(1, config.proxmox.read_workers)) as pool:
+            fetched = list(pool.map(lambda resource: _fetch_vm(client, resource), considered))
+    else:
+        fetched = []
+
+    for fetch in fetched:
+        _join_vm_disks(config, fetch, data, disks_by_group, referenced_volids, warnings)
 
     groups = tuple(
         Group(
