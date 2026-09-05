@@ -58,6 +58,7 @@ from proxmox_storage_drs.payback import (
 from proxmox_storage_drs.pve import build_client as build_pve_client
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, largest_disk_bytes
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult, order_moves
+from proxmox_storage_drs.state import State, load_state, load_vector_for_group
 from proxmox_storage_drs.topology import Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
@@ -274,6 +275,15 @@ def _filter_groups(topology: Topology, names: list[str] | None) -> Topology:
     )
 
 
+def _last_loads_by_group(state: State, topology: Topology) -> dict[str, dict[str, float] | None]:
+    """One :func:`state.load_vector_for_group` lookup per group, done once
+    up front rather than re-reading ``state`` inside each render function
+    -- both ``loadmodel.compute_group_load()``'s ``last_known_loads`` and
+    ``gates.evaluate_group_gates()``'s ``last_load`` take the identical
+    per-group ``dict[str, float] | None`` this produces."""
+    return {group.name: load_vector_for_group(state, group.name) for group in topology.groups}
+
+
 def _render_verify_metrics_human(report: VerifyMetricsReport) -> str:
     lines = [f"[{f.level:>7}] {f.message}" for f in report.findings]
     lines.append("")
@@ -312,6 +322,7 @@ def _render_show_load_human(
     config: Any,
     group_loads: dict[str, GroupLoad],
     load_errors: dict[str, str],
+    last_loads_by_group: dict[str, dict[str, float] | None],
 ) -> str:
     lines: list[str] = []
     for group in topology.groups:
@@ -327,7 +338,10 @@ def _render_show_load_human(
         header = f"Group {group.name}"
         if group_load is not None:
             decision = evaluate_group_gates(
-                group_load, reserve_statuses, config.gates, last_load=None
+                group_load,
+                reserve_statuses,
+                config.gates,
+                last_load=last_loads_by_group.get(group.name),
             )
             verdict = "ACT" if decision.act else "NO ACTION"
             header += f" → {verdict}: {decision.reason}"
@@ -381,6 +395,7 @@ def _render_show_load_json(
     config: Any,
     group_loads: dict[str, GroupLoad],
     load_errors: dict[str, str],
+    last_loads_by_group: dict[str, dict[str, float] | None],
 ) -> dict[str, object]:
     groups_out = []
     for group in topology.groups:
@@ -432,7 +447,10 @@ def _render_show_load_json(
         gate_out: dict[str, object] | None = None
         if group_load is not None:
             decision = evaluate_group_gates(
-                group_load, reserve_statuses, config.gates, last_load=None
+                group_load,
+                reserve_statuses,
+                config.gates,
+                last_load=last_loads_by_group.get(group.name),
             )
             gate_out = {
                 "act": decision.act,
@@ -460,6 +478,10 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
     client = build_pve_client(resolved.config.proxmox)
     topology = _filter_groups(build_topology(client, resolved.config), args.group)
     prom_client = PrometheusClient(resolved.config.prometheus)
+    # Read-only: never takes state.py's advisory lock (see its module
+    # docstring) -- show-load never executes a migration, so there is
+    # nothing here for the lock to protect against.
+    last_loads_by_group = _last_loads_by_group(load_state(resolved.config.state.path), topology)
     group_loads: dict[str, GroupLoad] = {}
     load_errors: dict[str, str] = {}
     for group in topology.groups:
@@ -470,6 +492,7 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
                 resolved.config.window,
                 resolved.config.load_weights,
                 group,
+                last_known_loads=last_loads_by_group.get(group.name),
             )
         except MetricsError as exc:
             # Section 4's load numbers are not safety-critical the way (C4)/
@@ -480,13 +503,19 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
     if args.json:
         print(
             json.dumps(
-                _render_show_load_json(topology, resolved.config, group_loads, load_errors),
+                _render_show_load_json(
+                    topology, resolved.config, group_loads, load_errors, last_loads_by_group
+                ),
                 indent=2,
                 sort_keys=True,
             )
         )
     else:
-        print(_render_show_load_human(topology, resolved.config, group_loads, load_errors))
+        print(
+            _render_show_load_human(
+                topology, resolved.config, group_loads, load_errors, last_loads_by_group
+            )
+        )
     return 0
 
 
@@ -725,6 +754,9 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
     topology = _filter_groups(build_topology(client, resolved.config), args.group)
     prom_client = PrometheusClient(resolved.config.prometheus)
     min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
+    # Read-only: plan never executes a migration, so -- like show-load --
+    # it never takes state.py's advisory lock (see that module's docstring).
+    last_loads_by_group = _last_loads_by_group(load_state(resolved.config.state.path), topology)
 
     group_loads: dict[str, GroupLoad] = {}
     gate_decisions: dict[str, GateDecision] = {}
@@ -742,6 +774,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                 resolved.config.window,
                 resolved.config.load_weights,
                 group,
+                last_known_loads=last_loads_by_group.get(group.name),
             )
         except MetricsError as exc:
             # Section 6: gating (and so planning) cannot proceed without a
@@ -756,7 +789,10 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
             for storage in group.storages
         }
         decision = evaluate_group_gates(
-            group_load, reserve_statuses, resolved.config.gates, last_load=None
+            group_load,
+            reserve_statuses,
+            resolved.config.gates,
+            last_load=last_loads_by_group.get(group.name),
         )
         gate_decisions[group.name] = decision
         if not decision.act:

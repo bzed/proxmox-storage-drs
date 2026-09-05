@@ -136,12 +136,16 @@ and left for you to review, not silently adjusted. See
   plan itself says is "fully supported... loses only this one advisory
   check." `max_single_move_duration` and the transient reserve invariant
   are the two *hard* bounds and are both already enforced.
-- **No `state.json`.** Section 11.2's drift history does not exist yet, so
-  the gate `plan` evaluates always treats this as the first run — see
-  `docs/internals/80-gates.md` for exactly what that does and does not
-  change about the verdict.
-- **No cooldowns, no staging, no concurrent scheduling.** All documented
-  as deliberate, not forgotten, in `docs/internals/90-heuristic.md` and
+- **`state.json` drift history is read, never written.** `plan`'s gate now
+  reads real `last_balance` history when a group has one recorded (see
+  `docs/internals/15-state.md`), but nothing writes `last_balance` yet --
+  that needs `execute.py` (phase 7), so a group stays "first run" (drift
+  gate skipped) until a migration has actually run.
+- **No cooldowns, no staging, no concurrent scheduling.** Cooldown
+  timestamps are stored and round-tripped by `state.py` but not yet *read*
+  by `topology.py`'s (C2) pinning or `heuristic.py`'s target eligibility.
+  All documented as deliberate, not forgotten, in
+  `docs/internals/15-state.md`, `docs/internals/90-heuristic.md` and
   `docs/internals/95-schedule.md`.
 
 `--json` emits `groups[]`, each with `gate` (identical shape to

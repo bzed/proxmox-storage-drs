@@ -55,11 +55,14 @@ mechanism:
    a caller can never mistake a flagged `0.0` for a genuinely idle disk —
    `show-load` renders it as an explicit `⚠` line, never silently.
 
-`state.json` persistence (the actual `last_known_loads` source) is not yet
-written (section 11.2) — `compute_group_load()` accepts the mapping today
-so this module needs no change when it exists; until then every call site
-passes nothing, and every coverage-rejected disk with no seed is flagged
-`0.0`, honestly.
+`state.py` (section 11.2) now provides the real `last_known_loads` source:
+`cli.py`'s `show-load` and `plan` both pass
+`state.load_vector_for_group(state, group.name)` through unchanged, exactly
+the mapping this function already expected (see `docs/internals/15-state.md`).
+`compute_group_load()` itself needed no change at all — the parameter was
+shaped for this from the start. A group with no recorded balance yet (a
+fresh `state.json`, or none on disk) still gets `None`, and every
+coverage-rejected disk with no seed is flagged `0.0`, exactly as before.
 
 ## `tpmstate0`/`unusedN` are never rejected; `efidisk0` is
 

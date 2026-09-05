@@ -64,3 +64,18 @@ class ExecutionError(DrsError):
 
     See IMPLEMENTATION_PLAN.md section 9.4.
     """
+
+
+class StateError(DrsError):
+    """``state.path`` could not be written, or its advisory lock could not
+    be manipulated.
+
+    Deliberately **not** raised for a missing or corrupt state file on
+    *read* -- IMPLEMENTATION_PLAN.md section 11.2 says "losing this file is
+    safe but not free": ``state.load_state()`` degrades to an empty state
+    and logs a warning instead, the same "do not fail the whole run over a
+    non-essential input" choice ``show-load`` already makes for a
+    Prometheus outage. This is raised only when the tool cannot do
+    something it was actively asked to do: persist state, or take the
+    advisory lock.
+    """

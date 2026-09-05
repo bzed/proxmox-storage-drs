@@ -1,0 +1,486 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Persistent state at ``state.path``. See IMPLEMENTATION_PLAN.md section 11.2.
+
+The only thing this tool remembers between runs: the load vector as of the
+last *executed* balance (drift, section 6), per-disk/per-storage cooldown
+timestamps (section 5.3 (C2), not yet consumed by any caller -- see below),
+in-flight migration UPIDs and staged disks (both section 9, `execute.py`,
+not yet written), and a node-local advisory lock. Local disk, one copy per
+host, deliberately never `/etc/pve` (`.agents/domain-invariants.md` section
+9: "state belongs in `state.path` on local disk").
+
+**Reading degrades, writing does not.** A missing file is the normal,
+expected first-run state (:func:`load_state` returns :func:`empty_state`
+silently); a present-but-corrupt or wrong-schema-version file logs a
+warning and *also* degrades to :func:`empty_state`, rather than failing the
+whole run -- section 11.2's own words are "losing this file is safe but
+not free: cooldowns and drift history reset". This mirrors ``show-load``'s
+choice to degrade rather than fail on a Prometheus outage (an essential
+*input* -- config, or an explicitly-named `-c PATH` -- is a hard failure on
+error, per `.agents/domain-invariants.md` section 9; this file is neither).
+:func:`save_state_atomic` and the lock functions, by contrast, raise
+:class:`~proxmox_storage_drs.exceptions.StateError` on failure -- those are
+things the caller actively asked this module to do, not a read whose
+absence has a well-defined fallback.
+
+**Locking**: :func:`acquire_lock` takes a real ``fcntl.flock(LOCK_EX |
+LOCK_NB)`` on the state file itself -- the actual, kernel-enforced mutual
+exclusion section 11.2 asks for, correct by construction for two instances
+on the *same host* (`.agents/domain-invariants.md` section 9: "the `fcntl`
+lock cannot see another node" -- cross-node coordination is the separate
+UPID scan, section 13, not this module's job). The `lock` field recorded
+inside the JSON itself (pid/host/acquired-at) is **descriptive metadata for
+an operator reading the file**, not the mechanism: by the time this
+module's code overwrites it, the OS has already granted exclusive
+ownership, so whatever a previous run last wrote there is necessarily
+stale and is unconditionally replaced. Section 11.2's "if `lock.pid` is not
+alive on `lock.host`, reclaim it" is naturally satisfied by this design
+too -- a process that died released its `flock()` when its file
+descriptor closed (on any exit, including a crash), so the *next*
+`acquire_lock()` call simply succeeds; there is no separate liveness check
+to get right or get wrong. ``acquire_lock()`` returns ``None`` (not an
+exception) when another live instance holds it, matching section 11.2's "a
+live PID means another instance is running: exit 0 quietly" -- the
+caller's job, not this module's, to decide what "quietly" means for its
+own command.
+
+**Deliberately not implemented in this pass** (recorded, not forgotten):
+
+- **Nothing calls :func:`acquire_lock`/:func:`with_recorded_balance` yet.**
+  Both exist and are fully tested, but only `execute.py` (section 12 phase
+  7, not yet written) has a reason to take the lock or record a balance --
+  `plan`/`show-load` never execute a migration, so section 11.2's "updated
+  only after a run that executed at least one migration" means they must
+  never call it, and taking the exclusive lock for a read-only report would
+  make an in-progress `apply` block `plan`/`show-load` for no safety
+  reason this codebase can find in the plan text.
+- **Cooldowns are stored and round-tripped (:class:`Cooldowns`,
+  :func:`with_recorded_cooldown`) but not yet *read* by anything that pins
+  a disk or excludes a migration target.** Section 5.3 (C2)'s "within its
+  per-disk cooldown -> pin to current" belongs with `topology.py`'s other
+  (C2) pin reasons (locked, excluded, snapshotted -- see
+  ``topology._pin_reason()``); the storage-side "accepts no new incoming
+  moves" belongs with `heuristic.py`'s target eligibility. Both need a
+  `State`/cooldown lookup threaded into a function that does not accept one
+  today, which is a real, separately-scoped change to two other modules,
+  not this one -- see ``docs/internals/15-state.md``.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import errno
+import fcntl
+import json
+import logging
+import os
+import socket
+import tempfile
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from typing import Any, Mapping
+
+from proxmox_storage_drs.exceptions import StateError
+
+logger = logging.getLogger(__name__)
+
+STATE_SCHEMA_VERSION = 1
+
+
+def _now_iso() -> str:
+    """UTC, second precision, ``Z`` suffix -- exactly section 11.2's own
+    example timestamps (``"2026-09-04T02:00:00Z"``), never a `+00:00`
+    offset form."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass(frozen=True, slots=True)
+class LockInfo:
+    """Descriptive only -- see the module docstring's "Locking" section for
+    why the real exclusion is `flock()`, not this."""
+
+    pid: int
+    host: str
+    acquired_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class LastBalance:
+    """``at`` is ``None`` before any run has ever executed a migration --
+    distinct from an empty ``load_vector``, which can happen even after a
+    real balance if every disk it touched has since been re-balanced away
+    from (section 11.2: "updated only after a run that executed at least
+    one migration")."""
+
+    at: str | None = None
+    load_vector: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class Cooldowns:
+    disk: Mapping[str, str] = field(default_factory=dict)
+    storage: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class State:
+    schema_version: int = STATE_SCHEMA_VERSION
+    lock: LockInfo | None = None
+    last_balance: LastBalance = field(default_factory=LastBalance)
+    cooldowns: Cooldowns = field(default_factory=Cooldowns)
+    inflight_upids: tuple[str, ...] = ()
+    staged_disks: tuple[str, ...] = ()
+
+
+def empty_state() -> State:
+    """First-run state: no lock, no recorded balance, no cooldowns, nothing
+    in flight -- exactly what a missing or unreadable ``state.path``
+    degrades to."""
+    return State()
+
+
+# ------------------------------------------------------------------- keys
+
+
+def disk_state_key(group: str, vmid: int, device: str) -> str:
+    """``"<group>:<vmid>:<device>"`` (section 11.2) -- the group prefix is
+    what keeps a vmid reused after a VM is destroyed and recreated in a
+    *different* group from colliding with its old entry.
+    ``topology.Disk.key`` is already ``"<vmid>:<device>"`` (see that
+    module's own comment pointing here), so this is always
+    ``f"{group}:{disk.key}"`` in practice."""
+    return f"{group}:{vmid}:{device}"
+
+
+def storage_state_key(group: str, storage_id: str) -> str:
+    """``"<group>:<storage>"`` (section 11.2)."""
+    return f"{group}:{storage_id}"
+
+
+# --------------------------------------------------------- (de)serialization
+
+
+def _state_to_dict(state: State) -> dict[str, Any]:
+    lock_out = None
+    if state.lock is not None:
+        lock_out = {
+            "pid": state.lock.pid,
+            "host": state.lock.host,
+            "acquired_at": state.lock.acquired_at,
+        }
+    return {
+        "schema_version": state.schema_version,
+        "lock": lock_out,
+        "last_balance": {
+            "at": state.last_balance.at,
+            "load_vector": dict(state.last_balance.load_vector),
+        },
+        "cooldowns": {
+            "disk": dict(state.cooldowns.disk),
+            "storage": dict(state.cooldowns.storage),
+        },
+        "inflight_upids": list(state.inflight_upids),
+        "staged_disks": list(state.staged_disks),
+    }
+
+
+def _state_from_dict(data: dict[str, Any]) -> State:
+    """Raises on any shape this module does not recognize -- the caller
+    (:func:`load_state`) is what turns that into "log and degrade", so this
+    function itself can stay strict and easy to reason about."""
+    schema_version = data["schema_version"]
+    if schema_version != STATE_SCHEMA_VERSION:
+        raise ValueError(f"unsupported state schema_version {schema_version!r}")
+
+    lock = None
+    lock_raw = data.get("lock")
+    if lock_raw is not None:
+        lock = LockInfo(
+            pid=int(lock_raw["pid"]),
+            host=str(lock_raw["host"]),
+            acquired_at=str(lock_raw["acquired_at"]),
+        )
+
+    balance_raw = data.get("last_balance") or {}
+    last_balance = LastBalance(
+        at=balance_raw.get("at"),
+        load_vector={
+            str(key): float(value) for key, value in (balance_raw.get("load_vector") or {}).items()
+        },
+    )
+
+    cooldowns_raw = data.get("cooldowns") or {}
+    cooldowns = Cooldowns(
+        disk={str(k): str(v) for k, v in (cooldowns_raw.get("disk") or {}).items()},
+        storage={str(k): str(v) for k, v in (cooldowns_raw.get("storage") or {}).items()},
+    )
+
+    return State(
+        schema_version=schema_version,
+        lock=lock,
+        last_balance=last_balance,
+        cooldowns=cooldowns,
+        inflight_upids=tuple(data.get("inflight_upids") or ()),
+        staged_disks=tuple(data.get("staged_disks") or ()),
+    )
+
+
+# --------------------------------------------------------------- read/write
+
+
+def _parse_state_text(text: str, path: str) -> State:
+    """The tolerant-parse half of :func:`load_state`, factored out so
+    :func:`acquire_lock` can apply the identical "degrade and warn, never
+    raise" rule to the content it reads through the already-open, already
+    -locked fd (AGENTS.md section 5: one implementation). An empty string
+    -- a file just created by ``O_CREAT``, or a genuinely empty pre
+    -existing one -- is the ordinary "nothing recorded yet" case, exactly
+    like a missing file, not something to warn about."""
+    if text.strip() == "":
+        return empty_state()
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "state file %s is not valid JSON, proceeding as if it were absent: %s",
+            path,
+            exc,
+            extra={"event": "state_corrupt", "path": path},
+        )
+        return empty_state()
+    try:
+        return _state_from_dict(raw)
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning(
+            "state file %s has an unexpected shape, proceeding as if it were absent: %s",
+            path,
+            exc,
+            extra={"event": "state_corrupt", "path": path},
+        )
+        return empty_state()
+
+
+def load_state(path: str) -> State:
+    """Best-effort read of ``path``. See the module docstring: a missing
+    file is the ordinary first-run case (silent); an unreadable or
+    unrecognizable one is logged at warning and *also* treated as absent
+    -- never raised, and never a reason to fail ``show-load``/``plan``."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return empty_state()
+    except OSError as exc:
+        logger.warning(
+            "could not read state file %s, proceeding as if it were absent: %s",
+            path,
+            exc,
+            extra={"event": "state_read_failed", "path": path},
+        )
+        return empty_state()
+    return _parse_state_text(text, path)
+
+
+def save_state_atomic(path: str, state: State) -> None:
+    """Temp file in the same directory, ``fsync``, then ``os.replace`` --
+    a reader (:func:`load_state`) can never observe a half-written file,
+    which is what lets reads skip locking entirely (see the module
+    docstring). Creates ``path``'s parent directory if missing (a fresh
+    install's ``/var/lib/pve-storage-drs`` may not exist yet). Raises
+    :class:`StateError` on any failure -- unlike :func:`load_state`, this
+    is something the caller asked this module to do, not a read with a
+    documented fallback."""
+    directory = os.path.dirname(path) or "."
+    tmp_path: str | None = None
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(_state_to_dict(state), fh, indent=2, sort_keys=True)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
+    except OSError as exc:
+        raise StateError(f"could not write state file {path!r}: {exc}") from exc
+
+
+# --------------------------------------------------------- last_balance
+
+
+def load_vector_for_group(state: State, group_name: str) -> dict[str, float] | None:
+    """This group's slice of ``last_balance.load_vector``, re-keyed from
+    ``"<group>:<vmid>:<device>"`` down to bare ``topology.Disk.key``
+    (``"<vmid>:<device>"``) -- exactly the shape
+    ``loadmodel.compute_group_load()``'s ``last_known_loads`` and
+    ``gates.evaluate_group_gates()``'s ``last_load`` both expect.
+
+    Returns ``None``, not ``{}``, when this group has no entries at all --
+    ``gates.py``'s own contract for ``last_load`` is that ``None`` means "no
+    such run has ever happened" (skip the drift gate outright), which is
+    different from "a run happened and recorded zero load everywhere"."""
+    prefix = f"{group_name}:"
+    entries = {
+        key[len(prefix) :]: value
+        for key, value in state.last_balance.load_vector.items()
+        if key.startswith(prefix)
+    }
+    return entries or None
+
+
+def with_recorded_balance(
+    state: State, group_name: str, load_by_key: Mapping[str, float], at: str | None = None
+) -> State:
+    """Pure: a new :class:`State` with ``group_name``'s slice of
+    ``last_balance.load_vector`` replaced by ``load_by_key`` (every other
+    group's entries untouched) and ``last_balance.at`` bumped to ``at``
+    (``_now_iso()`` if not given). For `execute.py` (not yet written) to
+    call once a run has executed at least one migration for this group
+    (section 11.2) -- not called by anything today, see the module
+    docstring."""
+    prefix = f"{group_name}:"
+    kept = {k: v for k, v in state.last_balance.load_vector.items() if not k.startswith(prefix)}
+    updated_vector = {**kept, **{f"{prefix}{key}": value for key, value in load_by_key.items()}}
+    return replace(state, last_balance=LastBalance(at=at or _now_iso(), load_vector=updated_vector))
+
+
+# ----------------------------------------------------------------- cooldowns
+
+
+def with_recorded_cooldown(
+    state: State,
+    *,
+    disk_keys: Mapping[str, str] | None = None,
+    storage_keys: Mapping[str, str] | None = None,
+) -> State:
+    """Pure: merges new disk/storage cooldown timestamps into ``state``,
+    keyed exactly as :func:`disk_state_key`/:func:`storage_state_key`
+    produce them. Not called by anything today -- see the module
+    docstring's note on cooldowns not yet being consumed."""
+    disk = {**state.cooldowns.disk, **(disk_keys or {})}
+    storage = {**state.cooldowns.storage, **(storage_keys or {})}
+    return replace(state, cooldowns=Cooldowns(disk=disk, storage=storage))
+
+
+# --------------------------------------------------------------------- lock
+
+
+def _pid_alive(pid: int) -> bool:
+    """Best-effort, used only to make a "still held" log message useful to
+    an operator -- the actual acquire/release decision never depends on
+    this (see the module docstring's "Locking" section)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # Exists but owned by someone else (EPERM) -- alive either way.
+        return True
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class LockHandle:
+    """Opaque -- pass to :func:`release_lock`. The open file descriptor is
+    what actually holds the ``flock()``; do not construct this directly."""
+
+    _fd: int
+    _path: str
+
+
+def _write_state_to_locked_fd(fd: int, state: State) -> None:
+    """Writes ``state`` **in place** into the already-open, already-locked
+    ``fd`` -- never via :func:`save_state_atomic`'s temp-file-plus-rename,
+    which replaces the directory entry with a *new* inode the lock was
+    never taken on, silently turning the held ``flock()`` into a lock on a
+    file nothing points to any more (found by
+    ``test_a_second_acquire_while_the_first_is_held_returns_none`` failing:
+    a second `acquire_lock()` opened the post-rename inode fresh and
+    locked it with no conflict at all). Truncating to the new, shorter
+    payload length matters just as much as writing the longer one -- a
+    stale tail from a previous, larger write must not survive."""
+    payload = (json.dumps(_state_to_dict(state), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, payload)
+    os.ftruncate(fd, len(payload))
+    os.fsync(fd)
+
+
+def acquire_lock(path: str) -> LockHandle | None:
+    """Section 11.2's advisory lock: ``fcntl.flock(LOCK_EX | LOCK_NB)`` on
+    ``path`` itself, non-blocking -- never sleeps and retries (no
+    `time.sleep`, per `.agents/testing.md`'s "inject the clock": there is
+    nothing to inject here because there is no wait loop). Returns ``None``
+    when another live instance already holds it (section 11.2: "a live PID
+    means another instance is running: exit 0 quietly" -- deciding what
+    "quietly" means, and for which exit code, is the caller's job).
+    Creates ``path`` (empty state) if it does not exist yet, so the very
+    first ``apply``/``auto`` run on a fresh install can still take the
+    lock. Raises :class:`StateError` for any other failure (permission
+    denied, read-only filesystem, ...)."""
+    directory = os.path.dirname(path) or "."
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise StateError(f"could not open state file {path!r} for locking: {exc}") from exc
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            return None
+        raise StateError(  # pragma: no cover - flock(2) only ever fails EACCES/EAGAIN for LOCK_NB
+            f"could not lock state file {path!r}: {exc}"
+        ) from exc
+
+    # We now hold exclusive OS-level ownership -- whatever `lock` metadata
+    # a previous run left behind is necessarily stale (see module
+    # docstring), so it is unconditionally overwritten, never inspected for
+    # a liveness decision. Read and (below) write through `fd` itself, not
+    # `load_state()`/`save_state_atomic()` -- the latter renames a new
+    # inode over `path`, which would silently detach the very lock we just
+    # took (see `_write_state_to_locked_fd`'s docstring).
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        chunks = []
+        while chunk := os.read(fd, 65536):
+            chunks.append(chunk)
+        current = _parse_state_text(b"".join(chunks).decode("utf-8"), path)
+        updated = replace(
+            current,
+            lock=LockInfo(pid=os.getpid(), host=socket.gethostname(), acquired_at=_now_iso()),
+        )
+        _write_state_to_locked_fd(fd, updated)
+    except OSError as exc:  # pragma: no cover - needs a write failure after a successful open+lock
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        raise StateError(f"could not write state file {path!r}: {exc}") from exc
+    return LockHandle(_fd=fd, _path=path)
+
+
+def release_lock(handle: LockHandle) -> None:
+    """Clears the descriptive ``lock`` field and releases the OS-level
+    lock, writing in place through the still-open, still-locked fd for the
+    same reason :func:`acquire_lock` does. Safe to call even if writing the
+    cleared state fails part way -- the ``flock()`` release in the
+    ``finally`` always runs, so a write error here never leaves the lock
+    held forever."""
+    try:
+        os.lseek(handle._fd, 0, os.SEEK_SET)
+        chunks = []
+        while chunk := os.read(handle._fd, 65536):
+            chunks.append(chunk)
+        current = _parse_state_text(b"".join(chunks).decode("utf-8"), handle._path)
+        _write_state_to_locked_fd(handle._fd, replace(current, lock=None))
+    finally:
+        fcntl.flock(handle._fd, fcntl.LOCK_UN)
+        os.close(handle._fd)
