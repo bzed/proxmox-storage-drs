@@ -18,10 +18,12 @@ import pytest
 
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.heuristic import (
+    _repair,
     evaluate_assignment,
     run_heuristic,
     seed_assignment,
 )
+from proxmox_storage_drs.reserve import compute_reserve_status
 from proxmox_storage_drs.topology import Disk, Group, Storage
 
 TIB = 1 << 40
@@ -261,6 +263,40 @@ def test_reserve_violation_is_repaired_even_with_beta_high_enough_to_forbid_bala
     result = run_heuristic(group, loads, objective, min_free_bytes=0)
     assert not result.breakdown.reserve_statuses["san-a"].violated
     assert result.repair_moves >= 1
+
+
+def test_repair_does_not_oscillate_when_no_target_can_fully_absorb_the_violation() -> None:
+    """A 3 TiB disk on an 8 TiB, reserve_factor=2.0 storage cannot be fully
+    repaired by moving it anywhere: landing alone on either storage still
+    needs 2x its own size reserved, which alone exceeds 8 TiB once you add
+    the 3 TiB itself. An earlier version of `_repair` judged a candidate
+    move only by whether the *source*'s shortfall fell, which it always
+    does when bytes leave it -- so it moved the disk to fix the source,
+    then on the next iteration moved it right back to fix the (now
+    violating) target, forever alternating without ever reducing the
+    group's total shortfall. The fix requires the group-wide total to
+    strictly decrease, which this fixture cannot fully reach (best
+    possible is 3 TiB -> 1 TiB, not 0) but must still not oscillate."""
+    disks = (
+        make_disk("101:scsi0", 3.0, 3.0, "san-a"),
+        make_disk("102:scsi0", 2.0, 0.0, "san-a", pinned="locked: backup"),
+    )
+    storages = (make_storage("san-a"), make_storage("san-b"))
+    group = Group(name="g", storages=storages, disks=disks)
+
+    assignment, repairs = _repair(group, seed_assignment(group), min_free_bytes=0)
+
+    assert repairs == 1  # not 2 -- no back-and-forth
+    assert assignment == {"101:scsi0": "san-b", "102:scsi0": "san-a"}
+
+    # Residual shortfall (1 TiB on san-b) is real and expected -- this
+    # fixture cannot be fully repaired, only improved from 3 TiB to 1 TiB.
+    def storage_of(d: Disk) -> str:
+        return assignment[d.key]
+
+    san_b = next(s for s in storages if s.id == "san-b")
+    status = compute_reserve_status(san_b, disks, 0, storage_of=storage_of)
+    assert status.shortfall_bytes == round(1.0 * TIB)
 
 
 # ------------------------------------------------------------------- pinned disks

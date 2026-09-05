@@ -119,7 +119,7 @@ def seed_assignment(group: Group) -> Assignment:
     return {d.key: d.current_storage for d in group.disks}
 
 
-def _group_average_utilization(group: Group, load_by_key: Mapping[str, float]) -> float:
+def group_average_utilization(group: Group, load_by_key: Mapping[str, float]) -> float:
     """`u* = (Sum_d l_d) / (Sum_s c_s)` (C6) -- a constant under any
     reassignment of `D`'s own disks (section 5.3): moving a disk changes
     which storage its load counts toward, never the group's total load or
@@ -139,7 +139,7 @@ def evaluate_assignment(
 ) -> ObjectiveBreakdown:
     """Section 5.4's objective for one candidate ``assignment``.
 
-    ``average_utilization`` is ``u*`` (see ``_group_average_utilization``)
+    ``average_utilization`` is ``u*`` (see ``group_average_utilization``)
     -- a parameter, not recomputed here, since every candidate evaluated
     during a single heuristic run shares the same value and recomputing it
     from scratch on every call would be pure waste.
@@ -205,6 +205,68 @@ def evaluate_assignment(
     )
 
 
+_RepairCandidate = tuple[float, Disk, str, bool, int]  # ratio, disk, target_id, worsens, used
+
+
+def _best_repair_candidate(
+    group: Group,
+    assignment: Assignment,
+    movable: tuple[Disk, ...],
+    worst_id: str,
+    current_total_shortfall: int,
+    min_free_bytes: int,
+) -> _RepairCandidate | None:
+    """The inner search of one `_repair` iteration, factored out only to
+    keep that function's own branching within the project's complexity
+    limit -- picks, among every (disk on `worst_id`, other target) pair,
+    the one with the highest group-wide shortfall reduction per byte, then
+    not worsening the target, then the target with the least existing
+    usage (section 5.5: "the feasible storage with the lowest u_s"; used
+    bytes is a monotonic proxy for u_s here since every candidate compared
+    is a trial where load itself has not changed)."""
+    best: _RepairCandidate | None = None
+    for disk in movable:
+        if assignment.get(disk.key, disk.current_storage) != worst_id or disk.size_bytes <= 0:
+            continue
+        for target in group.storages:
+            if target.id == worst_id:
+                continue
+            trial = dict(assignment)
+            trial[disk.key] = target.id
+
+            def trial_storage_of(d: Disk, _trial: Assignment = trial) -> str:
+                return _trial.get(d.key, d.current_storage)
+
+            trial_total = sum(
+                compute_reserve_status(
+                    s, group.disks, min_free_bytes, storage_of=trial_storage_of
+                ).shortfall_bytes
+                for s in group.storages
+            )
+            reduction = current_total_shortfall - trial_total
+            if reduction <= 0:
+                continue
+            ratio = reduction / disk.size_bytes
+
+            target_status = compute_reserve_status(
+                target, group.disks, min_free_bytes, storage_of=trial_storage_of
+            )
+            candidate: _RepairCandidate = (
+                ratio,
+                disk,
+                target.id,
+                target_status.violated,
+                target_status.managed_used_bytes,
+            )
+            if best is None or (ratio, not candidate[3], -candidate[4]) > (
+                best[0],
+                not best[3],
+                -best[4],
+            ):
+                best = candidate
+    return best
+
+
 def _repair(
     group: Group,
     assignment: Assignment,
@@ -212,20 +274,35 @@ def _repair(
 ) -> tuple[Assignment, int]:
     """Section 5.5 step 2: "while any `s` violates (C5), move the disk from
     `s` that most reduces the violation per byte moved, to the feasible
-    storage with the lowest `u_s`." One storage repaired per iteration --
-    the worst violator by shortfall -- so a group with several violating
-    storages fixes the most urgent one first; bounded by the movable disk
-    count since each successful iteration strictly reduces the group's
-    total shortfall (a repair move that does not is never selected)."""
+    storage with the lowest `u_s`."
+
+    Each candidate is judged by the reduction in the **group-wide total**
+    shortfall, not the source storage's shortfall alone: moving a disk off
+    a violating storage always reduces *that* storage's own shortfall (it
+    has fewer bytes and, if anything, a smaller or equal largest-disk
+    requirement), but it can just as easily create or worsen a violation
+    on whichever storage receives it -- reducing the source's problem
+    while making the group's total worse, or merely relocating it rather
+    than repairing it. Requiring the *group* total to strictly decrease is
+    what makes the loop's termination bound below actually correct, and
+    is also what stops it from oscillating a disk back and forth between
+    two storages that can never both hold it -- an earlier version of this
+    function checked only the source and did exactly that (see
+    ``test_repair_does_not_oscillate_when_no_target_can_fully_absorb_the_violation``).
+    Bounded generously (movable disks times storages) rather than tightly,
+    since "one repair per disk" is not actually how many steps a multi-
+    storage violation can need; the strict-decrease requirement is what
+    actually guarantees termination, this bound is only a defensive cap.
+    """
     assignment = dict(assignment)
     movable = _movable_disks(group)
-    storages_by_id = {s.id: s for s in group.storages}
     repairs = 0
+    max_iterations = len(movable) * max(1, len(group.storages)) + 1
 
     def storage_of(disk: Disk) -> str:
         return assignment.get(disk.key, disk.current_storage)
 
-    for _ in range(len(movable) + 1):
+    for _ in range(max_iterations):
         statuses = {
             s.id: compute_reserve_status(s, group.disks, min_free_bytes, storage_of=storage_of)
             for s in group.storages
@@ -234,52 +311,11 @@ def _repair(
         if not violating:
             break
         worst_id = max(violating, key=lambda sid: statuses[sid].shortfall_bytes)
-        worst_storage = storages_by_id[worst_id]
+        current_total = sum(status.shortfall_bytes for status in statuses.values())
 
-        # (ratio, disk, target_id, target_becomes_violated, target_used_bytes) --
-        # picked by highest ratio, then not worsening the target, then the
-        # target with the least existing usage (section 5.5: "the feasible
-        # storage with the lowest u_s"; used bytes is a monotonic proxy for
-        # u_s here since this loop only ever compares targets within the
-        # same trial, where load has not been touched by this move).
-        best: tuple[float, Disk, str, bool, int] | None = None
-        for disk in movable:
-            if storage_of(disk) != worst_id or disk.size_bytes <= 0:
-                continue
-            for target in group.storages:
-                if target.id == worst_id:
-                    continue
-                trial = dict(assignment)
-                trial[disk.key] = target.id
-
-                def trial_storage_of(d: Disk, _trial: Assignment = trial) -> str:
-                    return _trial.get(d.key, d.current_storage)
-
-                new_source_status = compute_reserve_status(
-                    worst_storage, group.disks, min_free_bytes, storage_of=trial_storage_of
-                )
-                reduction = statuses[worst_id].shortfall_bytes - new_source_status.shortfall_bytes
-                if reduction <= 0:
-                    continue
-                ratio = reduction / disk.size_bytes
-
-                target_status = compute_reserve_status(
-                    target, group.disks, min_free_bytes, storage_of=trial_storage_of
-                )
-                candidate = (
-                    ratio,
-                    disk,
-                    target.id,
-                    target_status.violated,
-                    target_status.managed_used_bytes,
-                )
-                if best is None or (ratio, not candidate[3], -candidate[4]) > (
-                    best[0],
-                    not best[3],
-                    -best[4],
-                ):
-                    best = candidate
-
+        best = _best_repair_candidate(
+            group, assignment, movable, worst_id, current_total, min_free_bytes
+        )
         if best is None:
             break  # no repair move helps: report the residual as unfixable (caller's job)
         _ratio, disk, target_id, _worsens, _used = best
@@ -364,7 +400,7 @@ def run_heuristic(
     ``load_by_key`` is ``loadmodel.GroupLoad.load_by_disk_key()``;
     ``min_free_bytes`` is ``config.snapshot_reserve.min_free_bytes``.
     """
-    average_utilization = _group_average_utilization(group, load_by_key)
+    average_utilization = group_average_utilization(group, load_by_key)
     initial = seed_assignment(group)
     initial_breakdown = evaluate_assignment(
         group, initial, load_by_key, objective, min_free_bytes, average_utilization

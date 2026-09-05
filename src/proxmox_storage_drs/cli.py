@@ -34,12 +34,14 @@ from proxmox_storage_drs.config import (
     load_config,
 )
 from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
-from proxmox_storage_drs.gates import evaluate_group_gates
+from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
+from proxmox_storage_drs.heuristic import HeuristicResult, run_heuristic
 from proxmox_storage_drs.loadmodel import GroupLoad, compute_group_load
 from proxmox_storage_drs.logging_setup import configure_logging
 from proxmox_storage_drs.metrics import PrometheusClient, VerifyMetricsReport, verify_metrics
 from proxmox_storage_drs.pve import build_client as build_pve_client
-from proxmox_storage_drs.reserve import compute_reserve_status, largest_disk_bytes
+from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, largest_disk_bytes
+from proxmox_storage_drs.schedule import ScheduleResult, order_moves
 from proxmox_storage_drs.topology import Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
@@ -441,6 +443,241 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
     return 0
 
 
+def _spread_fraction(utilization: dict[str, float], average_utilization: float) -> float:
+    """``(max_s u_s - min_s u_s) / u*`` -- gates.py's own imbalance formula
+    (section 6), reused here for the plan's before/after summary rather
+    than redefining "spread" a second way."""
+    if not utilization or not average_utilization:
+        return 0.0
+    return (max(utilization.values()) - min(utilization.values())) / average_utilization
+
+
+def _render_plan_human(
+    topology: Topology,
+    group_loads: dict[str, GroupLoad],
+    gate_decisions: dict[str, GateDecision],
+    heuristic_results: dict[str, HeuristicResult],
+    schedule_results: dict[str, ScheduleResult],
+    load_errors: dict[str, str],
+    bwlimit_bytes_per_sec: int,
+) -> str:
+    lines: list[str] = []
+    for group in topology.groups:
+        if group.name in load_errors:
+            lines.append(f"Group {group.name} — plan unavailable: {load_errors[group.name]}")
+            lines.append("")
+            continue
+
+        decision = gate_decisions[group.name]
+        verdict = "ACT" if decision.act else "NO ACTION"
+        lines.append(f"Group {group.name} → {verdict}: {decision.reason}")
+
+        schedule_result = schedule_results.get(group.name)
+        if schedule_result is None:
+            lines.append("")
+            continue
+
+        for i, move in enumerate(schedule_result.order, start=1):
+            duration = move.size_bytes / bwlimit_bytes_per_sec if bwlimit_bytes_per_sec else None
+            duration_str = f"~{format_duration_seconds(duration)}" if duration else "?"
+            change = -move.imbalance_reduction
+            lines.append(
+                f"  {i}. {move.disk_key:<14} {move.from_storage} → {move.to_storage}   "
+                f"{format_bytes(move.size_bytes):>10}   {duration_str:>8}   "
+                f"Δimbalance {change:+.2f}"
+            )
+        if schedule_result.deadlocked_msg:
+            lines.append(f"  ⚠ {schedule_result.deadlocked_msg}")
+
+        heuristic_result = heuristic_results[group.name]
+        group_load = group_loads[group.name]
+        before_spread = _spread_fraction(
+            {s.storage_id: s.utilization for s in group_load.storages},
+            group_load.average_utilization,
+        )
+        after_spread = _spread_fraction(
+            heuristic_result.breakdown.utilization, group_load.average_utilization
+        )
+        if schedule_result.order:
+            after_line = "  after: " + "  ".join(
+                f"{sid}={u:.2f}"
+                for sid, u in sorted(heuristic_result.breakdown.utilization.items())
+            )
+            lines.append(after_line)
+            lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
+            lines.append(
+                "  Note: payback (cost/benefit) validation is not yet implemented "
+                "(IMPLEMENTATION_PLAN.md phase 5) -- these moves have not been checked "
+                "against migration.payback_ratio, and the duration above is mirror time "
+                "only (no saferemove wipe accounted for)."
+            )
+        lines.append("")
+    if topology.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in topology.warnings)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_plan_json(
+    topology: Topology,
+    group_loads: dict[str, GroupLoad],
+    gate_decisions: dict[str, GateDecision],
+    heuristic_results: dict[str, HeuristicResult],
+    schedule_results: dict[str, ScheduleResult],
+    load_errors: dict[str, str],
+    bwlimit_bytes_per_sec: int,
+) -> dict[str, object]:
+    groups_out = []
+    for group in topology.groups:
+        decision = gate_decisions.get(group.name)
+        schedule_result = schedule_results.get(group.name)
+        moves_out = []
+        if schedule_result is not None:
+            for move in schedule_result.order:
+                moves_out.append(
+                    {
+                        "disk_key": move.disk_key,
+                        "vmid": move.vmid,
+                        "device": move.device,
+                        "from_storage": move.from_storage,
+                        "to_storage": move.to_storage,
+                        "size_bytes": move.size_bytes,
+                        "imbalance_reduction": move.imbalance_reduction,
+                        "resolves_reserve_violation": move.resolves_reserve_violation,
+                        "estimated_mirror_duration_seconds": (
+                            move.size_bytes / bwlimit_bytes_per_sec
+                            if bwlimit_bytes_per_sec
+                            else None
+                        ),
+                    }
+                )
+        gate_out = None
+        if decision is not None:
+            gate_out = {
+                "act": decision.act,
+                "reason": decision.reason,
+                "reserve_override": decision.reserve_override,
+                "drift_fraction": decision.drift_fraction,
+                "imbalance_fraction": decision.imbalance_fraction,
+            }
+        group_load = group_loads.get(group.name)
+        heuristic_result = heuristic_results.get(group.name)
+        before_spread = after_spread = None
+        if group_load is not None:
+            before_spread = _spread_fraction(
+                {s.storage_id: s.utilization for s in group_load.storages},
+                group_load.average_utilization,
+            )
+            if heuristic_result is not None:
+                after_spread = _spread_fraction(
+                    heuristic_result.breakdown.utilization, group_load.average_utilization
+                )
+        groups_out.append(
+            {
+                "name": group.name,
+                "load_error": load_errors.get(group.name),
+                "gate": gate_out,
+                "moves": moves_out,
+                "deadlocked": list(schedule_result.deadlocked) if schedule_result else [],
+                "deadlock_message": schedule_result.deadlocked_msg if schedule_result else None,
+                "before_spread": before_spread,
+                "after_spread": after_spread,
+                "payback_validated": False,
+            }
+        )
+    return {"groups": groups_out, "warnings": list(topology.warnings)}
+
+
+def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+    del mode
+    client = build_pve_client(resolved.config.proxmox)
+    topology = build_topology(client, resolved.config)
+    prom_client = PrometheusClient(resolved.config.prometheus)
+    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
+
+    group_loads: dict[str, GroupLoad] = {}
+    gate_decisions: dict[str, GateDecision] = {}
+    heuristic_results: dict[str, HeuristicResult] = {}
+    schedule_results: dict[str, ScheduleResult] = {}
+    load_errors: dict[str, str] = {}
+
+    for group in topology.groups:
+        try:
+            group_load = compute_group_load(
+                prom_client,
+                resolved.config.metrics,
+                resolved.config.window,
+                resolved.config.load_weights,
+                group,
+            )
+        except MetricsError as exc:
+            # Section 6: gating (and so planning) cannot proceed without a
+            # load to gate on -- unlike show-load's size/reserve report,
+            # nothing here is safe to show without it.
+            load_errors[group.name] = str(exc)
+            continue
+        group_loads[group.name] = group_load
+
+        reserve_statuses: dict[str, ReserveStatus] = {
+            storage.id: compute_reserve_status(storage, group.disks, min_free_bytes)
+            for storage in group.storages
+        }
+        decision = evaluate_group_gates(
+            group_load, reserve_statuses, resolved.config.gates, last_load=None
+        )
+        gate_decisions[group.name] = decision
+        if not decision.act:
+            continue
+
+        heuristic_result = run_heuristic(
+            group,
+            group_load.load_by_disk_key(),
+            resolved.config.objective,
+            min_free_bytes,
+            resolved.config.solver.heuristic_iterations,
+        )
+        heuristic_results[group.name] = heuristic_result
+        schedule_results[group.name] = order_moves(
+            group,
+            heuristic_result.assignment,
+            group_load.load_by_disk_key(),
+            resolved.config.objective,
+            min_free_bytes,
+        )
+
+    bwlimit = resolved.config.migration.bwlimit_bytes_per_sec
+    if args.json:
+        print(
+            json.dumps(
+                _render_plan_json(
+                    topology,
+                    group_loads,
+                    gate_decisions,
+                    heuristic_results,
+                    schedule_results,
+                    load_errors,
+                    bwlimit,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            _render_plan_human(
+                topology,
+                group_loads,
+                gate_decisions,
+                heuristic_results,
+                schedule_results,
+                load_errors,
+                bwlimit,
+            )
+        )
+    return 0
+
+
 def _implied_wipe_seconds(disk_bytes: int, throughput_bytes_per_sec: float | None) -> float | None:
     """Sections 3.5/7.1/9.3: ``z_max / saferemove_throughput``.
 
@@ -543,6 +780,7 @@ _COMMAND_HANDLERS: dict[str, CommandHandler] = {
 _COMMAND_HANDLERS["verify-metrics"] = _handle_verify_metrics
 _COMMAND_HANDLERS["show-load"] = _handle_show_load
 _COMMAND_HANDLERS["verify-storages"] = _handle_verify_storages
+_COMMAND_HANDLERS["plan"] = _handle_plan
 
 
 # ------------------------------------------------------------------- main

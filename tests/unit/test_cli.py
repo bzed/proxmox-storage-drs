@@ -146,10 +146,11 @@ def test_missing_config_is_reported_and_exits_1(
 def test_valid_config_dispatches_to_the_not_yet_implemented_handler(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # "apply" (execute.py, phase 7+) is still a stub; "plan" is real now.
     path = write_config(tmp_path)
-    assert cli.main(["-c", str(path), "plan"]) == 1
+    assert cli.main(["-c", str(path), "apply"]) == 1
     err = capsys.readouterr().err
-    assert "'plan' is not implemented yet" in err
+    assert "'apply' is not implemented yet" in err
 
 
 def test_drs_error_from_a_handler_is_reported_and_exits_1(
@@ -160,9 +161,9 @@ def test_drs_error_from_a_handler_is_reported_and_exits_1(
     def raising_handler(resolved: object, args: object, mode: str) -> int:
         raise DrsError("boom")
 
-    monkeypatch.setitem(cli._COMMAND_HANDLERS, "plan", raising_handler)
+    monkeypatch.setitem(cli._COMMAND_HANDLERS, "apply", raising_handler)
     path = write_config(tmp_path)
-    assert cli.main(["-c", str(path), "plan"]) == 1
+    assert cli.main(["-c", str(path), "apply"]) == 1
     assert "boom" in capsys.readouterr().err
 
 
@@ -175,8 +176,11 @@ def test_every_subcommand_is_registered() -> None:
 def test_config_loaded_and_warnings_are_logged(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # "apply" is still a stub -- this test is about the config-load/warning
+    # log events, which fire before dispatch regardless of command; "plan"
+    # is real now and would need network mocking to use safely here.
     path = write_config(tmp_path)
-    cli.main(["-c", str(path), "plan"])
+    cli.main(["-c", str(path), "apply"])
     err_lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
     events = [json.loads(ln)["event"] for ln in err_lines]
     assert "config_loaded" in events
@@ -478,11 +482,246 @@ def test_verify_storages_json_output(
     assert san_b["implied_wipe_seconds"] is None
 
 
+# --------------------------------------------------------------------------- plan
+
+
+def _patch_plan_deps(
+    monkeypatch: pytest.MonkeyPatch, topology: Topology, group_load: GroupLoad
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", lambda client, cfg: topology)
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.compute_group_load",
+        lambda prom_client, metrics, window, load_weights, group: group_load,
+    )
+
+
+def _repairable_sample_topology() -> Topology:
+    """`_sample_topology()` with san-b given more headroom (16 TiB instead
+    of 8): san-a still violates (C5) exactly as in that fixture, but now
+    the only possible move (101:scsi0, san-a -> san-b -- 102:scsi0 is
+    pinned) actually fits at the other end too, so the plan can fully
+    resolve it rather than merely improve it. `_sample_topology()` itself
+    is intentionally left alone: several other tests depend on its exact
+    numbers, including the fact that a 3 TiB disk does *not* fit cleanly
+    into an 8 TiB, reserve_factor=2.0 storage on its own -- see
+    ``test_plan_reports_a_deadlock_when_even_the_best_target_still_violates``,
+    which relies on exactly that to test deadlock reporting honestly."""
+    topology = _sample_topology()
+    group = topology.groups[0]
+    roomier_storages = tuple(
+        Storage(
+            id=s.id,
+            capability_weight=s.capability_weight,
+            reserve_factor=s.reserve_factor,
+            saturation_load=s.saturation_load,
+            capacity_bytes=16 * (1 << 40) if s.id == "san-b" else s.capacity_bytes,
+            used_bytes=s.used_bytes,
+            foreign_used_bytes=s.foreign_used_bytes,
+            saferemove=s.saferemove,
+            saferemove_throughput_bytes_per_sec=s.saferemove_throughput_bytes_per_sec,
+        )
+        for s in group.storages
+    )
+    roomier_group = Group(name=group.name, storages=roomier_storages, disks=group.disks)
+    return Topology(groups=(roomier_group,), warnings=topology.warnings)
+
+
+def test_plan_human_output_acts_via_reserve_override_and_shows_the_one_possible_move(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """san-a violates (C5); its only movable disk is 101:scsi0 (102:scsi0
+    is pinned, `locked: backup`) -- moving it away is the only possible
+    plan, and (with san-b's extra headroom) it fully resolves the
+    violation."""
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert "Group fc-tier1 → ACT: reserve violated on san-a" in out
+    assert "101:scsi0" in out
+    assert "san-a → san-b" in out
+    assert "102:scsi0" not in out  # pinned -- never proposed as a move
+    assert "payback" in out.lower()  # the phase-5-not-implemented caveat
+
+
+def test_plan_json_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    group_payload = payload["groups"][0]
+    assert group_payload["gate"]["act"] is True
+    assert group_payload["gate"]["reserve_override"] is True
+    assert group_payload["payback_validated"] is False
+    assert len(group_payload["moves"]) == 1
+    move = group_payload["moves"][0]
+    assert move["disk_key"] == "101:scsi0"
+    assert move["from_storage"] == "san-a"
+    assert move["to_storage"] == "san-b"
+    assert move["resolves_reserve_violation"] is True
+    assert move["estimated_mirror_duration_seconds"] > 0
+    assert group_payload["deadlocked"] == []
+    assert group_payload["deadlock_message"] is None
+    assert group_payload["before_spread"] is not None
+    assert group_payload["after_spread"] is not None
+
+
+def test_plan_reports_a_deadlock_when_even_the_best_target_still_violates(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real `_sample_topology()`, unmodified: its 3 TiB 101:scsi0 does
+    not fit *anywhere* in this two-storage, 8 TiB, reserve_factor=2.0 group
+    without violating (C5) somewhere -- landing alone on either storage
+    needs 6 TiB reserved on top of its own 3 TiB, which alone exceeds 8
+    TiB. The heuristic still proposes moving it (group-wide shortfall
+    drops from 3 TiB to 1 TiB, a real improvement), but the scheduler must
+    refuse to actually schedule a move into a state that still violates
+    the transient invariant -- reporting a deadlock is the safe, honest
+    outcome, not a false all-clear."""
+    _patch_plan_deps(monkeypatch, _sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    group_payload = payload["groups"][0]
+    assert group_payload["gate"]["reserve_override"] is True  # still tries -- san-a violates
+    assert group_payload["moves"] == []  # but nothing could actually be scheduled
+    assert group_payload["deadlocked"] == ["101:scsi0"]
+    assert group_payload["deadlock_message"] is not None
+    assert "section 8.1" in group_payload["deadlock_message"]
+
+
+def test_plan_human_output_shows_the_deadlock_warning_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert "⚠" in out
+    assert "section 8.1" in out
+
+
+def _balanced_non_violating_topology() -> Topology:
+    """Unlike `_sample_topology()`, san-a here does *not* violate (C5) --
+    needed to reach a pure imbalance-based NO ACTION, since a reserve
+    violation would otherwise always force ACT regardless of load."""
+    disks = (
+        Disk(
+            key="101:scsi0",
+            vmid=101,
+            device="scsi0",
+            vm_name="web01",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason=None,
+        ),
+        Disk(
+            key="102:scsi0",
+            vmid=102,
+            device="scsi0",
+            vm_name="db01",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-b",
+            format="raw",
+            pinned_reason=None,
+        ),
+    )
+    storages = (
+        Storage(
+            id="san-a",
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=8 * (1 << 40),
+            used_bytes=1 * (1 << 40),
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        ),
+        Storage(
+            id="san-b",
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=8 * (1 << 40),
+            used_bytes=1 * (1 << 40),
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        ),
+    )
+    return Topology(groups=(Group(name="fc-tier1", storages=storages, disks=disks),), warnings=())
+
+
+def test_plan_no_action_when_balanced_and_no_violation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        lambda client, cfg: _balanced_non_violating_topology(),
+    )
+    balanced = GroupLoad(
+        group_name="fc-tier1",
+        idle=False,
+        average_utilization=1.5,
+        disks=(
+            DiskLoad(disk_key="101:scsi0", load=1.5, flagged_reason=None),
+            DiskLoad(disk_key="102:scsi0", load=1.5, flagged_reason=None),
+        ),
+        storages=(
+            StorageLoad(storage_id="san-a", load=1.5, utilization=1.5),
+            StorageLoad(storage_id="san-b", load=1.5, utilization=1.5),
+        ),
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.compute_group_load",
+        lambda prom_client, metrics, window, load_weights, group: balanced,
+    )
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert "NO ACTION" in out
+    assert "1." not in out  # no numbered move lines when there is nothing to schedule
+
+
+def test_plan_reports_a_metrics_error_per_group(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.exceptions import MetricsError
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _sample_topology()
+    )
+
+    def raise_metrics_error(
+        prom_client: object, metrics: object, window: object, load_weights: object, group: object
+    ) -> None:
+        raise MetricsError("connection refused")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_group_load", raise_metrics_error)
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert "plan unavailable: connection refused" in out
+
+
 def test_mode_override_flows_through_main(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # "apply" is still a stub (no network access) -- this test is about the
+    # mode-override log happening before dispatch, for any command, not
+    # about "plan" specifically. "plan" itself is real now and would try a
+    # genuine network connection here if used unmocked (.agents/testing.md).
     path = write_config(tmp_path)
-    cli.main(["-c", str(path), "--mode", "auto", "plan"])
+    cli.main(["-c", str(path), "--mode", "auto", "apply"])
     err_lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
     events = [json.loads(ln) for ln in err_lines]
     override_events = [e for e in events if e["event"] == "mode_override"]
