@@ -35,10 +35,10 @@ than a document that reads as if the tool were finished:
 |---|---|
 | `--version`, `--help`, `--manual` | Implemented. |
 | `verify-metrics` | Implemented: all six `IMPLEMENTATION_PLAN.md` section 3.3 checks, human and `--json` output. |
-| `plan` | Not implemented yet — needs `pve.py`/`topology.py` (phase 2) and the load model, gates, scheduler and solver (phases 3-6). |
-| `show-load` | Not implemented yet — needs `pve.py`/`topology.py` (phase 2). |
+| `show-load` | Implemented: every storage in every group, its disks (all buses), sizes, and reserve status ((C4)/(C5)), pinned disks flagged with their reason, human and `--json` output. **Per-disk I/O load is not shown yet** — that needs `loadmodel.py` (phase 3) — every other figure is accurate. |
+| `verify-storages` | Implemented: `saferemove` and the implied wipe time per storage, warning when `gates.cooldown_per_storage` or `migration.max_single_move_duration` is shorter than it. |
+| `plan` | Not implemented yet — needs the load model, gates, scheduler and solver (phases 3-6). |
 | `explain` | Not implemented yet — needs the same, plus the payback and scheduling machinery it explains. |
-| `verify-storages` | Not implemented yet — needs `pve.py` (phase 2). |
 | `apply` | Not implemented yet — needs `execute.py` (phase 7 onward). |
 
 Configuration loading and validation (this whole manual's

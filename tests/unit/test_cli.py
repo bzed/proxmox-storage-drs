@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from proxmox_storage_drs import __version__, cli
+from proxmox_storage_drs.topology import Disk, Group, Storage, Topology
 
 MINIMAL_CONFIG = {
     "schema_version": 1,
@@ -215,6 +216,152 @@ def test_verify_metrics_json_output(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["coverage_by_disk"] == {"101:scsi0": 0.9}
+
+
+def _sample_topology() -> Topology:
+    disks = (
+        Disk(
+            key="101:scsi0",
+            vmid=101,
+            device="scsi0",
+            vm_name="web01",
+            node="pve01",
+            size_bytes=3 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason=None,
+        ),
+        Disk(
+            key="102:scsi0",
+            vmid=102,
+            device="scsi0",
+            vm_name="db01",
+            node="pve01",
+            size_bytes=2 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason="locked: backup",
+        ),
+    )
+    storages = (
+        Storage(
+            id="san-a",
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=8 * (1 << 40),
+            used_bytes=3 * (1 << 40),
+            foreign_used_bytes=0,
+            saferemove=True,
+            saferemove_throughput_bytes_per_sec=10 * (1 << 20),
+        ),
+        Storage(
+            id="san-b",
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=8 * (1 << 40),
+            used_bytes=0,
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        ),
+    )
+    group = Group(name="fc-tier1", storages=storages, disks=disks)
+    return Topology(groups=(group,), warnings=("108:scsi0 is ungrouped, not managed",))
+
+
+# --------------------------------------------------------------------- show-load
+
+
+def test_show_load_human_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _sample_topology()
+    )
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "show-load"]) == 0
+    out = capsys.readouterr().out
+    assert "Group fc-tier1" in out
+    assert "101:scsi0" in out
+    assert "[pinned: locked: backup]" in out
+    assert "reserve short by" in out or "reserve OK" in out
+    assert "ungrouped" in out
+    assert "not yet computed" in out
+
+
+def test_show_load_json_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _sample_topology()
+    )
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "show-load"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["load_computed"] is False
+    group_payload = payload["groups"][0]
+    assert group_payload["name"] == "fc-tier1"
+    keys = {d["key"] for d in group_payload["disks"]}
+    assert keys == {"101:scsi0", "102:scsi0"}
+    san_a = next(s for s in group_payload["storages"] if s["id"] == "san-a")
+    # managed_used 3+2=5 TiB, largest=3 TiB, reserve=2.0*3=6 TiB, 5+6=11 > capacity 8 TiB.
+    assert san_a["reserve_violated"] is True
+
+
+def test_show_load_reports_a_pve_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.exceptions import PveApiError
+
+    def raise_pve_error(client: object, cfg: object) -> None:
+        raise PveApiError("cluster unreachable")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", raise_pve_error)
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "show-load"]) == 1
+    assert "cluster unreachable" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------- verify-storages
+
+
+def test_verify_storages_human_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _sample_topology()
+    )
+    path = write_config(tmp_path, gates={"cooldown_per_storage": "1s"})
+    assert cli.main(["-c", str(path), "verify-storages"]) == 0
+    out = capsys.readouterr().out
+    assert "san-a  saferemove=on" in out
+    assert "implied wipe time" in out
+    assert "gates.cooldown_per_storage" in out  # 1s is far shorter than the implied wipe
+    assert "san-b  saferemove=off" in out
+    assert "no wipe-time check" in out
+
+
+def test_verify_storages_json_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _sample_topology()
+    )
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "verify-storages"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    san_a = next(s for s in payload["groups"][0]["storages"] if s["id"] == "san-a")
+    assert san_a["saferemove"] is True
+    assert san_a["implied_wipe_seconds"] == pytest.approx(3 * (1 << 40) / (10 * (1 << 20)))
+    san_b = next(s for s in payload["groups"][0]["storages"] if s["id"] == "san-b")
+    assert san_b["implied_wipe_seconds"] is None
 
 
 def test_mode_override_flows_through_main(
