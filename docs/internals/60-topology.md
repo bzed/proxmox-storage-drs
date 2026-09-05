@@ -78,9 +78,10 @@ disk, since assume-thick-provisioning sizing from a stale or unlisted
 config value is a real, if rare, source of drift. Two independently
 verified reasons this fallback path is not merely defensive: the
 `Datastore.Allocate`-vs-`Audit` privilege gap (`50-pve-api.md`), and an
-`unusedN` volume being absent from a live cluster's content listing even
-though `Datastore.Allocate` was present (`IMPLEMENTATION_PLAN.md` section
-3.6's note). `_parse_pve_config_size_bytes` parses PVE's own config-file
+`unusedN` volume, deleted directly on the storage backend outside Proxmox
+(confirmed with the cluster's operator), that PVE's own config still
+referenced and that PVE itself never noticed or refused to boot the VM
+over — `IMPLEMENTATION_PLAN.md` section 3.6's note. `_parse_pve_config_size_bytes` parses PVE's own config-file
 size suffixes (`512G` meaning binary GiB, no explicit `i`) — deliberately
 not `units.py`'s parser, which is for *this project's* config file, a
 different and coincidentally similarly-shaped format.

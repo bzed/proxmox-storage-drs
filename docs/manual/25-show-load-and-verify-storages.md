@@ -38,8 +38,14 @@ A **`Warnings:`** block, when present, lists things worth a look but not
 fatal: a disk on a storage that is not in any configured group ("ungrouped,
 not managed" — check whether that storage belongs in a group), or a disk
 whose size came from its own config rather than the storage's authoritative
-content listing (worth knowing your storage backend has this gap; see
-`IMPLEMENTATION_PLAN.md` section 3.6 for one confirmed example).
+content listing. The latter usually means the volume no longer exists on
+the storage — most often because it was removed directly on the storage
+backend rather than through Proxmox, which leaves a dangling reference
+behind that PVE does not clean up or even notice on its own (a VM starts
+fine with one; see `IMPLEMENTATION_PLAN.md` section 3.6 for a confirmed
+case). If you see this warning, check whether the named volume still
+exists on the storage and, if it genuinely does not, remove the stale
+reference (`qm unlink <vmid> <device>` for an `unusedN` entry).
 
 `--json` emits the same information as one object with `groups[].storages[]`
 (including the exact byte counts behind the reserve check) and
