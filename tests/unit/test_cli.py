@@ -555,18 +555,87 @@ def test_plan_json_output(
     group_payload = payload["groups"][0]
     assert group_payload["gate"]["act"] is True
     assert group_payload["gate"]["reserve_override"] is True
-    assert group_payload["payback_validated"] is False
     assert len(group_payload["moves"]) == 1
     move = group_payload["moves"][0]
     assert move["disk_key"] == "101:scsi0"
     assert move["from_storage"] == "san-a"
     assert move["to_storage"] == "san-b"
     assert move["resolves_reserve_violation"] is True
-    assert move["estimated_mirror_duration_seconds"] > 0
+    assert move["duration_mirror_seconds"] > 0
+    assert move["load_per_tib"] > 0
     assert group_payload["deadlocked"] == []
     assert group_payload["deadlock_message"] is None
     assert group_payload["before_spread"] is not None
     assert group_payload["after_spread"] is not None
+    # san-a's saferemove throughput (10 MiB/s) makes the wipe of this 3 TiB
+    # disk take far longer than the default 6h max_single_move_duration --
+    # a real, useful case for the hard per-move duration rule to catch.
+    assert move["duration_wipe_seconds"] > 0
+    assert move["exceeds_max_duration"] is True
+    payback = group_payload["payback"]
+    assert payback["aggregate_ok"] is True  # exempted -- resolves a reserve violation
+    assert payback["rejected_moves"] == ["101:scsi0"]
+    assert payback["accepted"] is False  # but still blocked by the hard duration rule
+
+
+def test_plan_json_output_accepts_payback_when_saferemove_is_off(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same repairable plan, but with san-a's `saferemove` off, so the
+    hard duration rule no longer blocks it. This fixture's move has a real
+    cost and exactly *zero* balance benefit (moving the only loaded disk
+    between two storages, one of which holds nothing but a zero-load
+    pinned disk, just relocates which side carries it -- `ratio` is
+    genuinely 0.0, not a rounding artefact) -- it is accepted anyway
+    because it resolves san-a's reserve violation, and section 13's
+    "never traded against balance" applies to payback too
+    (`evaluate_plan_payback()`'s own docstring)."""
+    topology = _repairable_sample_topology()
+    group = topology.groups[0]
+    no_wipe_storages = tuple(
+        Storage(
+            id=s.id,
+            capability_weight=s.capability_weight,
+            reserve_factor=s.reserve_factor,
+            saturation_load=s.saturation_load,
+            capacity_bytes=s.capacity_bytes,
+            used_bytes=s.used_bytes,
+            foreign_used_bytes=s.foreign_used_bytes,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        )
+        for s in group.storages
+    )
+    topology = Topology(
+        groups=(Group(name=group.name, storages=no_wipe_storages, disks=group.disks),),
+        warnings=topology.warnings,
+    )
+    _patch_plan_deps(monkeypatch, topology, _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    group_payload = payload["groups"][0]
+    move = group_payload["moves"][0]
+    assert move["duration_wipe_seconds"] == 0.0
+    assert move["exceeds_max_duration"] is False
+    payback = group_payload["payback"]
+    assert payback["rejected_moves"] == []
+    assert payback["aggregate_ok"] is True  # exempted -- resolves a reserve violation
+    assert payback["accepted"] is True
+    assert payback["benefit_load_seconds"] == 0.0  # genuinely zero, not a failure to compute it
+    assert payback["ratio"] == 0.0  # a real cost with zero benefit -> ratio 0, still accepted
+
+
+def test_plan_human_output_shows_the_payback_verdict(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert "payback: benefit" in out
+    assert "⚠ exceeds migration.max_single_move_duration" in out
+    assert "does not pass section 7.3's payback test" in out
 
 
 def test_plan_reports_a_deadlock_when_even_the_best_target_still_violates(
