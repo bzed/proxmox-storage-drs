@@ -572,15 +572,21 @@ while incurring the full `γ·z_d` byte penalty and the full payback cost of §7
 therefore leave them alone until a capacity constraint forces the issue, which is exactly the desired
 policy. Set `exclude.include_unused_disks: false` to pin them instead; they then count via `Uˢᵉˣᵗ`.
 
-**An `unusedN` volume can be absent from `GET /storage/{s}/content` on at least one real backend.**
-Verified against a live PVE 9.2.11 cluster on Ceph RBD storage: a VM's `unused0` entry named a volume
-(`VM:vm-104-disk-2`) that PVE's own config still tracked, but that volume did not appear anywhere in
-that storage's content listing, while the same VM's two active (`scsiN`) disks did. Whether the
-underlying RBD image still exists and is simply not enumerated for detached volumes, or the reference
-is stale, was not established — this is exactly the kind of claim §domain-invariants.md rule 10 says
-to verify or label, not assume. `topology.py` treats this the same as any other content-listing gap
-(§3.5): it falls back to the VM config's own `size=` for that disk and logs a warning naming it as
-unauthoritative, rather than silently treating the disk as zero bytes or dropping it.
+**An `unusedN` volume can be absent from `GET /storage/{s}/content` — not PVE's normal behaviour, but
+not rare enough to ignore either.** Found on a live PVE 9.2.11 cluster on Ceph RBD storage: a VM's
+`unused0` entry named a volume (`VM:vm-104-disk-2`) that PVE's own config still tracked, but that
+volume did not appear anywhere in that storage's content listing, while the same VM's two active
+(`scsiN`) disks did. The operator confirmed the cause: the underlying volume had been removed directly
+on the storage backend, outside Proxmox, leaving `unused0` a dangling reference in the VM's config.
+This is not something PVE catches on its own — an `unusedN` entry is not validated at VM start the way
+an attached disk is, so the VM boots normally with the stale reference still sitting in its config.
+`topology.py` treats a content-listing gap the same regardless of cause (§3.5): it falls back to the
+VM config's own `size=` for that disk and logs a warning naming it as unauthoritative, which is the
+conservative direction to be wrong in here — believing a since-deleted volume still occupies its
+former space costs nothing but a temporarily pessimistic reserve calculation, while the reverse
+(silently dropping it) could let a real volume's bytes go uncounted. An operator seeing this warning
+should treat it as a prompt to check for, and if confirmed gone, clean up the dangling reference (e.g.
+`qm unlink <vmid> unusedN`) rather than something the tool should silently paper over.
 
 **Evacuating a storage completely is therefore possible online** — every disk type in the table above
 except CD-ROM-media entries can be relocated with the guest running, and CD-ROM entries hold no
