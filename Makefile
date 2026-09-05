@@ -30,9 +30,7 @@ MYPY    := $(VENV)/bin/mypy
 PYTEST  := $(VENV)/bin/pytest
 endif
 
-# `src` does not exist yet at the design stage; wildcard keeps the targets usable
-# until it does, and picks it up automatically once it is created.
-SOURCES := $(wildcard src) tests tools
+SOURCES := src tests tools
 
 .PHONY: help venv install fmt fmt-check lint typecheck test cov fixtures check clean
 
@@ -77,14 +75,8 @@ lint: $(VENVDEP)
 typecheck: $(VENVDEP)
 	$(MYPY) $(SOURCES)
 
-# There are no tests yet: the repository is still at the design stage and
-# IMPLEMENTATION_PLAN.md is the deliverable. Skip pytest until the first test
-# file exists, so `make check` stays usable; from the first test onwards the
-# 85 % floor in pyproject.toml applies with no escape hatch.
 test: $(VENVDEP)
-	@if [ -z "$$(find tests -name 'test_*.py' -print -quit 2>/dev/null)" ]; then \
-		echo "NOTE: no test_*.py under tests/ yet (design stage); skipping pytest"; \
-	else $(PYTEST); fi
+	$(PYTEST)
 
 cov: $(VENVDEP)
 	$(PYTEST) --cov-report=html

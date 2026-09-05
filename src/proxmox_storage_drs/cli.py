@@ -1,0 +1,271 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""``pve-storage-drs`` entry point. See IMPLEMENTATION_PLAN.md section 11.3.
+
+This is the only module allowed to call ``print()`` (AGENTS.md section 5):
+everything else logs. ``print()`` here is reserved for the human/JSON report
+on stdout; all logging goes to stderr via :mod:`proxmox_storage_drs.logging_setup`,
+which is what keeps ``--json`` output on stdout uncontaminated.
+
+Global options are defined on the top-level parser (not the subparsers) so
+that argparse enforces "before the subcommand" (section 11.3) for free, and
+``argparse.ArgumentDefaultsHelpFormatter`` plus real default values on every
+``add_argument`` is what keeps ``--help`` unable to claim a default the code
+does not use (AGENTS.md section 8.5) -- there is deliberately no second,
+hand-kept list of options anywhere in this module or in the manpage/manual.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Callable, Sequence
+
+from proxmox_storage_drs import __version__
+from proxmox_storage_drs.config import (
+    DEFAULT_CONFIG_PATH,
+    ENV_CONFIG_VAR,
+    ResolvedConfig,
+    load_config,
+)
+from proxmox_storage_drs.exceptions import ConfigError, DrsError
+from proxmox_storage_drs.logging_setup import configure_logging
+
+logger = logging.getLogger(__name__)
+
+# Section 9.1: dry-run < confirm < auto. Used only to classify a --mode
+# override as an escalation (warn) or a de-escalation (info) -- section 11.3.
+_MODE_RANK = {"dry-run": 0, "confirm": 1, "auto": 2}
+
+_EXECUTION_MODES = ("dry-run", "confirm", "auto")
+
+# Subcommands from section 2 (module layout) / the manpage COMMANDS section,
+# each with the one-line description shown in --help and in the manpage.
+_SUBCOMMANDS: dict[str, str] = {
+    "plan": "Compute and print a migration plan. Does not execute it.",
+    "apply": "Execute a plan, subject to execution.mode, concurrency caps and time windows.",
+    "show-load": "Print every storage with its disks, sizes, measured load and reserve status.",
+    "explain": "Say why the tool did what it did: gates, pins, deferrals and payback arithmetic.",
+    "verify-metrics": "Validate configured metric/label names against the live Prometheus.",
+    "verify-storages": "Report saferemove and the implied wipe time per storage.",
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser that both ``main()`` and ``--help`` run on."""
+    parser = argparse.ArgumentParser(
+        prog="pve-storage-drs",
+        description=(
+            "Balance disk I/O load across Proxmox VE shared storages by "
+            "live-migrating VM disks. Dry-run is the default: nothing is changed "
+            "unless a less safe --mode is explicitly selected."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "-c",
+        "--config",
+        metavar="PATH",
+        default=None,
+        help=(
+            f"Read the configuration from PATH instead of {DEFAULT_CONFIG_PATH} "
+            f"(env: {ENV_CONFIG_VAR}). A PATH named here that is missing, unreadable "
+            "or invalid is a hard failure -- never a silent fallback to the default."
+        ),
+    )
+    parser.add_argument(
+        "--group",
+        metavar="NAME",
+        action="append",
+        default=None,
+        help="Restrict the run to one storage group. Repeatable. Groups are independent.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=_EXECUTION_MODES,
+        default=None,
+        help=(
+            "Override execution.mode for this run only. Moving toward less safety "
+            "(dry-run to confirm/auto, confirm to auto) is logged at warning level."
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the machine-readable report (section 9.5) instead of the human one.",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="More detail on stderr. Repeatable.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Warnings and errors only. Intended for the systemd timer.",
+    )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print the version and exit.",
+    )
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="Show the pve-storage-drs(1) manual page and exit.",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
+    subparsers.add_parser("help", help="Alias for --manual.")
+    for name, help_text in _SUBCOMMANDS.items():
+        subparsers.add_parser(name, help=help_text)
+
+    return parser
+
+
+# ------------------------------------------------------------- mode override
+
+
+def apply_mode_override(configured_mode: str, override: str) -> str:
+    """Section 11.3: log a ``--mode`` override, at warning level if it escalates.
+
+    Returns the effective mode (always ``override``, when one was given).
+    Escalating means moving *up* dry-run < confirm < auto -- removing a
+    safety barrier the operator themselves configured.
+    """
+    if override == configured_mode:
+        return override
+    escalating = _MODE_RANK[override] > _MODE_RANK[configured_mode]
+    level = logging.WARNING if escalating else logging.INFO
+    logger.log(
+        level,
+        "execution mode overridden on the command line",
+        extra={
+            "event": "mode_override",
+            "configured_mode": configured_mode,
+            "effective_mode": override,
+            "escalating": escalating,
+        },
+    )
+    return override
+
+
+# ------------------------------------------------------------------- manual
+
+
+def _fallback_manual_text() -> str:
+    """Plain text used only when ``man(1)`` itself is unavailable.
+
+    A packaged install always has ``man pve-storage-drs`` work -- the manpage is
+    installed by ``debian/pve-storage-drs.manpages`` and ``man(1)`` itself detects a
+    non-tty stdout and disables the pager on its own, which is what satisfies
+    "never answer with a URL alone" even when piped. This fallback exists only
+    for an uninstalled source checkout (or a minimal system with no man-db),
+    where it reads the manpage source directly from the repository.
+    """
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        candidate_path = candidate / "man" / "pve-storage-drs.1.md"
+        if candidate_path.is_file():
+            return candidate_path.read_text(encoding="utf-8")
+    return (
+        "pve-storage-drs manual is not available here: man(1) is not installed and "
+        "this does not look like a source checkout. Install the pve-storage-drs "
+        "package for `man pve-storage-drs`, or read man/pve-storage-drs.1.md in the "
+        "source tree."
+    )
+
+
+def show_manual() -> int:
+    """``--manual`` / ``help``: see AGENTS.md section 8.5."""
+    if shutil.which("man") is not None:
+        result = subprocess.run(["man", "pve-storage-drs"], check=False)
+        if result.returncode == 0:
+            return 0
+    print(_fallback_manual_text())
+    return 0
+
+
+# -------------------------------------------------------------- subcommands
+#
+# metrics.py, pve.py, topology.py and the solver/scheduler/executor modules
+# do not exist yet (IMPLEMENTATION_PLAN.md section 12 phases 1-9 are still in
+# progress). Each handler below is honest about that rather than pretending
+# to succeed -- AGENTS.md section 10 forbids emitting a partial/unvalidated
+# result, and "not implemented yet" is a true statement, not a silent wrong
+# action.
+
+
+CommandHandler = Callable[[ResolvedConfig, argparse.Namespace, str], int]
+
+
+def _make_not_yet_implemented_handler(command: str) -> CommandHandler:
+    def handler(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+        del resolved, args, mode
+        print(
+            f"pve-storage-drs: {command!r} is not implemented yet in this development "
+            "build; see IMPLEMENTATION_PLAN.md section 12 for the phase it belongs to",
+            file=sys.stderr,
+        )
+        return 1
+
+    return handler
+
+
+_COMMAND_HANDLERS: dict[str, CommandHandler] = {
+    name: _make_not_yet_implemented_handler(name) for name in _SUBCOMMANDS
+}
+
+
+# ------------------------------------------------------------------- main
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.version:
+        print(f"pve-storage-drs {__version__}")
+        return 0
+    if args.manual or args.command == "help":
+        return show_manual()
+    if args.command is None:
+        parser.print_usage(sys.stderr)
+        return 2
+
+    configure_logging(args.verbose, args.quiet)
+
+    try:
+        resolved = load_config(args.config)
+    except ConfigError as exc:
+        print(f"pve-storage-drs: {exc}", file=sys.stderr)
+        return 1
+
+    logger.info(
+        "configuration loaded",
+        extra={"event": "config_loaded", "path": resolved.path, "sha256": resolved.sha256},
+    )
+    for warning in resolved.warnings:
+        logger.warning(warning, extra={"event": "config_warning"})
+
+    effective_mode = resolved.config.execution.mode
+    if args.mode is not None:
+        effective_mode = apply_mode_override(resolved.config.execution.mode, args.mode)
+
+    handler = _COMMAND_HANDLERS[args.command]
+    try:
+        return handler(resolved, args, effective_mode)
+    except DrsError as exc:
+        logger.error(str(exc), extra={"event": "command_failed", "command": args.command})
+        print(f"pve-storage-drs: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised via the entry point
+    sys.exit(main())

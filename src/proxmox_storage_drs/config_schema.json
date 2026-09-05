@@ -1,0 +1,269 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "Structural validation for /etc/pve/drs.yaml. See IMPLEMENTATION_PLAN.md section 11.1. `additionalProperties: false` throughout is deliberate: a typo'd key is a knob with no formula, which section 15.1 calls a bug waiting to happen -- this is where it is caught. Semantic cross-field rules (duplicate storage ids, rate_window vs pvestatd_push_interval, etc.) are NOT expressible here and live in config.py's _validate_semantics instead.",
+  "type": "object",
+  "required": ["schema_version", "proxmox", "prometheus", "groups"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "proxmox": {
+      "type": "object",
+      "required": ["host", "auth"],
+      "additionalProperties": false,
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "verify_ssl": { "type": "boolean" },
+        "ca_file": { "type": ["string", "null"] },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "username": { "type": ["string", "null"] },
+            "password": { "type": ["string", "null"] },
+            "token_id": { "type": ["string", "null"] },
+            "token_secret": { "type": ["string", "null"] }
+          }
+        },
+        "ticket_refresh_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "read_workers": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "prometheus": {
+      "type": "object",
+      "required": ["url"],
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string", "minLength": 1 },
+        "timeout_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "username": { "type": ["string", "null"] },
+        "password": { "type": ["string", "null"] },
+        "bearer_token": { "type": ["string", "null"] }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "read_ops": { "type": "string", "minLength": 1 },
+        "write_ops": { "type": "string", "minLength": 1 },
+        "read_bytes": { "type": "string", "minLength": 1 },
+        "write_bytes": { "type": "string", "minLength": 1 },
+        "read_time_ns": { "type": "string", "minLength": 1 },
+        "write_time_ns": { "type": "string", "minLength": 1 },
+        "labels": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "vmid": { "type": "string", "minLength": 1 },
+            "device": { "type": "string", "minLength": 1 },
+            "node": { "type": "string", "minLength": 1 }
+          }
+        },
+        "rate_window": { "type": ["string", "number"] },
+        "step": { "type": ["string", "number"] },
+        "pvestatd_push_interval": { "type": ["string", "number"] }
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lookback": { "type": ["string", "number"] },
+        "quantile": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "upper_quantile": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "min_coverage": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+      }
+    },
+    "load_weights": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "iotime": { "type": "number", "minimum": 0 },
+        "ops": { "type": "number", "minimum": 0 },
+        "bytes": { "type": "number", "minimum": 0 },
+        "read_factor": { "type": "number", "minimum": 0 },
+        "write_factor": { "type": "number", "minimum": 0 }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "storages"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "storages": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "required": ["id"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string", "minLength": 1 },
+                "capability_weight": { "type": "number", "exclusiveMinimum": 0 },
+                "reserve_factor": { "type": ["number", "null"], "minimum": 0 },
+                "saturation_load": { "type": ["number", "null"], "exclusiveMinimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "snapshot_reserve": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "factor": { "type": "number", "minimum": 0 },
+        "min_free_bytes": { "type": ["string", "number"] },
+        "count_foreign_volumes": { "type": "boolean" }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "drift_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "imbalance_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "cooldown_per_disk": { "type": ["string", "number"] },
+        "cooldown_per_storage": { "type": ["string", "number"] }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bwlimit_bytes_per_sec": { "type": ["string", "number"], "exclusiveMinimum": 0 },
+        "source_load_weight": { "type": "number", "minimum": 0 },
+        "target_load_weight": { "type": "number", "minimum": 0 },
+        "payback_horizon": { "type": ["string", "number"], "exclusiveMinimum": 0 },
+        "payback_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "max_single_move_duration": { "type": ["string", "number"], "exclusiveMinimum": 0 },
+        "account_saferemove_wipe": { "type": "boolean" },
+        "wipe_load_weight": { "type": "number", "minimum": 0 },
+        "saturation_ceiling": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "assume_thick_provisioning": { "type": "boolean" }
+      }
+    },
+    "objective": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spread_metric": { "type": "string", "enum": ["l1", "minmax"] },
+        "alpha_spread": { "type": "number", "minimum": 0 },
+        "beta_move_count": { "type": "number", "minimum": 0 },
+        "gamma_move_bytes_per_tib": { "type": "number", "minimum": 0 },
+        "kappa_vm_affinity": { "type": "number", "minimum": 0 },
+        "affinity_counts_pinned_disks": { "type": "boolean" },
+        "reserve_violation_penalty": { "type": "number", "minimum": 0 }
+      }
+    },
+    "solver": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "type": "string", "enum": ["auto", "cpsat", "cbc", "heuristic"] },
+        "time_limit_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "mip_gap": { "type": "number", "minimum": 0, "maximum": 1 },
+        "heuristic_iterations": { "type": "integer", "exclusiveMinimum": 0 }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["dry-run", "confirm", "auto"] },
+        "max_concurrent_migrations": { "type": "integer", "minimum": 1 },
+        "max_migrations_per_run": { "type": "integer", "minimum": 1 },
+        "max_concurrent_per_storage": { "type": "integer", "minimum": 1 },
+        "max_replans_per_run": { "type": "integer", "minimum": 0 },
+        "abort_on_failure": { "type": "boolean" },
+        "poll_interval_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "locks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "wait_timeout": { "type": ["string", "number"], "exclusiveMinimum": 0 },
+            "poll_interval": { "type": ["string", "number"], "exclusiveMinimum": 0 },
+            "on_timeout": { "type": "string", "enum": ["skip", "abort"] }
+          }
+        },
+        "source_release": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "wait": { "type": "boolean" },
+            "timeout": { "type": ["string", "number"], "exclusiveMinimum": 0 }
+          }
+        },
+        "time_windows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["days", "start", "end"],
+            "additionalProperties": false,
+            "properties": {
+              "days": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+                }
+              },
+              "start": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+              "end": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" }
+            }
+          }
+        }
+      }
+    },
+    "exclude": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vmids": { "type": "array", "items": { "type": "integer" } },
+        "disks": { "type": "array", "items": { "type": "string" } },
+        "storages": { "type": "array", "items": { "type": "string" } },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "skip_vms_with_snapshots": { "type": "boolean" },
+        "running_only": { "type": "boolean" },
+        "include_unused_disks": { "type": "boolean" }
+      }
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "warn_pinned_load_fraction": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "forecast": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string", "enum": ["quantile", "seasonal_naive", "holt_winters"] },
+        "seasonal_lookback_days": { "type": "number", "minimum": 0 },
+        "holt_winters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "seasonal_periods": { "type": "integer", "exclusiveMinimum": 0 },
+            "trend": { "type": "string", "enum": ["add", "mul", "none"] },
+            "seasonal": { "type": "string", "enum": ["add", "mul", "none"] },
+            "residual_z": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}
