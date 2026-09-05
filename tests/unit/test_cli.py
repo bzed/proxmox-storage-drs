@@ -181,6 +181,42 @@ def test_config_loaded_and_warnings_are_logged(
     assert "config_warning" in events  # no saturation_load configured
 
 
+def test_verify_metrics_dispatches_and_renders_human(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.metrics import Finding, VerifyMetricsReport
+
+    fake_report = VerifyMetricsReport(
+        findings=(Finding("info", "all good"),),
+        sample_series={},
+        coverage_by_disk={},
+        observed_spacing_seconds=300.0,
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli.verify_metrics", lambda *a, **k: fake_report)
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "verify-metrics"]) == 0
+    assert "all good" in capsys.readouterr().out
+
+
+def test_verify_metrics_json_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.metrics import DiskKey, Finding, VerifyMetricsReport
+
+    fake_report = VerifyMetricsReport(
+        findings=(Finding("error", "bad"),),
+        sample_series={},
+        coverage_by_disk={DiskKey(101, "scsi0"): 0.9},
+        observed_spacing_seconds=None,
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli.verify_metrics", lambda *a, **k: fake_report)
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "verify-metrics"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["coverage_by_disk"] == {"101:scsi0": 0.9}
+
+
 def test_mode_override_flows_through_main(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

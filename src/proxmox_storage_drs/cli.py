@@ -18,6 +18,7 @@ hand-kept list of options anywhere in this module or in the manpage/manual.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 import subprocess
@@ -34,6 +35,7 @@ from proxmox_storage_drs.config import (
 )
 from proxmox_storage_drs.exceptions import ConfigError, DrsError
 from proxmox_storage_drs.logging_setup import configure_logging
+from proxmox_storage_drs.metrics import PrometheusClient, VerifyMetricsReport, verify_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -194,12 +196,11 @@ def show_manual() -> int:
 
 # -------------------------------------------------------------- subcommands
 #
-# metrics.py, pve.py, topology.py and the solver/scheduler/executor modules
-# do not exist yet (IMPLEMENTATION_PLAN.md section 12 phases 1-9 are still in
-# progress). Each handler below is honest about that rather than pretending
-# to succeed -- AGENTS.md section 10 forbids emitting a partial/unvalidated
-# result, and "not implemented yet" is a true statement, not a silent wrong
-# action.
+# pve.py, topology.py and the solver/scheduler/executor modules do not exist
+# yet (IMPLEMENTATION_PLAN.md section 12 phases 2-9 are still in progress).
+# Each such handler is honest about that rather than pretending to succeed --
+# AGENTS.md section 10 forbids emitting a partial/unvalidated result, and
+# "not implemented yet" is a true statement, not a silent wrong action.
 
 
 CommandHandler = Callable[[ResolvedConfig, argparse.Namespace, str], int]
@@ -218,9 +219,43 @@ def _make_not_yet_implemented_handler(command: str) -> CommandHandler:
     return handler
 
 
+def _render_verify_metrics_human(report: VerifyMetricsReport) -> str:
+    lines = [f"[{f.level:>7}] {f.message}" for f in report.findings]
+    lines.append("")
+    lines.append(
+        "OK: verify-metrics found no blocking problems" if report.ok else "FAILED: see errors above"
+    )
+    return "\n".join(lines)
+
+
+def _render_verify_metrics_json(report: VerifyMetricsReport) -> dict[str, object]:
+    return {
+        "ok": report.ok,
+        "findings": [{"level": f.level, "message": f.message} for f in report.findings],
+        "sample_series": report.sample_series,
+        "coverage_by_disk": {
+            f"{key.vmid}:{key.device}": fraction
+            for key, fraction in report.coverage_by_disk.items()
+        },
+        "observed_spacing_seconds": report.observed_spacing_seconds,
+    }
+
+
+def _handle_verify_metrics(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+    del mode
+    client = PrometheusClient(resolved.config.prometheus)
+    report = verify_metrics(client, resolved.config.metrics, resolved.config.window)
+    if args.json:
+        print(json.dumps(_render_verify_metrics_json(report), indent=2, sort_keys=True))
+    else:
+        print(_render_verify_metrics_human(report))
+    return 0 if report.ok else 1
+
+
 _COMMAND_HANDLERS: dict[str, CommandHandler] = {
     name: _make_not_yet_implemented_handler(name) for name in _SUBCOMMANDS
 }
+_COMMAND_HANDLERS["verify-metrics"] = _handle_verify_metrics
 
 
 # ------------------------------------------------------------------- main
