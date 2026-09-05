@@ -16,9 +16,10 @@ to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.
 is the authoritative per-command status: `plan` is real and prints an
 ordered, transient-feasible, payback-checked dry-run plan (see
 [`../manual/27-plan.md`](../manual/27-plan.md)), but nothing yet *executes*
-one (no `apply`), and every call site passes `last_load=None` since
-`state.json` (the real drift history) does not exist yet — see
-[`80-gates.md`](80-gates.md).
+one (no `apply`). `state.json` itself exists (`state.py`) and is read by
+both `show-load` and `plan` for real drift history — see
+[`15-state.md`](15-state.md) and [`80-gates.md`](80-gates.md) — but nothing
+writes it yet, since only `execute.py` (not yet written) has a reason to.
 
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
@@ -57,6 +58,7 @@ one (no `apply`), and every call site passes `last_load=None` since
         └───────────────────────┬─────────────────────────────────────────┘
                                  │
                      config.py (load + validate)
+                     state.py (state.json: drift history in, section 11.2)
                      forecast.py (Forecaster protocol + 3 models)
                      logging_setup.py (structured JSON to stderr)
                      units.py (duration/size parsing)
@@ -71,6 +73,7 @@ one (no `apply`), and every call site passes `last_load=None` since
 | `units.py` | Duration/size parsing (`"24h"`, `"200MiB"`) and human-readable formatting | section 11 |
 | `config.py` | Load `/etc/pve/drs.yaml`, jsonschema + semantic validation, the frozen dataclass config model | section 11 |
 | `config_schema.json` | The jsonschema structural half of validation | section 11.1 |
+| `state.py` | `state.json`: the load vector as of the last executed balance, cooldowns, the node-local advisory `flock()` — reading degrades, writing raises | section 11.2 |
 | `forecast.py` | The `Forecaster` protocol, `required_range_seconds`, and `quantile`/`seasonal_naive`/`holt_winters` | section 10 |
 | `logging_setup.py` | Structured JSON logging to **stderr** | section 2.1 (amended, see [`40-cli-and-logging.md`](40-cli-and-logging.md)) |
 | `metrics.py` | `PrometheusClient`, PromQL construction, `verify_metrics()`, `compute_disk_coverage()` | sections 3.1-3.4 |
@@ -85,8 +88,10 @@ one (no `apply`), and every call site passes `last_load=None` since
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan` | section 11.3 |
 
 Not yet written: `optimize.py`, `execute.py` — and, within modules that do
-exist, cooldown handling in `gates.py` (needs `state.json`'s timestamps;
-see [`80-gates.md`](80-gates.md)), heuristic step 4 "polish" and (C2)
+exist, cooldown handling in `gates.py`/`topology.py`/`heuristic.py` (needs
+`state.json`'s cooldown timestamps to be *read* somewhere, which nothing
+does yet even though `state.py` stores and round-trips them fine; see
+[`15-state.md`](15-state.md) and [`80-gates.md`](80-gates.md)), heuristic step 4 "polish" and (C2)
 format-compatibility eligibility in `heuristic.py` (see
 [`90-heuristic.md`](90-heuristic.md)), concurrent scheduling, priority-2
 ordering and staging in `schedule.py` (see [`95-schedule.md`](95-schedule.md)),
@@ -108,6 +113,10 @@ this.
 
 - [`10-configuration.md`](10-configuration.md) — how a YAML file becomes a
   validated `Config`, and where every default actually lives.
+- [`15-state.md`](15-state.md) — `state.json`'s dataclasses, why reading it
+  degrades but writing raises, the real `flock()` lock and the rename-vs
+  -in-place bug it takes to get that wrong, and what `show-load`/`plan`
+  actually get from it today.
 - [`20-forecasting.md`](20-forecasting.md) — the forecaster protocol and its
   three implementations.
 - [`30-metrics.md`](30-metrics.md) — the Prometheus client and the six
@@ -121,9 +130,9 @@ this.
 - [`70-loadmodel.md`](70-loadmodel.md) — the section 4 raw-series-to-`ℓ_d`
   blend, `min_coverage` rejection, and why `tpmstate0`/`unusedN` are exempt
   from it but `efidisk0` is not.
-- [`80-gates.md`](80-gates.md) — the section 6 act/no-act verdict, why
-  `show-load`'s gate line is diagnostic rather than a real decision today,
-  and why cooldowns are not in this module.
+- [`80-gates.md`](80-gates.md) — the section 6 act/no-act verdict, how
+  `state.json`'s drift history now reaches it, and why cooldowns are not
+  in this module.
 - [`90-heuristic.md`](90-heuristic.md) — the section 5.4/5.5 objective and
   the seed/repair/descend search, cross-checked against section 14's exact
   objective totals, and what "polish" and format eligibility still owe.

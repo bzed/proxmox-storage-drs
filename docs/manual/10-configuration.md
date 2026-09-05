@@ -835,6 +835,11 @@ Local disk, one copy per host, deliberately never `/etc/pve` — see
 free: cooldowns and the drift baseline reset, so the next run may migrate
 sooner than intended. Treat it as state to back up, not as a cache.
 
+`show-load` and `plan` both read this file (if present) for the drift
+gate's history; neither writes it, and a missing or unreadable file just
+means every group evaluates as if it had never been balanced before — see
+[`../internals/15-state.md`](../internals/15-state.md).
+
 ## `forecast` — history beyond the plain quantile
 
 See `IMPLEMENTATION_PLAN.md` section 10 and `proxmox_storage_drs/forecast.py`.

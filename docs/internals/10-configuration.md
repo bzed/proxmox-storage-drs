@@ -69,8 +69,8 @@ are therefore **not** part of `config.py`:
 - `execution.source_release.timeout` / `gates.cooldown_per_storage` against
   a storage's real `saferemove_throughput`.
 
-Both belong to `pve.py`/`topology.py` (not yet written) and
-`pve-storage-drs verify-storages`, once they exist — see
+Both belong to `pve.py`/`topology.py` (which do the live cluster fetch) and
+`pve-storage-drs verify-storages` — see
 [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md) for
 current status.
 

@@ -31,16 +31,28 @@ decides:
    `u*` from `GroupLoad.average_utilization`. `u* == 0` (idle group, section
    4) always means no-act — there is nothing to spread evenly.
 
-## `last_load=None` everywhere in this codebase, for now
+## `last_load` is real now, for `show-load` and `plan`
 
-`state.json` (section 11.2) is not yet written, so nothing in this codebase
-has an actual "last executed balance" to read. Every current caller
-(`show-load`) passes `last_load=None`, which per the degenerate-case table
-means the drift gate is always skipped and every decision reduces to
-"reserve override, else imbalance" — an accurate live snapshot, but not
-the real hysteresis behaviour section 6 describes once a plan actually
-executes and starts recording `ℓ_last`. `evaluate_group_gates()` itself
-needs no change when `state.json` exists; only its caller does.
+`state.py` (section 11.2) exists: `cli.py`'s `_last_loads_by_group()` reads
+`state.path` once per run and hands each group's slice of
+`last_balance.load_vector` (re-keyed to plain `topology.Disk.key`, or
+`None` if that group has no recorded balance yet) to
+`evaluate_group_gates()` as `last_load` -- both `show-load` and `plan` do
+this identically (`cli.py` calls the one function, not two copies).
+`evaluate_group_gates()` itself needed no change at all: it already took
+`last_load` as a parameter and treated `None` correctly (see
+`docs/internals/15-state.md` for the read side, and this page's next
+section for what is still missing).
+
+**What this does not yet do.** `state.json`'s `last_balance` is only ever
+*read* here -- nothing in this codebase calls `state.with_recorded_balance()`
+yet, because nothing executes a migration yet (`execute.py`, phase 7). Until
+then, `last_balance.load_vector` for any group stays exactly what it was
+the last time a human (or a test) wrote it by hand; a config with no
+`state.json` on disk, or a fresh install, still behaves exactly as this
+page originally described -- `last_load=None`, drift gate skipped, decision
+reduces to "reserve override, else imbalance". The wiring is real; the
+writer that would make it self-sustaining is not built yet.
 
 ## `show-load`'s gate line is diagnostic, not a real decision
 
@@ -48,13 +60,11 @@ needs no change when `state.json` exists; only its caller does.
 (`Group <name> → ACT: <reason>` / `→ NO ACTION: <reason>`) reusing
 `GateDecision.reason` verbatim — deliberately the single source of truth
 for the wording, rather than a second, similarly-but-not-identically
-phrased string living in `cli.py`. This is useful today (an operator can
-see whether the tool *would* act, and why) but is not what `plan`/`apply`
-(not yet written) will actually gate an execution on, once
-`last_load` is real: `show-load`'s verdict, precisely because it always
-passes `last_load=None`, can only ever show "reserve override" or
-"imbalance", never a drift-suppressed "no action" a real run with history
-would correctly show.
+phrased string living in `cli.py`. Its verdict now reflects real drift
+history whenever `state.json` has one, exactly like `plan`'s does — but
+`show-load` still isn't what `apply` (not yet written) will actually gate
+an execution on; it is `plan`/`apply`'s own gate evaluation, run at the
+moment a plan is built or applied, that is authoritative.
 
 ## Cooldowns are not this module's job
 

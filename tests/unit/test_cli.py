@@ -312,7 +312,12 @@ def _patch_show_load_deps(
     )
 
     def fake_compute_group_load(
-        prom_client: object, metrics: object, window: object, load_weights: object, group: object
+        prom_client: object,
+        metrics: object,
+        window: object,
+        load_weights: object,
+        group: object,
+        last_known_loads: object = None,
     ) -> GroupLoad:
         if isinstance(group_load, Exception):
             raise group_load
@@ -445,6 +450,163 @@ def test_show_load_json_reports_a_metrics_error_per_group(
     assert "load" not in disk_101
 
 
+# --------------------------------------------------------------------- state.json wiring
+
+
+def _no_reserve_violation_topology() -> Topology:
+    """Two storages, generously sized -- unlike `_sample_topology()`, no
+    (C4)/(C5) violation anywhere, so the drift/imbalance gates (not the
+    reserve override) are what actually decide act/no-act, which is what
+    these tests need to isolate."""
+    disks = (
+        Disk(
+            key="101:scsi0",
+            vmid=101,
+            device="scsi0",
+            vm_name="a",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason=None,
+        ),
+        Disk(
+            key="102:scsi0",
+            vmid=102,
+            device="scsi0",
+            vm_name="b",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-b",
+            format="raw",
+            pinned_reason=None,
+        ),
+    )
+    storages = tuple(
+        Storage(
+            id=sid,
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=100 * (1 << 40),
+            used_bytes=1 * (1 << 40),
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        )
+        for sid in ("san-a", "san-b")
+    )
+    return Topology(groups=(Group(name="fc-tier1", storages=storages, disks=disks),), warnings=())
+
+
+def _imbalanced_group_load() -> GroupLoad:
+    """san-a all the load, san-b none -- imbalance is 200% of `u*`, far
+    above the default `gates.imbalance_threshold` (20%), so this group ACTs
+    whenever the drift gate does not intervene first."""
+    return GroupLoad(
+        group_name="fc-tier1",
+        idle=False,
+        average_utilization=5.0,
+        disks=(
+            DiskLoad(disk_key="101:scsi0", load=10.0, flagged_reason=None),
+            DiskLoad(disk_key="102:scsi0", load=0.0, flagged_reason=None),
+        ),
+        storages=(
+            StorageLoad(storage_id="san-a", load=10.0, utilization=10.0),
+            StorageLoad(storage_id="san-b", load=0.0, utilization=0.0),
+        ),
+    )
+
+
+def test_show_load_acts_on_imbalance_when_there_is_no_state_json_yet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Baseline for the next test: with no `state.json` at all,
+    `last_load` is `None`, the drift gate is skipped outright (section 6's
+    own first-run rule), and this fixture's 200% imbalance triggers ACT."""
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        lambda client, cfg: _no_reserve_violation_topology(),
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.compute_group_load",
+        lambda prom_client, metrics, window, load_weights, group, last_known_loads=None: (
+            _imbalanced_group_load()
+        ),
+    )
+    state_path = tmp_path / "state.json"
+    path = write_config(tmp_path, state={"path": str(state_path)})
+    assert cli.main(["-c", str(path), "show-load"]) == 0
+    out = capsys.readouterr().out
+    assert "ACT: imbalance" in out
+
+
+def test_show_load_gate_reflects_real_drift_history_from_state_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same fixture as above, except `state.json` now records a
+    `last_balance` identical to the current load -- zero drift -- which
+    must suppress the ACT the imbalance alone would otherwise trigger.
+    This is the actual behavioural payoff of state.py's wiring into
+    `show-load`: the gate verdict now depends on real history, not
+    `last_load=None` pretending every run is the first one ever."""
+    from proxmox_storage_drs.state import LastBalance, State, save_state_atomic
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        lambda client, cfg: _no_reserve_violation_topology(),
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.compute_group_load",
+        lambda prom_client, metrics, window, load_weights, group, last_known_loads=None: (
+            _imbalanced_group_load()
+        ),
+    )
+    state_path = tmp_path / "state.json"
+    save_state_atomic(
+        str(state_path),
+        State(
+            last_balance=LastBalance(
+                at="2026-09-05T00:00:00Z",
+                load_vector={"fc-tier1:101:scsi0": 10.0, "fc-tier1:102:scsi0": 0.0},
+            )
+        ),
+    )
+    path = write_config(tmp_path, state={"path": str(state_path)})
+    assert cli.main(["-c", str(path), "show-load"]) == 0
+    out = capsys.readouterr().out
+    assert "NO ACTION: drift" in out
+    assert "below gates.drift_threshold" in out
+
+
+def test_plan_gate_also_reflects_real_drift_history_from_state_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same drift-suppression scenario as `show-load`'s, through `plan` --
+    the two commands share `_last_loads_by_group()`, not two independent
+    readings of `state.json` (AGENTS.md section 5)."""
+    from proxmox_storage_drs.state import LastBalance, State, save_state_atomic
+
+    _patch_plan_deps(monkeypatch, _no_reserve_violation_topology(), _imbalanced_group_load())
+    state_path = tmp_path / "state.json"
+    save_state_atomic(
+        str(state_path),
+        State(
+            last_balance=LastBalance(
+                at="2026-09-05T00:00:00Z",
+                load_vector={"fc-tier1:101:scsi0": 10.0, "fc-tier1:102:scsi0": 0.0},
+            )
+        ),
+    )
+    path = write_config(tmp_path, state={"path": str(state_path)})
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert "NO ACTION: drift" in out
+    assert "below gates.drift_threshold" in out
+
+
 # --------------------------------------------------------------------- verify-storages
 
 
@@ -545,7 +707,7 @@ def _patch_plan_deps(
     monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", lambda client, cfg: topology)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.compute_group_load",
-        lambda prom_client, metrics, window, load_weights, group: group_load,
+        lambda prom_client, metrics, window, load_weights, group, last_known_loads=None: group_load,
     )
 
 
@@ -1032,7 +1194,7 @@ def test_plan_no_action_when_balanced_and_no_violation(
     )
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.compute_group_load",
-        lambda prom_client, metrics, window, load_weights, group: balanced,
+        lambda prom_client, metrics, window, load_weights, group, last_known_loads=None: balanced,
     )
     path = write_config(tmp_path)
     assert cli.main(["-c", str(path), "plan"]) == 0
@@ -1052,7 +1214,12 @@ def test_plan_reports_a_metrics_error_per_group(
     )
 
     def raise_metrics_error(
-        prom_client: object, metrics: object, window: object, load_weights: object, group: object
+        prom_client: object,
+        metrics: object,
+        window: object,
+        load_weights: object,
+        group: object,
+        last_known_loads: object = None,
     ) -> None:
         raise MetricsError("connection refused")
 

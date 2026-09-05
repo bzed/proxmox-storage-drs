@@ -45,12 +45,22 @@ Group fc-tier1 → ACT: imbalance 255.4% meets or exceeds gates.imbalance_thresh
 Group fc-tier1 → NO ACTION: imbalance 12.2% is below gates.imbalance_threshold (20.0%)
 ```
 
-`show-load` always evaluates the drift gate as if this were the very first
-run (`state.json`'s last-executed load vector, section 11.2, is not wired
-through yet — `docs/internals/80-gates.md` has the detail), so its verdict
-today can only ever be a reserve override or an imbalance check, never a
-drift-suppressed "no action" — that only becomes possible once a real run
-has something to compare against.
+`show-load` reads `state.path`'s recorded load vector (section 11.2) and
+passes it to the drift gate, so once a group has one on record, this line
+can also read:
+
+```
+Group fc-tier1 → NO ACTION: drift 3.1% is below gates.drift_threshold (10.0%)
+```
+
+A group with no `state.json`, or none recorded for it yet, still evaluates
+as if this were the very first run — the drift gate is skipped outright
+(section 6's own degenerate-case rule), not "treated as zero drift" — so
+its verdict falls straight through to a reserve override or an imbalance
+check, exactly as before this was wired up. `docs/internals/80-gates.md`
+and `docs/internals/15-state.md` have the detail; nothing yet *writes*
+`last_balance` (that needs `execute.py`, not yet written), so this stays
+the common case until a migration has actually run.
 
 A pinned disk carries `[pinned: <reason>]` after its size and format —
 `snapshots present (N)`, `locked: <lock>`, `excluded by config`, or
@@ -61,8 +71,8 @@ answer to "why won't it move this disk."
 A disk whose measured I/O falls below `window.min_coverage` (section 3.4)
 gets a `⚠ <disk> : <reason>` line of its own, right after that group's
 disks, instead of a silently wrong `ℓ` — it either shows a `state.json`-
-recorded last known load (not yet wired through; see
-`docs/internals/70-loadmodel.md`) or `0.0`, and either way the warning says
+recorded last known load (see `docs/internals/70-loadmodel.md`) or `0.0`
+when no `state.json` entry exists for it, and either way the warning says
 which. `tpmstate0` and `unusedN` disks are never flagged this way: they
 genuinely emit no I/O metrics, so `ℓ 0.00` for them is correct, not a gap.
 A group with no measured I/O at all gets one `(idle: no measured I/O for
