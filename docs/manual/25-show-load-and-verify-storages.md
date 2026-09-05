@@ -13,7 +13,7 @@ section rather than invented for this page:
 
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml show-load
-Group fc-tier1
+Group fc-tier1 → ACT: reserve violated on san-a; bypassing the drift and imbalance gates (section 13: safety is not subject to hysteresis)
   san-a  used 4.50 TiB/8.00 TiB  L=6.50 u=6.50  ⚠ reserve short by 512.00 GiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
     101:scsi0        2.00 TiB  raw     ℓ 3.00
     101:scsi1        1.00 TiB  raw     ℓ 1.00
@@ -30,6 +30,27 @@ disks currently on it) and `u_s = L_s / capability_weight`; `ℓ` after a
 disk's size/format is that disk's own share. Both come from
 `IMPLEMENTATION_PLAN.md` section 14's worked example, so the numbers above
 are traceable to that section rather than invented for this page.
+
+## The `Group <name> → ACT`/`NO ACTION` line
+
+Section 6's three gates, evaluated in order — reserve override, then
+drift, then imbalance — and the first one that decides wins. The header
+line above shows the **reserve override**: san-a's 0.5 TiB shortfall forces
+`ACT` outright, regardless of how balanced or drifted the group is,
+because "safety is not subject to hysteresis" (section 13). The other two
+shapes this line can take, on a group with no reserve violation:
+
+```
+Group fc-tier1 → ACT: imbalance 255.4% meets or exceeds gates.imbalance_threshold (20.0%)
+Group fc-tier1 → NO ACTION: imbalance 12.2% is below gates.imbalance_threshold (20.0%)
+```
+
+`show-load` always evaluates the drift gate as if this were the very first
+run (`state.json`'s last-executed load vector, section 11.2, is not wired
+through yet — `docs/internals/80-gates.md` has the detail), so its verdict
+today can only ever be a reserve override or an imbalance check, never a
+drift-suppressed "no action" — that only becomes possible once a real run
+has something to compare against.
 
 A pinned disk carries `[pinned: <reason>]` after its size and format —
 `snapshots present (N)`, `locked: <lock>`, `excluded by config`, or
@@ -70,9 +91,14 @@ reference (`qm unlink <vmid> <device>` for an `unusedN` entry).
 (including the exact byte counts behind the reserve check, plus `load` and
 `utilization` when available) and `groups[].disks[]` (plus `load` and
 `load_flagged_reason` when available), with each group carrying its own
-`load_computed`, `idle` and `load_error` fields — a Prometheus outage on
-one group never prevents another group's `load_computed: true` from being
-reported.
+`load_computed`, `idle`, `load_error` and `gate` fields — a Prometheus
+outage on one group never prevents another group's `load_computed: true`
+or `gate` from being reported. `gate` is `null` when `load_computed` is
+`false` (no `GroupLoad` to evaluate gates against) and otherwise an object
+with `act` (bool), `reason` (string, identical to the human line's text
+after the arrow), `reserve_override` (bool), and `drift_fraction`/
+`imbalance_fraction` (float or `null` — `null` means that gate was never
+reached, not that it evaluated to zero).
 
 ## `verify-storages`
 
