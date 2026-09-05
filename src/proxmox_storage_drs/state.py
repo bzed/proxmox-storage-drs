@@ -55,16 +55,18 @@ own command.
   never call it, and taking the exclusive lock for a read-only report would
   make an in-progress `apply` block `plan`/`show-load` for no safety
   reason this codebase can find in the plan text.
-- **Cooldowns are stored and round-tripped (:class:`Cooldowns`,
-  :func:`with_recorded_cooldown`) but not yet *read* by anything that pins
-  a disk or excludes a migration target.** Section 5.3 (C2)'s "within its
-  per-disk cooldown -> pin to current" belongs with `topology.py`'s other
-  (C2) pin reasons (locked, excluded, snapshotted -- see
-  ``topology._pin_reason()``); the storage-side "accepts no new incoming
-  moves" belongs with `heuristic.py`'s target eligibility. Both need a
-  `State`/cooldown lookup threaded into a function that does not accept one
-  today, which is a real, separately-scoped change to two other modules,
-  not this one -- see ``docs/internals/15-state.md``.
+- **Cooldowns are stored, round-tripped and now queryable
+  (:func:`active_disk_cooldowns`/:func:`active_storage_cooldowns`), and
+  both `topology.py` (the (C2) per-disk pin) and `heuristic.py` (the
+  per-storage target exclusion) consume them -- see
+  ``docs/internals/15-state.md`` for the full wiring and its one
+  deliberate asymmetry (repair moves ignore the storage cooldown; nothing
+  yet exempts a disk-cooldown pin the same way).** What is still missing
+  is a *writer*: nothing calls :func:`with_recorded_cooldown` yet, because
+  nothing executes a migration yet -- exactly the same "read side wired,
+  write side waits on `execute.py`" shape as `last_balance` above. Until a
+  real migration records one, every cooldown query here returns empty and
+  every disk/storage behaves exactly as it did before this existed.
 """
 
 from __future__ import annotations
@@ -367,6 +369,78 @@ def with_recorded_cooldown(
     disk = {**state.cooldowns.disk, **(disk_keys or {})}
     storage = {**state.cooldowns.storage, **(storage_keys or {})}
     return replace(state, cooldowns=Cooldowns(disk=disk, storage=storage))
+
+
+def _parse_iso(timestamp: str) -> datetime | None:
+    """Inverse of :func:`_now_iso`. Returns ``None`` on anything that does
+    not parse -- a hand-edited or otherwise foreign timestamp in
+    ``cooldowns.disk``/``.storage`` must degrade to "no active cooldown",
+    not crash a ``show-load``/``plan`` run, matching this module's
+    read-side philosophy everywhere else (see the module docstring)."""
+    try:
+        return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def cooldown_remaining_seconds(
+    cooldowns: Mapping[str, str], key: str, cooldown_seconds: float, now: datetime
+) -> float:
+    """Seconds left in ``key``'s cooldown -- ``0.0`` if nothing is recorded
+    for it, its timestamp does not parse, or it has already expired.
+    ``cooldowns`` is ``state.cooldowns.disk`` or ``state.cooldowns.storage``;
+    ``key`` is exactly what :func:`disk_state_key`/:func:`storage_state_key`
+    produce. The one implementation of the expiry arithmetic (AGENTS.md
+    section 5) both :func:`active_disk_cooldowns` and
+    :func:`active_storage_cooldowns` build on."""
+    recorded = cooldowns.get(key)
+    if recorded is None:
+        return 0.0
+    parsed = _parse_iso(recorded)
+    if parsed is None:
+        return 0.0
+    elapsed = (now - parsed).total_seconds()
+    return max(cooldown_seconds - elapsed, 0.0)
+
+
+def _active_cooldowns(
+    cooldowns: Mapping[str, str], group_name: str, cooldown_seconds: float, now: datetime
+) -> dict[str, float]:
+    if cooldown_seconds <= 0:
+        return {}  # section 11: a `0` cooldown disables the check, not "always in cooldown"
+    prefix = f"{group_name}:"
+    result: dict[str, float] = {}
+    for key in cooldowns:
+        if not key.startswith(prefix):
+            continue
+        remaining = cooldown_remaining_seconds(cooldowns, key, cooldown_seconds, now)
+        if remaining > 0:
+            result[key[len(prefix) :]] = remaining
+    return result
+
+
+def active_disk_cooldowns(
+    state: State, group_name: str, cooldown_seconds: float, now: datetime
+) -> dict[str, float]:
+    """This group's disks still within ``gates.cooldown_per_disk_seconds``,
+    keyed by bare ``topology.Disk.key`` (mirrors
+    :func:`load_vector_for_group`'s own prefix-stripping) -> seconds
+    remaining. Empty when the cooldown is disabled (``<= 0``) or nothing is
+    recorded. For `topology.py`'s (C2) "within its per-disk cooldown ->
+    pin to current" -- see ``docs/internals/15-state.md``."""
+    return _active_cooldowns(state.cooldowns.disk, group_name, cooldown_seconds, now)
+
+
+def active_storage_cooldowns(
+    state: State, group_name: str, cooldown_seconds: float, now: datetime
+) -> dict[str, float]:
+    """This group's storages still within
+    ``gates.cooldown_per_storage_seconds``, keyed by bare storage id ->
+    seconds remaining. Empty when the cooldown is disabled (``<= 0``) or
+    nothing is recorded. For `heuristic.py`'s "a storage involved in a
+    migration within `cooldown_per_storage` accepts no new incoming moves"
+    -- see ``docs/internals/15-state.md``."""
+    return _active_cooldowns(state.cooldowns.storage, group_name, cooldown_seconds, now)
 
 
 # --------------------------------------------------------------------- lock

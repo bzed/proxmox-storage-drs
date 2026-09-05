@@ -80,6 +80,37 @@ exactly the capacity-locked scenario the plan describes (two storages each
 with headroom smaller than any single disk) and checks the only reachable
 improvement — a swap — is the one found.
 
+## The storage cooldown excludes a destination, never a source
+
+Section 6: "a storage involved in a migration within
+`cooldown_per_storage` accepts no new incoming moves." `run_heuristic()`'s
+`cooldown_storages` parameter — a plain `frozenset[str]` its caller
+(`cli.py`, via `state.active_storage_cooldowns()`) computes, not a
+`state.State` this module reads itself — is threaded through to
+`_descend()` only. Both of `_descend()`'s neighbourhoods respect it: the
+single-move loop skips any `target.id in cooldown_storages`, and the swap
+loop skips a pair whenever *either* storage a disk would land on is in
+cooldown (a swap always sends one disk to each of the two storages it
+touches, so either side landing on a cooldown storage blocks the whole
+swap). A disk already resident on a cooldown storage is always free to
+move *away* from it — the rule is about new arrivals, not existing
+occupants — which is why the filter only ever appears on the destination
+side of a candidate, never the source.
+
+`_repair()` never receives `cooldown_storages` at all — a deliberate
+exemption, not an oversight, matching this module's own repair-is
+-unconditional stance above: a storage actively needed to resolve a live
+(C4)/(C5) violation is not deferred for having been written to recently,
+the same reserve-override principle `gates.py` and `payback.py` already
+apply to the drift/imbalance gates and the payback test respectively.
+`test_run_heuristic_repair_ignores_storage_cooldown` is the regression
+test: a violation whose only viable full repair target is in
+`cooldown_storages` is still repaired.
+`test_descend_blocks_new_arrivals_onto_a_cooldown_storage` and
+`test_descend_still_allows_a_disk_to_move_away_from_a_cooldown_storage`
+cover `_descend()`'s own two sides of the rule, both against the section
+14 fixture.
+
 ## `objective.spread_metric`: two different quantities, not one rescaled
 
 Section 5.4/(C6) offers two imbalance forms, and `evaluate_assignment()`

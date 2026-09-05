@@ -10,6 +10,7 @@ it exactly as it would wrap the real thing.
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -264,6 +265,88 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
     assert storages_by_id["san-a"].used_bytes == 3 * (1 << 40)
 
 
+# --------------------------------------------------------------------- cooldowns
+
+
+def _one_disk_cluster(vmid: int = 201) -> tuple[PveClient, dict[int, dict[str, Any]]]:
+    vm_resources = [_vm(vmid, "node1")]
+    vm_configs = {vmid: {"name": f"vm{vmid}", "scsi0": f"san-a:vm-{vmid}-disk-0,size=10G"}}
+    client = build_fake_client(
+        vm_resources,
+        vm_configs,
+        {vmid: []},
+        {"san-a": [_content("san-a", vmid, "disk-0", 10 * (1 << 30))], "san-b": []},
+    )
+    return client, vm_configs
+
+
+def test_build_topology_pins_a_disk_within_its_cooldown(tmp_path: Path) -> None:
+    from proxmox_storage_drs.state import Cooldowns, State, disk_state_key
+
+    config = make_config(tmp_path)
+    client, _ = _one_disk_cluster()
+    now = datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)
+    state = State(
+        cooldowns=Cooldowns(
+            disk={disk_state_key("g1", 201, "scsi0"): "2026-09-06T11:00:00Z"}  # 1h ago
+        )
+    )
+
+    topology = build_topology(client, config, state=state, now=now)
+
+    disk = next(d for d in topology.groups[0].disks if d.key == "201:scsi0")
+    assert disk.pinned_reason is not None
+    assert disk.pinned_reason.startswith("cooldown:")
+    assert "gates.cooldown_per_disk" in disk.pinned_reason
+
+
+def test_build_topology_does_not_pin_once_the_cooldown_has_expired(tmp_path: Path) -> None:
+    from proxmox_storage_drs.state import Cooldowns, State, disk_state_key
+
+    config = make_config(tmp_path)  # default cooldown_per_disk: 24h
+    client, _ = _one_disk_cluster()
+    now = datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)
+    state = State(
+        cooldowns=Cooldowns(
+            disk={disk_state_key("g1", 201, "scsi0"): "2026-09-01T00:00:00Z"}  # long expired
+        )
+    )
+
+    topology = build_topology(client, config, state=state, now=now)
+
+    disk = next(d for d in topology.groups[0].disks if d.key == "201:scsi0")
+    assert disk.pinned_reason is None
+
+
+def test_build_topology_ignores_another_groups_cooldown_entry(tmp_path: Path) -> None:
+    from proxmox_storage_drs.state import Cooldowns, State, disk_state_key
+
+    config = make_config(tmp_path)
+    client, _ = _one_disk_cluster()
+    now = datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)
+    state = State(
+        cooldowns=Cooldowns(
+            disk={disk_state_key("some-other-group", 201, "scsi0"): "2026-09-06T11:00:00Z"}
+        )
+    )
+
+    topology = build_topology(client, config, state=state, now=now)
+
+    disk = next(d for d in topology.groups[0].disks if d.key == "201:scsi0")
+    assert disk.pinned_reason is None
+
+
+def test_build_topology_with_no_state_behaves_exactly_as_before(tmp_path: Path) -> None:
+    """The default (`state=None`) must be indistinguishable from an empty
+    state -- every existing caller/test that never passes `state` at all
+    keeps behaving exactly as it did before cooldowns existed."""
+    config = make_config(tmp_path)
+    client, _ = _one_disk_cluster()
+    topology = build_topology(client, config)
+    disk = next(d for d in topology.groups[0].disks if d.key == "201:scsi0")
+    assert disk.pinned_reason is None
+
+
 def test_build_topology_multiple_buses_and_cdrom_skip(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     vm_resources = [_vm(200, "node1")]
@@ -515,6 +598,7 @@ def test_pin_reason_priority_order() -> None:
             vm_excluded=True,
             disk_excluded=True,
             snapshot_reason="snapshots present (1)",
+            cooldown_remaining_seconds=3600.0,
             lock="backup",
             device="scsi0",
             include_unused_disks=True,
@@ -529,6 +613,7 @@ def test_pin_reason_movable() -> None:
             vm_excluded=False,
             disk_excluded=False,
             snapshot_reason=None,
+            cooldown_remaining_seconds=0.0,
             lock=None,
             device="scsi0",
             include_unused_disks=True,
@@ -543,11 +628,59 @@ def test_pin_reason_unused_disk_allowed_by_default() -> None:
             vm_excluded=False,
             disk_excluded=False,
             snapshot_reason=None,
+            cooldown_remaining_seconds=0.0,
             lock=None,
             device="unused0",
             include_unused_disks=True,
         )
         is None
+    )
+
+
+def test_pin_reason_cooldown_is_reported_with_time_remaining() -> None:
+    assert (
+        _pin_reason(
+            vm_excluded=False,
+            disk_excluded=False,
+            snapshot_reason=None,
+            cooldown_remaining_seconds=3600.0,
+            lock=None,
+            device="scsi0",
+            include_unused_disks=True,
+        )
+        == "cooldown: moved recently, 1.0h left on gates.cooldown_per_disk"
+    )
+
+
+def test_pin_reason_cooldown_wins_over_lock_per_the_plans_own_order() -> None:
+    """Section 5.3 (C2) lists cooldown before the lock check -- both being
+    true at once must report the cooldown, not the (transient) lock."""
+    assert (
+        _pin_reason(
+            vm_excluded=False,
+            disk_excluded=False,
+            snapshot_reason=None,
+            cooldown_remaining_seconds=1.0,
+            lock="backup",
+            device="scsi0",
+            include_unused_disks=True,
+        )
+        != "locked: backup"
+    )
+
+
+def test_pin_reason_snapshot_wins_over_cooldown() -> None:
+    assert (
+        _pin_reason(
+            vm_excluded=False,
+            disk_excluded=False,
+            snapshot_reason="snapshots present (1)",
+            cooldown_remaining_seconds=3600.0,
+            lock=None,
+            device="scsi0",
+            include_unused_disks=True,
+        )
+        == "snapshots present (1)"
     )
 
 

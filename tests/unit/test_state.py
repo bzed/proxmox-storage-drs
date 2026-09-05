@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,9 @@ from proxmox_storage_drs.state import (
     State,
     _pid_alive,
     acquire_lock,
+    active_disk_cooldowns,
+    active_storage_cooldowns,
+    cooldown_remaining_seconds,
     disk_state_key,
     empty_state,
     load_state,
@@ -289,6 +293,75 @@ def test_with_recorded_cooldown_merges_without_clobbering_existing_entries() -> 
 def test_with_recorded_cooldown_with_no_arguments_is_a_no_op() -> None:
     state = State(cooldowns=Cooldowns(disk={"a": "b"}))
     assert with_recorded_cooldown(state) == state
+
+
+# ---------------------------------------------------- cooldown expiry queries
+
+_NOW = datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_cooldown_remaining_seconds_counts_down_from_the_recorded_timestamp() -> None:
+    cooldowns = {"fc-tier1:101:scsi1": "2026-09-06T11:00:00Z"}  # 1h ago
+    remaining = cooldown_remaining_seconds(cooldowns, "fc-tier1:101:scsi1", 86400.0, _NOW)
+    assert remaining == pytest.approx(86400.0 - 3600.0)
+
+
+def test_cooldown_remaining_seconds_is_zero_once_expired() -> None:
+    cooldowns = {"fc-tier1:101:scsi1": "2026-09-05T00:00:00Z"}  # 36h ago
+    assert cooldown_remaining_seconds(cooldowns, "fc-tier1:101:scsi1", 86400.0, _NOW) == 0.0
+
+
+def test_cooldown_remaining_seconds_is_zero_when_the_key_is_absent() -> None:
+    assert cooldown_remaining_seconds({}, "fc-tier1:101:scsi1", 86400.0, _NOW) == 0.0
+
+
+def test_cooldown_remaining_seconds_is_zero_for_an_unparseable_timestamp() -> None:
+    """A hand-edited or foreign timestamp must degrade to "not in
+    cooldown", not raise -- this module's read-side philosophy applies to
+    every field, not just the ones `load_state()` itself parses."""
+    cooldowns = {"fc-tier1:101:scsi1": "not-a-timestamp"}
+    assert cooldown_remaining_seconds(cooldowns, "fc-tier1:101:scsi1", 86400.0, _NOW) == 0.0
+
+
+def test_active_disk_cooldowns_filters_by_group_and_expiry() -> None:
+    state = State(
+        cooldowns=Cooldowns(
+            disk={
+                "fc-tier1:101:scsi1": "2026-09-06T11:00:00Z",  # 1h ago -- active
+                "fc-tier1:102:scsi0": "2026-09-01T00:00:00Z",  # long expired
+                "fc-tier2:201:scsi0": "2026-09-06T11:59:00Z",  # different group
+            }
+        )
+    )
+    result = active_disk_cooldowns(state, "fc-tier1", 86400.0, _NOW)
+    assert result == {"101:scsi1": pytest.approx(86400.0 - 3600.0)}
+
+
+def test_active_storage_cooldowns_filters_by_group_and_expiry() -> None:
+    state = State(
+        cooldowns=Cooldowns(
+            storage={
+                "fc-tier1:san-b": "2026-09-06T11:30:00Z",  # 30m ago -- active
+                "fc-tier1:san-c": "2020-01-01T00:00:00Z",  # long expired
+                "fc-tier2:san-b": "2026-09-06T11:59:00Z",  # different group
+            }
+        )
+    )
+    result = active_storage_cooldowns(state, "fc-tier1", 3600.0, _NOW)
+    assert result == {"san-b": pytest.approx(3600.0 - 1800.0)}
+
+
+def test_active_cooldowns_are_empty_when_the_cooldown_is_disabled() -> None:
+    """`cooldown_*_seconds <= 0` disables the check entirely -- never
+    "everything is permanently in cooldown"."""
+    state = State(cooldowns=Cooldowns(disk={"fc-tier1:101:scsi1": "2026-09-06T12:00:00Z"}))
+    assert active_disk_cooldowns(state, "fc-tier1", 0.0, _NOW) == {}
+    assert active_disk_cooldowns(state, "fc-tier1", -1.0, _NOW) == {}
+
+
+def test_active_cooldowns_are_empty_on_a_fresh_state() -> None:
+    assert active_disk_cooldowns(empty_state(), "fc-tier1", 86400.0, _NOW) == {}
+    assert active_storage_cooldowns(empty_state(), "fc-tier1", 3600.0, _NOW) == {}
 
 
 # --------------------------------------------------------------------- lock

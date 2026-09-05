@@ -24,6 +24,7 @@ import logging
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -58,7 +59,12 @@ from proxmox_storage_drs.payback import (
 from proxmox_storage_drs.pve import build_client as build_pve_client
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, largest_disk_bytes
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult, order_moves
-from proxmox_storage_drs.state import State, load_state, load_vector_for_group
+from proxmox_storage_drs.state import (
+    State,
+    active_storage_cooldowns,
+    load_state,
+    load_vector_for_group,
+)
 from proxmox_storage_drs.topology import Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
@@ -476,12 +482,17 @@ def _render_show_load_json(
 def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
     client = build_pve_client(resolved.config.proxmox)
-    topology = _filter_groups(build_topology(client, resolved.config), args.group)
-    prom_client = PrometheusClient(resolved.config.prometheus)
     # Read-only: never takes state.py's advisory lock (see its module
     # docstring) -- show-load never executes a migration, so there is
-    # nothing here for the lock to protect against.
-    last_loads_by_group = _last_loads_by_group(load_state(resolved.config.state.path), topology)
+    # nothing here for the lock to protect against. Read once, reused for
+    # both build_topology()'s (C2) cooldown pin and the gate's drift input.
+    now = datetime.now(timezone.utc)
+    state = load_state(resolved.config.state.path)
+    topology = _filter_groups(
+        build_topology(client, resolved.config, state=state, now=now), args.group
+    )
+    prom_client = PrometheusClient(resolved.config.prometheus)
+    last_loads_by_group = _last_loads_by_group(state, topology)
     group_loads: dict[str, GroupLoad] = {}
     load_errors: dict[str, str] = {}
     for group in topology.groups:
@@ -751,12 +762,18 @@ def _render_plan_json(
 def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
     client = build_pve_client(resolved.config.proxmox)
-    topology = _filter_groups(build_topology(client, resolved.config), args.group)
-    prom_client = PrometheusClient(resolved.config.prometheus)
-    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     # Read-only: plan never executes a migration, so -- like show-load --
     # it never takes state.py's advisory lock (see that module's docstring).
-    last_loads_by_group = _last_loads_by_group(load_state(resolved.config.state.path), topology)
+    # Read once, reused for build_topology()'s (C2) cooldown pin, the
+    # gate's drift input, and run_heuristic()'s storage-cooldown exclusion.
+    now = datetime.now(timezone.utc)
+    state = load_state(resolved.config.state.path)
+    topology = _filter_groups(
+        build_topology(client, resolved.config, state=state, now=now), args.group
+    )
+    prom_client = PrometheusClient(resolved.config.prometheus)
+    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
+    last_loads_by_group = _last_loads_by_group(state, topology)
 
     group_loads: dict[str, GroupLoad] = {}
     gate_decisions: dict[str, GateDecision] = {}
@@ -798,12 +815,18 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
         if not decision.act:
             continue
 
+        cooldown_storages = frozenset(
+            active_storage_cooldowns(
+                state, group.name, resolved.config.gates.cooldown_per_storage_seconds, now
+            )
+        )
         heuristic_result = run_heuristic(
             group,
             group_load.load_by_disk_key(),
             resolved.config.objective,
             min_free_bytes,
             resolved.config.solver.heuristic_iterations,
+            cooldown_storages,
         )
         heuristic_results[group.name] = heuristic_result
         schedule_result = order_moves(
