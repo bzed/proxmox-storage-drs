@@ -18,7 +18,8 @@ What we depend on today, all confirmed present in trixie:
 
 | Python | Debian | Why |
 |---|---|---|
-| `requests` | `python3-requests` | PVE API and Prometheus HTTP |
+| `requests` | `python3-requests` | Prometheus HTTP, and the transport `proxmoxer`'s https backend uses |
+| `proxmoxer` | `python3-proxmoxer` | PVE API client (`pve.py`) — chosen over a hand-rolled ticket/CSRF client specifically for its backend abstraction: the same calls work over https today and over ssh (`openssh`/`ssh_paramiko`) later, with no change to `pve.py` |
 | `ruamel.yaml` | `python3-ruamel.yaml` | Config, round-trips comments |
 | `jsonschema` | `python3-jsonschema` | Config validation |
 | `pulp` | `python3-pulp` + `coinor-cbc` | The MILP path that Debian can actually install |

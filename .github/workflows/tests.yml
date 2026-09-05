@@ -28,7 +28,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             black coinor-cbc flake8 git isort make mypy pandoc \
-            python3-flake8-bugbear python3-jsonschema python3-pulp \
+            python3-flake8-bugbear python3-jsonschema python3-proxmoxer python3-pulp \
             python3-pytest python3-pytest-cov python3-pytest-xdist \
             python3-requests python3-ruamel.yaml python3-yaml
 

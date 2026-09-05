@@ -28,6 +28,7 @@ classifiers = [
 # `ortools` and `pulp` are therefore optional extras, not hard requirements.
 dependencies = [
   "requests>=2.31",
+  "proxmoxer>=2.0",
   "ruamel.yaml>=0.18",
   "jsonschema>=4.20",
 ]
@@ -85,11 +86,12 @@ python_version = "3.11"
 # Paths come from the Makefile so the targets work before `src/` exists.
 strict = true
 warn_unreachable = true
-# Third-party stubs we do not control. jsonschema is a hard dependency (it is
-# in Debian trixie) but ships no py.typed marker and Debian has no
-# types-jsonschema, so it is treated the same as the optional solvers here.
+# Third-party stubs we do not control. jsonschema and proxmoxer are hard
+# dependencies (both in Debian trixie) but ship no py.typed marker and Debian
+# has no types- packages for either, so they are treated the same as the
+# optional solvers here.
 [[tool.mypy.overrides]]
-module = ["jsonschema.*", "ortools.*", "pulp.*", "statsmodels.*"]
+module = ["jsonschema.*", "proxmoxer.*", "ortools.*", "pulp.*", "statsmodels.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
