@@ -408,9 +408,34 @@ same token gets `403 Forbidden (Datastore.Allocate)` calling `GET /storage/{stor
 same storage — the single-item form apparently backs an edit-UI code path gated by the ability to
 change the config, not merely read it. The list form returns the identical per-storage object for
 every storage in one call, so nothing is lost by preferring it; it is also one call instead of
-`|storages|` calls. This keeps the tool's required privilege set to `*.Audit` roles only, which
-matters because a Storage DRS token is exactly the kind of credential that should never need more
-than read access until the moment it calls `move_disk`.
+`|storages|` calls.
+
+**`GET /nodes/{node}/storage/{storage}/content` itself needs `Datastore.Allocate`, not merely
+`Datastore.Audit`, contrary to what an "Audit-only, read-planning tool" design would hope.** Also
+verified empirically on the same live cluster: with only `Datastore.Audit` granted, the call
+succeeds (HTTP 200) but returns an empty list on every storage, node and content-type filter tried,
+with no error at any level — a false negative that looks exactly like "this storage has no
+content" unless you already know to be suspicious of it. Granting `Datastore.Allocate` (bundled
+with `Datastore.Audit` in a custom role, scoped per-storage — see below) on the same storages made
+`/content` immediately start returning real data, retested and confirmed. So the tool's true
+minimum privilege per storage in scope is `Datastore.Audit` **and** `Datastore.Allocate`, not Audit
+alone; `move_disk` needs nothing beyond that on the storage side (the VM side needs `VM.Config.Disk`
+and `VM.Migrate` or equivalent, out of scope for this note). Document this precisely in the operator
+manual rather than repeating the more comfortable but wrong "Audit is enough" claim — an operator
+who grants only Audit will see the tool silently treat every storage as empty of tracked volumes,
+which corrupts the `Uˢᵉˣᵗ` accounting of §5.1.1 without ever raising an error.
+
+**Two more things this exposed about Proxmox's ACL model, worth knowing before configuring a
+token:** first, **API tokens have their own ACL entries, separate from their owning user** — with
+privilege separation enabled (the default), a token's effective permission is the *intersection* of
+the user's permissions and whatever is granted to the token specifically, so granting a role to the
+user alone has no effect on the token, and granting it to the token alone has no effect either
+unless the user has it too. Both need the grant. Second, ACL entries at `/storage` (the parent path,
+with `propagate: 1`) were not sufficient in practice to make `Datastore.Allocate` retroactively work
+on already-listed sub-paths in one observed sequence during testing — granting the role explicitly
+at each `/storage/{id}` resolved it; whether the parent-path grant would have converged given more
+time was not conclusively isolated, so the operator-facing guidance below grants per-storage
+explicitly rather than relying on propagation from `/storage`.
 
 Parsing a disk from the VM config: a key matching
 

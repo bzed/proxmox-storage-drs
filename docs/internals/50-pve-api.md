@@ -60,21 +60,35 @@ form, and using it would quietly force a Storage DRS token to hold more
 privilege than the tool actually needs. `IMPLEMENTATION_PLAN.md` section 3.5
 was corrected to match once this was found — see that section's note.
 
-**`storage_content()` returned an empty list for every RBD-pool-backed
-storage on that same test cluster**, across every node and every filter
-tried (`content=images`, a `vmid` filter), with no error at any privilege
-level tested. `pve.py` does not paper over this: the method returns exactly
-what the API returned, because guessing at *why* a real cluster behaves this
-way — a Ceph-side permission the audit token cannot see, or a genuine
-limitation of `/content` listing for RBD-backed storage on this specific
-setup — is exactly what `.agents/domain-invariants.md` rule 10 warns
-against doing from an agent's own inference. `topology.py`, when it consumes
-this method, needs a documented fallback for the case where `/content` is
-authoritative for nothing (falling back to the VM config's own `size=`
-value, per section 3.5's "cross-checked against `/storage/{storage}/content`
-_which is authoritative for what is actually allocated_" — that sentence
-assumes content listing works, and this cluster is a live counterexample)
-rather than assuming every deployment's storage backend populates it.
+**`storage_content()` returned an empty list — not an error — on every
+storage, node and content-type filter tried, until the token also held
+`Datastore.Allocate` on that storage.** This was genuinely surprising and
+worth calling out precisely because it is a *silent* false negative:
+`Datastore.Audit` alone gives a clean `200` with `{"data": []}`, which looks
+exactly like "this storage legitimately has no tracked content" rather than
+"the caller cannot see it." It was not guessed at — see
+`IMPLEMENTATION_PLAN.md` section 3.5's note, which records the exact
+before/after (0 entries with Audit only, 37 and 1 entries respectively for
+two real storages once `Datastore.Allocate` was added) on the same live
+cluster. **The practical consequence: `pve.py`'s own "keep the token to
+Audit-only" goal for `storage_definitions()` does not extend to
+`storage_content()`** — a Storage DRS token genuinely needs
+`Datastore.Allocate` (bundled with `Datastore.Audit` in one role) on every
+storage it manages, or `topology.py` will silently compute `Uˢᵉˣᵗ` (section
+5.1.1) as if every storage were empty of untracked volumes, with no error to
+notice by. `docs/manual/00-installation.md` states the exact minimum ACL
+grant an operator needs; this is not a place to economize on privilege out
+of a preference that turned out not to match reality.
+
+Two more things about Proxmox's ACL model this surfaced, both now reflected
+in the manual's token-setup instructions: **an API token's effective
+permission is the *intersection* of its owning user's permissions and
+whatever is granted to the token itself** when privilege separation is on
+(the default) — granting a role to only one of the two has no effect, both
+need it; and the grant that was confirmed to work was made explicitly at
+each `/storage/{id}` rather than only at the parent `/storage` path, so that
+is what the manual instructs, rather than relying on propagation that was
+not cleanly isolated as working or not.
 
 ## `move_disk()`: the one and only bytes/s -> KiB/s conversion
 

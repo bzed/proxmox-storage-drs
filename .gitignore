@@ -25,6 +25,9 @@ config/drs.yaml
 config/*.local.yaml
 .env
 
+# Throwaway dev-only diagnostics against a real cluster; never shipped source
+check_pve_permissions.py
+
 # Claude Code local settings
 .claude/
 
