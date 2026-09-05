@@ -64,12 +64,13 @@ class ObjectiveBreakdown:
     arithmetic, not just the answer, and because tests cross-checking this
     against the section 14 worked example need each term individually."""
 
-    imbalance_term: float  # alpha * sum(e_s)
+    imbalance_term: float  # alpha * (sum(e_s) [l1] or max(u_s) [minmax] -- objective.spread_metric)
     move_count_term: float  # beta * number of disks that moved
     bytes_moved_term: float  # gamma * TiB moved
     fragmentation_term: float  # kappa * sum(extra storages per VM)
     reserve_penalty_term: float  # objective.reserve_violation_penalty * TiB short
-    spread_e: dict[str, float]  # storage id -> e_s, for reporting
+    spread_e: dict[str, float]  # storage id -> e_s = |u_s - u*|, for reporting (both metrics)
+    utilization: dict[str, float]  # storage id -> u_s, for reporting and the minmax metric
     reserve_statuses: dict[str, ReserveStatus]  # storage id -> (C4)/(C5) at this assignment
     moved_disk_keys: frozenset[str]
 
@@ -142,6 +143,18 @@ def evaluate_assignment(
     -- a parameter, not recomputed here, since every candidate evaluated
     during a single heuristic run shares the same value and recomputing it
     from scratch on every call would be pure waste.
+
+    ``objective.spread_metric`` picks (C6)'s two alternative imbalance
+    forms (section 5.4): ``"l1"`` (default) is ``alpha * sum(e_s)``, the
+    sum of every storage's absolute deviation from ``u*``; ``"minmax"`` is
+    ``alpha * max(u_s)`` -- the plan's own "``t >= u_s`` for all s", the
+    *raw* utilization of the single hottest storage, not the largest
+    deviation from ``u*`` (those are not the same quantity: minmax is
+    "indifferent to everything below" the hottest storage, which a
+    deviation-based measure is not, since a storage far *below* u* would
+    also produce a large deviation). ``spread_e``/``utilization`` are
+    always both populated regardless of which metric is selected, so a
+    caller (or a test) can inspect either view either way.
     """
 
     def storage_of(disk: Disk) -> str:
@@ -149,12 +162,19 @@ def evaluate_assignment(
 
     reserve_statuses: dict[str, ReserveStatus] = {}
     spread_e: dict[str, float] = {}
+    utilization: dict[str, float] = {}
     for storage in group.storages:
         status = compute_reserve_status(storage, group.disks, min_free_bytes, storage_of=storage_of)
         reserve_statuses[storage.id] = status
         load = sum(load_by_key.get(d.key, 0.0) for d in group.disks if storage_of(d) == storage.id)
         u_s = load / storage.capability_weight if storage.capability_weight else 0.0
+        utilization[storage.id] = u_s
         spread_e[storage.id] = abs(u_s - average_utilization)
+
+    if objective.spread_metric == "minmax":
+        spread = max(utilization.values()) if utilization else 0.0
+    else:
+        spread = sum(spread_e.values())
 
     moved = frozenset(
         d.key for d in group.disks if assignment.get(d.key, d.current_storage) != d.current_storage
@@ -173,12 +193,13 @@ def evaluate_assignment(
     fragmentation = sum(max(0, len(storages) - 1) for storages in storages_per_vm.values())
 
     return ObjectiveBreakdown(
-        imbalance_term=objective.alpha_spread * sum(spread_e.values()),
+        imbalance_term=objective.alpha_spread * spread,
         move_count_term=objective.beta_move_count * len(moved),
         bytes_moved_term=objective.gamma_move_bytes_per_tib * bytes_moved_tib,
         fragmentation_term=objective.kappa_vm_affinity * fragmentation,
         reserve_penalty_term=objective.reserve_violation_penalty * reserve_shortfall_tib,
         spread_e=spread_e,
+        utilization=utilization,
         reserve_statuses=reserve_statuses,
         moved_disk_keys=moved,
     )

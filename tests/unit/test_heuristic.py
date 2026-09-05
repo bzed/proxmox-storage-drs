@@ -104,6 +104,70 @@ def test_initial_imbalance_term_matches_section_14_2_e_before() -> None:
     assert breakdown.imbalance_term == pytest.approx(8.0667, abs=1e-4)
     assert breakdown.reserve_statuses["san-a"].violated
     assert breakdown.reserve_statuses["san-a"].shortfall_bytes == round(0.5 * TIB)
+    assert breakdown.utilization["san-a"] == pytest.approx(6.5)  # c_s=1.0 -> u_s == L_s
+
+
+# ------------------------------------------------------------- REVIEW.md Q-01
+
+
+def test_spread_metric_l1_is_the_default_and_sums_every_deviation() -> None:
+    group = section_14_group()
+    loads = section_14_loads()
+    assignment = seed_assignment(group)
+    assert DEFAULT_OBJECTIVE.spread_metric == "l1"
+    breakdown = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 0, 7.4 / 3)
+    assert breakdown.imbalance_term == pytest.approx(sum(breakdown.spread_e.values()))
+
+
+def test_spread_metric_minmax_uses_only_the_hottest_storages_raw_utilization() -> None:
+    """Section 5.4: minmax is `t >= u_s` -- the hottest storage's own u_s,
+    not its deviation from u* (those disagree whenever a cold storage's
+    deviation below u* happens to be the largest one, which this fixture
+    is not, so this test also cross-checks the two forms are computed
+    independently rather than one derived from the other by accident)."""
+    group = section_14_group()
+    loads = section_14_loads()
+    assignment = seed_assignment(group)
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, spread_metric="minmax")
+
+    breakdown = evaluate_assignment(group, assignment, loads, objective, 0, 7.4 / 3)
+
+    assert breakdown.imbalance_term == pytest.approx(6.5)  # san-a's raw u_s, the hottest
+    assert breakdown.imbalance_term != pytest.approx(max(breakdown.spread_e.values()))
+    # Both views are always populated, regardless of which metric is active.
+    assert breakdown.utilization["san-a"] == pytest.approx(6.5)
+    assert breakdown.spread_e["san-a"] == pytest.approx(abs(6.5 - 7.4 / 3))
+
+
+def test_spread_metric_minmax_is_indifferent_to_a_second_nearly_as_bad_storage() -> None:
+    """The manual's own claim, made concrete: with the same hottest storage
+    (u_s=5.0) in both scenarios, minmax scores them identically no matter
+    how the *other* storages are doing, while l1 correctly tells a group
+    with two problem storages apart from one with only a single problem."""
+    storages = (make_storage("san-a"), make_storage("san-b"), make_storage("san-c"))
+    disks = (
+        make_disk("101:scsi0", 1.0, 0.0, "san-a"),
+        make_disk("102:scsi0", 1.0, 0.0, "san-b"),
+        make_disk("103:scsi0", 1.0, 0.0, "san-c"),
+    )
+    group = Group(name="g", storages=storages, disks=disks)
+    assignment = seed_assignment(group)
+    minmax = dataclasses.replace(DEFAULT_OBJECTIVE, spread_metric="minmax")
+    l1 = dataclasses.replace(DEFAULT_OBJECTIVE, spread_metric="l1")
+
+    # Only san-a is hot; san-b/san-c already sit at the target.
+    one_problem_loads = {"101:scsi0": 5.0, "102:scsi0": 3.0, "103:scsi0": 3.0}
+    # san-a is equally hot, but san-b/san-c are now nearly as bad too.
+    two_problem_loads = {"101:scsi0": 5.0, "102:scsi0": 2.9, "103:scsi0": 2.9}
+
+    one_minmax = evaluate_assignment(group, assignment, one_problem_loads, minmax, 0, 3.0)
+    two_minmax = evaluate_assignment(group, assignment, two_problem_loads, minmax, 0, 3.0)
+    one_l1 = evaluate_assignment(group, assignment, one_problem_loads, l1, 0, 3.0)
+    two_l1 = evaluate_assignment(group, assignment, two_problem_loads, l1, 0, 3.0)
+
+    assert one_minmax.imbalance_term == pytest.approx(two_minmax.imbalance_term) == 5.0
+    assert one_l1.imbalance_term != pytest.approx(two_l1.imbalance_term)
+    assert two_l1.imbalance_term > one_l1.imbalance_term  # l1 correctly sees it got worse
 
 
 # --------------------------------------------------------------- full heuristic runs

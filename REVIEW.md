@@ -44,6 +44,16 @@ also gained a reauthenticate-and-retry-once path for a ticket that expires from 
 cause, e.g. a long `apply --confirm` wait), and the manual now names the VM-level privileges
 `apply` will need.
 
+An **eighth pass** (section 13) reviews phases 3-4: `loadmodel.py` (the section 4 load model,
+wired into `show-load`), `gates.py` (the section 6 act/no-act decision), `heuristic.py` (the
+section 5.4/5.5 dependency-free solver), the `pve.py` reauthenticate-and-retry path and
+`topology.py` concurrent fetch from the P-01/P-02 fixes, and the `reserve.py`/`metrics.py`
+extensions those modules needed. Two new findings (Q-01..Q-02) are identified, both Low.
+**Section 14** records how both were resolved: `evaluate_assignment()` now implements
+`objective.spread_metric: minmax` correctly (as `max(u_s)`, not `max(e_s)` — the finding's own
+suggested fix would have computed the wrong quantity), and the manual now documents the
+per-group Prometheus query multiplier for multi-group configs.
+
 ---
 
 ## 0. Overall assessment
@@ -1386,6 +1396,159 @@ marking the manual entry as "not yet effective in this build."
 
 Verification: `python3 -m pytest` — 231 passed, 1 skipped (`statsmodels` not installed), 98.78%
 coverage (`pve.py` at 100%, both new lines this round). `make lint typecheck` clean.
+
+---
+
+## 13. Eighth-pass review of phases 3-4
+
+Commits `5994dc1..9a7c270` add phases 3 and 4: `loadmodel.py` (section 4), `gates.py` (section 6),
+`heuristic.py` (section 5.4/5.5), plus the P-01/P-02/P-03 fixes and the unused-disk root-cause
+documentation. The `reserve.py` and `metrics.py` modules were extended with the
+`storage_of` callback and `compute_disk_coverage()` extraction those new modules needed, and
+`cli.py`'s `show-load` now computes and displays per-disk/per-storage load and a per-group gate
+verdict.
+
+The implementation continues to be high quality. The heuristic's `evaluate_assignment()` is
+correctly factored as a pure function shared with the future MILP path, the repair-before-descend
+design makes the "reserve is never traded" invariant literal rather than merely well-weighted,
+and the test suite cross-checks the heuristic's objective totals against REVIEW.md Appendix A's
+hand-derived values to five decimal places (2.533333 / 3.158333). The gates module correctly
+implements the three-gate cascade in section 6's order, with the degenerate-case table handled.
+The `pve.py` reauthenticate-and-retry-once path is well-designed: the `threading.Lock` prevents
+a stampede, the closure over `_trial` in `_repair`'s inner loop avoids the classic late-binding
+bug, and the `storage_of` callback on `reserve.py` is the clean extension point the plan's
+"identical shape" requirement demands.
+
+### 13.1 Resolution of seventh-pass findings
+
+All three (P-01..P-03) are resolved — see section 12 for the full record.
+
+### 13.2 Summary of eighth-pass findings
+
+| ID | Severity | Section / File | Topic |
+|----|----------|----------------|-------|
+| Q-01 | Low | §5.4, heuristic.py, config.py | `objective.spread_metric: minmax` is accepted by the schema and documented in the manual but silently ignored by the heuristic — always computes L1 |
+| Q-02 | Low | §4, loadmodel.py, cli.py | `compute_group_load` fetches 7 Prometheus queries per group; a multi-group config re-fetches the same unfiltered series N times — acknowledged in internals docs but not in the manual |
+
+### 13.3 Q-01 — `objective.spread_metric: minmax` silently ignored by the heuristic
+
+**Severity:** Low
+**Files:** `heuristic.py:157`, `config.py:164`, `config_schema.json:155`,
+`docs/manual/10-configuration.md`
+
+The config schema accepts `spread_metric: "l1"` or `"minmax"`. The manual documents both:
+"`l1` (sum of each storage's deviation from the group's target utilization) or `minmax` (only
+the single hottest storage)." The plan's section 5.4 defines both forms: `e_s` for L1
+(`α · Σ e_s`), `t` for minmax. Section 15.1's traceability table maps `objective.spread_metric`
+to "§5.3 (C6), L1 vs min–max".
+
+But `heuristic.py`'s `evaluate_assignment()` always computes L1: `spread_e[storage.id] = abs(u_s
+- average_utilization)` and `imbalance_term = objective.alpha_spread * sum(spread_e.values())`.
+The `objective.spread_metric` field is never read. An operator who sets `spread_metric: minmax`
+gets L1 behaviour regardless — the same class of silent-ignoring that P-01 and P-02 identified
+for other config knobs.
+
+This is Low rather than Medium because: (a) the default is `l1`, so an operator has to actively
+choose `minmax` to be affected; (b) the heuristic is not yet wired into any CLI command, so no
+production decision is currently made from this path; (c) the MILP path (`optimize.py`, not yet
+written) is where `spread_metric` will matter most, since the CP-SAT/CBC model needs to
+construct either the `e_s` variables or the `t` variable depending on it.
+
+**Recommendation:** Either implement the minmax form in `evaluate_assignment()` (it is a
+one-line change: `max(spread_e.values())` instead of `sum(spread_e.values())` when
+`objective.spread_metric == "minmax"`), or — if the heuristic is intentionally L1-only and
+minmax is a future MILP-only option — add a note to the manual's `spread_metric` entry saying
+the heuristic always uses L1 and `minmax` only affects the MILP solver (not yet written). The
+test suite should assert whichever behaviour is chosen.
+
+### 13.4 Q-02 — Per-group Prometheus query redundancy in multi-group configs
+
+**Severity:** Low
+**Files:** `loadmodel.py:194-195`, `cli.py:416-424`, `docs/internals/70-loadmodel.md:30-37`
+
+`compute_group_load()` calls `compute_disk_coverage()` (1 range query) and
+`_fetch_all_raw_quantities()` (6 instant queries) — 7 Prometheus queries per group. Since
+`show-load` calls it once per group in a loop (`cli.py:416`), a config with N groups makes 7N
+queries. The coverage query and all six raw-quantity queries are unfiltered by group (they use
+`sum by (vmid, device)` which returns all disks), so the same data is fetched N times and
+discarded N-1 times.
+
+The internals doc (`70-loadmodel.md:30-37`) acknowledges this as a "known limitation, not a bug"
+and notes that "fetching once and slicing per group would be a straightforward follow-up if a real
+deployment's group count ever makes this Prometheus load worth avoiding." This is honest, but
+the manual does not mention it — an operator with 10 groups and a busy Prometheus might wonder
+why `show-load` issues 70 queries when 7 would suffice.
+
+This is Low because: the typical deployment has 1-3 groups (the worked example has 1); the
+queries are instant queries (fast); and the redundancy is correct (each group's
+coverage/rejection decisions are independent). It is a performance note, not a correctness issue.
+
+**Recommendation:** Either add a note to the manual's `show-load` section mentioning that
+multi-group configs issue queries per group (so an operator with many groups and a busy
+Prometheus is not surprised), or leave it as an internals-only note since it is unlikely to
+matter in practice. No code change is needed for correctness.
+
+### 13.5 Verification
+
+- `python3 -m pytest`: 277 passed, 1 skipped (statsmodels not installed), 98.69% coverage —
+  above the 85% floor. No failures.
+- `python3 tests/fixtures/generate_expected.py --check`: exits 0 — both fixture expected files
+  current.
+- `sha256sum --check` on all three PDF stamps (plan, internals, manual): all pass.
+- Heuristic objective totals cross-checked against REVIEW.md Appendix A's hand-derived values:
+  three-move (β=0.25) total = 2.533333 ✓; two-move (β=0.50) total = 3.158333 ✓; initial imbalance
+  E_before = 8.0667 ✓. The test assertions match the Appendix A values to 5 decimal places.
+- `gates.py`'s imbalance computation matches the plan's section 6 formula exactly:
+  `(max(u_s) - min(u_s)) / u*` — this is the minmax form, correctly independent of
+  `objective.spread_metric` (the gate always uses minmax per the plan, regardless of the
+  objective's spread metric setting).
+- `reserve.py`'s `storage_of` callback extension is correctly used by `heuristic.py` for
+  candidate-assignment evaluation and by `cli.py`/`topology.py` for current-state reporting
+  (defaulting to `_current_storage`). The `Storage.foreign_used_bytes` is correctly
+  assignment-invariant (foreign volumes are never members of D).
+- `pve.py`'s reauthenticate path: the `threading.Lock` serializes concurrent reauthentication,
+  the `_build_api` split allows both initial login and reauth to share the same construction
+  code, and the `_apply_ticket_refresh_seconds` is a guarded no-op for API-token auth and for
+  any `proxmoxer` internal shape change. Test coverage: `test_pve.py` has 7 new tests covering
+  reauth success, reauth failure, retry failure, transport failure after reauth, no-callback
+  behaviour, `ticket_refresh_seconds` application, and `_apply_ticket_refresh_seconds` as
+  no-op.
+- `topology.py`'s concurrent fetch: `ThreadPoolExecutor.map()` preserves order, the
+  fetch/join split keeps `disks_by_group`/`warnings` deterministic, and `read_workers=1`
+  degenerates to sequential. The `PveClient` is shared across threads.
+- `metrics.py`'s `compute_disk_coverage` extraction correctly shares the coverage computation
+  between `verify-metrics`'s report and `loadmodel.py`'s per-disk gate — one implementation
+  per AGENTS.md section 5.
+- The `show-load` command now displays `ℓ_d`, `L_s`, `u_s`, gate verdicts, coverage warnings,
+  and idle-group detection, and degrades gracefully on a per-group Prometheus outage. The
+  manual's `30-safety-and-status.md` status table is updated to reflect the new
+  functionality.
+- `docs/internals/70-loadmodel.md`, `80-gates.md`, `90-heuristic.md` correctly describe what
+  each module does, what it deliberately does not do yet (polish, format eligibility,
+  `state.json` wiring, cooldowns), and cross-reference the plan sections and REVIEW.md
+  Appendix A.
+
+### 13.6 Assessment
+
+Phases 3-4 are solid. The load model, gates, and heuristic all match the plan, the test suite
+cross-checks the heuristic's objective arithmetic against independently hand-derived values, and
+the honest "not yet implemented" handling continues in both the code (heuristic step 4 polish
+and format eligibility are documented gaps) and the documentation (`30-safety-and-status.md`'s
+status table, `90-heuristic.md`'s "what this pass deliberately does not do" section). The two
+findings (Q-01..Q-02) are both Low: Q-01 is a config knob silently ignored by the heuristic
+(same pattern as P-01/P-02, but lower severity because the heuristic is not yet wired into any
+command and the default is the implemented value), and Q-02 is a per-group query redundancy
+already acknowledged in the internals docs. Neither is a correctness issue.
+
+## 14. Resolution of eighth-pass findings (Q-01..Q-02)
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| Q-01 | Resolved | `evaluate_assignment()` now reads `objective.spread_metric`: `"l1"` (default, unchanged) sums every storage's deviation from `u*`; `"minmax"` uses `alpha * max(u_s)` — the plan's own `t >= u_s`, the *raw* utilization of the hottest storage, not `max(e_s)` (a deliberate correction of the finding's own one-line suggestion, which would have computed the wrong quantity — a cold storage's large deviation below `u*` would then wrongly influence a metric the plan and the manual both describe as reacting only to the single hottest storage). `ObjectiveBreakdown` gained a `utilization` field so both views are always available regardless of which metric is active. Three new tests, including one built directly from the manual's own "indifferent to a second nearly-as-bad storage" claim, made concrete with numbers. `docs/internals/90-heuristic.md` documents the distinction explicitly, since it is easy to get backwards. |
+| Q-02 | Resolved | Documented rather than changed, per the finding's own recommendation: the manual's `show-load` page now states that an `N`-group config issues `7N` Prometheus queries, not 7, and why (each group's coverage/data-quality decisions are independent, so the fetch cannot be shared). No code change — the finding's own severity assessment (correct, just wasteful for many groups) still applies. |
+
+Verification: `python3 -m pytest` — 280 passed, 1 skipped (`statsmodels` not installed). `make
+lint typecheck` clean.
 
 ---
 

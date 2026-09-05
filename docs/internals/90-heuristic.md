@@ -60,6 +60,31 @@ exactly the capacity-locked scenario the plan describes (two storages each
 with headroom smaller than any single disk) and checks the only reachable
 improvement — a swap — is the one found.
 
+## `objective.spread_metric`: two different quantities, not one rescaled
+
+Section 5.4/(C6) offers two imbalance forms, and `evaluate_assignment()`
+implements both: `"l1"` (default) is `alpha * sum(e_s)`, every storage's
+absolute deviation from `u*` summed; `"minmax"` is `alpha * max(u_s)` --
+the plan's own `t >= u_s` for all `s`, the *raw* utilization of the single
+hottest storage. These are not the same quantity with a different
+aggregation: `max(u_s)` and `max(e_s)` can disagree, because a storage
+sitting far *below* `u*` produces a large deviation `e_s` that minmax was
+never meant to notice (the manual's own words: "indifferent to a second
+nearly-as-bad storage" — nearly-as-bad on the *high* side; a cold storage
+is not what minmax was designed to react to at all). `ObjectiveBreakdown`
+carries both `spread_e` (deviations) and `utilization` (raw `u_s`)
+regardless of which metric is active, computed once in the same loop, so
+switching metrics never means computing something the other mode didn't
+already have on hand.
+
+REVIEW.md's Q-01 found this config knob silently ignored by an earlier
+version of this module (always L1, `objective.spread_metric` never read)
+— the same class of gap P-01/P-02 found in `pve.py`/`topology.py`.
+`test_spread_metric_minmax_is_indifferent_to_a_second_nearly_as_bad_storage`
+is the regression test, built directly from the manual's own claim: two
+scenarios with an identical hottest storage but a materially different
+second-worst one score identically under minmax and differently under l1.
+
 ## Proof this reproduces the plan, not just itself
 
 `tests/unit/test_heuristic.py` doesn't stop at "the assignment matches the
