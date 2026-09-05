@@ -8,17 +8,17 @@ section 2 architecture actually exists right now?
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
 gate, solve, cost, order, execute. As of this page, stages 1 (collect)
-through 4 (order) exist for the heuristic path — the MILP path (stage 4's
-other backend), cost (payback) and execute are `IMPLEMENTATION_PLAN.md`
-section 12 phases 5-9 and are not yet written. Do not take this page as a
-claim that the whole pipeline runs end to end —
-[`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
+through 6 (cost/order — sections 5-8 minus the MILP backend) exist for the
+heuristic path — the MILP path (an alternative stage-4 backend) and
+execute are `IMPLEMENTATION_PLAN.md` section 12 phases 6-9 and are not yet
+written. Do not take this page as a claim that the whole pipeline runs end
+to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
 is the authoritative per-command status: `plan` is real and prints an
-ordered, transient-feasible dry-run plan (see
+ordered, transient-feasible, payback-checked dry-run plan (see
 [`../manual/27-plan.md`](../manual/27-plan.md)), but nothing yet *executes*
-one (no `apply`), no cost/benefit (payback) check exists yet, and every
-call site passes `last_load=None` since `state.json` (the real drift
-history) does not exist yet — see [`80-gates.md`](80-gates.md).
+one (no `apply`), and every call site passes `last_load=None` since
+`state.json` (the real drift history) does not exist yet — see
+[`80-gates.md`](80-gates.md).
 
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
@@ -47,6 +47,9 @@ history) does not exist yet — see [`80-gates.md`](80-gates.md).
                                                       │
                                      schedule.py (order_moves():
                                      transient reserve invariant, section 8)
+                                                      │
+                                     payback.py (evaluate_plan_payback():
+                                     cost/benefit acceptance test, section 7)
                                                       │
         ┌───────────────────────────────────────────────────────────────────┐
         │            cli.py  (argument parsing, command dispatch,           │
@@ -78,15 +81,17 @@ history) does not exist yet — see [`80-gates.md`](80-gates.md).
 | `gates.py` | `evaluate_group_gates()`: reserve override, drift, imbalance — the act/no-act verdict, with reasoning | section 6 |
 | `heuristic.py` | `run_heuristic()`: seed/repair/descend, and `evaluate_assignment()`, the section 5.4 objective shared with the (unwritten) MILP path | sections 5.4/5.5 |
 | `schedule.py` | `order_moves()`: transient-feasible ordering of a target assignment's moves, deadlock reporting | section 8 |
+| `payback.py` | `evaluate_plan_payback()`: the cost/benefit acceptance test, with a reserve-override exemption mirroring `gates.py`'s | section 7 |
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan` | section 11.3 |
 
-Not yet written: `optimize.py`, `payback.py`, `execute.py` — and, within
-modules that do exist, cooldown handling in `gates.py` (needs
-`state.json`'s timestamps; see [`80-gates.md`](80-gates.md)), heuristic
-step 4 "polish" and (C2) format-compatibility eligibility in `heuristic.py`
-(see [`90-heuristic.md`](90-heuristic.md)), and concurrent scheduling,
-priority-2 ordering and staging in `schedule.py` (see
-[`95-schedule.md`](95-schedule.md)).
+Not yet written: `optimize.py`, `execute.py` — and, within modules that do
+exist, cooldown handling in `gates.py` (needs `state.json`'s timestamps;
+see [`80-gates.md`](80-gates.md)), heuristic step 4 "polish" and (C2)
+format-compatibility eligibility in `heuristic.py` (see
+[`90-heuristic.md`](90-heuristic.md)), concurrent scheduling, priority-2
+ordering and staging in `schedule.py` (see [`95-schedule.md`](95-schedule.md)),
+and the payback re-solve-and-retry loop plus the section 7.3 saturation
+check in `payback.py` (see [`96-payback.md`](96-payback.md)).
 
 ## Why config.py depends on forecast.py
 
@@ -126,3 +131,6 @@ this.
   moves under the section 8 transient invariant, why `cost_m = z_d` is
   exact today (not an approximation), and why the heuristic accepting a
   residual violation can still mean the scheduler reports a deadlock.
+- [`96-payback.md`](96-payback.md) — the section 7 cost/benefit test,
+  the `headroom_src`/`headroom_dst` gap in the plan's own cost formula,
+  and why a reserve-fixing plan always passes the economic test.

@@ -39,9 +39,17 @@ from proxmox_storage_drs.heuristic import HeuristicResult, run_heuristic
 from proxmox_storage_drs.loadmodel import GroupLoad, compute_group_load
 from proxmox_storage_drs.logging_setup import configure_logging
 from proxmox_storage_drs.metrics import PrometheusClient, VerifyMetricsReport, verify_metrics
+from proxmox_storage_drs.payback import (
+    MoveCost,
+    PaybackResult,
+    compute_benefit_load_seconds,
+    compute_move_cost,
+    compute_wipe_duration_seconds,
+    evaluate_plan_payback,
+)
 from proxmox_storage_drs.pve import build_client as build_pve_client
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, largest_disk_bytes
-from proxmox_storage_drs.schedule import ScheduleResult, order_moves
+from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult, order_moves
 from proxmox_storage_drs.topology import Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
@@ -452,14 +460,54 @@ def _spread_fraction(utilization: dict[str, float], average_utilization: float) 
     return (max(utilization.values()) - min(utilization.values())) / average_utilization
 
 
+_BYTES_PER_TIB = 1 << 40
+
+
+def _render_plan_move_line(
+    index: int, move: ScheduledMove, move_cost: MoveCost | None, load_by_key: dict[str, float]
+) -> str:
+    duration_str = "?"
+    flag = ""
+    if move_cost is not None:
+        duration_str = f"~{format_duration_seconds(move_cost.duration_mirror_seconds)}"
+        if move_cost.duration_wipe_seconds:
+            duration_str += f" +wipe {format_duration_seconds(move_cost.duration_wipe_seconds)}"
+        if move_cost.exceeds_max_duration:
+            flag = "  ⚠ exceeds migration.max_single_move_duration"
+    change = -move.imbalance_reduction
+    load_per_tib = load_by_key.get(move.disk_key, 0.0) / (move.size_bytes / _BYTES_PER_TIB)
+    return (
+        f"  {index}. {move.disk_key:<14} {move.from_storage} → {move.to_storage}   "
+        f"{format_bytes(move.size_bytes):>10}   {duration_str}   "
+        f"Δimbalance {change:+.2f}   ℓ/z {load_per_tib:.2f}{flag}"
+    )
+
+
+def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: float) -> list[str]:
+    mark = "✓" if payback_result.accepted else "✗"
+    lines = [
+        f"  payback: benefit {payback_result.benefit_load_seconds:.3g} load·s vs "
+        f"cost {payback_result.total_cost_load_seconds:.3g} load·s → "
+        f"ratio {payback_result.ratio:.3g} (need {payback_ratio:g}) {mark}"
+    ]
+    if not payback_result.accepted:
+        lines.append(
+            "  ⚠ this plan does not pass section 7.3's payback test -- "
+            "automatically re-solving with adjusted weights is not yet "
+            "implemented (phase 5 gap); review before applying"
+        )
+    return lines
+
+
 def _render_plan_human(
     topology: Topology,
     group_loads: dict[str, GroupLoad],
     gate_decisions: dict[str, GateDecision],
     heuristic_results: dict[str, HeuristicResult],
     schedule_results: dict[str, ScheduleResult],
+    payback_results: dict[str, PaybackResult],
     load_errors: dict[str, str],
-    bwlimit_bytes_per_sec: int,
+    payback_ratio: float,
 ) -> str:
     lines: list[str] = []
     for group in topology.groups:
@@ -477,20 +525,21 @@ def _render_plan_human(
             lines.append("")
             continue
 
+        group_load = group_loads[group.name]
+        load_by_key = group_load.load_by_disk_key()
+        payback_result = payback_results.get(group.name)
+        move_costs_by_key = (
+            {mc.disk_key: mc for mc in payback_result.move_costs} if payback_result else {}
+        )
+
         for i, move in enumerate(schedule_result.order, start=1):
-            duration = move.size_bytes / bwlimit_bytes_per_sec if bwlimit_bytes_per_sec else None
-            duration_str = f"~{format_duration_seconds(duration)}" if duration else "?"
-            change = -move.imbalance_reduction
             lines.append(
-                f"  {i}. {move.disk_key:<14} {move.from_storage} → {move.to_storage}   "
-                f"{format_bytes(move.size_bytes):>10}   {duration_str:>8}   "
-                f"Δimbalance {change:+.2f}"
+                _render_plan_move_line(i, move, move_costs_by_key.get(move.disk_key), load_by_key)
             )
         if schedule_result.deadlocked_msg:
             lines.append(f"  ⚠ {schedule_result.deadlocked_msg}")
 
         heuristic_result = heuristic_results[group.name]
-        group_load = group_loads[group.name]
         before_spread = _spread_fraction(
             {s.storage_id: s.utilization for s in group_load.storages},
             group_load.average_utilization,
@@ -505,12 +554,8 @@ def _render_plan_human(
             )
             lines.append(after_line)
             lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
-            lines.append(
-                "  Note: payback (cost/benefit) validation is not yet implemented "
-                "(IMPLEMENTATION_PLAN.md phase 5) -- these moves have not been checked "
-                "against migration.payback_ratio, and the duration above is mirror time "
-                "only (no saferemove wipe accounted for)."
-            )
+            if payback_result is not None:
+                lines.extend(_render_plan_payback_lines(payback_result, payback_ratio))
         lines.append("")
     if topology.warnings:
         lines.append("Warnings:")
@@ -525,16 +570,23 @@ def _render_plan_json(
     gate_decisions: dict[str, GateDecision],
     heuristic_results: dict[str, HeuristicResult],
     schedule_results: dict[str, ScheduleResult],
+    payback_results: dict[str, PaybackResult],
     load_errors: dict[str, str],
-    bwlimit_bytes_per_sec: int,
 ) -> dict[str, object]:
     groups_out = []
     for group in topology.groups:
         decision = gate_decisions.get(group.name)
         schedule_result = schedule_results.get(group.name)
+        payback_result = payback_results.get(group.name)
+        group_load = group_loads.get(group.name)
+        load_by_key = group_load.load_by_disk_key() if group_load else {}
+        move_costs_by_key = (
+            {mc.disk_key: mc for mc in payback_result.move_costs} if payback_result else {}
+        )
         moves_out = []
         if schedule_result is not None:
             for move in schedule_result.order:
+                move_cost = move_costs_by_key.get(move.disk_key)
                 moves_out.append(
                     {
                         "disk_key": move.disk_key,
@@ -545,10 +597,17 @@ def _render_plan_json(
                         "size_bytes": move.size_bytes,
                         "imbalance_reduction": move.imbalance_reduction,
                         "resolves_reserve_violation": move.resolves_reserve_violation,
-                        "estimated_mirror_duration_seconds": (
-                            move.size_bytes / bwlimit_bytes_per_sec
-                            if bwlimit_bytes_per_sec
-                            else None
+                        "load_per_tib": load_by_key.get(move.disk_key, 0.0)
+                        / (move.size_bytes / _BYTES_PER_TIB),
+                        "duration_mirror_seconds": (
+                            move_cost.duration_mirror_seconds if move_cost else None
+                        ),
+                        "duration_wipe_seconds": (
+                            move_cost.duration_wipe_seconds if move_cost else None
+                        ),
+                        "cost_load_seconds": move_cost.cost_load_seconds if move_cost else None,
+                        "exceeds_max_duration": (
+                            move_cost.exceeds_max_duration if move_cost else None
                         ),
                     }
                 )
@@ -561,7 +620,6 @@ def _render_plan_json(
                 "drift_fraction": decision.drift_fraction,
                 "imbalance_fraction": decision.imbalance_fraction,
             }
-        group_load = group_loads.get(group.name)
         heuristic_result = heuristic_results.get(group.name)
         before_spread = after_spread = None
         if group_load is not None:
@@ -573,6 +631,16 @@ def _render_plan_json(
                 after_spread = _spread_fraction(
                     heuristic_result.breakdown.utilization, group_load.average_utilization
                 )
+        payback_out = None
+        if payback_result is not None:
+            payback_out = {
+                "benefit_load_seconds": payback_result.benefit_load_seconds,
+                "total_cost_load_seconds": payback_result.total_cost_load_seconds,
+                "ratio": payback_result.ratio,
+                "aggregate_ok": payback_result.aggregate_ok,
+                "rejected_moves": list(payback_result.rejected_moves),
+                "accepted": payback_result.accepted,
+            }
         groups_out.append(
             {
                 "name": group.name,
@@ -583,7 +651,7 @@ def _render_plan_json(
                 "deadlock_message": schedule_result.deadlocked_msg if schedule_result else None,
                 "before_spread": before_spread,
                 "after_spread": after_spread,
-                "payback_validated": False,
+                "payback": payback_out,
             }
         )
     return {"groups": groups_out, "warnings": list(topology.warnings)}
@@ -600,6 +668,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
     gate_decisions: dict[str, GateDecision] = {}
     heuristic_results: dict[str, HeuristicResult] = {}
     schedule_results: dict[str, ScheduleResult] = {}
+    payback_results: dict[str, PaybackResult] = {}
     load_errors: dict[str, str] = {}
 
     for group in topology.groups:
@@ -638,15 +707,29 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
             resolved.config.solver.heuristic_iterations,
         )
         heuristic_results[group.name] = heuristic_result
-        schedule_results[group.name] = order_moves(
+        schedule_result = order_moves(
             group,
             heuristic_result.assignment,
             group_load.load_by_disk_key(),
             resolved.config.objective,
             min_free_bytes,
         )
+        schedule_results[group.name] = schedule_result
 
-    bwlimit = resolved.config.migration.bwlimit_bytes_per_sec
+        storages_by_id = {s.id: s for s in group.storages}
+        move_costs = [
+            compute_move_cost(move, storages_by_id[move.from_storage], resolved.config.migration)
+            for move in schedule_result.order
+        ]
+        benefit = compute_benefit_load_seconds(
+            heuristic_result.initial_breakdown.imbalance_term,
+            heuristic_result.breakdown.imbalance_term,
+            resolved.config.migration.payback_horizon_seconds,
+        )
+        payback_results[group.name] = evaluate_plan_payback(
+            move_costs, benefit, resolved.config.migration.payback_ratio
+        )
+
     if args.json:
         print(
             json.dumps(
@@ -656,8 +739,8 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                     gate_decisions,
                     heuristic_results,
                     schedule_results,
+                    payback_results,
                     load_errors,
-                    bwlimit,
                 ),
                 indent=2,
                 sort_keys=True,
@@ -671,23 +754,12 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                 gate_decisions,
                 heuristic_results,
                 schedule_results,
+                payback_results,
                 load_errors,
-                bwlimit,
+                resolved.config.migration.payback_ratio,
             )
         )
     return 0
-
-
-def _implied_wipe_seconds(disk_bytes: int, throughput_bytes_per_sec: float | None) -> float | None:
-    """Sections 3.5/7.1/9.3: ``z_max / saferemove_throughput``.
-
-    Not yet shared with ``payback.py``'s identical ``duration_wipe_d``
-    formula (section 7.1), since that module does not exist yet -- extract
-    this to one shared function the day it does (AGENTS.md section 5).
-    """
-    if not throughput_bytes_per_sec:
-        return None
-    return disk_bytes / throughput_bytes_per_sec
 
 
 def _render_verify_storages_human(topology: Topology, config: Any) -> str:
@@ -698,7 +770,7 @@ def _render_verify_storages_human(topology: Topology, config: Any) -> str:
             largest = largest_disk_bytes(group.disks, storage.id)
             state = "on" if storage.saferemove else "off"
             lines.append(f"  {storage.id}  saferemove={state}")
-            wipe_seconds = _implied_wipe_seconds(
+            wipe_seconds = compute_wipe_duration_seconds(
                 largest, storage.saferemove_throughput_bytes_per_sec
             )
             if wipe_seconds is None:
@@ -733,7 +805,7 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
         storages_out = []
         for storage in group.storages:
             largest = largest_disk_bytes(group.disks, storage.id)
-            wipe_seconds = _implied_wipe_seconds(
+            wipe_seconds = compute_wipe_duration_seconds(
                 largest, storage.saferemove_throughput_bytes_per_sec
             )
             storages_out.append(

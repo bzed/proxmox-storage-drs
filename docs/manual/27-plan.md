@@ -12,21 +12,23 @@ For each group, `plan`:
 2. If the gate says `NO ACTION`, stops there for that group — no solver
    runs, nothing more to show.
 3. If it says `ACT`, runs the heuristic solver (`IMPLEMENTATION_PLAN.md`
-   section 5.4/5.5) to compute a target assignment, then orders its moves
-   under the section 8 transient reserve invariant.
+   section 5.4/5.5) to compute a target assignment, orders its moves under
+   the section 8 transient reserve invariant, and checks the whole plan
+   against section 7's payback rule.
 
 This example uses the same section 14 worked example `show-load`'s manual
-page does, so the numbers are traceable to that section:
+page does, at the default weights (the three-move plan), so the numbers
+are traceable to that section:
 
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml plan
 Group fc-tier1 → ACT: reserve violated on san-a; bypassing the drift and imbalance gates (section 13: safety is not subject to hysteresis)
-  1. 102:scsi0      san-a → san-c     1.50 TiB      ~2.2h   Δimbalance -4.53
-  2. 101:scsi1      san-a → san-b     1.00 TiB      ~1.5h   Δimbalance -2.00
-  3. 105:scsi0      san-c → san-b   512.00 GiB     ~43.7m   Δimbalance -0.40
+  1. 102:scsi0      san-a → san-c     1.50 TiB   ~2.2h   Δimbalance -4.53   ℓ/z 1.67
+  2. 101:scsi1      san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00
+  3. 105:scsi0      san-c → san-b   512.00 GiB   ~43.7m   Δimbalance -0.40   ℓ/z 0.40
   after: san-a=3.00  san-b=1.90  san-c=2.50
   spread: 255.4% → 44.6%
-  Note: payback (cost/benefit) validation is not yet implemented (IMPLEMENTATION_PLAN.md phase 5) -- these moves have not been checked against migration.payback_ratio, and the duration above is mirror time only (no saferemove wipe accounted for).
+  payback: benefit 4.19e+06 load·s vs cost 3.15e+04 load·s → ratio 133 (need 10) ✓
 ```
 
 A group the gate does not act on prints one line and stops:
@@ -37,15 +39,21 @@ Group fc-tier2 → NO ACTION: imbalance 0.0% is below gates.imbalance_threshold 
 
 ## Reading a move line
 
-`1. 102:scsi0  san-a → san-c  1.50 TiB  ~2.2h  Δimbalance -4.53` — the disk,
-its current and target storage, its size, an estimated mirror-only
-duration (`size / migration.bwlimit_bytes_per_sec` — **not** including a
-`saferemove` wipe, since that needs `payback.py`'s accounting, not yet
-written), and this move's own effect on the group's imbalance metric at
+`1. 102:scsi0  san-a → san-c  1.50 TiB  ~2.2h  Δimbalance -4.53  ℓ/z 1.67` —
+the disk, its current and target storage, its size, the estimated mirror
+duration (`size / migration.bwlimit_bytes_per_sec`, plus a `+wipe <time>`
+suffix when `saferemove` on the source storage adds one — see the payback
+section below), this move's own effect on the group's imbalance metric at
 the moment it was scheduled (negative means imbalance went down, which is
 the usual case; a move scheduled mainly to resolve a reserve violation or
-consolidate a VM can show a positive value and still be correct — see the
-next section).
+consolidate a VM can show a positive value and still be correct), and
+`ℓ/z` — load per TiB, section 7.3's own "single best indicator of a good
+migration candidate: high I/O concentrated in a small disk."
+
+A move whose own duration exceeds `migration.max_single_move_duration`
+carries a `⚠ exceeds migration.max_single_move_duration` suffix and always
+fails the plan (see below) — this is a hard, per-move rule, independent of
+whether the plan as a whole looks profitable.
 
 `resolves_reserve_violation` (visible in `--json`, and implied by the
 `ACT: reserve violated on ...` header in human output) marks a move
@@ -61,14 +69,46 @@ implemented, so this is where a genuine cycle or an unavoidable capacity
 shortfall currently surfaces) rather than silently omitting the move or,
 worse, telling you a plan is clean when part of it is not achievable.
 
+## The `payback:` line
+
+Section 7.3's acceptance test: `benefit >= migration.payback_ratio * cost`,
+both sides in load-seconds. `benefit` is `(E_before - E_after) *
+migration.payback_horizon` (section 7.2 — the imbalance reduction this
+plan buys, projected over the horizon); `cost` sums every move's
+`duration_mirror * (source_load_weight + target_load_weight) +
+duration_wipe * wipe_load_weight` (section 7.1). A ✓ plan passed; a ✗ one
+did not, and gets an extra line saying so plainly — `plan` still shows you
+the numbers either way, it just does not pretend a failing plan is fine.
+
+**A plan resolving a reserve violation always passes this test**,
+regardless of the ratio shown — the example above happens to pass on
+merit (133 ≥ 10), but a plan whose *only* move fixes a (C4)/(C5) violation
+with zero balance benefit (a real, common case: relocating the sole loaded
+disk in a two-storage group changes which side carries it without
+reducing spread at all) is accepted too. Section 13's "the reserve is
+never traded against balance" applies here exactly as it does to the
+gates: an operator does not get to decline a capacity emergency fix
+because it scores poorly against `migration.payback_ratio`. The hard
+per-move duration rule is not exempted this way — it is an operational
+limit, not an economic one, and still blocks the plan.
+
+**What a ✗ (or a rejected move) does *not* do today: automatically make
+the plan smaller and retry.** Section 7.3 describes re-solving with `beta`
+and `gamma` doubled, up to three times, converging on the highest-value
+subset of moves. That loop is not implemented — a failing plan is reported
+and left for you to review, not silently adjusted. See
+`docs/internals/96-payback.md`.
+
 ## What `plan` does not yet do
 
-- **No cost/benefit check.** Every proposed move is shown as computed by
-  the balance objective alone; `IMPLEMENTATION_PLAN.md` section 7's
-  payback rule (a move must save more traffic than it costs within
-  `migration.payback_horizon`) is phase 5, not yet written. The `Note:`
-  line under a plan with moves says this every time, deliberately, rather
-  than once in this manual page alone.
+- **No automatic re-solve-and-shrink on a failing payback test** (see
+  above) — reported, not fixed for you.
+- **No section 7.3 saturation-ceiling defer check.** Needs a forecaster
+  upper bound this codebase does not compute yet, and no group in this
+  project's own dogfooding cluster has `saturation_load` set — which the
+  plan itself says is "fully supported... loses only this one advisory
+  check." `max_single_move_duration` and the transient reserve invariant
+  are the two *hard* bounds and are both already enforced.
 - **No `state.json`.** Section 11.2's drift history does not exist yet, so
   the gate `plan` evaluates always treats this as the first run — see
   `docs/internals/80-gates.md` for exactly what that does and does not
@@ -80,9 +120,14 @@ worse, telling you a plan is clean when part of it is not achievable.
 `--json` emits `groups[]`, each with `gate` (identical shape to
 `show-load`'s), `moves[]` (`disk_key`, `vmid`, `device`, `from_storage`,
 `to_storage`, `size_bytes`, `imbalance_reduction`,
-`resolves_reserve_violation`, `estimated_mirror_duration_seconds`),
+`resolves_reserve_violation`, `load_per_tib`, `duration_mirror_seconds`,
+`duration_wipe_seconds`, `cost_load_seconds`, `exceeds_max_duration`),
 `deadlocked` (a list of disk keys) and `deadlock_message` (`null` if none),
 `before_spread`/`after_spread` (the section 6 spread fraction, before the
 plan and after every scheduled move), `load_error` (`null` unless
-Prometheus failed for this group), and `payback_validated: false` always,
-for now — a machine-readable version of the same caveat.
+Prometheus failed for this group), and `payback` — `null` when there is no
+`GroupLoad` or the gate said `NO ACTION`, otherwise an object with
+`benefit_load_seconds`, `total_cost_load_seconds`, `ratio`, `aggregate_ok`
+(the economic test alone, or `true` if exempted), `rejected_moves` (disk
+keys failing the hard duration rule) and `accepted` (`aggregate_ok` and no
+rejected move).
