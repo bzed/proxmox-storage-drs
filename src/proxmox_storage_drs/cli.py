@@ -33,7 +33,8 @@ from proxmox_storage_drs.config import (
     ResolvedConfig,
     load_config,
 )
-from proxmox_storage_drs.exceptions import ConfigError, DrsError
+from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
+from proxmox_storage_drs.loadmodel import GroupLoad, compute_group_load
 from proxmox_storage_drs.logging_setup import configure_logging
 from proxmox_storage_drs.metrics import PrometheusClient, VerifyMetricsReport, verify_metrics
 from proxmox_storage_drs.pve import build_client as build_pve_client
@@ -256,10 +257,18 @@ def _handle_verify_metrics(resolved: ResolvedConfig, args: argparse.Namespace, m
     return 0 if report.ok else 1
 
 
-def _render_show_load_human(topology: Topology, config: Any) -> str:
+def _render_show_load_human(
+    topology: Topology,
+    config: Any,
+    group_loads: dict[str, GroupLoad],
+    load_errors: dict[str, str],
+) -> str:
     lines: list[str] = []
     for group in topology.groups:
         lines.append(f"Group {group.name}")
+        group_load = group_loads.get(group.name)
+        load_by_key = group_load.load_by_disk_key() if group_load else {}
+        storage_loads = {s.storage_id: s for s in group_load.storages} if group_load else {}
         for storage in group.storages:
             status = compute_reserve_status(
                 storage, group.disks, config.snapshot_reserve.min_free_bytes
@@ -269,9 +278,13 @@ def _render_show_load_human(topology: Topology, config: Any) -> str:
                 if status.violated
                 else "reserve OK"
             )
+            load_prefix = ""
+            if storage.id in storage_loads:
+                sl = storage_loads[storage.id]
+                load_prefix = f"L={sl.load:.2f} u={sl.utilization:.2f}  "
             lines.append(
                 f"  {storage.id}  used {format_bytes(storage.used_bytes)}/"
-                f"{format_bytes(storage.capacity_bytes)}  {reserve_str}  "
+                f"{format_bytes(storage.capacity_bytes)}  {load_prefix}{reserve_str}  "
                 f"(largest disk {format_bytes(status.largest_disk_bytes)}, "
                 f"requires {format_bytes(status.required_reserve_bytes)} free)"
             )
@@ -280,46 +293,64 @@ def _render_show_load_human(topology: Topology, config: Any) -> str:
                 key=lambda d: (d.vmid, d.device),
             )
             for disk in disks_here:
+                load_suffix = f"  ℓ {load_by_key[disk.key]:.2f}" if disk.key in load_by_key else ""
                 pin = f"  [pinned: {disk.pinned_reason}]" if disk.pinned_reason else ""
                 lines.append(
                     f"    {disk.key:<14} {format_bytes(disk.size_bytes):>10}  "
-                    f"{disk.format:<6}{pin}"
+                    f"{disk.format:<6}{load_suffix}{pin}"
                 )
+        if group_load is not None:
+            for disk_load in group_load.disks:
+                if disk_load.flagged_reason:
+                    lines.append(f"  ⚠ {disk_load.disk_key}: {disk_load.flagged_reason}")
+            if group_load.idle:
+                lines.append("  (idle: no measured I/O for this group this window)")
+        if group.name in load_errors:
+            lines.append(f"  ⚠ per-disk load unavailable: {load_errors[group.name]}")
         lines.append("")
     if topology.warnings:
         lines.append("Warnings:")
         lines.extend(f"  - {warning}" for warning in topology.warnings)
         lines.append("")
-    lines.append(
-        "Note: per-disk I/O load is not yet computed -- loadmodel.py "
-        "(IMPLEMENTATION_PLAN.md section 12 phase 3) is not implemented yet; "
-        "sizes and reserve status above are accurate."
-    )
     return "\n".join(lines)
 
 
-def _render_show_load_json(topology: Topology, config: Any) -> dict[str, object]:
+def _render_show_load_json(
+    topology: Topology,
+    config: Any,
+    group_loads: dict[str, GroupLoad],
+    load_errors: dict[str, str],
+) -> dict[str, object]:
     groups_out = []
     for group in topology.groups:
+        group_load = group_loads.get(group.name)
+        load_by_key = group_load.load_by_disk_key() if group_load else {}
+        flagged_by_key = (
+            {d.disk_key: d.flagged_reason for d in group_load.disks} if group_load else {}
+        )
+        storage_loads = {s.storage_id: s for s in group_load.storages} if group_load else {}
         storages_out = []
         for storage in group.storages:
             status = compute_reserve_status(
                 storage, group.disks, config.snapshot_reserve.min_free_bytes
             )
-            storages_out.append(
-                {
-                    "id": storage.id,
-                    "used_bytes": storage.used_bytes,
-                    "capacity_bytes": storage.capacity_bytes,
-                    "foreign_used_bytes": storage.foreign_used_bytes,
-                    "largest_disk_bytes": status.largest_disk_bytes,
-                    "required_reserve_bytes": status.required_reserve_bytes,
-                    "reserve_violated": status.violated,
-                    "reserve_shortfall_bytes": status.shortfall_bytes,
-                }
-            )
-        disks_out = [
-            {
+            entry: dict[str, object] = {
+                "id": storage.id,
+                "used_bytes": storage.used_bytes,
+                "capacity_bytes": storage.capacity_bytes,
+                "foreign_used_bytes": storage.foreign_used_bytes,
+                "largest_disk_bytes": status.largest_disk_bytes,
+                "required_reserve_bytes": status.required_reserve_bytes,
+                "reserve_violated": status.violated,
+                "reserve_shortfall_bytes": status.shortfall_bytes,
+            }
+            if storage.id in storage_loads:
+                entry["load"] = storage_loads[storage.id].load
+                entry["utilization"] = storage_loads[storage.id].utilization
+            storages_out.append(entry)
+        disks_out = []
+        for d in group.disks:
+            disk_entry: dict[str, object] = {
                 "key": d.key,
                 "vmid": d.vmid,
                 "device": d.device,
@@ -329,22 +360,55 @@ def _render_show_load_json(topology: Topology, config: Any) -> dict[str, object]
                 "format": d.format,
                 "pinned_reason": d.pinned_reason,
             }
-            for d in group.disks
-        ]
-        groups_out.append({"name": group.name, "storages": storages_out, "disks": disks_out})
-    return {"groups": groups_out, "warnings": list(topology.warnings), "load_computed": False}
+            if d.key in load_by_key:
+                disk_entry["load"] = load_by_key[d.key]
+                disk_entry["load_flagged_reason"] = flagged_by_key.get(d.key)
+            disks_out.append(disk_entry)
+        groups_out.append(
+            {
+                "name": group.name,
+                "storages": storages_out,
+                "disks": disks_out,
+                "load_computed": group_load is not None,
+                "idle": group_load.idle if group_load is not None else None,
+                "load_error": load_errors.get(group.name),
+            }
+        )
+    return {"groups": groups_out, "warnings": list(topology.warnings)}
 
 
 def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
     client = build_pve_client(resolved.config.proxmox)
     topology = build_topology(client, resolved.config)
+    prom_client = PrometheusClient(resolved.config.prometheus)
+    group_loads: dict[str, GroupLoad] = {}
+    load_errors: dict[str, str] = {}
+    for group in topology.groups:
+        try:
+            group_loads[group.name] = compute_group_load(
+                prom_client,
+                resolved.config.metrics,
+                resolved.config.window,
+                resolved.config.load_weights,
+                group,
+            )
+        except MetricsError as exc:
+            # Section 4's load numbers are not safety-critical the way (C4)/
+            # (C5) reserve status is -- a Prometheus outage should not hide
+            # accurate size/reserve info the rest of this command already
+            # has, so this group's load is simply reported as unavailable.
+            load_errors[group.name] = str(exc)
     if args.json:
         print(
-            json.dumps(_render_show_load_json(topology, resolved.config), indent=2, sort_keys=True)
+            json.dumps(
+                _render_show_load_json(topology, resolved.config, group_loads, load_errors),
+                indent=2,
+                sort_keys=True,
+            )
         )
     else:
-        print(_render_show_load_human(topology, resolved.config))
+        print(_render_show_load_human(topology, resolved.config, group_loads, load_errors))
     return 0
 
 

@@ -8,8 +8,10 @@ configuration (``config.MetricsConfig``), never a constant baked in here.
 
 This module only ever *reads*. All arithmetic on raw series (the section 4
 load model) lives in ``loadmodel.py``; this module's job stops at handing
-back parsed ``(vmid, device) -> value`` maps and the section 3.3
-verification report.
+back parsed ``(vmid, device) -> value`` maps, the section 3.3 verification
+report, and (:func:`compute_disk_coverage`) the one per-disk coverage
+computation both that report and ``loadmodel.py``'s ``min_coverage`` gate
+share.
 """
 
 from __future__ import annotations
@@ -53,9 +55,8 @@ class _SessionLike(Protocol):
 
 
 # The six raw quantities of section 3.4, keyed by the MetricsConfig attribute
-# that names them -- this is what lets verify-metrics and the loadmodel (a
-# later phase) iterate "every configured metric" without hardcoding the list
-# twice.
+# that names them -- this is what lets verify-metrics and loadmodel.py
+# iterate "every configured metric" without hardcoding the list twice.
 RAW_METRIC_FIELDS = (
     "read_ops",
     "write_ops",
@@ -332,15 +333,24 @@ def _check_device_label_collision(metrics: MetricsConfig) -> Finding | None:
     return None
 
 
-def _check_coverage(
+def compute_disk_coverage(
     client: PrometheusClient, metrics: MetricsConfig, window: WindowConfig
-) -> tuple[list[Finding], dict[DiskKey, float]]:
-    """Section 3.3 step 5: per-disk sample coverage over the decision window.
+) -> dict[DiskKey, float]:
+    """Section 3.3 step 5 / section 3.4's ``min_coverage`` rule: per-disk
+    sample coverage over the decision window, as a fraction in ``[0, 1]``.
 
     Uses ``read_ops`` as the representative metric: coverage gaps are a
     property of the underlying scrape, not of which of the six fields is
     read, and running six range queries here would be six times the load for
-    no extra information.
+    no extra information. Shared by ``verify-metrics``'s own report
+    (:func:`_check_coverage` below) and ``loadmodel.py``'s per-disk
+    data-quality gate (section 3.4: "reject a disk whose sample coverage...
+    is below ``window.min_coverage``") -- one implementation of the
+    computation, per AGENTS.md section 5, even though the two callers do
+    different things with a low value (one reports it, the other falls back
+    to a disk's last known load). Raises :class:`MetricsError` on a failed
+    query -- callers decide for themselves whether that is fatal or merely
+    unknown-coverage.
     """
     metric_name = metrics.read_ops
     expr = build_rate_promql(
@@ -352,10 +362,7 @@ def _check_coverage(
     # by a live server during development; see the git history for the fix.
     end = time.time()
     start = end - window.lookback_seconds
-    try:
-        result = client.range_query(expr, start, end, metrics.step_seconds)
-    except MetricsError as exc:
-        return [Finding("error", f"coverage check failed: {exc}")], {}
+    result = client.range_query(expr, start, end, metrics.step_seconds)
 
     expected_samples = max(1, round(window.lookback_seconds / metrics.step_seconds) + 1)
     coverage: dict[DiskKey, float] = {}
@@ -371,6 +378,17 @@ def _check_coverage(
             continue
         actual_samples = len(series.get("values", []))
         coverage[key] = min(1.0, actual_samples / expected_samples)
+    return coverage
+
+
+def _check_coverage(
+    client: PrometheusClient, metrics: MetricsConfig, window: WindowConfig
+) -> tuple[list[Finding], dict[DiskKey, float]]:
+    """Section 3.3 step 5: report which disks fall below ``window.min_coverage``."""
+    try:
+        coverage = compute_disk_coverage(client, metrics, window)
+    except MetricsError as exc:
+        return [Finding("error", f"coverage check failed: {exc}")], {}
 
     findings = []
     for key, fraction in sorted(coverage.items(), key=lambda kv: (kv[0].vmid, kv[0].device)):
@@ -383,7 +401,7 @@ def _check_coverage(
                 )
             )
     if not coverage:
-        findings.append(Finding("warning", f"{metric_name}: no series to measure coverage on"))
+        findings.append(Finding("warning", f"{metrics.read_ops}: no series to measure coverage on"))
     return findings, coverage
 
 

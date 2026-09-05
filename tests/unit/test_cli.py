@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from proxmox_storage_drs import __version__, cli
+from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
 from proxmox_storage_drs.topology import Disk, Group, Storage, Topology
 
 MINIMAL_CONFIG = {
@@ -274,13 +275,52 @@ def _sample_topology() -> Topology:
 # --------------------------------------------------------------------- show-load
 
 
-def test_show_load_human_output(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+def _sample_group_load() -> GroupLoad:
+    """Matches `_sample_topology()`'s two disks (both on san-a) and adds
+    san-b as a second, idle-for-this-group storage -- one flagged disk so
+    the flagged-disk rendering path is exercised by the same fixture."""
+    return GroupLoad(
+        group_name="fc-tier1",
+        idle=False,
+        average_utilization=2.25,
+        disks=(
+            DiskLoad(disk_key="101:scsi0", load=3.0, flagged_reason=None),
+            DiskLoad(
+                disk_key="102:scsi0",
+                load=0.0,
+                flagged_reason="sample coverage 40% is below window.min_coverage (80%); "
+                "no last known load recorded",
+            ),
+        ),
+        storages=(
+            StorageLoad(storage_id="san-a", load=3.0, utilization=3.0),
+            StorageLoad(storage_id="san-b", load=0.0, utilization=0.0),
+        ),
+    )
+
+
+def _patch_show_load_deps(
+    monkeypatch: pytest.MonkeyPatch, group_load: GroupLoad | Exception
 ) -> None:
     monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _sample_topology()
     )
+
+    def fake_compute_group_load(
+        prom_client: object, metrics: object, window: object, load_weights: object, group: object
+    ) -> GroupLoad:
+        if isinstance(group_load, Exception):
+            raise group_load
+        return group_load
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_group_load", fake_compute_group_load)
+
+
+def test_show_load_human_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_show_load_deps(monkeypatch, _sample_group_load())
     path = write_config(tmp_path)
     assert cli.main(["-c", str(path), "show-load"]) == 0
     out = capsys.readouterr().out
@@ -289,27 +329,35 @@ def test_show_load_human_output(
     assert "[pinned: locked: backup]" in out
     assert "reserve short by" in out or "reserve OK" in out
     assert "ungrouped" in out
-    assert "not yet computed" in out
+    assert "L=3.00 u=3.00" in out  # san-a's StorageLoad
+    assert "ℓ 3.00" in out  # 101:scsi0's DiskLoad
+    assert "102:scsi0: sample coverage 40%" in out  # the flagged disk
 
 
 def test_show_load_json_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
-    monkeypatch.setattr(
-        "proxmox_storage_drs.cli.build_topology", lambda client, cfg: _sample_topology()
-    )
+    _patch_show_load_deps(monkeypatch, _sample_group_load())
     path = write_config(tmp_path)
     assert cli.main(["-c", str(path), "--json", "show-load"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["load_computed"] is False
     group_payload = payload["groups"][0]
     assert group_payload["name"] == "fc-tier1"
+    assert group_payload["load_computed"] is True
+    assert group_payload["idle"] is False
+    assert group_payload["load_error"] is None
     keys = {d["key"] for d in group_payload["disks"]}
     assert keys == {"101:scsi0", "102:scsi0"}
+    disk_101 = next(d for d in group_payload["disks"] if d["key"] == "101:scsi0")
+    assert disk_101["load"] == 3.0
+    assert disk_101["load_flagged_reason"] is None
+    disk_102 = next(d for d in group_payload["disks"] if d["key"] == "102:scsi0")
+    assert disk_102["load_flagged_reason"] is not None
     san_a = next(s for s in group_payload["storages"] if s["id"] == "san-a")
     # managed_used 3+2=5 TiB, largest=3 TiB, reserve=2.0*3=6 TiB, 5+6=11 > capacity 8 TiB.
     assert san_a["reserve_violated"] is True
+    assert san_a["load"] == 3.0
+    assert san_a["utilization"] == 3.0
 
 
 def test_show_load_reports_a_pve_error(
@@ -325,6 +373,61 @@ def test_show_load_reports_a_pve_error(
     path = write_config(tmp_path)
     assert cli.main(["-c", str(path), "show-load"]) == 1
     assert "cluster unreachable" in capsys.readouterr().err
+
+
+def test_show_load_degrades_gracefully_on_a_metrics_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Prometheus outage must not hide the size/reserve report the rest of
+    this command already has -- section 4's load is reported unavailable,
+    not fatal."""
+    from proxmox_storage_drs.exceptions import MetricsError
+
+    _patch_show_load_deps(monkeypatch, MetricsError("connection refused"))
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "show-load"]) == 0
+    out = capsys.readouterr().out
+    assert "reserve short by" in out or "reserve OK" in out  # unaffected
+    assert "per-disk load unavailable: connection refused" in out
+
+
+def test_show_load_human_output_notes_an_idle_group(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    idle_load = GroupLoad(
+        group_name="fc-tier1",
+        idle=True,
+        average_utilization=0.0,
+        disks=(
+            DiskLoad(disk_key="101:scsi0", load=0.0, flagged_reason=None),
+            DiskLoad(disk_key="102:scsi0", load=0.0, flagged_reason=None),
+        ),
+        storages=(
+            StorageLoad(storage_id="san-a", load=0.0, utilization=0.0),
+            StorageLoad(storage_id="san-b", load=0.0, utilization=0.0),
+        ),
+    )
+    _patch_show_load_deps(monkeypatch, idle_load)
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "show-load"]) == 0
+    assert "idle: no measured I/O" in capsys.readouterr().out
+
+
+def test_show_load_json_reports_a_metrics_error_per_group(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.exceptions import MetricsError
+
+    _patch_show_load_deps(monkeypatch, MetricsError("connection refused"))
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "show-load"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    group_payload = payload["groups"][0]
+    assert group_payload["load_computed"] is False
+    assert group_payload["idle"] is None
+    assert group_payload["load_error"] == "connection refused"
+    disk_101 = next(d for d in group_payload["disks"] if d["key"] == "101:scsi0")
+    assert "load" not in disk_101
 
 
 # --------------------------------------------------------------------- verify-storages

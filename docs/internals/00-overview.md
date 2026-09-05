@@ -7,10 +7,12 @@ section 2 architecture actually exists right now?
 ## The pipeline, as specified and as built
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
-gate, solve, cost, order, execute. As of this page, stages 1 (collect) and 2
-(join) exist; gate through execute are `IMPLEMENTATION_PLAN.md` section 12
-phases 3-9 and are not yet written. Do not take this page as a claim that
-the whole pipeline runs end to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
+gate, solve, cost, order, execute. As of this page, stages 1 (collect), 2
+(join) and the load-computation half of stage 3 (gate) exist; the
+act/no-act *decision* itself (drift/imbalance gates, cooldowns) through
+execute are `IMPLEMENTATION_PLAN.md` section 12 phases 3 (remainder)-9 and
+are not yet written. Do not take this page as a claim that the whole
+pipeline runs end to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
 is the authoritative per-command status.
 
 ```
@@ -25,10 +27,14 @@ is the authoritative per-command status.
                                          topology.py (build_topology():
                                          the disk/storage/group join, D/S/U^ext)
                                                      │
-                                         reserve.py (compute_reserve_status():
-                                         (C4)/(C5), shared with the solver)
-                                                     │
-        ┌───────────────────────────────────────────┴───────────────────────┐
+                              ┌──────────────────────┴──────────────────────┐
+                              ▼                                             ▼
+                reserve.py (compute_reserve_status():           loadmodel.py (compute_group_load():
+                (C4)/(C5), shared with the solver)               l_d/L_s/u_s, section 4)
+                              │                                             │
+                              └──────────────────────┬──────────────────────┘
+                                                      ▼
+        ┌───────────────────────────────────────────────────────────────────┐
         │            cli.py  (argument parsing, command dispatch,           │
         │            mode-override rule, show-load, verify-storages)        │
         └───────────────────────┬─────────────────────────────────────────┘
@@ -50,14 +56,16 @@ is the authoritative per-command status.
 | `config_schema.json` | The jsonschema structural half of validation | section 11.1 |
 | `forecast.py` | The `Forecaster` protocol, `required_range_seconds`, and `quantile`/`seasonal_naive`/`holt_winters` | section 10 |
 | `logging_setup.py` | Structured JSON logging to **stderr** | section 2.1 (amended, see [`40-cli-and-logging.md`](40-cli-and-logging.md)) |
-| `metrics.py` | `PrometheusClient`, PromQL construction, `verify_metrics()` | sections 3.1-3.4 |
+| `metrics.py` | `PrometheusClient`, PromQL construction, `verify_metrics()`, `compute_disk_coverage()` | sections 3.1-3.4 |
 | `pve.py` | `PveClient` (built on `proxmoxer`), `build_client()` | section 3.5 |
 | `topology.py` | `build_topology()`: the disk/storage/group join, `D`, `S`, `Uˢᵉˣᵗ`, (C2) pins | sections 3.5-3.7, 5.1, 5.3 (C2) |
 | `reserve.py` | `compute_reserve_status()`: (C4)/(C5), shared by `show-load` today and the solver later | section 5.3 (C4)/(C5) |
+| `loadmodel.py` | `compute_group_load()`: the raw-series-to-`ℓ_d` blend, `min_coverage` rejection, current `L_s`/`u_s` | section 4 |
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages` | section 11.3 |
 
-Not yet written: `loadmodel.py`, `optimize.py`, `heuristic.py`, `payback.py`,
-`schedule.py`, `execute.py`.
+Not yet written: the section 6 drift/imbalance gates (phase 3's other
+half), `optimize.py`, `heuristic.py`, `payback.py`, `schedule.py`,
+`execute.py`.
 
 ## Why config.py depends on forecast.py
 
@@ -84,3 +92,6 @@ this.
   `proxmoxer`, and two things verified against a real cluster.
 - [`60-topology.md`](60-topology.md) — the disk/storage/group join, the
   section 5.1.1 foreign-volume accounting, and the shared (C4)/(C5) evaluator.
+- [`70-loadmodel.md`](70-loadmodel.md) — the section 4 raw-series-to-`ℓ_d`
+  blend, `min_coverage` rejection, and why `tpmstate0`/`unusedN` are exempt
+  from it but `efidisk0` is not.

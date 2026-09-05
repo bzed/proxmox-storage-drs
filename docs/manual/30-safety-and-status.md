@@ -35,9 +35,9 @@ than a document that reads as if the tool were finished:
 |---|---|
 | `--version`, `--help`, `--manual` | Implemented. |
 | `verify-metrics` | Implemented: all six `IMPLEMENTATION_PLAN.md` section 3.3 checks, human and `--json` output. |
-| `show-load` | Implemented: every storage in every group, its disks (all buses), sizes, and reserve status ((C4)/(C5)), pinned disks flagged with their reason, human and `--json` output. **Per-disk I/O load is not shown yet** — that needs `loadmodel.py` (phase 3) — every other figure is accurate. |
+| `show-load` | Implemented: every storage in every group, its disks (all buses), sizes, reserve status ((C4)/(C5)), and per-disk/per-storage I/O load (`ℓ_d`/`L_s`/`u_s`, section 4), pinned and low-coverage disks flagged with their reason, human and `--json` output. A Prometheus outage degrades this one group's load to "unavailable" rather than failing the whole command — sizes and reserve status are unaffected. |
 | `verify-storages` | Implemented: `saferemove` and the implied wipe time per storage, warning when `gates.cooldown_per_storage` or `migration.max_single_move_duration` is shorter than it. |
-| `plan` | Not implemented yet — needs the load model, gates, scheduler and solver (phases 3-6). |
+| `plan` | Not implemented yet — needs the drift/imbalance gates, scheduler and solver (the rest of phase 3, and phases 4-6). |
 | `explain` | Not implemented yet — needs the same, plus the payback and scheduling machinery it explains. |
 | `apply` | Not implemented yet — needs `execute.py` (phase 7 onward). |
 
