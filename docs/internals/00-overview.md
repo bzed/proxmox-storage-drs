@@ -8,11 +8,12 @@ section 2 architecture actually exists right now?
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
 gate, solve, cost, order, execute. As of this page, stages 1 (collect)
-through 6 (cost/order — sections 5-8 minus the MILP backend) exist for the
-heuristic path — the MILP path (an alternative stage-4 backend) and
-execute are `IMPLEMENTATION_PLAN.md` section 12 phases 6-9 and are not yet
-written. Do not take this page as a claim that the whole pipeline runs end
-to end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
+through 6 (cost/order) exist, with **two** interchangeable stage-4 (solve)
+backends — the dependency-free heuristic and the MILP (CP-SAT/CBC) path —
+selected by `solver.backend`; only execute (`IMPLEMENTATION_PLAN.md`
+section 12 phase 7+) is not yet written. Do not take this page as a claim
+that the whole pipeline runs end to end —
+[`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
 is the authoritative per-command status: `plan` is real and prints an
 ordered, transient-feasible, payback-checked dry-run plan (see
 [`../manual/27-plan.md`](../manual/27-plan.md)), but nothing yet *executes*
@@ -43,9 +44,11 @@ writes it yet, since only `execute.py` (not yet written) has a reason to.
                                      gates.py (evaluate_group_gates():
                                      reserve override / drift / imbalance, section 6)
                                                       │
-                                     heuristic.py (run_heuristic():
-                                     seed / repair / descend, section 5.4/5.5)
-                                                      │
+                          heuristic.py (run_heuristic():          optimize.py (solve():
+                          seed / repair / descend,                 CP-SAT / CBC, lexicographic
+                          section 5.4/5.5)                         reserve solve, section 5.5)
+                                      └───────────────┬────────────────────┘
+                                                      ▼
                                      schedule.py (order_moves():
                                      transient reserve invariant, section 8)
                                                       │
@@ -82,22 +85,28 @@ writes it yet, since only `execute.py` (not yet written) has a reason to.
 | `reserve.py` | `compute_reserve_status()`: (C4)/(C5), shared by `show-load` today and the solver later | section 5.3 (C4)/(C5) |
 | `loadmodel.py` | `compute_group_load()`: the raw-series-to-`ℓ_d` blend, `min_coverage` rejection, current `L_s`/`u_s` | section 4 |
 | `gates.py` | `evaluate_group_gates()`: reserve override, drift, imbalance — the act/no-act verdict, with reasoning | section 6 |
-| `heuristic.py` | `run_heuristic()`: seed/repair/descend, and `evaluate_assignment()`, the section 5.4 objective shared with the (unwritten) MILP path | sections 5.4/5.5 |
+| `heuristic.py` | `run_heuristic()`: seed/repair/descend, and `evaluate_assignment()`, the section 5.4 objective shared with the MILP path too | sections 5.4/5.5 |
+| `optimize.py` | `solve()`: CP-SAT/CBC, section 5.3's constraints, the lexicographic two-stage reserve solve | section 5.5 |
 | `schedule.py` | `order_moves()`: transient-feasible ordering of a target assignment's moves, deadlock reporting | section 8 |
 | `payback.py` | `evaluate_plan_payback()`: the cost/benefit acceptance test, with a reserve-override exemption mirroring `gates.py`'s | section 7 |
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan` | section 11.3 |
 
-Not yet written: `optimize.py`, `execute.py`. Cooldowns are now read:
-`topology.py`'s (C2) per-disk pin and `heuristic.py`'s per-storage
-target exclusion both consume `state.py`'s cooldown data (see
-[`15-state.md`](15-state.md), [`60-topology.md`](60-topology.md) and
-[`90-heuristic.md`](90-heuristic.md)) — only *writing* a cooldown still
-waits on `execute.py`. Within modules that do exist: heuristic step 4
-"polish" and (C2) format-compatibility eligibility in `heuristic.py` (see
-[`90-heuristic.md`](90-heuristic.md)), concurrent scheduling, priority-2
-ordering and staging in `schedule.py` (see [`95-schedule.md`](95-schedule.md)),
-and the payback re-solve-and-retry loop plus the section 7.3 saturation
-check in `payback.py` (see [`96-payback.md`](96-payback.md)).
+Not yet written: `execute.py` (phase 7+) and `auto` mode (phase 8) --
+`optimize.py` (phase 6) is done: `plan` picks CP-SAT, CBC or the
+heuristic per `solver.backend`, see [`91-optimize.md`](91-optimize.md).
+Cooldowns are now read: `topology.py`'s (C2) per-disk pin and
+`heuristic.py`'s per-storage target exclusion both consume `state.py`'s
+cooldown data (see [`15-state.md`](15-state.md),
+[`60-topology.md`](60-topology.md) and [`90-heuristic.md`](90-heuristic.md))
+— only *writing* a cooldown still waits on `execute.py`, and the MILP
+path does not enforce the storage cooldown at all yet (see
+[`91-optimize.md`](91-optimize.md)). Within modules that do exist:
+heuristic step 4 "polish" and (C2) format-compatibility eligibility in
+`heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)), concurrent
+scheduling, priority-2 ordering and staging in `schedule.py` (see
+[`95-schedule.md`](95-schedule.md)), and the payback re-solve-and-retry
+loop plus the section 7.3 saturation check in `payback.py` (see
+[`96-payback.md`](96-payback.md)).
 
 ## Why config.py depends on forecast.py
 
@@ -140,6 +149,12 @@ this.
   the seed/repair/descend search, cross-checked against section 14's exact
   objective totals, the storage-cooldown destination filter and its
   repair-side exemption, and what "polish" and format eligibility still owe.
+- [`91-optimize.md`](91-optimize.md) — the CP-SAT and CBC MILP backends,
+  section 5.5's exact integer coefficient scaling (and the `γ`-term trap
+  it exists to avoid), why the reserve is solved in two lexicographic
+  stages rather than one big-M objective, and `cli.py`'s
+  `solver.backend` dispatch (`auto`'s cascade, and why an explicitly
+  forced backend still falls back to the heuristic rather than failing).
 - [`95-schedule.md`](95-schedule.md) — ordering a target assignment's
   moves under the section 8 transient invariant, why `cost_m = z_d` is
   exact today (not an approximation), and why the heuristic accepting a

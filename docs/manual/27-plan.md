@@ -11,18 +11,25 @@ For each group, `plan`:
    evaluates the same section 6 gate.
 2. If the gate says `NO ACTION`, stops there for that group — no solver
    runs, nothing more to show.
-3. If it says `ACT`, runs the heuristic solver (`IMPLEMENTATION_PLAN.md`
-   section 5.4/5.5) to compute a target assignment, orders its moves under
-   the section 8 transient reserve invariant, and checks the whole plan
-   against section 7's payback rule.
+3. If it says `ACT`, solves it with whichever backend `solver.backend`
+   selects (`IMPLEMENTATION_PLAN.md` section 5.4/5.5 — see
+   `docs/internals/91-optimize.md` for the CP-SAT/CBC backends and
+   `docs/internals/90-heuristic.md` for the dependency-free one) to
+   compute a target assignment, orders its moves under the section 8
+   transient reserve invariant, and checks the whole plan against
+   section 7's payback rule.
 
 This example uses the same section 14 worked example `show-load`'s manual
-page does, at the default weights (the three-move plan), so the numbers
-are traceable to that section:
+page does, at the default weights (the three-move plan) and
+`solver.backend: auto` with neither MILP library installed, so it falls
+back to the heuristic — the numbers are traceable to that section either
+way, since every backend reports through the identical objective
+function:
 
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml plan
 Group fc-tier1 → ACT: reserve violated on san-a; bypassing the drift and imbalance gates (section 13: safety is not subject to hysteresis)
+  solver: heuristic
   1. 102:scsi0      san-a → san-c     1.50 TiB   ~2.2h   Δimbalance -4.53   ℓ/z 1.67
   2. 101:scsi1      san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00
   3. 105:scsi0      san-c → san-b   512.00 GiB   ~43.7m   Δimbalance -0.40   ℓ/z 0.40
@@ -30,6 +37,16 @@ Group fc-tier1 → ACT: reserve violated on san-a; bypassing the drift and imbal
   spread: 255.4% → 44.6%
   payback: benefit 4.19e+06 load·s vs cost 3.15e+04 load·s → ratio 133 (need 10) ✓
 ```
+
+The `solver:` line names whichever backend actually produced this plan --
+`heuristic`, `cpsat` or `cbc` -- plus, for a MILP backend, `(optimal)` or
+`(feasible)` (the gap was not proven closed within `solver.time_limit_seconds`,
+but a solution was still found). It is not always what `solver.backend`
+says: `auto` tries CP-SAT then CBC before the heuristic, and even an
+explicitly forced `cpsat`/`cbc` falls back to the heuristic (logged as a
+warning in that case) rather than failing the whole run, if that library
+is not installed or cannot solve within the time limit -- see
+`docs/internals/91-optimize.md`.
 
 The `after:`/`spread:` lines (and the payback numbers) reflect what the
 scheduler actually managed to order, not the solver's target assignment —
@@ -154,7 +171,10 @@ and left for you to review, not silently adjusted. See
   forgotten, in `docs/internals/95-schedule.md`.
 
 `--json` emits `groups[]`, each with `gate` (identical shape to
-`show-load`'s), `moves[]` (`disk_key`, `vmid`, `device`, `from_storage`,
+`show-load`'s), `solver_backend`/`solver_status` (`null`/`null` when the
+gate said `NO ACTION`; otherwise `"heuristic"`/`null`, or `"cpsat"`/
+`"cbc"` with `"optimal"`/`"feasible"` -- the same information the human
+output's `solver:` line names), `moves[]` (`disk_key`, `vmid`, `device`, `from_storage`,
 `to_storage`, `size_bytes`, `imbalance_reduction`,
 `resolves_reserve_violation`, `load_per_tib`, `duration_mirror_seconds`,
 `duration_wipe_seconds`, `cost_load_seconds`, `exceeds_max_duration`),

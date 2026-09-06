@@ -93,6 +93,23 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = ["jsonschema.*", "proxmoxer.*", "ortools.*", "pulp.*", "statsmodels.*"]
 ignore_missing_imports = true
+# `ortools` (unlike the others here) ships real, typed source that mypy will
+# otherwise analyze when it happens to be installed -- this skips a
+# genuinely-present ortools from being followed into at all, matching how it
+# is already treated everywhere else (an optional dependency this project
+# never type-checks the inside of). It does not fully insulate against
+# `ortools`'s own numpy dependency: numpy ships its stubs using syntax newer
+# than `python_version` above (a hard parse error, not a type error, so no
+# per-module mypy option rescues it), and pytest's own optional numpy-aware
+# assertion rewriting reaches numpy directly, bypassing this override
+# entirely, whenever numpy happens to be installed in the checking venv --
+# e.g. after `pip install -e .[solver]` or `.[forecast]`. `make check`'s own
+# venv (`.[dev]` only, see `make install`) never installs either extra, so
+# this never affects the project's actual gate; see
+# `docs/internals/91-optimize.md` for what this looks like when it does.
+[[tool.mypy.overrides]]
+module = ["ortools.*"]
+follow_imports = "skip"
 
 # ---------------------------------------------------------------------------
 # Tests. The 85 % floor is enforced here, not by convention — see

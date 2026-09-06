@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from proxmox_storage_drs import __version__
+from proxmox_storage_drs import __version__, optimize
 from proxmox_storage_drs.config import (
     DEFAULT_CONFIG_PATH,
     ENV_CONFIG_VAR,
@@ -38,7 +38,7 @@ from proxmox_storage_drs.config import (
 from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
 from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
 from proxmox_storage_drs.heuristic import (
-    HeuristicResult,
+    Assignment,
     ObjectiveBreakdown,
     evaluate_assignment,
     group_average_utilization,
@@ -65,7 +65,7 @@ from proxmox_storage_drs.state import (
     load_state,
     load_vector_for_group,
 )
-from proxmox_storage_drs.topology import Topology, build_topology
+from proxmox_storage_drs.topology import Group, Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
 logger = logging.getLogger(__name__)
@@ -605,10 +605,16 @@ def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: flo
     return lines
 
 
+def _render_plan_solver_line(outcome: _SolveOutcome) -> str:
+    suffix = f" ({outcome.status})" if outcome.status is not None else ""
+    return f"  solver: {outcome.backend}{suffix}"
+
+
 def _render_plan_human(
     topology: Topology,
     group_loads: dict[str, GroupLoad],
     gate_decisions: dict[str, GateDecision],
+    solve_outcomes: dict[str, _SolveOutcome],
     schedule_results: dict[str, ScheduleResult],
     payback_results: dict[str, PaybackResult],
     final_breakdowns: dict[str, ObjectiveBreakdown],
@@ -631,6 +637,7 @@ def _render_plan_human(
             lines.append("")
             continue
 
+        lines.append(_render_plan_solver_line(solve_outcomes[group.name]))
         group_load = group_loads[group.name]
         load_by_key = group_load.load_by_disk_key()
         payback_result = payback_results.get(group.name)
@@ -671,6 +678,7 @@ def _render_plan_json(
     topology: Topology,
     group_loads: dict[str, GroupLoad],
     gate_decisions: dict[str, GateDecision],
+    solve_outcomes: dict[str, _SolveOutcome],
     schedule_results: dict[str, ScheduleResult],
     payback_results: dict[str, PaybackResult],
     final_breakdowns: dict[str, ObjectiveBreakdown],
@@ -679,6 +687,7 @@ def _render_plan_json(
     groups_out = []
     for group in topology.groups:
         decision = gate_decisions.get(group.name)
+        solve_outcome = solve_outcomes.get(group.name)
         schedule_result = schedule_results.get(group.name)
         payback_result = payback_results.get(group.name)
         group_load = group_loads.get(group.name)
@@ -748,6 +757,8 @@ def _render_plan_json(
                 "name": group.name,
                 "load_error": load_errors.get(group.name),
                 "gate": gate_out,
+                "solver_backend": solve_outcome.backend if solve_outcome else None,
+                "solver_status": solve_outcome.status if solve_outcome else None,
                 "moves": moves_out,
                 "deadlocked": list(schedule_result.deadlocked) if schedule_result else [],
                 "deadlock_message": schedule_result.deadlocked_msg if schedule_result else None,
@@ -757,6 +768,97 @@ def _render_plan_json(
             }
         )
     return {"groups": groups_out, "warnings": list(topology.warnings)}
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _SolveOutcome:
+    """One group's solve, whichever backend actually produced it --
+    `_render_plan_human()`/`_render_plan_json()` report `backend`/`status`
+    the same way regardless, and everything downstream (`order_moves()`,
+    the payback benefit) only ever needs `assignment`/`initial_breakdown`,
+    which both `heuristic.HeuristicResult` and `optimize.OptimizeResult`
+    already carry identically (both built from the one shared
+    `heuristic.evaluate_assignment()` -- see `optimize.py`'s own module
+    docstring)."""
+
+    assignment: Assignment
+    initial_breakdown: ObjectiveBreakdown
+    backend: str  # "cpsat" | "cbc" | "heuristic"
+    status: str | None  # "optimal" | "feasible" for a MILP backend, None for the heuristic
+
+
+def _solve_group(
+    group: Group,
+    load_by_key: dict[str, float],
+    resolved: ResolvedConfig,
+    min_free_bytes: int,
+    cooldown_storages: frozenset[str],
+) -> _SolveOutcome:
+    """Section 5.5's backend dispatch. ``solver.backend: auto`` cascades
+    CP-SAT, then CBC, then the heuristic; an explicitly forced backend that
+    cannot produce a plan (library not importable, or no feasible solution
+    within ``solver.time_limit_seconds``) falls back to the heuristic too
+    -- section 13's failure-mode table says plainly "solver infeasible or
+    timing out -> fall back to the heuristic; never emit a partial/
+    unvalidated assignment", with no carve-out for a backend the operator
+    explicitly named (`docs/manual/10-configuration.md`'s own
+    `solver.backend` text: forcing one is "to reproduce or compare a
+    result", not to disable this safety net). A forced backend that falls
+    back anyway is logged at warning -- an operator who asked for `cpsat`
+    specifically should not have to diff `--json` output to notice `auto`
+    quietly happened instead.
+    """
+    solver = resolved.config.solver
+    cascade = {
+        "auto": ("cpsat", "cbc"),
+        "cpsat": ("cpsat",),
+        "cbc": ("cbc",),
+        "heuristic": (),
+    }[solver.backend]
+    for backend in cascade:
+        result = optimize.solve(
+            group,
+            load_by_key,
+            resolved.config.objective,
+            min_free_bytes,
+            backend,
+            solver.time_limit_seconds,
+            solver.mip_gap,
+            cooldown_storages,
+        )
+        if result is not None:
+            return _SolveOutcome(
+                assignment=result.assignment,
+                initial_breakdown=result.initial_breakdown,
+                backend=result.backend,
+                status=result.status,
+            )
+        if solver.backend != "auto":
+            logger.warning(
+                "solver.backend=%s could not produce a plan for this group; "
+                "falling back to the heuristic",
+                solver.backend,
+                extra={
+                    "event": "solver_fallback",
+                    "group": group.name,
+                    "requested": solver.backend,
+                },
+            )
+
+    heuristic_result = run_heuristic(
+        group,
+        load_by_key,
+        resolved.config.objective,
+        min_free_bytes,
+        solver.heuristic_iterations,
+        cooldown_storages,
+    )
+    return _SolveOutcome(
+        assignment=heuristic_result.assignment,
+        initial_breakdown=heuristic_result.initial_breakdown,
+        backend="heuristic",
+        status=None,
+    )
 
 
 def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
@@ -777,7 +879,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
 
     group_loads: dict[str, GroupLoad] = {}
     gate_decisions: dict[str, GateDecision] = {}
-    heuristic_results: dict[str, HeuristicResult] = {}
+    solve_outcomes: dict[str, _SolveOutcome] = {}
     schedule_results: dict[str, ScheduleResult] = {}
     payback_results: dict[str, PaybackResult] = {}
     final_breakdowns: dict[str, ObjectiveBreakdown] = {}
@@ -820,18 +922,13 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                 state, group.name, resolved.config.gates.cooldown_per_storage_seconds, now
             )
         )
-        heuristic_result = run_heuristic(
-            group,
-            group_load.load_by_disk_key(),
-            resolved.config.objective,
-            min_free_bytes,
-            resolved.config.solver.heuristic_iterations,
-            cooldown_storages,
+        solve_outcome = _solve_group(
+            group, group_load.load_by_disk_key(), resolved, min_free_bytes, cooldown_storages
         )
-        heuristic_results[group.name] = heuristic_result
+        solve_outcomes[group.name] = solve_outcome
         schedule_result = order_moves(
             group,
-            heuristic_result.assignment,
+            solve_outcome.assignment,
             group_load.load_by_disk_key(),
             resolved.config.objective,
             min_free_bytes,
@@ -863,7 +960,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
         ]
         spread_metric = resolved.config.objective.spread_metric
         benefit = compute_benefit_load_seconds(
-            raw_spread(heuristic_result.initial_breakdown, spread_metric),
+            raw_spread(solve_outcome.initial_breakdown, spread_metric),
             raw_spread(final_breakdown, spread_metric),
             resolved.config.migration.payback_horizon_seconds,
         )
@@ -878,6 +975,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                     topology,
                     group_loads,
                     gate_decisions,
+                    solve_outcomes,
                     schedule_results,
                     payback_results,
                     final_breakdowns,
@@ -893,6 +991,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                 topology,
                 group_loads,
                 gate_decisions,
+                solve_outcomes,
                 schedule_results,
                 payback_results,
                 final_breakdowns,
