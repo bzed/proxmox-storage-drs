@@ -23,18 +23,24 @@ nothing fetches anything.
   neither storage's own throughput is the binding constraint (the common
   case bwlimit exists to enforce) — a documented simplification of the
   plan's own underspecified formula, not a full accounting.
-- **The section 7.3 saturation-ceiling defer check**
-  (``L_during(s) <= saturation_ceiling * N_s``). Needs the forecaster's
-  upper bound over a horizon equal to a specific move's own duration,
-  which `forecast.py`'s ``Forecaster`` protocol does not yet expose (it
-  answers for ``window.lookback`` only); and no group in this codebase's
-  own dogfooding cluster has ``storages[].saturation_load`` set, which the
-  plan itself says makes this "fully supported... loses only this one
-  advisory check." `max_single_move_duration` (implemented below) and the
-  transient reserve invariant (`schedule.py`, already enforced before a
-  move ever reaches this module) are the two *hard* bounds section 7.3
-  names as "always active"; this deferred one is explicitly the
-  best-effort extra.
+- **The mirroring-phase-only reading of the section 7.3 saturation
+  check.** ``compute_move_cost()`` evaluates ``L_during(s) <=
+  saturation_ceiling * N_s`` once, at ``duration_mirror_seconds`` (the
+  section header's own words: "push either endpoint above ... during
+  *the mirror*"), charging both ``ω_src``/``ω_dst``. It does **not**
+  additionally check the *draining* phase (``ω_wipe`` over
+  ``duration_wipe_seconds``) as a second, separate check the way the full
+  generalized in-flight-set model implies it could -- doing that exactly
+  needs `schedule.py` to reason about which moves are actually
+  overlapping at defer-check time, which it does not do (see
+  `95-schedule.md`'s own "reasoning about concurrency at scheduling
+  time" gap). A best-effort guard checked at its own literal, narrower
+  reading is still strictly more than none; a fuller model is a real,
+  separately-scoped follow-up. And, as ever: no group in this codebase's
+  own dogfooding cluster has ``storages[].saturation_load`` set, which
+  the plan itself says makes the check's total absence "fully
+  supported... loses only this one advisory check" -- `N_s` is `None`
+  skips it per endpoint, never assumed.
 - **The 3-retry re-solve-with-doubled-`beta`/`gamma` loop** on aggregate
   payback failure. A real UX refinement (it converges on the smaller
   subset of high-value moves rather than abandoning the run), not a
@@ -76,6 +82,13 @@ class MoveCost:
     # aggregate test too (see that function's docstring) without needing
     # the `ScheduledMove`s themselves.
     resolves_reserve_violation: bool
+    # Section 7.3's best-effort defer check: `L_during(s) > saturation_ceiling
+    # * N_s` for either endpoint, at the mirroring-phase horizon (see the
+    # module docstring's note on why only that phase is checked). Defaults
+    # `False` -- inactive unless the caller supplies `target`/`l_hat_src`/
+    # `l_hat_dst` to `compute_move_cost()`, which every existing call site
+    # predating this field does not.
+    saturation_deferred: bool = False
 
     @property
     def duration_seconds(self) -> float:
@@ -89,14 +102,25 @@ class PaybackResult:
     ``aggregate_ok`` (``benefit >= payback_ratio * Sum cost_d``, or
     unconditionally ``True`` when any move resolves a reserve violation --
     see ``evaluate_plan_payback()``) and ``accepted`` (``aggregate_ok``
-    **and** no individually-rejected move) are kept separate so a caller
-    can report *why* an otherwise-profitable plan was still rejected,
-    rather than only a single bit."""
+    **and** no individually-rejected or -deferred move) are kept separate
+    so a caller can report *why* an otherwise-profitable plan was still
+    rejected, rather than only a single bit.
+
+    ``rejected_moves`` (the hard per-move duration rule) and
+    ``deferred_moves`` (the best-effort saturation guard) are kept as two
+    separate tuples, not merged into one, even though `cli.py` excludes
+    both from execution identically -- section 7.3's own words draw the
+    same distinction ("reject the move" vs. "defer the move to a later
+    run"), and a caller reporting *why* a move did not run should be able
+    to say which of the two happened, one hard and always active, the
+    other best-effort and skipped entirely when a storage has no
+    ``saturation_load`` configured."""
 
     move_costs: tuple[MoveCost, ...]
     benefit_load_seconds: float  # (E_before - E_after) * migration.payback_horizon
     rejected_moves: tuple[str, ...]  # disk keys failing the hard per-move duration rule
     aggregate_ok: bool
+    deferred_moves: tuple[str, ...] = ()  # disk keys failing the section 7.3 saturation guard
 
     @property
     def total_cost_load_seconds(self) -> float:
@@ -109,7 +133,7 @@ class PaybackResult:
 
     @property
     def accepted(self) -> bool:
-        return self.aggregate_ok and not self.rejected_moves
+        return self.aggregate_ok and not self.rejected_moves and not self.deferred_moves
 
 
 def compute_wipe_duration_seconds(
@@ -128,21 +152,74 @@ def compute_wipe_duration_seconds(
     return disk_bytes / throughput_bytes_per_sec
 
 
+def mirror_duration_seconds(move: ScheduledMove, migration: MigrationConfig) -> float:
+    """Section 7.1's ``duration_mirror_d = z_d / bwlimit`` (see the module
+    docstring's note on ``headroom_src``/``headroom_dst``), factored out
+    of :func:`compute_move_cost` so a caller can learn a move's own
+    mirror duration *before* calling that function -- a real ordering
+    dependency section 7.3's saturation guard introduces: the guard's own
+    forecast horizon is this move's mirror duration, but
+    ``compute_move_cost()`` is also what decides whether that guard's
+    verdict makes the move deferred, so the caller must compute this
+    first, fetch its forecasts, and only then call
+    ``compute_move_cost(..., target=..., l_hat_src=..., l_hat_dst=...)``.
+    """
+    bwlimit = migration.bwlimit_bytes_per_sec
+    return move.size_bytes / bwlimit if bwlimit else 0.0
+
+
+def _saturation_deferred(
+    source: Storage,
+    target: Storage,
+    migration: MigrationConfig,
+    l_hat_src: float,
+    l_hat_dst: float,
+) -> bool:
+    """Section 7.3's defer check, mirroring-phase only (see the module
+    docstring): ``L_during(s) = L_hat_s(duration_mirror) + omega_role(s)``,
+    checked against ``saturation_ceiling * N_s`` for each endpoint that
+    has a ``saturation_load`` configured -- skipped entirely for one that
+    does not ("fully supported... loses only this one advisory check").
+    Factored out of :func:`compute_move_cost` purely to stay within this
+    project's flake8 complexity limit."""
+    if source.saturation_load is not None:
+        l_during_src = l_hat_src + migration.source_load_weight
+        if l_during_src > migration.saturation_ceiling * source.saturation_load:
+            return True
+    if target.saturation_load is not None:
+        l_during_dst = l_hat_dst + migration.target_load_weight
+        if l_during_dst > migration.saturation_ceiling * target.saturation_load:
+            return True
+    return False
+
+
 def compute_move_cost(
     move: ScheduledMove,
     source: Storage,
     migration: MigrationConfig,
+    target: Storage | None = None,
+    l_hat_src: float = 0.0,
+    l_hat_dst: float = 0.0,
 ) -> MoveCost:
-    """Section 7.1's cost for one scheduled move.
+    """Section 7.1's cost for one scheduled move, plus (only when
+    ``target`` is given) section 7.3's saturation defer check.
 
-    Only ``source`` is needed (not the target storage): `saferemove` is a
-    property of where the volume is *removed from*, and
-    ``migration.bwlimit_bytes_per_sec`` is the one global mirror-rate
-    config value both ends share (see the module docstring's note on
-    ``headroom_src``/``headroom_dst``).
+    Only ``source`` is needed for the cost itself (not the target
+    storage): `saferemove` is a property of where the volume is *removed
+    from*, and ``migration.bwlimit_bytes_per_sec`` is the one global
+    mirror-rate config value both ends share (see the module docstring's
+    note on ``headroom_src``/``headroom_dst``).
+
+    ``target``/``l_hat_src``/``l_hat_dst`` are the saturation guard's own
+    inputs -- ``l_hat_src``/``l_hat_dst`` are the caller's own
+    already-computed ``L_hat_s(duration_mirror)`` (section 10.1:
+    `forecast.storage_upper_bound()`, summed over each endpoint's
+    *currently* resident disks), left at their default of ``0.0`` and
+    ``target=None`` (the check inactive) for every caller that has not
+    computed a forecast at all -- this function stays pure either way,
+    never fetching anything itself (the module docstring's own promise).
     """
-    bwlimit = migration.bwlimit_bytes_per_sec
-    duration_mirror = move.size_bytes / bwlimit if bwlimit else 0.0
+    duration_mirror = mirror_duration_seconds(move, migration)
 
     duration_wipe = 0.0
     if migration.account_saferemove_wipe and source.saferemove:
@@ -157,6 +234,11 @@ def compute_move_cost(
         + duration_wipe * migration.wipe_load_weight
     )
     exceeds = (duration_mirror + duration_wipe) > migration.max_single_move_duration_seconds
+    deferred = (
+        _saturation_deferred(source, target, migration, l_hat_src, l_hat_dst)
+        if target is not None
+        else False
+    )
 
     return MoveCost(
         disk_key=move.disk_key,
@@ -165,6 +247,7 @@ def compute_move_cost(
         cost_load_seconds=cost,
         exceeds_max_duration=exceeds,
         resolves_reserve_violation=move.resolves_reserve_violation,
+        saturation_deferred=deferred,
     )
 
 
@@ -228,9 +311,11 @@ def evaluate_plan_payback(
     has_reserve_override = any(mc.resolves_reserve_violation for mc in move_costs)
     aggregate_ok = has_reserve_override or benefit_load_seconds >= payback_ratio * total_cost
     rejected = tuple(mc.disk_key for mc in move_costs if mc.exceeds_max_duration)
+    deferred = tuple(mc.disk_key for mc in move_costs if mc.saturation_deferred)
     return PaybackResult(
         move_costs=move_costs,
         benefit_load_seconds=benefit_load_seconds,
         rejected_moves=rejected,
         aggregate_ok=aggregate_ok,
+        deferred_moves=deferred,
     )

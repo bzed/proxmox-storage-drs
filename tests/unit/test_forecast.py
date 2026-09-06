@@ -18,6 +18,7 @@ from proxmox_storage_drs.forecast import (
     _quantile,
     build_forecaster,
     required_range_seconds,
+    storage_upper_bound,
 )
 
 DAY = 86400.0
@@ -181,3 +182,35 @@ def test_build_forecaster_unknown_model_raises() -> None:
     object.__setattr__(fc, "model", "bogus")
     with pytest.raises(ValueError):
         build_forecaster(fc, DAY, 300, 0, 0.95, 0.99)
+
+
+# --------------------------------------------------------- storage_upper_bound
+
+
+def test_storage_upper_bound_sums_independent_per_disk_forecasts() -> None:
+    """Section 10.1: L_hat_s(Delta) = sum of each disk's own upper bound,
+    forecast independently -- not the forecast of the storage's own
+    summed series (which could differ once the disks' peaks do not
+    coincide)."""
+    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
+    series = {
+        "101:scsi0": tuple((float(i), v) for i, v in enumerate([1.0, 2.0, 3.0])),
+        "102:scsi0": tuple((float(i), v) for i, v in enumerate([4.0, 5.0, 6.0])),
+    }
+    result = storage_upper_bound(forecaster, series, ["101:scsi0", "102:scsi0"], timedelta(hours=1))
+    # upper_bound (quantile=1.0, i.e. max) is 3.0 and 6.0 respectively.
+    assert result == pytest.approx(9.0)
+
+
+def test_storage_upper_bound_missing_disk_key_contributes_zero() -> None:
+    """A disk key with no fetched series at all -- e.g. this run has no
+    history for it yet -- forecasts an empty series, not a KeyError."""
+    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
+    series = {"101:scsi0": tuple((float(i), v) for i, v in enumerate([1.0, 2.0]))}
+    result = storage_upper_bound(forecaster, series, ["101:scsi0", "999:scsi0"], timedelta(hours=1))
+    assert result == pytest.approx(2.0)  # 999:scsi0 contributes 0.0
+
+
+def test_storage_upper_bound_empty_disk_keys_is_zero() -> None:
+    forecaster = QuantileForecaster(lookback_seconds=DAY)
+    assert storage_upper_bound(forecaster, {}, [], timedelta(hours=1)) == 0.0

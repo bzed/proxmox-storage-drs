@@ -24,12 +24,31 @@ itself believes it needs.
 
 Every `Forecaster.predict()` returns a `Forecast(point_estimate,
 upper_bound)`. Nothing in this module enforces that callers use
-`upper_bound` — that discipline belongs to the caller (the optimizer and the
-section 7.3 saturation guard, neither written yet). The asymmetry is stated
-in the module docstring and repeated here because it is easy to get backwards
-under time pressure: overestimating costs a slightly worse balance,
-underestimating risks scheduling a mirror onto a storage that is about to
-saturate.
+`upper_bound` — that discipline belongs to the caller: the section 7.3
+saturation guard (`payback.py`'s `compute_move_cost()`, via
+`storage_upper_bound()` below) already only ever reads `.upper_bound`;
+the optimizer does not consume a forecast at all yet. The asymmetry is
+stated in the module docstring and repeated here because it is easy to
+get backwards under time pressure: overestimating costs a slightly worse
+balance, underestimating risks scheduling a mirror onto a storage that is
+about to saturate.
+
+## `storage_upper_bound()`: section 10.1's per-disk sum, not a per-storage forecast
+
+Section 10.1 is explicit that `L̂_s(Δ)` is `Σ_{d : x_{d,s}=1} û_d(Δ)` —
+every disk on `s` forecast **independently**, then summed — never the
+forecast of `s`'s own already-summed series. `storage_upper_bound()` is
+exactly that sum, given a `Forecaster`, `{disk_key: TimeSeries}` (typically
+`loadmodel.compute_disk_load_series()`'s own output), the disk keys
+currently on one storage, and a horizon. Summing upper bounds this way is
+deliberately conservative (it assumes every disk peaks together — the
+right direction for a guard whose failure mode is starting a mirror onto
+an already-busy array), and is real, measurable extra conservatism
+whenever a group's disks do not actually peak in lockstep: forecasting
+one already-summed series directly would let one disk's trough offset
+another's peak, understating the storage's own worst case. A disk key
+with no fetched series at all forecasts as an empty one (`0.0`), never a
+`KeyError` — this run may simply have no history for a disk yet.
 
 ## `QuantileForecaster`
 
