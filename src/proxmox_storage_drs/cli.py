@@ -83,6 +83,7 @@ from proxmox_storage_drs.state import (
     with_recorded_balance,
     with_recorded_cooldown,
 )
+from proxmox_storage_drs.timewindow import current_deadline
 from proxmox_storage_drs.topology import Group, Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
@@ -1290,6 +1291,8 @@ def _apply_payback_gate(
     payback_ratio: float,
     exclude: ExcludeConfig,
     confirm: ConfirmCallback | None,
+    deadline: datetime | None = None,
+    max_migrations: int | None = None,
 ) -> ExecutionResult:
     """Section 7.3's payback verdict gates *execution*, not merely the
     report (REVIEW.md S-02): a move `rejected_moves` names (the hard
@@ -1312,6 +1315,13 @@ def _apply_payback_gate(
     renderers need no special case for it; ``execute_plan()`` itself is
     never called at all when the aggregate test fails, so a rejected plan
     issues zero API calls, the same as `dry-run`.
+
+    ``deadline``/``max_migrations`` are threaded straight through to
+    `execute.execute_plan()` -- ``auto`` mode's own section 9.1 budgets
+    (`_handle_apply()` is the only caller that ever passes non-``None``
+    values for either, and computes ``group_plan.payback_result.move_costs``
+    into the ``move_costs_by_key`` `execute_plan()` needs for the deadline
+    estimate).
     """
     assert group_plan.schedule_result is not None and group_plan.payback_result is not None
     order = group_plan.schedule_result.order
@@ -1358,6 +1368,7 @@ def _apply_payback_gate(
         return ExecutionResult(outcomes=tuple(refused), stopped_early=False, stop_reason=None)
 
     filtered = dataclasses.replace(group_plan.schedule_result, order=kept)
+    move_costs_by_key = {mc.disk_key: mc for mc in payback.move_costs}
     executed = execute_plan(
         client,
         group,
@@ -1368,6 +1379,9 @@ def _apply_payback_gate(
         mode,
         exclude,
         confirm=confirm,
+        deadline=deadline,
+        move_costs_by_key=move_costs_by_key,
+        max_migrations=max_migrations,
     )
     return ExecutionResult(
         outcomes=tuple(refused) + executed.outcomes,
@@ -1376,24 +1390,222 @@ def _apply_payback_gate(
     )
 
 
-def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
-    """Section 9: execute (``confirm``) or merely report (``dry-run``)
-    the same per-group pipeline ``plan`` computes -- :func:`_plan_group`
-    is the one implementation of it both commands share (AGENTS.md
-    section 5), so there is no separate "apply's own solve/schedule"
-    to drift out of sync with what ``plan`` just showed the operator.
+def _real_local_now() -> datetime:
+    return datetime.now().astimezone()
 
-    ``auto`` is refused outright: its safety rails
-    (``execution.time_windows``, ``max_migrations_per_run``, the
-    concurrency caps) are IMPLEMENTATION_PLAN.md section 12 phase 8, not
-    this one, and running it unattended without them would be exactly the
-    "partial/unvalidated result" AGENTS.md section 10 forbids.
+
+def _run_auto_group(
+    client: PveClient,
+    resolved: ResolvedConfig,
+    prom_client: PrometheusClient,
+    min_free_bytes: int,
+    state: State,
+    group: Group,
+    group_plan: _GroupPlan,
+    migrations_budget: int | None,
+    local_now: Callable[[], datetime] = _real_local_now,
+) -> tuple[ExecutionResult, int | None]:
+    """``auto`` mode's own orchestration: section 9.1's time-window budget
+    and section 9.2's re-plan protocol, bounded by
+    ``execution.max_replans_per_run``. Everything reported here
+    (`group_loads`/`gate_decisions`/etc.) still comes from the *initial*
+    ``group_plan`` its caller already recorded -- a re-plan here changes
+    what gets *executed*, not what the report says the group's plan was,
+    which keeps this function from having to hand back a `_GroupPlan`
+    that might, after a re-plan concludes "no action needed", have every
+    solve/schedule/payback field `None`. What this function does return
+    is one `ExecutionResult` accumulating *every* attempt's outcomes, so
+    the report shows the whole story (initial attempt, why it stopped,
+    what the re-plan did next), plus the updated, cross-group
+    ``migrations_budget`` (``execution.max_migrations_per_run`` is a
+    per-*invocation* cap, shared across every group `_handle_apply()`
+    visits, not reset per group or per re-plan).
+
+    ``local_now`` -- real host local time by default -- is injectable for
+    the same reason `execute.py`'s own `Clock` is: a test needs a
+    deterministic answer to "is now inside this configured window"
+    without actually waiting for (or being sensitive to) real wall-clock
+    time (`.agents/testing.md`).
     """
-    if mode == "auto":
+    execution = resolved.config.execution
+    replans_left = execution.max_replans_per_run
+    all_outcomes: list[MoveOutcome] = []
+    stopped_early = False
+    stop_reason: str | None = None
+
+    while True:
+        assert group_plan.schedule_result is not None and group_plan.payback_result is not None
+        # Local wall-clock time -- `timewindow.py`'s own module docstring
+        # explains why a human-configured HH:MM window is matched against
+        # the host's local time, not UTC.
+        now = local_now()
+        deadline = current_deadline(execution.time_windows, now)
+        if deadline is not None and deadline <= now:
+            refused = tuple(
+                MoveOutcome(
+                    m.disk_key,
+                    m.from_storage,
+                    m.to_storage,
+                    "skipped",
+                    "outside execution.time_windows",
+                )
+                for m in group_plan.schedule_result.order
+            )
+            all_outcomes.extend(refused)
+            stopped_early = True
+            stop_reason = "outside execution.time_windows"
+            break
+
+        result = _apply_payback_gate(
+            client,
+            group,
+            group_plan,
+            resolved.config.migration,
+            execution,
+            min_free_bytes,
+            "auto",
+            resolved.config.migration.payback_ratio,
+            resolved.config.exclude,
+            None,
+            deadline=deadline,
+            max_migrations=migrations_budget,
+        )
+        all_outcomes.extend(result.outcomes)
+        stopped_early = result.stopped_early
+        stop_reason = result.stop_reason
+        if migrations_budget is not None:
+            used = sum(1 for o in result.outcomes if o.status in ("moved", "draining", "failed"))
+            migrations_budget = max(migrations_budget - used, 0)
+
+        needs_replan = bool(result.outcomes) and result.outcomes[-1].status == "replan_needed"
+        if not needs_replan:
+            break
+        if replans_left <= 0:
+            # Section 9.2 step 4: "on exceeding it, stop and report -- a
+            # cluster churning faster than the engine can plan is a
+            # condition for a human to look at, not to iterate against."
+            stop_reason = (
+                f"execution.max_replans_per_run ({execution.max_replans_per_run}) exceeded "
+                f"(last mismatch: {stop_reason})"
+            )
+            break
+        replans_left -= 1
+
+        # Section 9.2 step 3: "re-invoke the whole pipeline from the new
+        # observed state" -- topology included, not just the plan, since
+        # whatever triggered the mismatch (a VM live-migrated, a storage
+        # reconfigured) can mean the group's own membership changed too.
+        fresh_now = datetime.now(timezone.utc)
+        fresh_topology = build_topology(client, resolved.config, state=state, now=fresh_now)
+        fresh_group = next((g for g in fresh_topology.groups if g.name == group.name), None)
+        if fresh_group is None:
+            stop_reason = f"group {group.name!r} no longer exists after re-planning"
+            break
+        fresh_last_loads = _last_loads_by_group(state, fresh_topology)
+        new_plan = _plan_group(
+            fresh_group, resolved, prom_client, min_free_bytes, fresh_last_loads, state, fresh_now
+        )
+        if (
+            new_plan.load_error is not None
+            or new_plan.decision is None
+            or not new_plan.decision.act
+            or new_plan.schedule_result is None
+        ):
+            # Re-planning concluded no further action is needed, or hit a
+            # load error -- "the gates may well conclude no further
+            # action is needed, which is a correct outcome" (section
+            # 9.2 step 3), not a failure to report as one.
+            stopped_early = False
+            stop_reason = None
+            break
+        group = fresh_group
+        group_plan = new_plan
+
+    return ExecutionResult(tuple(all_outcomes), stopped_early, stop_reason), migrations_budget
+
+
+def _record_executed_moves(
+    state: State,
+    group_name: str,
+    load_by_key: dict[str, float],
+    outcomes: tuple[MoveOutcome, ...],
+) -> State:
+    """Section 11.2: ``last_balance``/cooldowns are "updated only after a
+    run that executed at least one migration" -- ``"moved"`` and
+    ``"draining"`` both count (the mirror itself completed either way,
+    mirroring `execute.py`'s own (C4) accounting choice for the same two
+    statuses), ``"would_move"``/``"skipped"``/``"failed"``/
+    ``"replan_needed"``/a payback refusal do not. Derived from
+    ``outcomes`` directly, never a `_GroupPlan`'s own
+    ``schedule_result.order``: a payback refusal (S-02) can already make
+    ``outcomes`` a reordered subset of that order, and in ``auto`` mode a
+    re-plan (:func:`_run_auto_group`) can execute moves from a *later*
+    plan attempt that never appeared in the first attempt's order at
+    all -- factored out of `_handle_apply()`'s own loop purely to stay
+    within this project's flake8 complexity limit."""
+    executed = [o for o in outcomes if o.status in ("moved", "draining")]
+    if not executed:
+        return state
+    # The load reading recorded here is the caller's own -- in `auto`
+    # mode after a re-plan, the *first* attempt's, not whichever later
+    # attempt actually executed the move. A real, deliberate
+    # simplification: re-fetching the load model again here just to
+    # refresh `last_balance` by a few minutes' drift is not worth a
+    # second `compute_group_load()` call on this path.
+    state = with_recorded_balance(state, group_name, load_by_key)
+    timestamp = now_iso()
+    # Both endpoints get a timestamp -- section 6's own words are "a
+    # storage **involved in** a migration ... accepts no new incoming
+    # moves", and section 9.3's knob-sizing rule ("cooldown_per_storage
+    # must exceed the expected wipe time ... or the next run will plan
+    # moves onto a storage that is still draining") is specifically about
+    # the *source*, where the saferemove wipe actually runs (REVIEW.md
+    # S-03: recording the destination only can never protect a draining
+    # source, no matter how long the cooldown is configured for). This is
+    # a *recording* decision only -- which storages get a timestamp;
+    # `heuristic.py`'s own *enforcement* of that cooldown stays
+    # destination-only, excluding a cooldown storage as a move/swap
+    # target but never as a source (docs/internals/90-heuristic.md),
+    # which is unaffected by recording the source's own timestamp here
+    # too.
+    storage_keys = {storage_state_key(group_name, o.to_storage): timestamp for o in executed}
+    storage_keys.update(
+        {storage_state_key(group_name, o.from_storage): timestamp for o in executed}
+    )
+    disk_keys = {}
+    for o in executed:
+        vmid_str, device = o.disk_key.split(":", 1)
+        disk_keys[disk_state_key(group_name, int(vmid_str), device)] = timestamp
+    return with_recorded_cooldown(state, disk_keys=disk_keys, storage_keys=storage_keys)
+
+
+def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+    """Section 9: execute (``confirm``/``auto``) or merely report
+    (``dry-run``) the same per-group pipeline ``plan`` computes --
+    :func:`_plan_group` is the one implementation of it every mode
+    shares (AGENTS.md section 5), so there is no separate "apply's own
+    solve/schedule" to drift out of sync with what ``plan`` just showed
+    the operator. ``auto`` additionally runs :func:`_run_auto_group`'s
+    section 9.1/9.2 orchestration (time windows, `max_migrations_per_run`,
+    the bounded re-plan loop) instead of a single `_apply_payback_gate()`
+    call.
+
+    ``execution.max_concurrent_migrations``/``max_concurrent_per_storage``
+    above `1` are refused outright in `auto` mode: `execute.py` runs every
+    move strictly sequentially, which trivially satisfies either cap's
+    *default* of `1` but not a configured value above it, and running
+    sequentially anyway while silently ignoring a requested concurrency
+    would be exactly the "partial/unvalidated result" AGENTS.md section 10
+    forbids -- refusing outright names the gap instead of hiding it.
+    """
+    if mode == "auto" and (
+        resolved.config.execution.max_concurrent_migrations > 1
+        or resolved.config.execution.max_concurrent_per_storage > 1
+    ):
         print(
-            "pve-storage-drs: 'apply' does not support --mode auto yet in this "
-            "development build (IMPLEMENTATION_PLAN.md section 12 phase 8: auto mode "
-            "+ time windows); use --mode confirm or --mode dry-run",
+            "pve-storage-drs: 'apply' does not support concurrent execution yet in this "
+            "development build (execution.max_concurrent_migrations/max_concurrent_per_storage "
+            "> 1); set both to 1, or use --mode confirm",
             file=sys.stderr,
         )
         return 1
@@ -1435,6 +1647,14 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
         prom_client = PrometheusClient(resolved.config.prometheus)
         min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
         last_loads_by_group = _last_loads_by_group(state, topology)
+        # execution.max_migrations_per_run is a per-*invocation* cap,
+        # shared across every group this run visits -- not reset per
+        # group. Only ever consulted in `auto` mode (`_run_auto_group()`
+        # is the only caller that ever passes a non-`None` value on to
+        # `execute_plan()`).
+        migrations_budget: int | None = (
+            resolved.config.execution.max_migrations_per_run if mode == "auto" else None
+        )
 
         for group in topology.groups:
             group_plan = _plan_group(
@@ -1474,76 +1694,35 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                 ):
                     print(line)
 
-            confirm_callback = _confirm_move_interactively if mode == "confirm" else None
-            result = _apply_payback_gate(
-                client,
-                group,
-                group_plan,
-                resolved.config.migration,
-                resolved.config.execution,
-                min_free_bytes,
-                mode,
-                resolved.config.migration.payback_ratio,
-                resolved.config.exclude,
-                confirm_callback,
-            )
-            execution_results[group.name] = result
-
-            # Section 11.2: last_balance/cooldowns are "updated only after
-            # a run that executed at least one migration" -- "moved" and
-            # "draining" both count (the mirror itself completed either
-            # way, mirroring execute.py's own (C4) accounting choice for
-            # the same two statuses), "would_move"/"skipped"/"failed"/
-            # "replan_needed"/a payback refusal do not. Keyed by
-            # disk_key, not zipped positionally: a payback refusal
-            # (S-02) can make `result.outcomes` a reordered subset of
-            # `group_plan.schedule_result.order`.
-            outcomes_by_key = {o.disk_key: o for o in result.outcomes}
-            executed_moves = [
-                move
-                for move in group_plan.schedule_result.order
-                if (outcome := outcomes_by_key.get(move.disk_key)) is not None
-                and outcome.status in ("moved", "draining")
-            ]
-            if executed_moves:
-                state = with_recorded_balance(
-                    state, group.name, group_plan.group_load.load_by_disk_key()
-                )
-                timestamp = now_iso()
-                # Both endpoints get a timestamp -- section 6's own words
-                # are "a storage **involved in** a migration ... accepts
-                # no new incoming moves", and section 9.3's knob-sizing
-                # rule ("cooldown_per_storage must exceed the expected
-                # wipe time ... or the next run will plan moves onto a
-                # storage that is still draining") is specifically about
-                # the *source*, where the saferemove wipe actually runs
-                # (REVIEW.md S-03: recording the destination only can
-                # never protect a draining source, no matter how long
-                # the cooldown is configured for). This is a *recording*
-                # decision only -- which storages get a timestamp;
-                # `heuristic.py`'s own *enforcement* of that cooldown
-                # stays destination-only, excluding a cooldown storage as
-                # a move/swap target but never as a source
-                # (docs/internals/90-heuristic.md), which is unaffected
-                # by recording the source's own timestamp here too.
-                storage_keys = {
-                    storage_state_key(group.name, move.to_storage): timestamp
-                    for move in executed_moves
-                }
-                storage_keys.update(
-                    {
-                        storage_state_key(group.name, move.from_storage): timestamp
-                        for move in executed_moves
-                    }
-                )
-                state = with_recorded_cooldown(
+            if mode == "auto":
+                result, migrations_budget = _run_auto_group(
+                    client,
+                    resolved,
+                    prom_client,
+                    min_free_bytes,
                     state,
-                    disk_keys={
-                        disk_state_key(group.name, move.vmid, move.device): timestamp
-                        for move in executed_moves
-                    },
-                    storage_keys=storage_keys,
+                    group,
+                    group_plan,
+                    migrations_budget,
                 )
+            else:
+                confirm_callback = _confirm_move_interactively if mode == "confirm" else None
+                result = _apply_payback_gate(
+                    client,
+                    group,
+                    group_plan,
+                    resolved.config.migration,
+                    resolved.config.execution,
+                    min_free_bytes,
+                    mode,
+                    resolved.config.migration.payback_ratio,
+                    resolved.config.exclude,
+                    confirm_callback,
+                )
+            execution_results[group.name] = result
+            state = _record_executed_moves(
+                state, group.name, group_plan.group_load.load_by_disk_key(), result.outcomes
+            )
 
             if result.stop_reason == "operator quit":
                 # A human asked to stop the whole apply run, not just this

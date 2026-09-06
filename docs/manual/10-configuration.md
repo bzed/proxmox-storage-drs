@@ -663,21 +663,20 @@ disks can land on one storage at once, and none of their sources release
 space until each individually completes.
 
 **Not yet effective in this build.** `apply`'s executor runs strictly
-sequentially, one move at a time, regardless of this setting — it belongs to
-`auto` mode's concurrency machinery (`IMPLEMENTATION_PLAN.md` section 12
-phase 8), not yet implemented. See `docs/manual/30-safety-and-status.md`.
+sequentially, one move at a time, regardless of this setting. `--mode auto`
+is refused outright when this is set above `1` (or so is
+`max_concurrent_per_storage`, below), rather than silently running
+sequentially against a requested concurrency it does not implement — see
+`docs/manual/30-safety-and-status.md`.
 
 ### `execution.max_migrations_per_run`
 
 Integer `>= 1`, default `5`.
 
 A ceiling on how many moves one invocation executes, independent of how many
-the plan contains — the remainder waits for the next run.
-
-**Not yet effective in this build.** `apply` executes every move in the
-scheduled plan (subject to section 7.3's payback gate); this per-run cap is
-part of `auto` mode's not-yet-implemented safety rails (phase 8). See
-`docs/manual/30-safety-and-status.md`.
+the plan contains — the remainder waits for the next run. `auto` mode only
+(`dry-run`/`confirm` execute or report the whole plan regardless); a shared
+budget across every group the run visits, not reset per group.
 
 ### `execution.max_concurrent_per_storage`
 
@@ -692,7 +691,7 @@ two concurrent `saferemove` wipes sharing one throttle.
 
 **Not yet effective in this build**, for the same reason as
 `max_concurrent_migrations` above — there is no concurrent execution yet to
-cap. See `docs/manual/30-safety-and-status.md`.
+cap. `--mode auto` is refused outright when this is set above `1`.
 
 ### `execution.max_replans_per_run`
 
@@ -702,13 +701,9 @@ A cap on how many times one run may abandon its current plan and re-plan
 from newly observed state (section 9.2) — a mismatch between the plan and
 reality (a VM live-migrated mid-plan, a lock appeared) is normal, but a
 cluster churning faster than the engine can plan is a condition for a human,
-not for indefinite retrying.
-
-**Not yet effective in this build.** `apply` detects the need to re-plan
-(`replan_needed`) and stops the group's run cleanly, but does not yet
-re-invoke the pipeline automatically — that loop, capped by this setting, is
-`cli.py`-level orchestration not implemented yet. See
-`docs/manual/28-apply.md` and `docs/manual/30-safety-and-status.md`.
+not for indefinite retrying. `auto` mode only — `confirm`/`dry-run` report a
+mismatch (`replan_needed`) and stop that group's own run for the operator to
+re-run by hand, rather than re-planning automatically.
 
 ### `execution.abort_on_failure`
 
@@ -777,9 +772,18 @@ anything without a human already present.
 
 `HH:MM` strings, required together, must differ.
 
-The window `auto` mode is permitted to execute moves in. A window may cross
-midnight (`start: "22:00"`, `end: "06:00"`); `start == end` is rejected as
-ambiguous — it would silently mean either "never" or "always".
+The window `auto` mode is permitted to execute moves in, in the **local
+time of the host running `pve-storage-drs`** — the same convention
+`systemd.timer`'s own `OnCalendar=` uses by default — not UTC. A window may
+cross midnight (`start: "22:00"`, `end: "06:00"`); `start == end` is
+rejected as ambiguous — it would silently mean either "never" or "always".
+No `time_windows` configured at all means no restriction: `auto` may
+execute at any time (section 2.1's "the engine may plan at any time and
+simply decline to act outside the window" only applies once at least one
+window is configured). Before starting a move, `auto` also refuses it (and
+stops the group's run cleanly, without aborting a move already in
+progress) if its estimated duration would not finish before the window
+closes.
 
 ## `exclude` — what DRS never touches
 

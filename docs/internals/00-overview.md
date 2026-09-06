@@ -10,19 +10,23 @@ section 2 architecture actually exists right now?
 gate, solve, cost, order, execute. As of this page, all seven exist, with
 **two** interchangeable stage-4 (solve) backends — the dependency-free
 heuristic and the MILP (CP-SAT/CBC) path — selected by `solver.backend`.
-Stage 7 (execute) is real for `dry-run`/`confirm`; `auto` mode's own
-safety rails (`IMPLEMENTATION_PLAN.md` section 12 phase 8) are not. Do not
-take this page as a claim that the whole pipeline runs unattended end to
-end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
+Stage 7 (execute) is real for all three `execution.mode` values,
+including `auto`'s own section 9.1 time-window/migration-count budgets
+and section 9.2 re-plan loop (`IMPLEMENTATION_PLAN.md` section 12 phase
+8) — the one thing still missing there is concurrent execution
+(`execution.max_concurrent_migrations`/`max_concurrent_per_storage`
+above `1`), which `apply` refuses outright rather than run sequentially
+against. Do not take this page as a claim that every phase-8 knob does
+something — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
 is the authoritative per-command status: `plan` prints an ordered,
 transient-feasible, payback-checked plan (see
 [`../manual/27-plan.md`](../manual/27-plan.md)), and `apply` (see
-[`../manual/28-apply.md`](../manual/28-apply.md)) executes it in `dry-run`
-or `confirm`, re-validating every move against the live cluster
-immediately before issuing it (section 9.2), waiting out a VM lock rather
-than failing (section 9.3.1), and not considering a move done until the
-task succeeded *and* the source volume is gone *and* the VM's lock is
-clear (section 9.3.2) — see [`92-execute.md`](92-execute.md). `state.json`
+[`../manual/28-apply.md`](../manual/28-apply.md)) executes it in any
+mode, re-validating every move against the live cluster immediately
+before issuing it (section 9.2), waiting out a VM lock rather than
+failing (section 9.3.1), and not considering a move done until the task
+succeeded *and* the source volume is gone *and* the VM's lock is clear
+(section 9.3.2) — see [`92-execute.md`](92-execute.md). `state.json`
 itself (`state.py`) is read by `show-load` and `plan` for drift history
 and cooldowns, and now **written** by `apply` after any run that actually
 executed a migration — see [`15-state.md`](15-state.md),
@@ -72,6 +76,7 @@ executed a migration — see [`15-state.md`](15-state.md),
                                  │
                      config.py (load + validate)
                      state.py (state.json: drift/cooldowns in and out, section 11.2)
+                     timewindow.py (current_deadline(): auto's time-window budget, section 9.1)
                      forecast.py (Forecaster protocol + 3 models)
                      logging_setup.py (structured JSON to stderr)
                      units.py (duration/size parsing)
@@ -99,23 +104,27 @@ executed a migration — see [`15-state.md`](15-state.md),
 | `optimize.py` | `solve()`: CP-SAT/CBC, section 5.3's constraints, the lexicographic two-stage reserve solve | section 5.5 |
 | `schedule.py` | `order_moves()`: transient-feasible ordering of a target assignment's moves, deadlock reporting | section 8 |
 | `payback.py` | `evaluate_plan_payback()`: the cost/benefit acceptance test, with a reserve-override exemption mirroring `gates.py`'s | section 7 |
-| `execute.py` | `execute_plan()`: pre-flight re-check per move, VM-lock wait, `move_disk`, the three-condition completion criterion, orphan detection on failure | section 9 |
-| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan`, `apply` | section 11.3 |
+| `execute.py` | `execute_plan()`: pre-flight re-check per move, VM-lock wait, `move_disk`, the three-condition completion criterion, orphan detection on failure, `auto`'s own time-window/migration-count budgets | section 9 |
+| `timewindow.py` | `current_deadline()`: is `now` (local time) inside a configured `execution.time_windows` entry, and when does it close | section 9.1 |
+| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan`, `apply` (including `auto`'s own re-plan loop) | section 11.3 |
 
-Not yet written: `auto` mode's own safety rails (phase 8) — `apply`
-itself (phase 7) executes `dry-run`/`confirm`, see
-[`92-execute.md`](92-execute.md) and
+Not yet written: concurrent execution
+(`execution.max_concurrent_migrations`/`max_concurrent_per_storage`
+above `1`) — `apply` refuses `auto` mode outright rather than run
+sequentially against a higher configured value; everything else phase 8
+names (time windows, `max_migrations_per_run`, the re-plan loop) is
+real, see [`92-execute.md`](92-execute.md) and
 [`../manual/28-apply.md`](../manual/28-apply.md). `optimize.py` (phase 6)
 is done: `plan`/`apply` pick CP-SAT, CBC or the heuristic per
-`solver.backend`, see [`91-optimize.md`](91-optimize.md). Cooldowns and
-drift history are now read *and written*: `topology.py`'s (C2) per-disk
-pin and `heuristic.py`'s per-storage target exclusion consume `state.py`'s
-cooldown data, and `apply` writes a fresh one for every disk/destination
--storage a run actually migrated (see [`15-state.md`](15-state.md),
-[`60-topology.md`](60-topology.md), [`90-heuristic.md`](90-heuristic.md)
-and [`92-execute.md`](92-execute.md)) — the MILP path still does not
-enforce the storage cooldown itself, only the heuristic does (see
-[`91-optimize.md`](91-optimize.md)). Within modules that do exist:
+`solver.backend`, and both MILP backends now enforce the storage cooldown
+identically to the heuristic (see [`91-optimize.md`](91-optimize.md)).
+Cooldowns and drift history are read *and written*: `topology.py`'s (C2)
+per-disk pin and `heuristic.py`'s per-storage target exclusion consume
+`state.py`'s cooldown data, and `apply` writes a fresh one for every
+disk and **both** of a move's storages a run actually migrated (see
+[`15-state.md`](15-state.md), [`60-topology.md`](60-topology.md),
+[`90-heuristic.md`](90-heuristic.md) and [`92-execute.md`](92-execute.md)).
+Within modules that do exist:
 heuristic step 4 "polish" and (C2) format-compatibility eligibility in
 `heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)), concurrent
 scheduling, priority-2 ordering and staging in `schedule.py` (see
@@ -179,5 +188,7 @@ this.
   and why a reserve-fixing plan always passes the economic test.
 - [`92-execute.md`](92-execute.md) — why a completed move needs three
   conditions, not one, why a VM lock is waited out rather than
-  whitelisted, the injectable `Clock`, and how `cli.py`'s `_plan_group()`
-  gives `plan` and `apply` one shared pipeline instead of two.
+  whitelisted, the injectable `Clock`, how `cli.py`'s `_plan_group()`
+  gives `plan` and `apply` one shared pipeline instead of two, and
+  `auto` mode's time-window budget and re-plan loop (`timewindow.py`,
+  `cli._run_auto_group()`).
