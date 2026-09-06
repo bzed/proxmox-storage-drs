@@ -147,12 +147,16 @@ and left for you to review, not silently adjusted. See
 
 - **No automatic re-solve-and-shrink on a failing payback test** (see
   above) — reported, not fixed for you.
-- **No section 7.3 saturation-ceiling defer check.** Needs a forecaster
-  upper bound this codebase does not compute yet, and no group in this
-  project's own dogfooding cluster has `saturation_load` set — which the
-  plan itself says is "fully supported... loses only this one advisory
-  check." `max_single_move_duration` and the transient reserve invariant
-  are the two *hard* bounds and are both already enforced.
+- **The section 7.3 saturation-ceiling defer check only covers the
+  mirroring phase**, not a second, separate check for the *draining*
+  phase a `saferemove` wipe holds a storage in afterward — that needs
+  `schedule.py` to reason about which moves actually overlap in time,
+  which it does not do. The check itself is otherwise active for any
+  storage that configures `saturation_load` (still none in this
+  project's own dogfooding cluster) — a deferred move is reported
+  separately from a hard-duration-rejected one (`deferred_moves`, not
+  `rejected_moves`) and excluded from `apply` the same way. See
+  `docs/internals/96-payback.md`.
 - **`plan` itself still only reads `state.json`, never writes it.** Its
   gate reads real `last_balance` history when a group has one recorded
   (see `docs/internals/15-state.md`), and a disk/storage cooldown pins or
@@ -186,5 +190,7 @@ Prometheus failed for this group), and `payback` — `null` when there is no
 `GroupLoad` or the gate said `NO ACTION`, otherwise an object with
 `benefit_load_seconds`, `total_cost_load_seconds`, `ratio`, `aggregate_ok`
 (the economic test alone, or `true` if exempted), `rejected_moves` (disk
-keys failing the hard duration rule) and `accepted` (`aggregate_ok` and no
-rejected move).
+keys failing the hard duration rule), `deferred_moves` (disk keys deferred
+by the section 7.3 saturation guard — empty unless a storage in the group
+configures `saturation_load`) and `accepted` (`aggregate_ok` and neither
+list non-empty).

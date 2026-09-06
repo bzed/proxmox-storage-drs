@@ -25,7 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -49,6 +49,13 @@ from proxmox_storage_drs.execute import (
     MoveOutcome,
     execute_plan,
 )
+from proxmox_storage_drs.forecast import (
+    Forecaster,
+    TimeSeries,
+    build_forecaster,
+    required_range_seconds,
+    storage_upper_bound,
+)
 from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
 from proxmox_storage_drs.heuristic import (
     Assignment,
@@ -58,7 +65,7 @@ from proxmox_storage_drs.heuristic import (
     raw_spread,
     run_heuristic,
 )
-from proxmox_storage_drs.loadmodel import GroupLoad, compute_group_load
+from proxmox_storage_drs.loadmodel import GroupLoad, compute_disk_load_series, compute_group_load
 from proxmox_storage_drs.logging_setup import configure_logging
 from proxmox_storage_drs.metrics import PrometheusClient, VerifyMetricsReport, verify_metrics
 from proxmox_storage_drs.payback import (
@@ -68,6 +75,7 @@ from proxmox_storage_drs.payback import (
     compute_move_cost,
     compute_wipe_duration_seconds,
     evaluate_plan_payback,
+    mirror_duration_seconds,
 )
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.pve import build_client as build_pve_client
@@ -91,7 +99,7 @@ from proxmox_storage_drs.state import (
     without_inflight_upid,
 )
 from proxmox_storage_drs.timewindow import current_deadline
-from proxmox_storage_drs.topology import Group, Topology, build_topology
+from proxmox_storage_drs.topology import Group, Storage, Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
 logger = logging.getLogger(__name__)
@@ -638,6 +646,11 @@ def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: flo
             "  ⚠ blocked by the hard per-move duration rule (migration."
             "max_single_move_duration): " + ", ".join(payback_result.rejected_moves)
         )
+    if payback_result.deferred_moves:
+        lines.append(
+            "  ⚠ deferred by the section 7.3 saturation guard (migration."
+            "saturation_ceiling): " + ", ".join(payback_result.deferred_moves)
+        )
     return lines
 
 
@@ -875,6 +888,7 @@ def _render_group_plan_json(
             "ratio": payback_result.ratio,
             "aggregate_ok": payback_result.aggregate_ok,
             "rejected_moves": list(payback_result.rejected_moves),
+            "deferred_moves": list(payback_result.deferred_moves),
             "accepted": payback_result.accepted,
         }
     return {
@@ -1089,6 +1103,80 @@ class _GroupPlan:
     payback_result: PaybackResult | None = None
 
 
+def _saturation_forecast_inputs(
+    prom_client: PrometheusClient, resolved: ResolvedConfig, group: Group, now: datetime
+) -> tuple[Forecaster, dict[str, TimeSeries]] | None:
+    """Section 7.3's saturation guard needs a forecaster and every disk's
+    own load history -- but only when at least one storage in ``group``
+    actually configures ``saturation_load``. Returns ``None`` to skip the
+    guard entirely otherwise, matching the plan's own words literally: a
+    group that leaves it unset everywhere "loses only this one advisory
+    check", at no Prometheus cost -- fetching a history no storage in
+    this group could ever use would contradict that.
+
+    ``range_seconds`` is the *configured forecaster's* own requirement
+    (``forecast.required_range_seconds()``), not ``window.lookback`` --
+    section 10.1's own "genuinely different things" (`docs/internals/20-forecasting.md`).
+    """
+    if not any(s.saturation_load is not None for s in group.storages):
+        return None
+    forecast_config = resolved.config.forecast
+    window = resolved.config.window
+    metrics = resolved.config.metrics
+    range_seconds = required_range_seconds(
+        forecast_config, window.lookback_seconds, metrics.step_seconds
+    )
+    now_epoch = now.timestamp()
+    forecaster = build_forecaster(
+        forecast_config,
+        window.lookback_seconds,
+        metrics.step_seconds,
+        now_epoch,
+        window.quantile,
+        window.upper_quantile,
+    )
+    disk_series = compute_disk_load_series(
+        prom_client,
+        metrics,
+        resolved.config.load_weights,
+        group,
+        range_seconds,
+        metrics.step_seconds,
+        now_epoch,
+    )
+    return forecaster, disk_series
+
+
+def _compute_one_move_cost(
+    move: ScheduledMove,
+    storages_by_id: dict[str, Storage],
+    group: Group,
+    migration: MigrationConfig,
+    saturation_inputs: tuple[Forecaster, dict[str, TimeSeries]] | None,
+) -> MoveCost:
+    """One move's section 7.1 cost, plus (only when ``saturation_inputs``
+    is not ``None``) section 7.3's saturation defer check -- computing
+    each endpoint's own ``L_hat_s(duration_mirror)`` from its *currently*
+    resident disks (`payback.compute_move_cost()`'s own docstring on why
+    not the moving disk's hypothetical arrival) before handing off to the
+    pure cost function. Factored out of `_plan_group()`'s own list
+    comprehension purely to stay within this project's flake8 complexity
+    limit."""
+    source = storages_by_id[move.from_storage]
+    if saturation_inputs is None:
+        return compute_move_cost(move, source, migration)
+    forecaster, disk_series = saturation_inputs
+    target = storages_by_id[move.to_storage]
+    horizon = timedelta(seconds=mirror_duration_seconds(move, migration))
+    src_keys = [d.key for d in group.disks if d.current_storage == move.from_storage]
+    dst_keys = [d.key for d in group.disks if d.current_storage == move.to_storage]
+    l_hat_src = storage_upper_bound(forecaster, disk_series, src_keys, horizon)
+    l_hat_dst = storage_upper_bound(forecaster, disk_series, dst_keys, horizon)
+    return compute_move_cost(
+        move, source, migration, target=target, l_hat_src=l_hat_src, l_hat_dst=l_hat_dst
+    )
+
+
 def _plan_group(
     group: Group,
     resolved: ResolvedConfig,
@@ -1163,8 +1251,11 @@ def _plan_group(
     )
 
     storages_by_id = {s.id: s for s in group.storages}
+    saturation_inputs = _saturation_forecast_inputs(prom_client, resolved, group, now)
     move_costs = [
-        compute_move_cost(move, storages_by_id[move.from_storage], resolved.config.migration)
+        _compute_one_move_cost(
+            move, storages_by_id, group, resolved.config.migration, saturation_inputs
+        )
         for move in schedule_result.order
     ]
     spread_metric = resolved.config.objective.spread_metric
@@ -1325,6 +1416,35 @@ def _make_inflight_callbacks(
     return on_started, on_finished
 
 
+def _refused_move_outcomes(
+    order: tuple[ScheduledMove, ...], payback: PaybackResult
+) -> list[MoveOutcome]:
+    """The two section 7.3 per-move exclusions -- the hard duration rule
+    (``rejected_moves``) and the best-effort saturation guard
+    (``deferred_moves``) -- rendered as ``"skipped"`` outcomes, in that
+    priority order for a move flagged by both (the hard rule is the more
+    definitive reason). Factored out of :func:`_apply_payback_gate` purely
+    to stay within this project's flake8 complexity limit."""
+    rejected_keys = set(payback.rejected_moves)
+    deferred_keys = set(payback.deferred_moves)
+    outcomes: list[MoveOutcome] = []
+    for m in order:
+        if m.disk_key in rejected_keys:
+            detail = (
+                "refused: exceeds migration.max_single_move_duration (section 7.3's hard "
+                "per-move duration rule)"
+            )
+        elif m.disk_key in deferred_keys:
+            detail = (
+                "deferred: section 7.3 saturation guard (migration.saturation_ceiling) -- "
+                "re-evaluate on a later run"
+            )
+        else:
+            continue
+        outcomes.append(MoveOutcome(m.disk_key, m.from_storage, m.to_storage, "skipped", detail))
+    return outcomes
+
+
 def _apply_payback_gate(
     client: PveClient,
     group: Group,
@@ -1343,19 +1463,20 @@ def _apply_payback_gate(
 ) -> ExecutionResult:
     """Section 7.3's payback verdict gates *execution*, not merely the
     report (REVIEW.md S-02): a move `rejected_moves` names (the hard
-    per-move `migration.max_single_move_duration` rule) must never reach
-    `execute.py` regardless of the plan's aggregate economics, and a plan
-    that fails the aggregate economic test (``not aggregate_ok``) must
-    not be executed at all. This is the same "report, never force"
-    policy `payback.py` itself follows (a reserve-resolving plan is
-    exempted from the economic half there, never from the hard duration
-    rule) -- applied here to mean the tool also refuses *on its own
-    verdict*, rather than reporting a plan as rejected in one command and
-    executing it anyway in the next. `execute.py`'s
-    `_wait_for_move_completion()` docstring's assumption ("a move that
-    was accepted at planning time already passed
-    `migration.max_single_move_duration`") is only true by construction
-    because of the filtering below -- until now it was simply false.
+    per-move `migration.max_single_move_duration` rule) or `deferred_moves`
+    names (the best-effort saturation guard) must never reach `execute.py`
+    regardless of the plan's aggregate economics, and a plan that fails
+    the aggregate economic test (``not aggregate_ok``) must not be
+    executed at all. This is the same "report, never force" policy
+    `payback.py` itself follows (a reserve-resolving plan is exempted
+    from the economic half there, never from the hard duration rule) --
+    applied here to mean the tool also refuses *on its own verdict*,
+    rather than reporting a plan as rejected in one command and executing
+    it anyway in the next. `execute.py`'s `_wait_for_move_completion()`
+    docstring's assumption ("a move that was accepted at planning time
+    already passed `migration.max_single_move_duration`") is only true by
+    construction because of the filtering below -- until now it was
+    simply false.
 
     A refused move's outcome is reported exactly like any other
     `execute_plan()` outcome (``status="skipped"``) so the shared
@@ -1378,20 +1499,8 @@ def _apply_payback_gate(
     assert group_plan.schedule_result is not None and group_plan.payback_result is not None
     order = group_plan.schedule_result.order
     payback = group_plan.payback_result
-    rejected_keys = set(payback.rejected_moves)
-
-    refused: list[MoveOutcome] = [
-        MoveOutcome(
-            m.disk_key,
-            m.from_storage,
-            m.to_storage,
-            "skipped",
-            "refused: exceeds migration.max_single_move_duration (section 7.3's hard "
-            "per-move duration rule)",
-        )
-        for m in order
-        if m.disk_key in rejected_keys
-    ]
+    excluded_keys = set(payback.rejected_moves) | set(payback.deferred_moves)
+    refused = _refused_move_outcomes(order, payback)
 
     if not payback.aggregate_ok:
         refused.extend(
@@ -1404,7 +1513,7 @@ def _apply_payback_gate(
                 f"< required {payback_ratio:g}, section 7.3)",
             )
             for m in order
-            if m.disk_key not in rejected_keys
+            if m.disk_key not in excluded_keys
         )
         return ExecutionResult(
             outcomes=tuple(refused),
@@ -1412,7 +1521,7 @@ def _apply_payback_gate(
             stop_reason="plan failed the payback acceptance test (section 7.3)",
         )
 
-    kept = tuple(m for m in order if m.disk_key not in rejected_keys)
+    kept = tuple(m for m in order if m.disk_key not in excluded_keys)
     if not kept:
         # Every move was individually rejected -- nothing left to
         # execute, but that is not "stopped early": there was nothing
