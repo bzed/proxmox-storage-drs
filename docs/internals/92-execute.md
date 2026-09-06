@@ -155,22 +155,19 @@ keyboard should not look like a bug report.
 
 ## What `execute_plan()` deliberately does not do
 
-- **No re-plan loop.** A `"replan_needed"` outcome stops the group's run
-  cleanly; re-invoking the whole gate/solve/schedule/payback pipeline
-  from the newly observed state and continuing, capped at
-  `execution.max_replans_per_run` (`IMPLEMENTATION_PLAN.md` section 9.2
-  steps 3-4), is `cli.py`-level orchestration across multiple
-  `execute_plan()` calls — a real, separately-scoped piece of work, not
-  implemented here or in `cli.py` yet.
-- **`auto` mode's mechanics exist; its safety rails do not.** `mode ==
-  "auto"` behaves like `[a]ll remaining` chosen up front, unprompted, but
-  this module enforces none of `execution.time_windows`,
-  `max_migrations_per_run`, or the multi-window concurrency caps —
-  `IMPLEMENTATION_PLAN.md` section 12 phase 8, a distinct phase from this
-  one (phase 7's own "done when" names only `confirm` mode). `cli.py`'s
-  `_handle_apply()` refuses `--mode auto` outright rather than run
-  unattended without the protections its own manual page documents for
-  it.
+- **No re-plan loop inside this module.** A `"replan_needed"` outcome
+  stops the group's run cleanly here; re-invoking the whole
+  gate/solve/schedule/payback pipeline from the newly observed state is
+  `cli.py`-level orchestration across multiple `execute_plan()` calls
+  (`cli._run_auto_group()`, `auto` mode only — see below), not something
+  this module does itself. `dry-run`/`confirm` never re-plan at all: the
+  operator re-runs `apply` by hand once ready.
+- **No concurrent execution.** `execution.max_concurrent_migrations`/
+  `max_concurrent_per_storage` are accepted in `ExecutionConfig` but
+  never consulted here — every move is issued strictly sequentially.
+  `cli._handle_apply()` refuses to start `auto` mode at all when either
+  is configured above `1`, rather than run sequentially against a
+  requested concurrency this module cannot deliver.
 - **No crash recovery.** Section 13's "on startup, check for running
   `move_disk` UPIDs owned by the DRS user before planning anything" is
   not implemented; `state.State.inflight_upids` exists and round-trips
@@ -203,13 +200,20 @@ unvisited, which must render as "not evaluated this run," not a
 `KeyError`. This was caught by a test exercising the quit path, not by
 inspection.
 
-After a group's `execute_plan()` call, `_handle_apply()` decides which
-moves counted as "executed" for `state.json`'s own bookkeeping — `"moved"`
-and `"draining"` (the mirror itself completed either way, mirroring
+After a group's execution, `_record_executed_moves()` decides which moves
+counted as "executed" for `state.json`'s own bookkeeping — `"moved"` and
+`"draining"` (the mirror itself completed either way, mirroring
 `execute.py`'s own (C4) accounting choice for those same two statuses),
-never `"would_move"`/`"skipped"`/`"failed"`/`"replan_needed"`. For those,
-it calls `state.with_recorded_balance()` (this group's measured load
-vector, feeding the next run's drift gate) and `state.with_recorded_cooldown()`
+never `"would_move"`/`"skipped"`/`"failed"`/`"replan_needed"`. It reads
+straight off the final `ExecutionResult.outcomes`, never a `_GroupPlan`'s
+own `schedule_result.order`: a payback refusal (S-02) can already make
+`outcomes` a reordered subset of that order, and in `auto` mode a
+re-plan (`_run_auto_group()`, below) can execute moves from a *later*
+plan attempt that never appeared in the group's first-attempt order at
+all — an earlier revision iterated the stale order and silently dropped
+those later moves' cooldowns. For every move that counts, it calls
+`state.with_recorded_balance()` (this group's measured load vector,
+feeding the next run's drift gate) and `state.with_recorded_cooldown()`
 — a fresh disk cooldown for every executed disk at its *new* location, and
 a fresh storage cooldown for **both** of the move's storages, source and
 destination (section 6: "a storage involved in a migration ... accepts no
@@ -254,3 +258,69 @@ merely asserted. In `confirm` mode, the group's payback lines print once,
 before the first prompt — an operator confirming moves one at a time
 sees the tool's own verdict before being asked anything, not only in the
 post-run report.
+
+## `auto` mode: `timewindow.py` and `_run_auto_group()` (phase 8)
+
+`execute_plan()` itself grew two auto-only budgets, both `None` (inactive)
+unless `cli.py` passes real values: a `deadline` (an absolute instant,
+checked against `clock.now()` before starting each move, together with
+that move's `payback.MoveCost` duration estimate from `move_costs_by_key`)
+and a `max_migrations` count, decremented once per move actually attempted
+(`"moved"`/`"draining"`/`"failed"` — never `"skipped"`/`"would_move"`/
+`"replan_needed"`). Both stop the whole run cleanly (never mid-move) via
+the same `_auto_budget_stop_outcome()` helper, since remaining time only
+ever decreases and a spent cap stays spent — there is never a reason to
+skip one move for a budget reason and then try a later one anyway.
+
+`timewindow.py` is a small, dependency-free module answering exactly one
+question, `current_deadline(windows, now) -> datetime | None`: `None`
+means no restriction at all (no `time_windows` configured), and a
+non-`None` value is either the close time of whichever configured window
+covers `now`, or `now` itself when none currently do (zero remaining
+budget — deliberately not a separate "not in any window" signal, so a
+caller's "does the next move fit before the deadline" arithmetic refuses
+correctly without a second check). It works in **local time**, not UTC —
+a documented, deliberate choice (the plan does not name a timezone for
+this setting) matching `systemd.timer`'s own `OnCalendar=` default and
+how an operator actually thinks about a maintenance window. The classic
+overnight-window bug — a `days: [fri]` window tagged Friday still needing
+to match at 2am *Saturday* — gets its own two-piece matching logic
+(`is_window_active()`) and its own regression tests.
+
+`cli._run_auto_group()` is where section 9.2's re-plan protocol actually
+lives: a loop, bounded by `execution.max_replans_per_run`, that calls
+`_apply_payback_gate()` and then, only if the *last* outcome it produced
+was `"replan_needed"`, re-fetches topology fresh
+(`build_topology()` — not just re-running `_plan_group()` on the same
+`Group` object, since whatever triggered the mismatch can mean the
+group's own membership changed) and calls `_plan_group()` again before
+retrying. A re-plan that concludes `NO ACTION` (or hits a load error) ends
+the loop quietly, not as a failure — section 9.2's own words, "the gates
+may well conclude no further action is needed." Exceeding the replan cap
+rewrites the final `stop_reason` to name the setting explicitly, rather
+than reporting the *symptom* (the last mismatch) as if it were the cause.
+
+One deliberate simplification: everything the human/JSON report shows for
+a group (`gate_decisions[name]`, `schedule_results[name]`, etc.) still
+comes from the group's *first* planning attempt, even after `auto`
+re-plans it — only the accumulated `ExecutionResult.outcomes` (every
+attempt's outcomes, concatenated) and `last_balance`'s recorded load
+vector reflect what actually happened. Returning a second `_GroupPlan`
+from a successful re-plan would need `_handle_apply()`'s reporting dicts
+to cope with the *first* attempt's fields being live while a later one
+supersedes them, and — worse — a re-plan that lands on `NO ACTION` would
+have to report a group whose `schedule_result`/`payback_result` are
+`None` despite the group having `ACT`ed and moved something moments
+earlier. Reporting the first attempt's plan alongside the full outcome
+history is simpler and does not lose information: the report already
+shows *why* it stopped and *what happened next* per outcome.
+
+`execution.max_migrations_per_run` is a per-*invocation* budget, shared
+across every group `_handle_apply()` visits — `_run_auto_group()` returns
+the updated remaining count, which its caller threads into the next
+group's call rather than resetting it. `max_concurrent_migrations`/
+`max_concurrent_per_storage` above `1` are refused before `_handle_apply()`
+does anything else (before even acquiring `state.json`'s lock): the
+executor has no concurrent-execution mechanism at all, so honouring
+either cap's default of `1` is automatic but a higher configured value is
+not something this build can actually deliver.

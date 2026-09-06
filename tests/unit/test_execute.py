@@ -35,6 +35,7 @@ from proxmox_storage_drs.execute import (
     _wait_for_unlocked,
     execute_plan,
 )
+from proxmox_storage_drs.payback import MoveCost
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult
 from proxmox_storage_drs.topology import Disk, Group, Storage
@@ -154,6 +155,9 @@ def run(
     clock: FakeClock | None = None,
     confirm: object = None,
     exclude: ExcludeConfig = EXCLUDE,
+    deadline: datetime | None = None,
+    move_costs_by_key: dict[str, MoveCost] | None = None,
+    max_migrations: int | None = None,
 ) -> ExecutionResult:
     schedule_result = ScheduleResult(
         order=moves, deadlocked=(), final_assignment={d.key: d.current_storage for d in group.disks}
@@ -170,6 +174,9 @@ def run(
         exclude,
         confirm=confirm,  # type: ignore[arg-type]
         clock=fc.clock(),
+        deadline=deadline,
+        move_costs_by_key=move_costs_by_key,
+        max_migrations=max_migrations,
     )
 
 
@@ -709,3 +716,99 @@ def test_source_release_wait_false_skips_the_drain_check_entirely() -> None:
     execution = ExecutionConfig(source_release=SourceReleaseConfig(wait=False))
     result = run(client, group, (make_move(),), execution=execution)
     assert result.outcomes[0].status == "moved"
+
+
+# --------------------------------------------------------- auto mode budgets
+
+
+def test_max_migrations_per_run_stops_the_run_before_the_next_attempt() -> None:
+    group = Group(
+        name="g",
+        storages=(make_storage("san-a"), make_storage("san-b")),
+        disks=(make_disk("101:scsi0", 1.0, "san-a"), make_disk("102:scsi0", 1.0, "san-a")),
+    )
+    upid2 = "UPID:pve01:00001235:00ABCDEF:qmmove:102:root@pam:"
+    client, api = client_with(
+        {
+            "cluster/resources": [
+                {"vmid": 101, "node": "pve01", "status": "running"},
+                {"vmid": 102, "node": "pve01", "status": "running"},
+            ],
+            "nodes/pve01/qemu/102/config": {"scsi0": "san-a:vm-102-disk-0,size=1024G"},
+            "nodes/pve01/qemu/102/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/102/status/current": {"lock": None},
+            "nodes/pve01/qemu/102/move_disk": upid2,
+            f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
+        }
+    )
+    moves = (make_move(), make_move("102:scsi0", 102, "scsi0"))
+    result = run(client, group, moves, max_migrations=1)
+    assert [o.status for o in result.outcomes] == ["moved", "skipped"]
+    assert "max_migrations_per_run" in result.outcomes[1].detail
+    assert result.stopped_early is True
+    assert result.stop_reason is not None and "max_migrations_per_run" in result.stop_reason
+    # The second move never even reached a pre-flight check.
+    assert not any("102" in c[1] for c in api.calls)
+
+
+def test_max_migrations_per_run_of_zero_refuses_the_first_move_too() -> None:
+    client, api = client_with({})
+    result = run(client, default_group(), (make_move(),), max_migrations=0)
+    assert result.outcomes[0].status == "skipped"
+    assert api.calls == []
+
+
+def test_deadline_refuses_a_move_that_cannot_finish_in_time() -> None:
+    move_costs = {"101:scsi0": MoveCost("101:scsi0", 7200.0, 0.0, 7200.0, False, False)}
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    deadline = datetime(2026, 9, 6, 12, 30, 0, tzinfo=timezone.utc)  # only 30 min left
+    client, api = client_with({})
+    result = run(
+        client,
+        default_group(),
+        (make_move(),),
+        clock=fc,
+        deadline=deadline,
+        move_costs_by_key=move_costs,
+    )
+    assert result.outcomes[0].status == "skipped"
+    assert "execution.time_windows" in result.outcomes[0].detail
+    assert result.stopped_early is True
+    assert api.calls == []
+
+
+def test_deadline_allows_a_move_that_fits() -> None:
+    move_costs = {"101:scsi0": MoveCost("101:scsi0", 1800.0, 0.0, 1800.0, False, False)}
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    deadline = datetime(2026, 9, 6, 13, 0, 0, tzinfo=timezone.utc)  # 1h left, needs 30m
+    client, _api = client_with({})
+    result = run(
+        client,
+        default_group(),
+        (make_move(),),
+        clock=fc,
+        deadline=deadline,
+        move_costs_by_key=move_costs,
+    )
+    assert result.outcomes[0].status == "moved"
+
+
+def test_deadline_with_no_cost_estimate_assumes_zero_duration() -> None:
+    """A move missing from `move_costs_by_key` is never refused for lack
+    of an estimate -- it is assumed to take no time at all."""
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    deadline = datetime(2026, 9, 6, 12, 0, 1, tzinfo=timezone.utc)  # 1 second left
+    client, _api = client_with({})
+    result = run(
+        client, default_group(), (make_move(),), clock=fc, deadline=deadline, move_costs_by_key={}
+    )
+    assert result.outcomes[0].status == "moved"
+
+
+def test_deadline_already_passed_refuses_immediately() -> None:
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    deadline = datetime(2026, 9, 6, 11, 0, 0, tzinfo=timezone.utc)  # already in the past
+    client, api = client_with({})
+    result = run(client, default_group(), (make_move(),), clock=fc, deadline=deadline)
+    assert result.outcomes[0].status == "skipped"
+    assert api.calls == []

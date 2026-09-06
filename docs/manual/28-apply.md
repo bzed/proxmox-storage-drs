@@ -10,7 +10,7 @@ own manual page, `docs/manual/27-plan.md`, describes all four in detail)
 |---|---|
 | `dry-run` *(default)* | Prints the same report `plan` would, plus a `would_move` outcome per move. Issues zero API calls. |
 | `confirm` | Executes one move at a time, prompting before each: `[y]es`/`[n]o skip`/`[a]ll remaining`/`[q]uit`. |
-| `auto` | **Refused outright in this build.** Its own safety rails (`execution.time_windows`, `max_migrations_per_run`, the concurrency caps) are `IMPLEMENTATION_PLAN.md` section 12 phase 8, a separate, not-yet-implemented piece of work — see `docs/manual/30-safety-and-status.md`. |
+| `auto` | Executes unattended, subject to `execution.time_windows`, `max_migrations_per_run`, and a bounded automatic re-plan loop — see "Reading `auto` mode" below. Refused outright only when `execution.max_concurrent_migrations`/`max_concurrent_per_storage` is configured above `1`: the executor itself is still strictly sequential — see `docs/manual/30-safety-and-status.md`. |
 
 A `confirm` run, using the same section 14 fixture `plan`'s own manual
 page walks through, with the operator declining the first move and
@@ -48,6 +48,46 @@ planned. An answer that is not one of the four is rejected right there
 `execute.py` at all, so a typo can never be mistaken for one of the four
 real decisions.
 
+## Reading `auto` mode
+
+`auto` behaves like `[a]ll remaining` chosen up front, unprompted, plus
+three things `dry-run`/`confirm` do not do at all
+(`IMPLEMENTATION_PLAN.md` section 9.1/9.2):
+
+- **`execution.time_windows`.** If any are configured, a move is refused
+  (reported `skipped`, "outside execution.time_windows") unless the
+  current moment — in the **local time of the host running
+  `pve-storage-drs`**, not UTC — falls inside one of them, and before
+  starting a move `auto` also refuses it if its estimated duration
+  (mirror plus any `saferemove` wipe) would not finish before the window
+  closes. No windows configured at all means no restriction. Either way,
+  a move already in progress is never aborted at window close — the
+  check only ever runs *before* issuing the next one.
+- **`execution.max_migrations_per_run`.** A ceiling on how many moves
+  the whole invocation executes, shared across every group it visits
+  (not reset per group) — the remainder waits for the next scheduled
+  run.
+- **The re-plan loop.** A `replan_needed` mismatch does not end an
+  `auto` run the way it ends a `dry-run`/`confirm` one: `apply`
+  re-invokes the whole pipeline (gates, load model, solver, payback,
+  ordering) from freshly observed cluster state and tries again, up to
+  `execution.max_replans_per_run` times. The gate may well conclude no
+  further action is needed on the re-plan — a normal, quiet outcome, not
+  a failure. Exceeding the cap does end the run, with a message naming
+  the setting: "a cluster churning faster than the engine can plan is a
+  condition for a human to look at, not to iterate against."
+  Cross-referencing the report's `outcomes[]` shows the whole story for
+  a re-planned group: the mismatch that triggered each re-plan, and
+  whatever the next attempt then did.
+
+`auto` is refused outright, before touching PVE or Prometheus at all,
+when `execution.max_concurrent_migrations` or
+`execution.max_concurrent_per_storage` is configured above `1` — the
+executor itself still runs every move strictly sequentially, so honouring
+either cap's *default* of `1` is automatic but a higher configured value
+is not something this build can actually deliver; refusing names the gap
+instead of silently running sequentially against it.
+
 ## What "done" means for one move, and why it can take a while
 
 A move is not finished when the `move_disk` task itself succeeds.
@@ -71,14 +111,12 @@ than attempted into that lock.
 
 Before *every* move, `apply` re-checks the live cluster rather than
 trusting the plan: the VM may have moved node, the disk may no longer be
-on the expected source, a snapshot may have appeared, or the target
-storage's free space may no longer satisfy the section 8.1 transient
-invariant. Any of these stops the run for that group with
-`replan_needed` rather than patching the plan around it — re-invoking
-the whole pipeline automatically from the new observed state
-(`IMPLEMENTATION_PLAN.md` section 9.2's re-plan protocol) is `cli.py`
--level orchestration this build does not yet implement; the operator
-re-runs `apply` by hand once ready.
+on the expected source, a snapshot may have appeared, it may have been
+tagged for exclusion, or the target storage's free space may no longer
+satisfy the section 8.1 transient invariant. Any of these stops the
+group's run with `replan_needed`. In `dry-run`/`confirm`, that is the end
+of it — the operator re-runs `apply` by hand once ready; see "Reading
+`auto` mode" below for what `auto` itself does about it automatically.
 
 A VM config lock (`backup`, `snapshot`, `migrate`, or any other value —
 this set is never whitelisted, see `docs/internals/92-execute.md`) makes
@@ -152,13 +190,10 @@ and `orphaned_volumes` (only ever non-empty after a `failed` outcome).
 
 ## What `apply` does not yet do
 
-- **`--mode auto` is refused outright**, not merely unsafe by default —
-  see the table above and `docs/manual/30-safety-and-status.md`.
-- **No automatic re-plan loop.** A `replan_needed` outcome stops the
-  group's run cleanly; re-invoking gates/solve/schedule/payback from the
-  newly observed state and continuing, capped at
-  `execution.max_replans_per_run` (`IMPLEMENTATION_PLAN.md` section 9.2
-  steps 3-4), is `cli.py`-level orchestration not implemented yet.
+- **No concurrent execution.** `execution.max_concurrent_migrations`/
+  `max_concurrent_per_storage` above `1` are refused outright in `auto`
+  mode rather than silently run sequentially against them — see the
+  table above and `docs/manual/30-safety-and-status.md`.
 - **No crash recovery.** Section 13's "on startup, check for running
   `move_disk` UPIDs owned by the DRS user before planning anything" is
   not implemented — `state.json`'s `inflight_upids` field exists and

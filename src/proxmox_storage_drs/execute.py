@@ -19,14 +19,20 @@ by hours.
 ``ConfirmCallback`` -- interactive prompting is `cli.py`'s job, the only
 module allowed to talk to the terminal) before each move, honouring
 `[y]es/[n]o skip/[a]ll remaining/[q]uit` (section 9.1). ``auto`` behaves
-like `[a]ll remaining` chosen up front, unprompted -- **but this module
-does not itself enforce `execution.time_windows`, `max_migrations_per_run`
-or the multi-window concurrency caps**; those are section 12 phase 8
-("auto mode + time windows"), a later, separate phase from this one
-(phase 7's own "done when" names only `confirm` mode). `cli.py` is what
-currently refuses to run `apply` in `auto` mode at all, rather than run it
-unattended without the safety rails its own manual page documents for it
--- see ``docs/internals/92-execute.md``.
+like `[a]ll remaining` chosen up front, unprompted, and this module
+enforces both of section 9.1's own per-move budgets for it -- refusing to
+start (and stopping the run cleanly) a move that cannot finish before
+``deadline``, or once ``max_migrations`` attempts have already been made
+-- via the ``deadline``/``move_costs_by_key``/``max_migrations``
+parameters `cli.py` supplies only in `auto` mode (section 12 phase 8).
+**Still not enforced here**: the `max_concurrent_migrations`/
+`max_concurrent_per_storage` caps -- every move remains strictly
+sequential (one in flight at a time), which is trivially compliant with
+either cap's *default* of `1` but not with a value above it; `cli.py`
+refuses to start `auto` mode at all when either is configured above `1`,
+rather than silently running sequentially against a cap that asked for
+concurrency this module does not implement -- see
+``docs/internals/92-execute.md``.
 
 A move never gets a second chance to "fix" the plan around it: any
 pre-flight mismatch, or a live transient-invariant check that no longer
@@ -47,11 +53,12 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Callable
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Mapping
 
 from proxmox_storage_drs.config import ExcludeConfig, ExecutionConfig, LocksConfig, MigrationConfig
 from proxmox_storage_drs.exceptions import PveApiError
+from proxmox_storage_drs.payback import MoveCost
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.reserve import largest_disk_bytes
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult
@@ -460,6 +467,49 @@ def _confirm_decision(
     raise ValueError(f"confirm callback returned {decision!r}, expected y/n/a/q")
 
 
+def _auto_budget_stop_outcome(
+    move: ScheduledMove,
+    clock: Clock,
+    deadline: datetime | None,
+    move_costs_by_key: Mapping[str, MoveCost] | None,
+    migrations_used: int,
+    max_migrations: int | None,
+) -> MoveOutcome | None:
+    """``None`` when ``move`` may proceed; otherwise the ``"skipped"``
+    outcome to report right before `execute_plan()` stops the *whole*
+    run. Both of `auto` mode's section 9.1 budgets are "stop cleanly",
+    never "skip this one and try a later move": remaining time only ever
+    decreases as a run goes on, and a migration cap already reached stays
+    reached, so nothing later in ``order`` could fit either. Checked in
+    this order (the cap first) only because it is the cheaper check, not
+    because one takes priority when both apply."""
+    if max_migrations is not None and migrations_used >= max_migrations:
+        return MoveOutcome(
+            move.disk_key,
+            move.from_storage,
+            move.to_storage,
+            "skipped",
+            f"execution.max_migrations_per_run ({max_migrations}) reached for this invocation",
+        )
+    if deadline is not None:
+        move_cost = (move_costs_by_key or {}).get(move.disk_key)
+        estimated_seconds = (
+            move_cost.duration_mirror_seconds + move_cost.duration_wipe_seconds
+            if move_cost is not None
+            else 0.0
+        )
+        if clock.now() + timedelta(seconds=estimated_seconds) > deadline:
+            return MoveOutcome(
+                move.disk_key,
+                move.from_storage,
+                move.to_storage,
+                "skipped",
+                "insufficient time remaining in execution.time_windows for this move "
+                f"(needs ~{estimated_seconds:.0f}s more)",
+            )
+    return None
+
+
 def _drained_skip_outcome(move: ScheduledMove, drained_storages: set[str]) -> MoveOutcome | None:
     """``None`` when neither of ``move``'s storages is draining this run;
     otherwise the ``"skipped"`` outcome for it -- factored out of
@@ -479,6 +529,39 @@ def _drained_skip_outcome(move: ScheduledMove, drained_storages: set[str]) -> Mo
     )
 
 
+def _post_move_bookkeeping(
+    result: MoveOutcome,
+    move: ScheduledMove,
+    disk: Disk,
+    largest_by_storage: dict[str, int],
+    drained_storages: set[str],
+    execution: ExecutionConfig,
+) -> str | None:
+    """Updates this run's own (C4) largest-disk tracking and drained
+    -storage exclusion after one move's outcome, returning a stop reason
+    when the run must end here (a `"replan_needed"` mismatch, or a
+    `"failed"` move that must stop it) or ``None`` to continue --
+    factored out of `execute_plan()`'s own loop purely to stay within
+    this project's flake8 complexity limit."""
+    if result.status in ("moved", "draining"):
+        # The mirror itself is done either way (the task reported OK) --
+        # "draining" only means the *source* has not released yet, so
+        # the target's own (C4) largest-disk accounting already needs to
+        # include this disk for any later move's live transient check
+        # against the same target.
+        largest_by_storage[move.to_storage] = max(
+            largest_by_storage[move.to_storage], disk.size_bytes
+        )
+        if result.status == "draining":
+            drained_storages.add(move.from_storage)
+        return None
+    if result.status == "replan_needed":
+        return result.detail
+    if result.status == "failed" and (result.always_stop or execution.abort_on_failure):
+        return f"{move.disk_key} failed: {result.detail}"
+    return None
+
+
 def execute_plan(
     client: PveClient,
     group: Group,
@@ -490,6 +573,9 @@ def execute_plan(
     exclude: ExcludeConfig,
     confirm: ConfirmCallback | None = None,
     clock: Clock = _REAL_CLOCK,
+    deadline: datetime | None = None,
+    move_costs_by_key: Mapping[str, MoveCost] | None = None,
+    max_migrations: int | None = None,
 ) -> ExecutionResult:
     """Execute (or, in ``dry-run``, merely report) one group's already
     -ordered plan. ``mode`` is ``"dry-run"``, ``"confirm"`` or ``"auto"``
@@ -500,6 +586,22 @@ def execute_plan(
     running and untagged for exclusion" re-check (REVIEW.md S-06), the
     same vmid/tag predicate `topology.py`'s own (C2) pin already applies
     at planning time.
+
+    ``deadline``/``move_costs_by_key``/``max_migrations`` are ``auto``
+    mode's own section 9.1 requirements ("refuse to start a move that
+    cannot finish inside the remaining time window... honour
+    `max_migrations_per_run`") -- ``cli.py`` is what only ever passes
+    non-``None`` values for these in ``auto`` mode; left ``None`` (the
+    default) for ``dry-run``/``confirm``, both checks are simply
+    inactive. ``deadline`` is an absolute instant (typically derived from
+    `timewindow.current_deadline()`) compared against ``clock.now()``,
+    never wall-clock time read directly, so it is exercised by the same
+    fake clock every other wait loop here uses. ``move_costs_by_key``
+    supplies each move's estimated `duration_mirror_seconds +
+    duration_wipe_seconds` (`payback.MoveCost`, the same estimate the
+    hard per-move duration rule uses) for that check; a move missing from
+    it is assumed to take no time at all, never refused for lack of an
+    estimate.
     """
     disks_by_key = {d.key: d for d in group.disks}
     storages_by_id = {s.id: s for s in group.storages}
@@ -521,6 +623,7 @@ def execute_plan(
     # `move_disk` touching that storage fail.
     drained_storages: set[str] = set()
     auto_confirmed = mode != "confirm"
+    migrations_used = 0
     for move in schedule_result.order:
         disk = disks_by_key[move.disk_key]
 
@@ -528,6 +631,13 @@ def execute_plan(
         if drained_skip is not None:
             outcomes.append(drained_skip)
             continue
+
+        budget_stop = _auto_budget_stop_outcome(
+            move, clock, deadline, move_costs_by_key, migrations_used, max_migrations
+        )
+        if budget_stop is not None:
+            outcomes.append(budget_stop)
+            return ExecutionResult(tuple(outcomes), True, budget_stop.detail)
 
         if mode == "dry-run":
             outcomes.append(
@@ -565,23 +675,12 @@ def execute_plan(
             exclude,
         )
         outcomes.append(result)
+        migrations_used += 1
 
-        if result.status in ("moved", "draining"):
-            # The mirror itself is done either way (the task reported OK) --
-            # "draining" only means the *source* has not released yet, so
-            # the target's own (C4) largest-disk accounting already needs
-            # to include this disk for any later move's live transient
-            # check against the same target.
-            largest_by_storage[move.to_storage] = max(
-                largest_by_storage[move.to_storage], disk.size_bytes
-            )
-            if result.status == "draining":
-                drained_storages.add(move.from_storage)
-        elif result.status == "replan_needed":
-            return ExecutionResult(tuple(outcomes), True, result.detail)
-        elif result.status == "failed" and (result.always_stop or execution.abort_on_failure):
-            return ExecutionResult(
-                tuple(outcomes), True, f"{move.disk_key} failed: {result.detail}"
-            )
+        stop_reason = _post_move_bookkeeping(
+            result, move, disk, largest_by_storage, drained_storages, execution
+        )
+        if stop_reason is not None:
+            return ExecutionResult(tuple(outcomes), True, stop_reason)
 
     return ExecutionResult(tuple(outcomes), False, None)

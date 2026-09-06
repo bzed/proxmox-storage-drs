@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,9 +14,11 @@ import yaml
 
 from proxmox_storage_drs import __version__, cli
 from proxmox_storage_drs.config import ResolvedConfig
+from proxmox_storage_drs.execute import MoveOutcome
 from proxmox_storage_drs.heuristic import ObjectiveBreakdown
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
-from proxmox_storage_drs.state import load_state
+from proxmox_storage_drs.schedule import ScheduledMove
+from proxmox_storage_drs.state import empty_state, load_state
 from proxmox_storage_drs.topology import Disk, Group, Storage, Topology
 
 MINIMAL_CONFIG = {
@@ -1382,17 +1385,34 @@ def _balanced_apply_group_load() -> GroupLoad:
     )
 
 
-def test_apply_refuses_auto_mode_without_touching_the_network(
+def test_apply_refuses_concurrent_auto_execution_without_touching_the_network(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`execute.py` runs strictly sequentially -- a configured
+    concurrency above the default of `1` is refused outright rather than
+    silently running sequentially anyway."""
+
+    def fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("a concurrency refusal must return before touching PVE")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", fail)
+    path = write_config(tmp_path, execution={"max_concurrent_migrations": 2})
+    assert cli.main(["-c", str(path), "--mode", "auto", "apply"]) == 1
+    err = capsys.readouterr().err
+    assert "does not support concurrent execution yet" in err
+
+
+def test_apply_refuses_concurrent_per_storage_auto_execution(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fail(*_a: object, **_k: object) -> None:
-        raise AssertionError("apply --mode auto must return before touching PVE")
+        raise AssertionError("a concurrency refusal must return before touching PVE")
 
     monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", fail)
-    path = write_config(tmp_path)
+    path = write_config(tmp_path, execution={"max_concurrent_per_storage": 2})
     assert cli.main(["-c", str(path), "--mode", "auto", "apply"]) == 1
     err = capsys.readouterr().err
-    assert "does not support --mode auto yet" in err
+    assert "does not support concurrent execution yet" in err
 
 
 def test_apply_dry_run_reports_would_move_and_writes_no_state(
@@ -1477,6 +1497,9 @@ def test_apply_records_balance_and_cooldowns_after_an_executed_move(
         exclude: object = None,
         confirm: object = None,
         clock: object = None,
+        deadline: object = None,
+        move_costs_by_key: object = None,
+        max_migrations: object = None,
     ) -> ExecutionResult:
         return ExecutionResult(
             outcomes=(
@@ -1539,6 +1562,9 @@ def test_apply_stops_the_whole_run_when_the_operator_quits(
         exclude: object = None,
         confirm: object = None,
         clock: object = None,
+        deadline: object = None,
+        move_costs_by_key: object = None,
+        max_migrations: object = None,
     ) -> ExecutionResult:
         return ExecutionResult(outcomes=(), stopped_early=True, stop_reason="operator quit")
 
@@ -1639,6 +1665,9 @@ def test_apply_exits_1_when_a_move_fails(
         exclude: object = None,
         confirm: object = None,
         clock: object = None,
+        deadline: object = None,
+        move_costs_by_key: object = None,
+        max_migrations: object = None,
     ) -> ExecutionResult:
         return ExecutionResult(
             outcomes=(
@@ -1737,6 +1766,440 @@ def test_apply_confirm_mode_shows_the_payback_verdict_before_the_first_prompt(
     assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
     assert "payback:" in seen_before_prompt["out"]
     assert "✓" in seen_before_prompt["out"]
+
+
+# --------------------------------------------------------- auto mode (phase 8)
+
+
+def _make_group_plan(
+    group: Group,
+    resolved: ResolvedConfig,
+    moves: tuple[ScheduledMove, ...],
+    act: bool = True,
+    rejected_moves: tuple[str, ...] = (),
+    aggregate_ok: bool = True,
+) -> cli._GroupPlan:
+    from proxmox_storage_drs.gates import GateDecision
+    from proxmox_storage_drs.payback import MoveCost, PaybackResult
+    from proxmox_storage_drs.schedule import ScheduleResult
+
+    load_by_key = {d.key: 1.0 for d in group.disks}
+    decision = GateDecision(
+        act=act,
+        reason="test",
+        reserve_override=False,
+        drift_fraction=None,
+        imbalance_fraction=0.5,
+    )
+    if not act:
+        return cli._GroupPlan(
+            group_load=GroupLoad(
+                group_name=group.name,
+                idle=False,
+                average_utilization=1.0,
+                disks=(),
+                storages=(),
+            ),
+            decision=decision,
+        )
+    group_load = GroupLoad(
+        group_name=group.name,
+        idle=False,
+        average_utilization=1.0,
+        disks=tuple(DiskLoad(disk_key=d.key, load=1.0, flagged_reason=None) for d in group.disks),
+        storages=tuple(
+            StorageLoad(storage_id=s.id, load=0.0, utilization=0.0) for s in group.storages
+        ),
+    )
+    schedule_result = ScheduleResult(
+        order=moves, deadlocked=(), final_assignment={d.key: d.current_storage for d in group.disks}
+    )
+    move_costs = tuple(
+        MoveCost(m.disk_key, 100.0, 0.0, 100.0, m.disk_key in rejected_moves, False) for m in moves
+    )
+    payback_result = PaybackResult(
+        move_costs=move_costs,
+        benefit_load_seconds=1_000_000.0,
+        rejected_moves=rejected_moves,
+        aggregate_ok=aggregate_ok,
+    )
+    return cli._GroupPlan(
+        group_load=group_load,
+        decision=decision,
+        solve_outcome=None,
+        schedule_result=schedule_result,
+        final_breakdown=_fake_breakdown(group, load_by_key, resolved),
+        payback_result=payback_result,
+    )
+
+
+def _one_move(group: Group) -> ScheduledMove:
+    disk = group.disks[0]
+    return ScheduledMove(
+        disk_key=disk.key,
+        vmid=disk.vmid,
+        device=disk.device,
+        from_storage="san-a",
+        to_storage="san-b",
+        size_bytes=disk.size_bytes,
+        imbalance_reduction=1.0,
+        resolves_reserve_violation=False,
+    )
+
+
+def _moved_outcome(move: ScheduledMove) -> MoveOutcome:
+    return MoveOutcome(move.disk_key, move.from_storage, move.to_storage, "moved", "task OK")
+
+
+def _replan_needed_outcome(move: ScheduledMove) -> MoveOutcome:
+    return MoveOutcome(
+        move.disk_key, move.from_storage, move.to_storage, "replan_needed", "no longer matches"
+    )
+
+
+def test_run_auto_group_refuses_outside_every_configured_time_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(
+        tmp_path,
+        execution={
+            "time_windows": [{"days": ["mon"], "start": "01:00", "end": "02:00"}],
+        },
+    )
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+
+    def fail(*_a: object, **_k: object) -> ExecutionResult:
+        raise AssertionError("outside every window: _apply_payback_gate must never be called")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli._apply_payback_gate", fail)
+
+    # 2026-09-07 is a Monday; 12:00 is well outside 01:00-02:00.
+    fixed_now = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+    result, budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        empty_state(),
+        group,
+        group_plan,
+        None,
+        local_now=lambda: fixed_now,
+    )
+    assert result.stopped_early is True
+    assert result.stop_reason == "outside execution.time_windows"
+    assert result.outcomes[0].status == "skipped"
+    assert budget is None
+
+
+def test_run_auto_group_allows_execution_inside_a_configured_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(
+        tmp_path,
+        execution={
+            "time_windows": [{"days": ["mon"], "start": "00:00", "end": "23:59"}],
+        },
+    )
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._apply_payback_gate",
+        lambda *a, **k: ExecutionResult((_moved_outcome(move),), False, None),
+    )
+    fixed_now = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        empty_state(),
+        group,
+        group_plan,
+        None,
+        local_now=lambda: fixed_now,
+    )
+    assert result.outcomes[0].status == "moved"
+    assert result.stopped_early is False
+
+
+def test_run_auto_group_no_time_windows_configured_means_unrestricted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(tmp_path)
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._apply_payback_gate",
+        lambda *a, **k: ExecutionResult((_moved_outcome(move),), False, None),
+    )
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        empty_state(),
+        group,
+        group_plan,
+        None,
+    )
+    assert result.outcomes[0].status == "moved"
+
+
+def test_run_auto_group_replans_and_succeeds_on_the_second_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(tmp_path)
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+    second_plan = _make_group_plan(group, resolved, (move,))
+
+    calls = {"n": 0}
+
+    def fake_gate(*a: object, **k: object) -> ExecutionResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ExecutionResult((_replan_needed_outcome(move),), True, "no longer matches")
+        return ExecutionResult((_moved_outcome(move),), False, None)
+
+    monkeypatch.setattr("proxmox_storage_drs.cli._apply_payback_gate", fake_gate)
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        lambda *a, **k: Topology(groups=(group,), warnings=()),
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli._plan_group", lambda *a, **k: second_plan)
+
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        empty_state(),
+        group,
+        group_plan,
+        None,
+    )
+    assert calls["n"] == 2
+    assert [o.status for o in result.outcomes] == ["replan_needed", "moved"]
+    assert result.stopped_early is False
+    assert result.stop_reason is None
+
+
+def test_run_auto_group_stops_cleanly_when_a_replan_concludes_no_action_needed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(tmp_path)
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+    no_action_plan = _make_group_plan(group, resolved, (), act=False)
+
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._apply_payback_gate",
+        lambda *a, **k: ExecutionResult((_replan_needed_outcome(move),), True, "no longer matches"),
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        lambda *a, **k: Topology(groups=(group,), warnings=()),
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli._plan_group", lambda *a, **k: no_action_plan)
+
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        empty_state(),
+        group,
+        group_plan,
+        None,
+    )
+    assert [o.status for o in result.outcomes] == ["replan_needed"]
+    assert result.stopped_early is False
+    assert result.stop_reason is None
+
+
+def test_run_auto_group_stops_after_exhausting_max_replans_per_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(tmp_path, execution={"max_replans_per_run": 2})
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._apply_payback_gate",
+        lambda *a, **k: ExecutionResult((_replan_needed_outcome(move),), True, "no longer matches"),
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        lambda *a, **k: Topology(groups=(group,), warnings=()),
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._plan_group",
+        lambda *a, **k: _make_group_plan(group, resolved, (move,)),
+    )
+
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        empty_state(),
+        group,
+        group_plan,
+        None,
+    )
+    # One initial attempt plus two re-plans = three replan_needed outcomes.
+    assert [o.status for o in result.outcomes] == ["replan_needed"] * 3
+    assert result.stopped_early is True
+    assert result.stop_reason is not None
+    assert "max_replans_per_run" in result.stop_reason
+    assert "exceeded" in result.stop_reason
+
+
+def test_run_auto_group_stops_when_the_group_vanishes_after_replanning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An edge case (every storage in the group removed from config
+    between plans), but a real one: `build_topology()`'s fresh result may
+    simply no longer contain a group by this name."""
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(tmp_path)
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._apply_payback_gate",
+        lambda *a, **k: ExecutionResult((_replan_needed_outcome(move),), True, "no longer matches"),
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology", lambda *a, **k: Topology(groups=(), warnings=())
+    )
+
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        empty_state(),
+        group,
+        group_plan,
+        None,
+    )
+    assert [o.status for o in result.outcomes] == ["replan_needed"]
+    assert result.stopped_early is True
+    assert result.stop_reason is not None
+    assert "no longer exists" in result.stop_reason
+
+
+def test_run_auto_group_decrements_the_shared_migrations_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(tmp_path)
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._apply_payback_gate",
+        lambda *a, **k: ExecutionResult((_moved_outcome(move),), False, None),
+    )
+    _result, budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        empty_state(),
+        group,
+        group_plan,
+        3,
+    )
+    assert budget == 2
+
+
+def test_apply_auto_mode_shares_max_migrations_per_run_across_groups(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`execution.max_migrations_per_run` is a per-*invocation* cap
+    (`IMPLEMENTATION_PLAN.md` section 9.1: "auto must... honour
+    max_migrations_per_run"), shared across every group `apply` visits in
+    one run, not reset per group -- this exercises `_handle_apply()`'s
+    own threading of the budget from group to group, end to end through
+    `cli.main()`, distinct from `_run_auto_group()`'s already-unit-tested
+    arithmetic for a single group."""
+    from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
+
+    balanced = _balanced_apply_topology()
+    two_groups = Topology(
+        groups=(
+            balanced.groups[0],
+            Group(
+                name="fc-tier2",
+                storages=balanced.groups[0].storages,
+                disks=balanced.groups[0].disks,
+            ),
+        ),
+        warnings=(),
+    )
+    _patch_plan_deps(monkeypatch, two_groups, _balanced_apply_group_load())
+
+    calls: list[tuple[str, object]] = []
+
+    def fake_execute_plan(
+        client: object,
+        group: Group,
+        schedule_result: object,
+        migration: object,
+        execution: object,
+        min_free_bytes: object,
+        mode: object,
+        exclude: object,
+        confirm: object = None,
+        clock: object = None,
+        deadline: object = None,
+        move_costs_by_key: object = None,
+        max_migrations: object = None,
+    ) -> ExecutionResult:
+        calls.append((group.name, max_migrations))
+        move = schedule_result.order[0]  # type: ignore[attr-defined]
+        return ExecutionResult(
+            (MoveOutcome(move.disk_key, move.from_storage, move.to_storage, "moved", "ok"),),
+            False,
+            None,
+        )
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fake_execute_plan)
+    path = write_config(
+        tmp_path,
+        state={"path": str(tmp_path / "state.json")},
+        execution={"max_migrations_per_run": 1},
+    )
+    assert cli.main(["-c", str(path), "--mode", "auto", "apply"]) == 0
+    assert [name for name, _budget in calls] == ["fc-tier1", "fc-tier2"]
+    assert calls[0][1] == 1  # the full budget, for the first group
+    assert calls[1][1] == 0  # already spent by the first group's one move
 
 
 # --------------------------------------------------------- solver backend dispatch
