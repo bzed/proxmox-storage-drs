@@ -135,8 +135,9 @@ itself still only ever produces a strictly-sequential order (not
 above -- but reasoning about which pairs of moves could safely be
 *scheduled* to overlap, priority-2 ordering, and staging, per
 [`95-schedule.md`](95-schedule.md)); and the payback re-solve-and-retry
-loop plus the section 7.3 saturation check in `payback.py` (see
-[`96-payback.md`](96-payback.md)).
+loop in `payback.py` (see [`96-payback.md`](96-payback.md) -- the section
+7.3 saturation check itself is implemented there now, mirroring-phase
+only).
 
 ## Why config.py depends on forecast.py
 

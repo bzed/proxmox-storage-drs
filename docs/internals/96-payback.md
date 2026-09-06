@@ -118,8 +118,8 @@ neither being non-empty.
   already makes for an unschedulable move.
 - **The section 7.3 saturation-ceiling defer check beyond its mirroring
   -phase reading.** `compute_move_cost()` now implements `L_during(s) <=
-  saturation_ceiling * N_s` for each endpoint (see the new section
-  below), but only at the mirroring-phase horizon the section's own
+  saturation_ceiling * N_s` for each endpoint (see the section above),
+  but only at the mirroring-phase horizon the section's own
   header names ("push either endpoint above ... during *the mirror*") —
   not a second, separate check for the *draining* phase (`ω_wipe` over
   `duration_wipe_seconds`), which the full generalized in-flight-set
@@ -129,12 +129,21 @@ neither being non-empty.
   the plan's own words allow ("fully supported... loses only this one
   advisory check").
 
-## Wired into `plan`, not yet into `apply`
+## Wired into `plan` and `apply` alike, via `_plan_group()`
 
-`cli.py`'s `_handle_plan()` computes a `PaybackResult` for every group the
-gate acts on, right after scheduling its moves, and both render functions
-show it (`docs/manual/27-plan.md`). `compute_wipe_duration_seconds()` is
-also used by `verify-storages`'s existing wipe-time warning — one
-implementation of the formula, not two (AGENTS.md section 5). Nothing
-calls this module from `apply`, because `apply` does not exist yet
-(`execute.py`, phase 7+).
+`cli.py`'s `_plan_group()` (`docs/internals/92-execute.md`'s "one planning
+pipeline, shared by `plan` and `apply`") computes a `PaybackResult` for
+every group the gate acts on, right after scheduling its moves, and both
+`plan`'s render functions and `apply`'s payback gate
+(`_apply_payback_gate()`) consume it — a rejected or deferred move never
+reaches `execute.py` regardless of mode. `_saturation_forecast_inputs()`
+is what builds the saturation guard's own forecaster and per-disk load
+history, once per group, only when at least one of its storages
+configures `saturation_load` — skipped entirely otherwise, so a cluster
+that never sets it pays no Prometheus cost for a check it cannot use.
+`_compute_one_move_cost()` then derives each move's own
+`l_hat_src`/`l_hat_dst` (`forecast.storage_upper_bound()` over each
+endpoint's *currently* resident disks, at that move's own mirror
+duration) before calling `compute_move_cost()`. `compute_wipe_duration_seconds()`
+is also used by `verify-storages`'s existing wipe-time warning — one
+implementation of the formula, not two (AGENTS.md section 5).

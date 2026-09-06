@@ -958,6 +958,128 @@ def test_plan_json_output_accepts_payback_when_saferemove_is_off(
     assert payback["ratio"] == 0.0  # a real cost with zero benefit -> ratio 0, still accepted
 
 
+class _StubForecaster:
+    """A `Forecaster` whose `predict()` always returns the same, huge
+    upper bound regardless of input -- deterministically triggers section
+    7.3's saturation guard without needing to hand-derive a real
+    quantile/seasonal_naive/holt_winters number."""
+
+    def __init__(self, upper_bound: float) -> None:
+        self._upper_bound = upper_bound
+
+    def required_range(self) -> object:
+        return None
+
+    def predict(self, series: object, horizon: object) -> object:
+        from proxmox_storage_drs.forecast import Forecast
+
+        return Forecast(point_estimate=0.0, upper_bound=self._upper_bound)
+
+
+def test_plan_json_output_defers_a_move_via_the_saturation_guard(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """san-a (the source, and the only storage with any disk currently
+    resident -- san-b starts empty in this fixture) configures a tight
+    `saturation_load` -- with `cli.build_forecaster()` stubbed to always
+    forecast a huge upper bound, the move is deferred by section 7.3's
+    guard, not merely scored, and `deferred_moves` (not `rejected_moves`)
+    is what reports it."""
+    topology = _repairable_sample_topology()
+    group = topology.groups[0]
+    storages = tuple(
+        Storage(
+            id=s.id,
+            capability_weight=s.capability_weight,
+            reserve_factor=s.reserve_factor,
+            saturation_load=10.0 if s.id == "san-a" else s.saturation_load,
+            capacity_bytes=s.capacity_bytes,
+            used_bytes=s.used_bytes,
+            foreign_used_bytes=s.foreign_used_bytes,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        )
+        for s in group.storages
+    )
+    topology = Topology(
+        groups=(Group(name=group.name, storages=storages, disks=group.disks),),
+        warnings=topology.warnings,
+    )
+    _patch_plan_deps(monkeypatch, topology, _sample_group_load())
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_forecaster", lambda *a, **k: _StubForecaster(1000.0)
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_disk_load_series", lambda *a, **k: {})
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    payback = payload["groups"][0]["payback"]
+    assert payback["deferred_moves"] == ["101:scsi0"]
+    assert payback["rejected_moves"] == []  # a defer is not a hard-duration rejection
+    assert payback["accepted"] is False
+
+
+def test_apply_excludes_a_saturation_deferred_move_from_execution(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_apply_payback_gate()` must exclude a deferred move from what it
+    hands to `execute_plan()`, exactly like a hard-duration-rejected one
+    -- exercised here via `dry-run`, which reports every move's outcome
+    without needing a fake PVE API at all."""
+    topology = _repairable_sample_topology()
+    group = topology.groups[0]
+    storages = tuple(
+        Storage(
+            id=s.id,
+            capability_weight=s.capability_weight,
+            reserve_factor=s.reserve_factor,
+            saturation_load=10.0 if s.id == "san-a" else s.saturation_load,
+            capacity_bytes=s.capacity_bytes,
+            used_bytes=s.used_bytes,
+            foreign_used_bytes=s.foreign_used_bytes,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        )
+        for s in group.storages
+    )
+    topology = Topology(
+        groups=(Group(name=group.name, storages=storages, disks=group.disks),),
+        warnings=topology.warnings,
+    )
+    _patch_plan_deps(monkeypatch, topology, _sample_group_load())
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_forecaster", lambda *a, **k: _StubForecaster(1000.0)
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_disk_load_series", lambda *a, **k: {})
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    out = capsys.readouterr().out
+    assert "101:scsi0" in out
+    assert "skipped: deferred: section 7.3 saturation guard" in out
+    assert "would_move" not in out  # the only move in this plan was deferred, never executed
+
+
+def test_plan_json_output_saturation_guard_is_skipped_without_any_saturation_load(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No storage in the group configures `saturation_load` -- the guard
+    must not even call `compute_disk_load_series()`/`build_forecaster()`,
+    matching the plan's own "loses only this one advisory check, at no
+    Prometheus cost" promise."""
+
+    def fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("the saturation guard must not fetch anything when unconfigured")
+
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_forecaster", fail)
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_disk_load_series", fail)
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    payback = payload["groups"][0]["payback"]
+    assert payback["deferred_moves"] == []
+
+
 def test_plan_human_output_shows_the_payback_verdict(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
