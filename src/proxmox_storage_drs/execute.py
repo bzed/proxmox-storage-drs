@@ -60,7 +60,7 @@ from proxmox_storage_drs.config import ExcludeConfig, ExecutionConfig, LocksConf
 from proxmox_storage_drs.exceptions import PveApiError
 from proxmox_storage_drs.payback import MoveCost
 from proxmox_storage_drs.pve import PveClient
-from proxmox_storage_drs.reserve import largest_disk_bytes
+from proxmox_storage_drs.reserve import largest_disk_bytes, transient_charge_ok
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult
 from proxmox_storage_drs.topology import DISK_KEY_RE, Disk, Group, Storage, parse_disk_spec
 
@@ -273,21 +273,25 @@ def _live_transient_check(
 ) -> bool:
     """Section 9.2 step 2, re-derived from a *live* ``storage_status()``
     call rather than the in-memory model ``schedule.transient_invariant_ok()``
-    checks against -- the same section 8.1 formula
-    (``used + z_d + max(f·max(Z,z_d), min_free) <= C``), but the model
-    function's ``used`` comes from summing this tool's own disk list, and a
-    live re-check specifically wants PVE's own authoritative current
-    ``used`` instead, which already reflects anything else that touched the
-    storage since planning. Not a second implementation of the *rule*,
-    only of the *arithmetic*, against a data source the model-based
-    function was never built to accept (AGENTS.md section 5)."""
+    checks against, via the shared :func:`reserve.transient_charge_ok`
+    (section 8.1's one arithmetic core, AGENTS.md section 5) -- the model
+    function's ``used``/``total`` come from summing this tool's own disk
+    list and ``Storage.capacity_bytes``, while a live re-check specifically
+    wants PVE's own authoritative current ``used``/``total`` instead, which
+    already reflects anything else that touched the storage since
+    planning. Not a second implementation of the *rule*, only of the
+    *data source* the model-based function was never built to accept."""
     status = client.storage_status(node, target.id)
     live_used = int(status["used"])
     live_total = int(status["total"])
-    required = max(
-        round(target.reserve_factor * max(existing_largest_bytes, disk.size_bytes)), min_free_bytes
+    return transient_charge_ok(
+        target.reserve_factor,
+        live_total,
+        live_used,
+        existing_largest_bytes,
+        [disk.size_bytes],
+        min_free_bytes,
     )
-    return live_used + disk.size_bytes + required <= live_total
 
 
 def _detect_orphan_volumes(

@@ -97,7 +97,7 @@ executed a migration — see [`15-state.md`](15-state.md),
 | `metrics.py` | `PrometheusClient`, PromQL construction, `verify_metrics()`, `compute_disk_coverage()` | sections 3.1-3.4 |
 | `pve.py` | `PveClient` (built on `proxmoxer`), `build_client()` | section 3.5 |
 | `topology.py` | `build_topology()`: the disk/storage/group join, `D`, `S`, `Uˢᵉˣᵗ`, (C2) pins | sections 3.5-3.7, 5.1, 5.3 (C2) |
-| `reserve.py` | `compute_reserve_status()`: (C4)/(C5), shared by `show-load` today and the solver later | section 5.3 (C4)/(C5) |
+| `reserve.py` | `compute_reserve_status()`: (C4)/(C5), shared by `show-load` today and the solver later; `transient_charge_ok()`: section 8.1's transient invariant, generalized to any number of concurrent charges on one target, shared by `schedule.py` (model-based) and `execute.py` (live) | section 5.3 (C4)/(C5), section 8.1 |
 | `loadmodel.py` | `compute_group_load()`: the raw-series-to-`ℓ_d` blend, `min_coverage` rejection, current `L_s`/`u_s` | section 4 |
 | `gates.py` | `evaluate_group_gates()`: reserve override, drift, imbalance — the act/no-act verdict, with reasoning | section 6 |
 | `heuristic.py` | `run_heuristic()`: seed/repair/descend, and `evaluate_assignment()`, the section 5.4 objective shared with the MILP path too | sections 5.4/5.5 |

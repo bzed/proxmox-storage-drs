@@ -50,6 +50,18 @@ freed) before this one begins. That is the correct model for
 plan's own "recommended configuration") — see the next section for why it
 is deliberately not generalized to more than one in-flight move yet.
 
+The actual arithmetic — `used_b + sum(z_m) + f_b * max(Z_b, max(z_m)) <=
+C_b` — now lives in `reserve.transient_charge_ok()`, taking a *list* of
+charges rather than one disk, so it degenerates to section 8.1's original
+single-move form when called with `[disk.size_bytes]` (what this module
+does) and generalizes correctly to several moves landing on the same
+storage at once when a future concurrent executor calls it with more than
+one (AGENTS.md section 5: this is now genuinely the *one* place that
+formula is written, not two functions that happen to agree).
+`execute._live_transient_check()` calls the identical function against a
+live `storage_status()` read instead of this module's model-derived
+numbers — see `92-execute.md`.
+
 The `min_free_bytes` floor is folded into the transient check the same way
 (C5) folds it into the steady-state one (`max(f_b * max(Z_b, z_d),
 min_free_bytes)`) — the plan's own section 8.1 formula does not mention

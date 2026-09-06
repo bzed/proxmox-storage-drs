@@ -66,6 +66,60 @@ def managed_used_bytes(
     return sum(d.size_bytes for d in disks if storage_of(d) == storage_id)
 
 
+def transient_charge_ok(
+    reserve_factor: float,
+    capacity_bytes: int,
+    used_bytes: int,
+    existing_largest_bytes: int,
+    charge_sizes_bytes: Iterable[int],
+    min_free_bytes: int,
+) -> bool:
+    """IMPLEMENTATION_PLAN.md section 8.1's transient invariant, generalized
+    to an arbitrary set of moves landing on one storage at once::
+
+        used_b + sum(z_m) + f_b * max(Z_b, max(z_m)) <= C_b
+
+    ``charge_sizes_bytes`` is every in-flight move's ``z_m`` (its disk's
+    size) whose *target* is this storage — one element for section 8.1's
+    original single-move form (a plain migration under the default
+    ``max_concurrent_migrations: 1``), more than one only when several
+    moves land on the same storage at once. This is the one arithmetic
+    core both `schedule.py`'s planning-time check (model-derived
+    ``used_bytes``/``existing_largest_bytes``, always a single charge) and
+    `execute.py`'s live, execution-time check (``storage_status()``-derived
+    ``used_bytes``, one or more charges once concurrent execution launches
+    more than one move onto the same target) call — AGENTS.md section 5:
+    the *rule* is one implementation, and only the *source* of
+    ``used_bytes``/``existing_largest_bytes``/``capacity_bytes`` legitimately
+    differs between a model-based caller and a live one (a live re-check
+    also wants a live ``total`` in place of ``Storage.capacity_bytes``, in
+    case the LUN itself was resized since this run started — which is why
+    this function takes plain numbers, never a whole ``Storage``, so
+    neither caller has to fabricate one just to substitute one field).
+
+    Deliberately conservative for the concurrent case: this function does
+    not assume ``used_bytes`` already reflects any of ``charge_sizes_bytes``
+    (whether a live ``storage_status()`` read already counts another
+    in-flight move's target allocation at the instant it is queried is not
+    something this codebase asserts either way — the arithmetic is only
+    ever *too* conservative if it does, never unsafe, and unsafe is the one
+    direction this tool never accepts, see `.agents/domain-invariants.md`).
+
+    ``existing_largest_bytes`` is ``Z_b`` *before* any of
+    ``charge_sizes_bytes`` land — the largest disk already resident on the
+    target, from whichever data source the caller is using. Returns
+    ``True`` (vacuously satisfied) when ``charge_sizes_bytes`` is empty —
+    there is nothing landing on this storage for the check to apply to.
+    """
+    charges = list(charge_sizes_bytes)
+    if not charges:
+        return True
+    required = max(
+        round(reserve_factor * max(existing_largest_bytes, max(charges))), min_free_bytes
+    )
+    return used_bytes + sum(charges) + required <= capacity_bytes
+
+
 def compute_reserve_status(
     storage: Storage,
     disks: Iterable[Disk],
