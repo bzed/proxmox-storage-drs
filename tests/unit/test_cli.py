@@ -15,6 +15,7 @@ from proxmox_storage_drs import __version__, cli
 from proxmox_storage_drs.config import ResolvedConfig
 from proxmox_storage_drs.heuristic import ObjectiveBreakdown
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
+from proxmox_storage_drs.state import load_state
 from proxmox_storage_drs.topology import Disk, Group, Storage, Topology
 
 MINIMAL_CONFIG = {
@@ -160,11 +161,12 @@ def test_missing_config_is_reported_and_exits_1(
 def test_valid_config_dispatches_to_the_not_yet_implemented_handler(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # "apply" (execute.py, phase 7+) is still a stub; "plan" is real now.
+    # "explain" (not scoped to any phase yet) is still a stub; "plan" and
+    # "apply" are both real now (phases 4-7).
     path = write_config(tmp_path)
-    assert cli.main(["-c", str(path), "apply"]) == 1
+    assert cli.main(["-c", str(path), "explain"]) == 1
     err = capsys.readouterr().err
-    assert "'apply' is not implemented yet" in err
+    assert "'explain' is not implemented yet" in err
 
 
 def test_drs_error_from_a_handler_is_reported_and_exits_1(
@@ -1288,7 +1290,8 @@ def test_plan_reports_a_metrics_error_per_group(
 def test_mode_override_flows_through_main(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # "apply" is still a stub (no network access) -- this test is about the
+    # "apply --mode auto" refuses outright before touching the network
+    # (phase 8 is not implemented yet) -- this test is about the
     # mode-override log happening before dispatch, for any command, not
     # about "plan" specifically. "plan" itself is real now and would try a
     # genuine network connection here if used unmocked (.agents/testing.md).
@@ -1300,6 +1303,283 @@ def test_mode_override_flows_through_main(
     assert override_events
     assert override_events[0]["effective_mode"] == "auto"
     assert override_events[0]["level"] == "WARNING"
+
+
+# --------------------------------------------------------------------- apply
+
+
+def test_apply_refuses_auto_mode_without_touching_the_network(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("apply --mode auto must return before touching PVE")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", fail)
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--mode", "auto", "apply"]) == 1
+    err = capsys.readouterr().err
+    assert "does not support --mode auto yet" in err
+
+
+def test_apply_dry_run_reports_would_move_and_writes_no_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dry-run's own `execute_plan()` path issues zero API calls (see
+    `test_execute.py`), so `build_pve_client`'s "fake-client" string is
+    never actually called into -- this only checks `_handle_apply()`'s
+    wiring, not `execute.py`'s own dry-run behaviour again."""
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    state_path = tmp_path / "state.json"
+    path = write_config(tmp_path, state={"path": str(state_path)})
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    out = capsys.readouterr().out
+    assert "101:scsi0" in out
+    assert "would_move" in out
+    # Nothing was executed, so section 11.2's "updated only after a run
+    # that executed at least one migration" must not have fired.
+    assert not state_path.exists() or load_state(str(state_path)).last_balance.at is None
+
+
+def test_apply_confirm_mode_prompts_and_honours_a_decline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declined move never reaches `execute.py`'s own move-issuing code
+    (see `execute_plan()`), so "fake-client" is never called into here
+    either -- this checks that `_handle_apply()` wires the interactive
+    `input()`-based callback through correctly and honours its answer."""
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    prompts = []
+
+    def fake_input(prompt: str) -> str:
+        prompts.append(prompt)
+        return "n"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    state_path = tmp_path / "state.json"
+    path = write_config(tmp_path, state={"path": str(state_path)})
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
+    assert len(prompts) == 1
+    assert "101:scsi0" in prompts[0]
+    assert "san-a → san-b" in prompts[0]
+    out = capsys.readouterr().out
+    assert "skipped: operator declined" in out
+    assert load_state(str(state_path)).last_balance.at is None
+
+
+def test_apply_confirm_mode_retries_on_unrecognized_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    answers = iter(["maybe", "n"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    state_path = tmp_path / "state.json"
+    path = write_config(tmp_path, state={"path": str(state_path)})
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
+    err = capsys.readouterr().err
+    assert "please answer y, n, a or q" in err
+
+
+def test_apply_records_balance_and_cooldowns_after_an_executed_move(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_handle_apply()` itself decides which moves count as "executed"
+    (section 11.2) -- this stubs `execute_plan()` (already covered, move
+    by move, in `test_execute.py`) so the test is only about that
+    decision and its `state.json` write, not about re-driving a fake PVE
+    API through the whole executor again."""
+    from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
+    from proxmox_storage_drs.state import disk_state_key, storage_state_key
+
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+
+    def fake_execute_plan(
+        client: object,
+        group: object,
+        schedule_result: object,
+        migration: object,
+        execution: object,
+        min_free_bytes: object,
+        mode: object,
+        confirm: object = None,
+        clock: object = None,
+    ) -> ExecutionResult:
+        return ExecutionResult(
+            outcomes=(
+                MoveOutcome(
+                    disk_key="101:scsi0",
+                    from_storage="san-a",
+                    to_storage="san-b",
+                    status="moved",
+                    detail="task UPID:... completed OK",
+                    upid="UPID:pve01:00001234:00ABCDEF:qmmove:101:root@pam:",
+                ),
+            ),
+            stopped_early=False,
+            stop_reason=None,
+        )
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fake_execute_plan)
+    state_path = tmp_path / "state.json"
+    path = write_config(tmp_path, state={"path": str(state_path)})
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
+    out = capsys.readouterr().out
+    assert "moved: task UPID" in out
+
+    saved = load_state(str(state_path))
+    assert saved.last_balance.at is not None
+    assert saved.last_balance.load_vector == {"fc-tier1:101:scsi0": 3.0, "fc-tier1:102:scsi0": 0.0}
+    disk_key = disk_state_key("fc-tier1", 101, "scsi0")
+    storage_key = storage_state_key("fc-tier1", "san-b")
+    assert disk_key in saved.cooldowns.disk
+    assert storage_key in saved.cooldowns.storage
+    assert storage_state_key("fc-tier1", "san-a") not in saved.cooldowns.storage
+
+
+def test_apply_stops_the_whole_run_when_the_operator_quits(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    repairable = _repairable_sample_topology()
+    two_groups = Topology(
+        groups=(
+            repairable.groups[0],
+            Group(name="fc-tier2", storages=repairable.groups[0].storages, disks=()),
+        ),
+        warnings=(),
+    )
+    _patch_plan_deps(monkeypatch, two_groups, _sample_group_load())
+
+    def fake_execute_plan(
+        client: object,
+        group: object,
+        schedule_result: object,
+        migration: object,
+        execution: object,
+        min_free_bytes: object,
+        mode: object,
+        confirm: object = None,
+        clock: object = None,
+    ) -> ExecutionResult:
+        return ExecutionResult(outcomes=(), stopped_early=True, stop_reason="operator quit")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fake_execute_plan)
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
+    out = capsys.readouterr().out
+    # Only the first group's own report -- fc-tier2 was never even planned
+    # once the operator quit on fc-tier1.
+    assert out.count("→ ACT") == 1
+
+
+def test_apply_exits_quietly_when_state_json_is_already_locked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.state import acquire_lock, release_lock
+
+    def fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("a locked run must never reach PVE at all")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", fail)
+    state_path = tmp_path / "state.json"
+    path = write_config(tmp_path, state={"path": str(state_path)})
+    handle = acquire_lock(str(state_path))
+    assert handle is not None
+    try:
+        assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+        assert capsys.readouterr().out == ""
+    finally:
+        release_lock(handle)
+
+
+def test_apply_reports_a_metrics_error_and_a_no_action_group_without_executing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.exceptions import MetricsError
+
+    two_groups = _two_group_topology()
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", _fake_build_topology(two_groups))
+
+    def per_group_load(
+        prom_client: object,
+        metrics: object,
+        window: object,
+        load_weights: object,
+        group: Group,
+        last_known_loads: object = None,
+    ) -> GroupLoad:
+        if group.name == "fc-tier1":
+            raise MetricsError("connection refused")
+        return GroupLoad(
+            group_name=group.name,
+            idle=True,
+            average_utilization=0.0,
+            disks=(),
+            storages=(
+                StorageLoad(storage_id="san-a", load=0.0, utilization=0.0),
+                StorageLoad(storage_id="san-b", load=0.0, utilization=0.0),
+            ),
+        )
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_group_load", per_group_load)
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    out = capsys.readouterr().out
+    assert "fc-tier1 — plan unavailable: connection refused" in out
+    assert "fc-tier2 → NO ACTION" in out
+
+
+def test_apply_json_output_includes_the_execution_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "--json", "apply"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    group_out = next(g for g in payload["groups"] if g["name"] == "fc-tier1")
+    assert group_out["execution"]["stopped_early"] is False
+    assert group_out["execution"]["outcomes"][0]["status"] == "would_move"
+
+
+def test_apply_exits_1_when_a_move_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
+
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+
+    def fake_execute_plan(
+        client: object,
+        group: object,
+        schedule_result: object,
+        migration: object,
+        execution: object,
+        min_free_bytes: object,
+        mode: object,
+        confirm: object = None,
+        clock: object = None,
+    ) -> ExecutionResult:
+        return ExecutionResult(
+            outcomes=(
+                MoveOutcome(
+                    disk_key="101:scsi0",
+                    from_storage="san-a",
+                    to_storage="san-b",
+                    status="failed",
+                    detail="move_disk task failed: mirror error",
+                ),
+            ),
+            stopped_early=True,
+            stop_reason="101:scsi0 failed: move_disk task failed: mirror error",
+        )
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fake_execute_plan)
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 1
+    out = capsys.readouterr().out
+    assert "failed: move_disk task failed" in out
+    assert "run stopped early" in out
 
 
 # --------------------------------------------------------- solver backend dispatch

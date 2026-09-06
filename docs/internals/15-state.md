@@ -85,7 +85,10 @@ function computing the per-group slice, not two independent
 implementations (AGENTS.md section 5). Neither command takes the advisory
 lock: both are read-only reports that never execute a migration, and
 taking the exclusive lock for one would make an in-progress `apply` block
-`plan`/`show-load` for no safety reason the plan text supports.
+`plan`/`show-load` for no safety reason the plan text supports. `apply`
+(`docs/internals/92-execute.md`) is the one command that does take it —
+before touching PVE or Prometheus at all, so a second concurrent instance
+exits quietly without paying for either round-trip first.
 
 The practical effect: a `state.json` with a real `last_balance` now makes
 the drift gate genuinely suppress an `ACT` verdict the imbalance alone
@@ -93,8 +96,8 @@ would otherwise trigger — see
 `test_show_load_gate_reflects_real_drift_history_from_state_json` and
 `test_plan_gate_also_reflects_real_drift_history_from_state_json` in
 `tests/unit/test_cli.py` for the exact before/after. Without a
-`state.json` on disk (the common case until `execute.py` exists — see
-below), behaviour is unchanged from before this module existed:
+`state.json` on disk (the common case until `apply` has actually executed
+a migration), behaviour is unchanged from before this module existed:
 `last_load=None`, drift gate skipped, "reserve override, else imbalance".
 
 ## Cooldowns: read by `topology.py` and `heuristic.py`, not by this module
@@ -117,18 +120,31 @@ the storage cooldown entirely (section 13's reserve-override principle),
 while nothing yet exempts a disk-cooldown pin from blocking a repair the
 same way — a known, documented limitation, not an oversight.
 
-Like `last_balance`, this is **read-only wiring**: nothing calls
-`with_recorded_cooldown()` yet, so every cooldown query returns empty
-until `execute.py` records one.
+`apply` is what actually calls `with_recorded_cooldown()` now, once per
+group, for every disk/storage a run's `execute_plan()` call actually
+migrated — a fresh disk cooldown at the disk's *new* location, and a fresh
+storage cooldown for the move's **destination** only, mirroring
+`_descend()`'s own asymmetry above (`docs/internals/92-execute.md`). A
+group `apply` never acts on (the gate said `NO ACTION`, or nothing
+executed before a `load_error`/`replan_needed` stopped it) leaves that
+group's cooldowns untouched, exactly like before this was wired in.
+
+## Locking and writing: `apply`'s own responsibility
+
+`acquire_lock()`/`release_lock()`/`save_locked_state()` are exercised now:
+`apply` is the one command that can execute a migration, so it is the one
+this lock protects (see `docs/internals/92-execute.md`). It acquires the
+lock first, builds up the run's `State` in memory as each group finishes
+executing (`with_recorded_balance()`/`with_recorded_cooldown()`), and
+writes it once at the very end via `save_locked_state()` — **never**
+`save_state_atomic()`'s rename, which would silently detach the very lock
+just taken (see this page's own account of that bug, above) — before
+`release_lock()` in a `finally`, so a mid-run exception never leaves the
+lock held. `show-load`/`plan` still never take it, for the same
+read-only-report reason as always.
 
 ## Deliberately not implemented in this pass
 
-- **Nothing calls `acquire_lock()` or `with_recorded_balance()`/
-  `with_recorded_cooldown()` yet.** All exist and are fully tested, but
-  only `execute.py` (phase 7, not yet written) has a reason to take the
-  lock or record anything — section 11.2 itself says `last_balance` is
-  "updated only after a run that executed at least one migration", and
-  neither `show-load` nor `plan` ever does.
 - **A disk-cooldown pin is not exempted for an active reserve violation
   the way the storage cooldown is.** `topology.py` decides a disk's pin
   before the group's `reserve.ReserveStatus` is even computable (it needs

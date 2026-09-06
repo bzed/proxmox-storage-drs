@@ -39,7 +39,7 @@ than a document that reads as if the tool were finished:
 | `verify-storages` | Implemented: `saferemove` and the implied wipe time per storage, warning when `gates.cooldown_per_storage` or `migration.max_single_move_duration` is shorter than it. |
 | `plan` | Implemented: per group, evaluates the section 6 gate (reading real drift history from `state.json` when a group has one recorded — same as `show-load`, see `docs/internals/15-state.md`), and on `ACT` solves it with `solver.backend` (`auto` tries CP-SAT, then CBC, then the dependency-free heuristic — see `docs/internals/91-optimize.md`; both MILP backends and the heuristic exclude, as a migration target, any storage within `gates.cooldown_per_storage`, except when repairing a live reserve violation, which is never deferred for a cooldown, in the heuristic only — see `docs/internals/91-optimize.md`'s own note on that gap), orders its moves under the section 8 transient reserve invariant, and checks the whole plan against section 7's payback (cost/benefit) test — a plan resolving a reserve violation is exempt from the economic half of that test but not from the hard per-move duration rule. Human and `--json` output report which backend actually solved each group. **No automatic re-solve-and-shrink on a failing payback test** — a plan that fails is reported, not silently adjusted (section 7.3's 3-retry loop is not implemented). **No section 7.3 saturation-ceiling check** — needs a forecaster upper bound this codebase does not compute yet; fully supported to be absent per the plan's own words, since it is the one advisory (not hard) check. See `docs/manual/27-plan.md` and `docs/internals/90-heuristic.md`/`91-optimize.md`/`95-schedule.md`/`96-payback.md`. |
 | `explain` | Not implemented yet — needs the payback arithmetic it exists to explain (phase 5). |
-| `apply` | Not implemented yet — needs `execute.py` (phase 7 onward). |
+| `apply` | Implemented for `dry-run` and `confirm` (phase 7's own scope). Runs the identical per-group gate/solve/schedule/payback pipeline `plan` prints, then executes it: pre-flight re-checks each move against the live cluster immediately before issuing it, waits out a VM config lock rather than failing, and does not consider a move done until the task succeeds *and* the source volume is gone *and* the VM's lock is clear — a `saferemove` wipe can hold those apart for hours (`draining`). `--mode auto` is refused outright with a clear message: its own safety rails (`execution.time_windows`, `max_migrations_per_run`, the concurrency caps) are phase 8, not this one, and running unattended without them is exactly the "partial/unvalidated result" this project refuses to ship. A mismatch found at execution time (VM moved, snapshot appeared, the transient invariant no longer holds live) stops the run with `replan_needed` rather than patching the plan — re-invoking the whole pipeline automatically from the new state is not implemented yet (`cli.py`-level orchestration, still open). See `docs/manual/28-apply.md` and `docs/internals/92-execute.md`. |
 
 Configuration loading and validation (this whole manual's
 [`10-configuration.md`](10-configuration.md)) is complete and exercised by
@@ -52,14 +52,24 @@ Running a command that is not implemented yet prints a message naming the
 plan section it belongs to, and exits `1`:
 
 ```
-$ pve-storage-drs apply
-pve-storage-drs: 'apply' is not implemented yet in this development build; see IMPLEMENTATION_PLAN.md section 12 for the phase it belongs to
+$ pve-storage-drs explain
+pve-storage-drs: 'explain' is not implemented yet in this development build; see IMPLEMENTATION_PLAN.md section 12 for the phase it belongs to
+```
+
+`apply --mode auto` is refused the same way, for a different reason (it
+exists and is scoped, just not to this phase), so it names the phase
+instead of claiming the whole command is missing:
+
+```
+$ pve-storage-drs --mode auto apply
+pve-storage-drs: 'apply' does not support --mode auto yet in this development build (IMPLEMENTATION_PLAN.md section 12 phase 8: auto mode + time windows); use --mode confirm or --mode dry-run
 ```
 
 ## Optional dependencies
 
-`pve-storage-drs` runs, plans and (once implemented) executes with only
-`requests`, `ruamel.yaml` and `jsonschema` installed. Three dependencies are
+`pve-storage-drs` runs, plans and executes (`dry-run`/`confirm`; `auto` not
+yet) with only `requests`, `ruamel.yaml` and `jsonschema` installed. Three
+dependencies are
 optional and are imported only where they are used, never at module level:
 
 - **`pulp` + `coinor-cbc`** (Debian `Recommends`) — the packaged MILP solver

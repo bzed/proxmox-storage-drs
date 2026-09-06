@@ -1,9 +1,9 @@
 # Reading `plan`
 
 `plan` computes what `pve-storage-drs` would do and prints it. It never
-changes anything, in any `execution.mode` — that is `apply`'s job (not yet
-implemented; see `30-safety-and-status.md`), and it needs a separate,
-explicit invocation to run at all.
+changes anything, in any `execution.mode` — that is `apply`'s job (see
+`docs/manual/28-apply.md`), and it needs a separate, explicit invocation to
+run at all.
 
 For each group, `plan`:
 
@@ -153,20 +153,21 @@ and left for you to review, not silently adjusted. See
   plan itself says is "fully supported... loses only this one advisory
   check." `max_single_move_duration` and the transient reserve invariant
   are the two *hard* bounds and are both already enforced.
-- **`state.json` drift history is read, never written.** `plan`'s gate now
-  reads real `last_balance` history when a group has one recorded (see
-  `docs/internals/15-state.md`), but nothing writes `last_balance` yet --
-  that needs `execute.py` (phase 7), so a group stays "first run" (drift
-  gate skipped) until a migration has actually run.
-- **Cooldowns are read, never written.** A disk moved within
-  `gates.cooldown_per_disk` is pinned (`show-load`/`plan` both show it as
-  `[pinned: cooldown: ...]`), and a storage touched within
+- **`plan` itself still only reads `state.json`, never writes it.** Its
+  gate reads real `last_balance` history when a group has one recorded
+  (see `docs/internals/15-state.md`), and a disk/storage cooldown pins or
+  excludes exactly as described below -- but `plan` never executes a
+  migration, so it never has anything of its own to record. `apply` is
+  what writes `last_balance` and cooldowns now, after a run that actually
+  executed at least one migration (`docs/manual/28-apply.md`); a group
+  with no `state.json` yet, or one `apply` has never touched, still
+  evaluates as a first run (drift gate skipped).
+- **Cooldowns.** A disk moved within `gates.cooldown_per_disk` is pinned
+  (`show-load`/`plan` both show it as `[pinned: cooldown: ...]`), and a
+  storage that was a migration's *destination* within
   `gates.cooldown_per_storage` accepts no new incoming moves from the
-  heuristic. Like drift history above, both depend entirely on
-  `state.json` already having a recorded timestamp -- nothing writes one
-  yet, so this stays inactive until `execute.py` (phase 7) exists. See
-  `docs/internals/15-state.md`, `docs/internals/60-topology.md` and
-  `docs/internals/90-heuristic.md`.
+  heuristic. See `docs/internals/15-state.md`, `docs/internals/60-topology.md`
+  and `docs/internals/90-heuristic.md`.
 - **No staging, no concurrent scheduling.** Documented as deliberate, not
   forgotten, in `docs/internals/95-schedule.md`.
 
