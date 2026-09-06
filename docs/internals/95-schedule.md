@@ -41,26 +41,33 @@ has not been revisited to consume it (REVIEW.md R-04).
 Section 8.1 defines a generalized invariant over a whole in-flight set `M`
 specifically so it can be "implement[ed] as the single feasibility
 predicate and call[ed] with `M = {m}` for the sequential case" — this
-module is that sequential case. `transient_invariant_ok()` checks one move
-against `state`, the assignment as of immediately before that move starts;
-every previously-scheduled move is assumed **fully complete** by then
-(mirror finished, and any `saferemove` wipe finished, source genuinely
-freed) before this one begins. That is the correct model for
-`execution.max_concurrent_migrations: 1` (the default, and the
-plan's own "recommended configuration") — see the next section for why it
-is deliberately not generalized to more than one in-flight move yet.
+module is that sequential case, always. `transient_invariant_ok()` checks
+one move against `state`, the assignment as of immediately before that
+move starts; every previously-scheduled move is assumed **fully
+complete** by then (mirror finished, and any `saferemove` wipe finished,
+source genuinely freed) before this one begins. That models
+`schedule.order_moves()`'s own job correctly regardless of
+`execution.max_concurrent_migrations` — it always computes one, strictly
+-sequential *order*; that order becomes a launch queue several moves can
+run against concurrently only once `execute.py`'s own executor gets hold
+of it (`92-execute.md`'s "Concurrent execution" section) — this module
+itself never reasons about overlapping in-flight windows, and does not
+need to, since `execute.py`'s own live re-checks (below) are what
+actually enforce the invariant against whatever really ends up running
+together.
 
 The actual arithmetic — `used_b + sum(z_m) + f_b * max(Z_b, max(z_m)) <=
-C_b` — now lives in `reserve.transient_charge_ok()`, taking a *list* of
+C_b` — lives in `reserve.transient_charge_ok()`, taking a *list* of
 charges rather than one disk, so it degenerates to section 8.1's original
 single-move form when called with `[disk.size_bytes]` (what this module
 does) and generalizes correctly to several moves landing on the same
-storage at once when a future concurrent executor calls it with more than
-one (AGENTS.md section 5: this is now genuinely the *one* place that
-formula is written, not two functions that happen to agree).
-`execute._live_transient_check()` calls the identical function against a
-live `storage_status()` read instead of this module's model-derived
-numbers — see `92-execute.md`.
+storage at once when `execute._launch_decision()` calls it with more than
+one, for real, under concurrent execution (AGENTS.md section 5: this is
+the *one* place that formula is written, not two functions that happen to
+agree). `execute._live_transient_check()` (sequential) and
+`execute._launch_decision()` (concurrent) both call it against a live
+`storage_status()` read instead of this module's model-derived numbers —
+see `92-execute.md`.
 
 The `min_free_bytes` floor is folded into the transient check the same way
 (C5) folds it into the steady-state one (`max(f_b * max(Z_b, z_d),
@@ -100,14 +107,17 @@ every move a plan proposed).
 
 ## What this pass deliberately does not do
 
-- **Concurrent scheduling** (`execution.max_concurrent_migrations > 1`).
-  `payback.py` now provides the move-duration estimates this would need,
-  but reasoning correctly about overlapping in-flight windows — which
-  pairs of moves can safely run together under the generalized section
-  8.1 invariant — is not implemented. This module schedules strictly
-  sequentially regardless of the configured value; section 8.1's own
-  generalized invariant is what a future version would evaluate against
-  the real in-flight set instead of `{m}`.
+- **Reasoning about concurrency at scheduling time.** This module always
+  produces one, strictly-sequential *order* -- `execute.py`'s own
+  executor is what actually runs several of that order's moves at once
+  under `execution.max_concurrent_migrations > 1`, re-validating section
+  8.1's generalized invariant live against whatever really ends up
+  in flight together (`92-execute.md`'s "Concurrent execution" section).
+  `payback.py`'s move-duration estimates would let this module choose a
+  smarter, concurrency-aware *order* (e.g. front-loading moves that can
+  provably run together) instead of leaving that entirely to
+  `execute.py`'s own strict-FIFO launch discipline, but that scheduling
+  -time optimization is not implemented.
 - **Ordering priority 2** ("moves that free space a later move needs") and
   **staging** (section 8.3 option 1). Both are refinements over a plan
   that is already feasible and safe without them — priority 2 only

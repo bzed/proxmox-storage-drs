@@ -10,7 +10,7 @@ own manual page, `docs/manual/27-plan.md`, describes all four in detail)
 |---|---|
 | `dry-run` *(default)* | Prints the same report `plan` would, plus a `would_move` outcome per move. Issues zero API calls. |
 | `confirm` | Executes one move at a time, prompting before each: `[y]es`/`[n]o skip`/`[a]ll remaining`/`[q]uit`. |
-| `auto` | Executes unattended, subject to `execution.time_windows`, `max_migrations_per_run`, and a bounded automatic re-plan loop — see "Reading `auto` mode" below. Refused outright only when `execution.max_concurrent_migrations`/`max_concurrent_per_storage` is configured above `1`: the executor itself is still strictly sequential — see `docs/manual/30-safety-and-status.md`. |
+| `auto` | Executes unattended, subject to `execution.time_windows`, `max_migrations_per_run`, and a bounded automatic re-plan loop — see "Reading `auto` mode" below. Also the only mode that honours `execution.max_concurrent_migrations`/`max_concurrent_per_storage` above their default of `1`, running several moves at once — see "Concurrent execution" below. |
 
 A `confirm` run, using the same section 14 fixture `plan`'s own manual
 page walks through, with the operator declining the first move and
@@ -80,13 +80,38 @@ three things `dry-run`/`confirm` do not do at all
   a re-planned group: the mismatch that triggered each re-plan, and
   whatever the next attempt then did.
 
-`auto` is refused outright, before touching PVE or Prometheus at all,
-when `execution.max_concurrent_migrations` or
-`execution.max_concurrent_per_storage` is configured above `1` — the
-executor itself still runs every move strictly sequentially, so honouring
-either cap's *default* of `1` is automatic but a higher configured value
-is not something this build can actually deliver; refusing names the gap
-instead of silently running sequentially against it.
+## Concurrent execution
+
+Configuring `execution.max_concurrent_migrations`/`max_concurrent_per_storage`
+above their default of `1` runs several moves at once in `auto` mode
+(`dry-run`/`confirm` always run strictly sequentially, regardless of these
+settings — concurrency only makes sense for unattended operation).
+Section 8.1's transient reserve invariant generalizes to a whole in-flight
+set of moves landing on the same storage at once, checked live before
+every launch exactly like the sequential executor's own pre-flight
+re-check; `max_concurrent_per_storage` counts a storage as occupied
+whether a move touches it as source *or* target.
+
+**Launch order stays strictly FIFO.** The scheduler's own queue (the same
+one a sequential run would follow, one move at a time) is never
+reordered to keep every concurrency slot busy: if the next queued move
+cannot launch yet — its VM is locked, or a per-storage cap is already
+reached — `apply` waits for it rather than skipping ahead to a later
+move that could launch immediately. Several moves genuinely run at once
+once launched (nothing blocks waiting for one move's own completion or
+lock to affect any other), but which move launches *next* is always
+decided in the order `plan` would have shown it. This can under-deliver
+on throughput in a mixed queue, but never launches a move out of the
+order the payback-scored plan itself computed.
+
+A failure (or a budget/deadline limit) stops the run from launching
+anything further, exactly as in the sequential case, but does not
+abandon moves already in flight: `apply` keeps polling them to their own
+natural conclusion (`moved`, `failed`, or `draining`) before returning,
+so nothing already running is left unreported. Section 7.3's saturation
+check is not enforced under concurrency any more than it is under the
+sequential executor (`docs/manual/30-safety-and-status.md`'s own note on
+that gap applies here too).
 
 ## What "done" means for one move, and why it can take a while
 
@@ -207,10 +232,3 @@ except a lock timeout that happened after issuing nothing yet, so still
 `null` there too; a `failed` outcome carries one only when the task
 itself ran and failed, not when a lock timeout aborted before it started)
 and `orphaned_volumes` (only ever non-empty after a `failed` outcome).
-
-## What `apply` does not yet do
-
-- **No concurrent execution.** `execution.max_concurrent_migrations`/
-  `max_concurrent_per_storage` above `1` are refused outright in `auto`
-  mode rather than silently run sequentially against them — see the
-  table above and `docs/manual/30-safety-and-status.md`.

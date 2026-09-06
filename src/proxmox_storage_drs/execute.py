@@ -25,14 +25,19 @@ start (and stopping the run cleanly) a move that cannot finish before
 ``deadline``, or once ``max_migrations`` attempts have already been made
 -- via the ``deadline``/``move_costs_by_key``/``max_migrations``
 parameters `cli.py` supplies only in `auto` mode (section 12 phase 8).
-**Still not enforced here**: the `max_concurrent_migrations`/
-`max_concurrent_per_storage` caps -- every move remains strictly
-sequential (one in flight at a time), which is trivially compliant with
-either cap's *default* of `1` but not with a value above it; `cli.py`
-refuses to start `auto` mode at all when either is configured above `1`,
-rather than silently running sequentially against a cap that asked for
-concurrency this module does not implement -- see
-``docs/internals/92-execute.md``.
+
+**Concurrent execution** (`execution.max_concurrent_migrations`/
+`max_concurrent_per_storage` above their default of `1`) is `auto`-only:
+`execute_plan()` dispatches to `_execute_concurrent()` instead of the
+strictly-sequential `_execute_sequential()` above either cap's default,
+implementing section 8.1's generalized transient invariant
+(`reserve.transient_charge_ok()`) and section 9.2's "poll all in-flight
+UPIDs, launch the next queued move as each slot frees" loop -- see
+`_execute_concurrent()`'s own docstring for exactly what it does and does
+not do (strict-FIFO launching; section 7.3's saturation check remains
+unenforced, exactly as under the sequential executor). `dry-run`/
+`confirm` never use it, matching section 9.1's own per-mode description,
+which discusses concurrency only under `auto`.
 
 A move never gets a second chance to "fix" the plan around it: any
 pre-flight mismatch, or a live transient-invariant check that no longer
@@ -52,9 +57,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from proxmox_storage_drs.config import ExcludeConfig, ExecutionConfig, LocksConfig, MigrationConfig
 from proxmox_storage_drs.exceptions import PveApiError
@@ -236,14 +241,28 @@ def _preflight(
     )
 
 
+def _check_lock_once(client: PveClient, node: str, vmid: int) -> str | None:
+    """The one live read behind section 9.3.1's lock check: the VM's
+    current ``config.lock``, ``None`` when clear. Factored out so the
+    sequential executor's blocking :func:`_wait_for_unlocked` and the
+    concurrent executor's own non-blocking per-cycle check (below) share
+    the identical read (AGENTS.md section 5) -- the concurrent case
+    cannot block a whole poll cycle sleeping on one candidate's lock the
+    way the sequential wait loop does, since other moves may be able to
+    launch in the meantime."""
+    return client.vm_status_current(node, vmid).get("lock")
+
+
 def _wait_for_unlocked(
     client: PveClient, node: str, vmid: int, locks: LocksConfig, clock: Clock
 ) -> tuple[bool, str | None]:
     """Section 9.3.1: any non-empty ``lock`` means wait, never whitelist a
     value (`.agents/domain-invariants.md` rule 5). Returns ``(True, None)``
-    once clear, or ``(False, last_seen_lock)`` on timeout."""
+    once clear, or ``(False, last_seen_lock)`` on timeout. Sequential-mode
+    only -- see the module docstring's "Concurrent execution" section for
+    why the concurrent executor cannot reuse this blocking form."""
     start = clock.now()
-    lock = client.vm_status_current(node, vmid).get("lock")
+    lock = _check_lock_once(client, node, vmid)
     warned = False
     while lock:
         elapsed = (clock.now() - start).total_seconds()
@@ -259,7 +278,7 @@ def _wait_for_unlocked(
             )
             warned = True
         clock.sleep(locks.poll_interval_seconds)
-        lock = client.vm_status_current(node, vmid).get("lock")
+        lock = _check_lock_once(client, node, vmid)
     return True, None
 
 
@@ -323,6 +342,67 @@ def _detect_orphan_volumes(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _MoveWaitState:
+    """Carries :func:`_poll_move_once` state across non-blocking poll
+    cycles -- the concurrent executor's per-in-flight-move counterpart to
+    :func:`_wait_for_move_completion`'s own local ``start`` variable.
+    ``drain_start`` is set the first cycle the source-release phase is
+    entered (the task itself reported ``OK``, but the source has not
+    released yet), so later cycles measure elapsed time from *that*
+    instant, not from when polling of this move began."""
+
+    drain_start: datetime | None = None
+
+
+def _poll_move_once(
+    client: PveClient,
+    node: str,
+    vmid: int,
+    upid: str,
+    source: Storage,
+    volid: str,
+    execution: ExecutionConfig,
+    clock: Clock,
+    wait_state: _MoveWaitState,
+) -> tuple[tuple[str, str] | None, _MoveWaitState]:
+    """One non-blocking step of section 9.3.2's three-condition completion
+    criterion: ``(None, wait_state)`` while the move is still in progress
+    (call again next cycle), or ``((status, detail), wait_state)`` once it
+    has reached a terminal outcome (``"moved"``, ``"failed"`` or
+    ``"draining"``). :func:`_wait_for_move_completion` is this function
+    called in a tight loop until it stops returning ``None`` -- the one
+    implementation of the criterion, shared by the sequential executor
+    (via that blocking wrapper) and the concurrent executor (calling this
+    directly, once per in-flight move per poll cycle, so waiting on one
+    move's task or source-release never blocks progress on any other)."""
+    task = client.task_status(node, upid)
+    if task.get("status") != "stopped":
+        return None, wait_state
+
+    if task.get("exitstatus") != "OK":
+        return ("failed", f"move_disk task {upid} failed: {task.get('exitstatus')}"), wait_state
+
+    if not execution.source_release.wait or not source.saferemove:
+        return ("moved", f"task {upid} completed OK"), wait_state
+
+    drain_start = wait_state.drain_start or clock.now()
+    content = client.storage_content(node, source.id)
+    volume_present = any(item.get("volid") == volid for item in content)
+    lock = _check_lock_once(client, node, vmid)
+    if not volume_present and not lock:
+        return ("moved", f"task {upid} completed OK, source released"), wait_state
+    elapsed = (clock.now() - drain_start).total_seconds()
+    if elapsed > execution.source_release.timeout_seconds:
+        return (
+            "draining",
+            f"task {upid} completed OK, but the source volume ({volid}) is still present "
+            f"after {elapsed:.0f}s -- saferemove wipe likely still running (section 8.2 "
+            "'draining'); the next run will see this storage as it actually is",
+        ), wait_state
+    return None, _MoveWaitState(drain_start=drain_start)
+
+
 def _wait_for_move_completion(
     client: PveClient,
     node: str,
@@ -333,41 +413,24 @@ def _wait_for_move_completion(
     execution: ExecutionConfig,
     clock: Clock,
 ) -> tuple[str, str]:
-    """Section 9.3.2's three-condition completion criterion. Polls the
-    task first (unbounded -- the plan says "poll ... until status ==
-    'stopped'" with no separate timeout of its own; a move that was
-    accepted at planning time already passed
+    """Section 9.3.2's three-condition completion criterion, blocking
+    until it resolves. Polls the task first (unbounded -- the plan says
+    "poll ... until status == 'stopped'" with no separate timeout of its
+    own; a move that was accepted at planning time already passed
     `migration.max_single_move_duration`), then, only if
     ``execution.source_release.wait`` and the source actually
     ``saferemove``s, polls for the source volume's disappearance and the
     VM's lock clearing together, bounded by
-    ``execution.source_release.timeout``."""
+    ``execution.source_release.timeout``. Sequential-mode only -- see
+    :func:`_poll_move_once` for the non-blocking form the concurrent
+    executor uses instead."""
+    wait_state = _MoveWaitState()
     while True:
-        task = client.task_status(node, upid)
-        if task.get("status") == "stopped":
-            break
-        clock.sleep(execution.poll_interval_seconds)
-
-    if task.get("exitstatus") != "OK":
-        return "failed", f"move_disk task {upid} failed: {task.get('exitstatus')}"
-
-    if not execution.source_release.wait or not source.saferemove:
-        return "moved", f"task {upid} completed OK"
-
-    start = clock.now()
-    while True:
-        content = client.storage_content(node, source.id)
-        volume_present = any(item.get("volid") == volid for item in content)
-        lock = client.vm_status_current(node, vmid).get("lock")
-        if not volume_present and not lock:
-            return "moved", f"task {upid} completed OK, source released"
-        elapsed = (clock.now() - start).total_seconds()
-        if elapsed > execution.source_release.timeout_seconds:
-            return "draining", (
-                f"task {upid} completed OK, but the source volume ({volid}) is still present "
-                f"after {elapsed:.0f}s -- saferemove wipe likely still running (section 8.2 "
-                "'draining'); the next run will see this storage as it actually is"
-            )
+        result, wait_state = _poll_move_once(
+            client, node, vmid, upid, source, volid, execution, clock, wait_state
+        )
+        if result is not None:
+            return result
         clock.sleep(execution.poll_interval_seconds)
 
 
@@ -685,7 +748,72 @@ def execute_plan(
     that persisting `state.json` only at the end of a whole `execute_plan()`
     call would never survive the exact crash section 13 exists to recover
     from.
+
+    Dispatches to :func:`_execute_concurrent` only in ``"auto"`` mode with
+    either concurrency cap configured above its default of `1` -- see that
+    function's own docstring for why concurrency is `auto`-only, and
+    :func:`_execute_sequential` (everything else, including `auto` at the
+    default caps) for the strictly-sequential form this module has always
+    used.
     """
+    if mode == "auto" and (
+        execution.max_concurrent_migrations > 1 or execution.max_concurrent_per_storage > 1
+    ):
+        return _execute_concurrent(
+            client,
+            group,
+            schedule_result,
+            migration,
+            execution,
+            min_free_bytes,
+            exclude,
+            clock,
+            deadline,
+            move_costs_by_key,
+            max_migrations,
+            on_inflight_started,
+            on_inflight_finished,
+        )
+    return _execute_sequential(
+        client,
+        group,
+        schedule_result,
+        migration,
+        execution,
+        min_free_bytes,
+        mode,
+        exclude,
+        confirm,
+        clock,
+        deadline,
+        move_costs_by_key,
+        max_migrations,
+        on_inflight_started,
+        on_inflight_finished,
+    )
+
+
+def _execute_sequential(
+    client: PveClient,
+    group: Group,
+    schedule_result: ScheduleResult,
+    migration: MigrationConfig,
+    execution: ExecutionConfig,
+    min_free_bytes: int,
+    mode: str,
+    exclude: ExcludeConfig,
+    confirm: ConfirmCallback | None,
+    clock: Clock,
+    deadline: datetime | None,
+    move_costs_by_key: Mapping[str, MoveCost] | None,
+    max_migrations: int | None,
+    on_inflight_started: InflightCallback | None,
+    on_inflight_finished: InflightCallback | None,
+) -> ExecutionResult:
+    """`execute_plan()`'s original, strictly-sequential loop (one move in
+    flight at a time) -- ``dry-run``, ``confirm``, and ``auto`` at the
+    default concurrency caps all use this. See :func:`_execute_concurrent`
+    for the `auto`-only alternative used above either cap's default."""
     disks_by_key = {d.key: d for d in group.disks}
     storages_by_id = {s.id: s for s in group.storages}
     # Section 8.1's "largest disk on the target" for the live transient
@@ -772,3 +900,509 @@ def execute_plan(
             return ExecutionResult(tuple(outcomes), True, stop_reason)
 
     return ExecutionResult(tuple(outcomes), False, None)
+
+
+# --------------------------------------------------------- concurrent execution
+#
+# `auto` mode only, and only once `execution.max_concurrent_migrations`/
+# `max_concurrent_per_storage` is configured above its default of `1` (see
+# `execute_plan()`'s own dispatch). Every helper below exists because a
+# concurrent executor cannot use `_wait_for_unlocked()`/
+# `_wait_for_move_completion()`'s blocking loops directly: blocking on one
+# move's lock or completion would stall every *other* in-flight or
+# candidate move for as long as that wait lasts, defeating the entire
+# point of concurrency. `_poll_move_once()` (above) already provides the
+# non-blocking form of the completion criterion; this section adds the
+# non-blocking form of the lock wait (`_LockWaitTracker`/`_launch_decision`)
+# and the orchestration loop itself.
+
+
+@dataclass(frozen=True, slots=True)
+class _InflightMove:
+    """One concurrently-executing move's own state, carried across poll
+    cycles -- the concurrent executor's counterpart to
+    `_execute_one_move()`'s single local call stack. There is no call
+    stack per move here, since nothing blocks waiting for one move before
+    moving on to the next, so every in-flight move's progress
+    (`wait_state`) has to be threaded explicitly instead."""
+
+    move: ScheduledMove
+    disk: Disk
+    node: str
+    upid: str
+    source: Storage
+    target: Storage
+    volid: str
+    wait_state: _MoveWaitState = _MoveWaitState()
+
+
+def _per_storage_inflight_counts(inflight: Sequence[_InflightMove]) -> dict[str, int]:
+    """Section 8.1 point 3: how many in-flight moves currently touch each
+    storage as *either* source or target -- what
+    `execution.max_concurrent_per_storage` ceilings."""
+    counts: dict[str, int] = {}
+    for im in inflight:
+        counts[im.move.from_storage] = counts.get(im.move.from_storage, 0) + 1
+        counts[im.move.to_storage] = counts.get(im.move.to_storage, 0) + 1
+    return counts
+
+
+def _target_charges(inflight: Sequence[_InflightMove], storage_id: str) -> list[int]:
+    """Every in-flight move's ``z_m`` whose *target* is ``storage_id`` --
+    the ``charge_sizes_bytes`` :func:`reserve.transient_charge_ok` needs
+    to account for moves this run has already launched onto the same
+    storage (see that function's own docstring for why this does not try
+    to guess whether a live ``used`` read already reflects them)."""
+    return [im.disk.size_bytes for im in inflight if im.move.to_storage == storage_id]
+
+
+def _poll_inflight_once(
+    client: PveClient,
+    inflight: Sequence[_InflightMove],
+    execution: ExecutionConfig,
+    clock: Clock,
+    largest_by_storage: dict[str, int],
+    drained_storages: set[str],
+    on_inflight_finished: InflightCallback | None,
+) -> tuple[list[_InflightMove], list[MoveOutcome], str | None]:
+    """One poll cycle across every currently in-flight move -- the
+    concurrent counterpart to `_execute_one_move()`'s single blocking
+    `_wait_for_move_completion()` call, via `_poll_move_once()` (AGENTS.md
+    section 5: the identical per-move completion criterion, called once
+    per in-flight move per cycle here instead of once, blocking, per
+    move). Returns the still-in-flight subset, any outcomes newly
+    resolved this cycle (in resolution order, each already run through
+    `_post_move_bookkeeping()` for the (C4) largest-disk/drained-storage
+    side effects), and a stop reason if one of them requires the run to
+    stop launching further moves (only a `"failed"` move needing
+    `execution.abort_on_failure`/`always_stop` can set this --
+    `"replan_needed"` is only ever produced at launch time, by
+    `_launch_decision()` below, never by polling an already-launched
+    move)."""
+    still_inflight: list[_InflightMove] = []
+    resolved: list[MoveOutcome] = []
+    stop_reason: str | None = None
+    for im in inflight:
+        result, wait_state = _poll_move_once(
+            client,
+            im.node,
+            im.disk.vmid,
+            im.upid,
+            im.source,
+            im.volid,
+            execution,
+            clock,
+            im.wait_state,
+        )
+        if result is None:
+            still_inflight.append(replace(im, wait_state=wait_state))
+            continue
+        status, detail = result
+        if on_inflight_finished is not None:
+            on_inflight_finished(im.upid)
+        orphans: tuple[str, ...] = ()
+        if status == "failed":
+            orphans = _detect_orphan_volumes(client, im.node, im.move.to_storage, im.disk.vmid)
+            if orphans:
+                logger.warning(
+                    "orphaned volume(s) left on %s after a failed move: %s",
+                    im.move.to_storage,
+                    ", ".join(orphans),
+                    extra={
+                        "event": "orphaned_volumes",
+                        "storage": im.move.to_storage,
+                        "volumes": orphans,
+                    },
+                )
+        outcome = MoveOutcome(
+            im.move.disk_key,
+            im.move.from_storage,
+            im.move.to_storage,
+            status,
+            detail,
+            im.upid,
+            orphans,
+        )
+        resolved.append(outcome)
+        reason = _post_move_bookkeeping(
+            outcome, im.move, im.disk, largest_by_storage, drained_storages, execution
+        )
+        if reason is not None and stop_reason is None:
+            stop_reason = reason
+    return still_inflight, resolved, stop_reason
+
+
+@dataclass(frozen=True, slots=True)
+class _LockWaitTracker:
+    """Tracks how long the *current* head of ``pending`` has been seen
+    locked, across poll cycles -- the non-blocking counterpart to
+    `_wait_for_unlocked()`'s local ``start``/``warned`` variables. Strict
+    -FIFO launching (see `_execute_concurrent()`'s own docstring) means
+    there is only ever one candidate to track this for at a time, reset
+    to a fresh, empty tracker by the caller whenever the head of
+    ``pending`` changes for any reason."""
+
+    start: datetime | None = None
+    warned: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _LaunchDecision:
+    """:func:`_launch_decision`'s result. ``verdict`` is one of:
+
+    - ``"wait"`` -- not launchable yet (a per-storage cap is saturated,
+      or the VM is locked and has not timed out); try again next cycle
+      with the same candidate still at the head of ``pending``.
+      ``lock_wait`` carries the tracker state to resume from.
+    - ``"launch"`` -- clear to launch; ``preflight`` is the resolved
+      pre-flight result (`node`/`volid`) the caller needs to actually
+      issue `move_disk` (this function makes no mutating API calls
+      itself).
+    - ``"resolved"`` -- the head of ``pending`` is done *without* ever
+      launching (a pre-flight mismatch, a lock timeout, or the section
+      8.1 transient invariant failing live); ``outcome`` is what the
+      caller should record before popping it.
+    """
+
+    verdict: str
+    outcome: MoveOutcome | None = None
+    preflight: _PreflightResult | None = None
+    lock_wait: _LockWaitTracker = _LockWaitTracker()
+
+
+def _launch_lock_decision(
+    candidate: ScheduledMove,
+    disk: Disk,
+    lock: str,
+    locks: LocksConfig,
+    clock: Clock,
+    lock_wait: _LockWaitTracker,
+) -> _LaunchDecision:
+    """The non-blocking counterpart to `_wait_for_unlocked()`'s loop body,
+    for one poll cycle. Factored out of :func:`_launch_decision` purely to
+    stay within this project's flake8 complexity limit."""
+    start = lock_wait.start or clock.now()
+    elapsed = (clock.now() - start).total_seconds()
+    if elapsed > locks.wait_timeout_seconds:
+        detail = f"VM {disk.vmid} still locked ({lock}) after {locks.wait_timeout_seconds:.0f}s"
+        always_stop = locks.on_timeout == "abort"
+        outcome = MoveOutcome(
+            candidate.disk_key,
+            candidate.from_storage,
+            candidate.to_storage,
+            "failed" if always_stop else "skipped",
+            detail,
+            always_stop=always_stop,
+        )
+        return _LaunchDecision("resolved", outcome=outcome)
+    if not lock_wait.warned:
+        logger.warning(
+            "VM %s is locked (%s); waiting up to %s",
+            disk.vmid,
+            lock,
+            locks.wait_timeout_seconds,
+            extra={"event": "vm_locked", "vmid": disk.vmid, "lock": lock},
+        )
+    return _LaunchDecision("wait", lock_wait=_LockWaitTracker(start=start, warned=True))
+
+
+def _launch_decision(
+    client: PveClient,
+    candidate: ScheduledMove,
+    disk: Disk,
+    storages_by_id: dict[str, Storage],
+    execution: ExecutionConfig,
+    min_free_bytes: int,
+    largest_by_storage: dict[str, int],
+    exclude: ExcludeConfig,
+    inflight: Sequence[_InflightMove],
+    clock: Clock,
+    lock_wait: _LockWaitTracker,
+) -> _LaunchDecision:
+    """Section 9.2's five pre-flight re-checks plus section 8.1's
+    generalized transient invariant, for one candidate, one poll cycle,
+    without ever blocking. See :class:`_LaunchDecision` for the three
+    possible verdicts."""
+    per_storage = _per_storage_inflight_counts(inflight)
+    if (
+        per_storage.get(candidate.from_storage, 0) >= execution.max_concurrent_per_storage
+        or per_storage.get(candidate.to_storage, 0) >= execution.max_concurrent_per_storage
+    ):
+        return _LaunchDecision("wait", lock_wait=lock_wait)
+
+    preflight = _preflight(client, disk, candidate, exclude)
+    if preflight.mismatch is not None:
+        outcome = MoveOutcome(
+            candidate.disk_key,
+            candidate.from_storage,
+            candidate.to_storage,
+            "replan_needed",
+            preflight.mismatch,
+        )
+        return _LaunchDecision("resolved", outcome=outcome)
+    assert (
+        preflight.node is not None and preflight.volid is not None
+    )  # guaranteed when mismatch is None
+
+    if preflight.lock:
+        return _launch_lock_decision(
+            candidate, disk, preflight.lock, execution.locks, clock, lock_wait
+        )
+
+    target = storages_by_id[candidate.to_storage]
+    status = client.storage_status(preflight.node, target.id)
+    charges = _target_charges(inflight, target.id) + [disk.size_bytes]
+    if not transient_charge_ok(
+        target.reserve_factor,
+        int(status["total"]),
+        int(status["used"]),
+        largest_by_storage[target.id],
+        charges,
+        min_free_bytes,
+    ):
+        outcome = MoveOutcome(
+            candidate.disk_key,
+            candidate.from_storage,
+            candidate.to_storage,
+            "replan_needed",
+            f"the section 8.1 transient invariant no longer holds for {target.id!r} "
+            "against its live storage status",
+        )
+        return _LaunchDecision("resolved", outcome=outcome)
+
+    return _LaunchDecision("launch", preflight=preflight)
+
+
+def _advance_pending(
+    client: PveClient,
+    pending: list[ScheduledMove],
+    outcomes: list[MoveOutcome],
+    inflight: list[_InflightMove],
+    disks_by_key: dict[str, Disk],
+    storages_by_id: dict[str, Storage],
+    migration: MigrationConfig,
+    execution: ExecutionConfig,
+    min_free_bytes: int,
+    largest_by_storage: dict[str, int],
+    drained_storages: set[str],
+    exclude: ExcludeConfig,
+    clock: Clock,
+    lock_wait: _LockWaitTracker,
+    deadline: datetime | None,
+    move_costs_by_key: Mapping[str, MoveCost] | None,
+    migrations_used: int,
+    max_migrations: int | None,
+    on_inflight_started: InflightCallback | None,
+) -> tuple[_LockWaitTracker, int, str | None]:
+    """One poll cycle's attempt to move ``pending[0]`` forward -- mutates
+    ``pending``/``outcomes``/``inflight`` in place (the same style
+    `_post_move_bookkeeping()` already uses for ``largest_by_storage``/
+    ``drained_storages``) and returns the (possibly reset)
+    :class:`_LockWaitTracker`, the updated ``migrations_used`` count, and
+    a stop reason if this cycle's outcome requires one. Does nothing
+    (returns its inputs unchanged) when ``pending`` is empty or every
+    concurrency slot is already full. Factored out of
+    `_execute_concurrent()`'s own loop purely to stay within this
+    project's flake8 complexity limit."""
+    if not pending:
+        return lock_wait, migrations_used, None
+
+    candidate = pending[0]
+    disk = disks_by_key[candidate.disk_key]
+
+    drained_skip = _drained_skip_outcome(candidate, drained_storages)
+    if drained_skip is not None:
+        outcomes.append(drained_skip)
+        pending.pop(0)
+        return _LockWaitTracker(), migrations_used, None
+
+    estimated_seconds = _estimated_duration_seconds(candidate, move_costs_by_key)
+    budget_stop = _auto_budget_stop_outcome(
+        candidate, clock, deadline, estimated_seconds, migrations_used, max_migrations
+    )
+    if budget_stop is not None:
+        outcomes.append(budget_stop)
+        pending.pop(0)
+        return _LockWaitTracker(), migrations_used, budget_stop.detail
+
+    if len(inflight) >= execution.max_concurrent_migrations:
+        return lock_wait, migrations_used, None
+
+    decision = _launch_decision(
+        client,
+        candidate,
+        disk,
+        storages_by_id,
+        execution,
+        min_free_bytes,
+        largest_by_storage,
+        exclude,
+        inflight,
+        clock,
+        lock_wait,
+    )
+    if decision.verdict == "wait":
+        return decision.lock_wait, migrations_used, None
+
+    if decision.verdict == "launch":
+        assert decision.preflight is not None
+        pf = decision.preflight
+        assert pf.node is not None and pf.volid is not None
+        upid = client.move_disk(
+            pf.node,
+            disk.vmid,
+            disk.device,
+            candidate.to_storage,
+            delete=True,
+            bwlimit_bytes_per_sec=migration.bwlimit_bytes_per_sec,
+        )
+        # Section 11.2: recorded before this function does anything else
+        # with `upid`, exactly as `_execute_one_move()` does -- see that
+        # function's own comment on why.
+        if on_inflight_started is not None:
+            on_inflight_started(upid)
+        inflight.append(
+            _InflightMove(
+                move=candidate,
+                disk=disk,
+                node=pf.node,
+                upid=upid,
+                source=storages_by_id[candidate.from_storage],
+                target=storages_by_id[candidate.to_storage],
+                volid=pf.volid,
+            )
+        )
+        pending.pop(0)
+        return _LockWaitTracker(), migrations_used + 1, None
+
+    assert decision.verdict == "resolved" and decision.outcome is not None
+    outcomes.append(decision.outcome)
+    pending.pop(0)
+    stop_reason = _post_move_bookkeeping(
+        decision.outcome, candidate, disk, largest_by_storage, drained_storages, execution
+    )
+    return _LockWaitTracker(), migrations_used, stop_reason
+
+
+def _execute_concurrent(
+    client: PveClient,
+    group: Group,
+    schedule_result: ScheduleResult,
+    migration: MigrationConfig,
+    execution: ExecutionConfig,
+    min_free_bytes: int,
+    exclude: ExcludeConfig,
+    clock: Clock,
+    deadline: datetime | None,
+    move_costs_by_key: Mapping[str, MoveCost] | None,
+    max_migrations: int | None,
+    on_inflight_started: InflightCallback | None,
+    on_inflight_finished: InflightCallback | None,
+) -> ExecutionResult:
+    """``auto`` mode's concurrent orchestration -- section 8.1's
+    generalized transient invariant and section 9.2's "poll all in-flight
+    UPIDs, launch the next queued move as each slot frees" loop. Used
+    only once `execution.max_concurrent_migrations`/
+    `max_concurrent_per_storage` is configured above its default of `1`
+    (see `execute_plan()`'s own dispatch); every other case uses
+    `_execute_sequential()` unchanged.
+
+    **Strict FIFO, deliberately.** This launches at most ``pending[0]`` at
+    a time -- it never skips ahead to a later candidate
+    `schedule.order_moves()` placed behind one that cannot launch yet.
+    Several moves genuinely run concurrently once launched (every
+    in-flight move is polled each cycle via `_poll_move_once()`, and
+    nothing ever blocks on one move's own completion or lock wait), but
+    the *decision of which move to launch next* stays exactly the order
+    the scheduler already computed. A more sophisticated scheduler could
+    reorder around a blocked head to keep every concurrency slot busy;
+    this one instead waits for the head to become launchable (or resolve
+    without launching) before considering anything after it -- simpler to
+    reason about and to test exhaustively, and, like `schedule.py`'s own
+    documented ordering-priority-2/staging gaps, this can only ever
+    under-deliver on throughput, never produce an unsafe launch order.
+
+    **Section 7.3's saturation check is not enforced here either** --
+    it is not enforced anywhere in this codebase yet (see
+    `docs/internals/96-payback.md`), so section 8.1 point 4 of
+    `concurrency_ok` stays a documented gap under concurrency exactly as
+    it already is under the sequential executor.
+
+    See `execute_plan()`'s own docstring for every parameter; this
+    function implements the identical contract (budgets, drained-storage
+    exclusion, crash-recovery callbacks) for the concurrent case. Unlike
+    `_execute_sequential()`, a stop condition here does not return
+    immediately: other moves may already be in flight, and their
+    outcomes/crash-recovery callbacks must still be recorded, so this
+    function keeps polling (never launching anything new) until every
+    in-flight move has resolved before returning.
+    """
+    disks_by_key = {d.key: d for d in group.disks}
+    storages_by_id = {s.id: s for s in group.storages}
+    largest_by_storage = {s.id: largest_disk_bytes(group.disks, s.id) for s in group.storages}
+
+    outcomes: list[MoveOutcome] = []
+    drained_storages: set[str] = set()
+    inflight: list[_InflightMove] = []
+    pending = list(schedule_result.order)
+    migrations_used = 0
+    stop_reason: str | None = None
+    lock_wait = _LockWaitTracker()
+
+    while pending or inflight:
+        still_inflight, resolved, poll_stop = _poll_inflight_once(
+            client,
+            inflight,
+            execution,
+            clock,
+            largest_by_storage,
+            drained_storages,
+            on_inflight_finished,
+        )
+        inflight = still_inflight
+        outcomes.extend(resolved)
+        if poll_stop is not None and stop_reason is None:
+            stop_reason = poll_stop
+
+        pending_len_before = len(pending)
+        if stop_reason is None:
+            lock_wait, migrations_used, advance_stop = _advance_pending(
+                client,
+                pending,
+                outcomes,
+                inflight,
+                disks_by_key,
+                storages_by_id,
+                migration,
+                execution,
+                min_free_bytes,
+                largest_by_storage,
+                drained_storages,
+                exclude,
+                clock,
+                lock_wait,
+                deadline,
+                move_costs_by_key,
+                migrations_used,
+                max_migrations,
+                on_inflight_started,
+            )
+            if advance_stop is not None:
+                stop_reason = advance_stop
+
+        if not inflight and (not pending or stop_reason is not None):
+            # Nothing left to poll, and either nothing left to launch
+            # either, or a stop condition means we never will again --
+            # once `stop_reason` is set, `_advance_pending()` is never
+            # called again (the `if stop_reason is None:` guard above), so
+            # a non-empty `pending` would otherwise never shrink and this
+            # loop would spin forever waiting for it to. Those remaining
+            # candidates are simply abandoned, unreported -- exactly what
+            # `_execute_sequential()`'s own early `return` already does
+            # for every move after the one that triggered a stop.
+            break
+        if resolved or len(pending) < pending_len_before:
+            continue  # progress was made this cycle -- try again immediately
+        clock.sleep(execution.poll_interval_seconds)
+
+    return ExecutionResult(tuple(outcomes), stop_reason is not None, stop_reason)
