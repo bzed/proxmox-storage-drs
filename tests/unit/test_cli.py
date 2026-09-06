@@ -1080,6 +1080,81 @@ def test_plan_json_output_saturation_guard_is_skipped_without_any_saturation_loa
     assert payback["deferred_moves"] == []
 
 
+# ------------------------------------------------------- backtest validation gate
+
+
+def test_backtest_gate_skips_validation_for_the_quantile_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`quantile` (the default `forecast.model`) does no fitting at all --
+    there is nothing to validate and nothing more conservative to fall
+    back to, so the gate must not even call `backtest_validated()`/
+    `group_aggregate_series()`."""
+
+    def fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("quantile must never be backtested")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.backtest_validated", fail)
+    monkeypatch.setattr("proxmox_storage_drs.cli.group_aggregate_series", fail)
+    resolved = _resolved_config(tmp_path)
+    sentinel = object()
+    result = cli._backtest_gated_forecaster(
+        sentinel,  # type: ignore[arg-type]
+        resolved.config.forecast,
+        resolved,
+        {},
+        now_epoch=0.0,
+        window_seconds=100.0,
+    )
+    assert result is sentinel
+
+
+def test_backtest_gate_keeps_the_forecaster_when_validated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.backtest_validated", lambda *a, **k: True)
+    resolved = _resolved_config(
+        tmp_path, forecast={"model": "seasonal_naive", "seasonal_lookback_days": 1}
+    )
+    sentinel = object()
+    result = cli._backtest_gated_forecaster(
+        sentinel,  # type: ignore[arg-type]
+        resolved.config.forecast,
+        resolved,
+        {},
+        now_epoch=0.0,
+        window_seconds=100.0,
+    )
+    assert result is sentinel
+
+
+def test_backtest_gate_falls_back_to_quantile_when_validation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A model that fails its own backtest (or cannot be validated for
+    lack of history -- `backtest_validated()` returns `False` for both)
+    falls back to a fresh `QuantileForecaster`, not to the failed
+    forecaster it was just handed, and says so at warning level."""
+    from proxmox_storage_drs.forecast import QuantileForecaster
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.backtest_validated", lambda *a, **k: False)
+    resolved = _resolved_config(
+        tmp_path, forecast={"model": "seasonal_naive", "seasonal_lookback_days": 1}
+    )
+    sentinel = object()
+    with caplog.at_level(logging.WARNING):
+        result = cli._backtest_gated_forecaster(
+            sentinel,  # type: ignore[arg-type]
+            resolved.config.forecast,
+            resolved,
+            {},
+            now_epoch=0.0,
+            window_seconds=100.0,
+        )
+    assert isinstance(result, QuantileForecaster)
+    assert any("backtest" in r.message for r in caplog.records)
+
+
 def test_plan_human_output_shows_the_payback_verdict(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -36,6 +36,7 @@ from proxmox_storage_drs.config import (
     ENV_CONFIG_VAR,
     ExcludeConfig,
     ExecutionConfig,
+    ForecastConfig,
     MigrationConfig,
     ResolvedConfig,
     load_config,
@@ -52,7 +53,9 @@ from proxmox_storage_drs.execute import (
 from proxmox_storage_drs.forecast import (
     Forecaster,
     TimeSeries,
+    backtest_validated,
     build_forecaster,
+    group_aggregate_series,
     required_range_seconds,
     storage_upper_bound,
 )
@@ -1144,7 +1147,52 @@ def _saturation_forecast_inputs(
         metrics.step_seconds,
         now_epoch,
     )
+    forecaster = _backtest_gated_forecaster(
+        forecaster, forecast_config, resolved, disk_series, now_epoch, window.lookback_seconds
+    )
     return forecaster, disk_series
+
+
+def _backtest_gated_forecaster(
+    forecaster: Forecaster,
+    forecast_config: ForecastConfig,
+    resolved: ResolvedConfig,
+    disk_series: dict[str, TimeSeries],
+    now_epoch: float,
+    window_seconds: float,
+) -> Forecaster:
+    """Section 10.2/phase 9's backtest validation gate: ``quantile``
+    itself is never backtested (no fitting occurs, so there is nothing to
+    validate and nothing more conservative to fall back to);
+    ``seasonal_naive``/``holt_winters`` must have actually predicted the
+    group's own recent past accurately (``forecast.backtest_validated()``,
+    within ``gates.imbalance_threshold``) before section 7.3's saturation
+    guard trusts them at all. A model that fails -- or that cannot yet be
+    validated for lack of history -- falls back to ``quantile`` for this
+    run, logged once at warning; a fresh deployment is not given a free
+    pass just because it has no track record yet
+    (`forecast.backtest_validated()`'s own docstring)."""
+    if forecast_config.model == "quantile":
+        return forecaster
+    aggregate = group_aggregate_series(disk_series)
+    threshold = resolved.config.gates.imbalance_threshold
+    if backtest_validated(forecaster, aggregate, now_epoch, window_seconds, threshold):
+        return forecaster
+    logger.warning(
+        "forecast.model %r failed its section 10.2 backtest validation (or lacks the history "
+        "for one yet); falling back to quantile for this group's saturation guard this run",
+        forecast_config.model,
+        extra={"event": "forecast_backtest_failed", "model": forecast_config.model},
+    )
+    window = resolved.config.window
+    return build_forecaster(
+        dataclasses.replace(forecast_config, model="quantile"),
+        window_seconds,
+        resolved.config.metrics.step_seconds,
+        now_epoch,
+        window.quantile,
+        window.upper_quantile,
+    )
 
 
 def _compute_one_move_cost(
