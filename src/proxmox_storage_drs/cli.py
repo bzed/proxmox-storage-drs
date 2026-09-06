@@ -36,6 +36,7 @@ from proxmox_storage_drs.config import (
     load_config,
 )
 from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
+from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome, execute_plan
 from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
 from proxmox_storage_drs.heuristic import (
     Assignment,
@@ -61,9 +62,17 @@ from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, l
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult, order_moves
 from proxmox_storage_drs.state import (
     State,
+    acquire_lock,
     active_storage_cooldowns,
+    disk_state_key,
     load_state,
     load_vector_for_group,
+    now_iso,
+    release_lock,
+    save_locked_state,
+    storage_state_key,
+    with_recorded_balance,
+    with_recorded_cooldown,
 )
 from proxmox_storage_drs.topology import Group, Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds
@@ -554,7 +563,11 @@ def _load_per_tib(load_by_key: dict[str, float], move: ScheduledMove) -> float:
 
 
 def _render_plan_move_line(
-    index: int, move: ScheduledMove, move_cost: MoveCost | None, load_by_key: dict[str, float]
+    index: int,
+    move: ScheduledMove,
+    move_cost: MoveCost | None,
+    load_by_key: dict[str, float],
+    outcome: MoveOutcome | None = None,
 ) -> str:
     duration_str = "?"
     flag = ""
@@ -566,11 +579,17 @@ def _render_plan_move_line(
             flag = "  ⚠ exceeds migration.max_single_move_duration"
     change = -move.imbalance_reduction
     load_per_tib = _load_per_tib(load_by_key, move)
-    return (
+    line = (
         f"  {index}. {move.disk_key:<14} {move.from_storage} → {move.to_storage}   "
         f"{format_bytes(move.size_bytes):>10}   {duration_str}   "
         f"Δimbalance {change:+.2f}   ℓ/z {load_per_tib:.2f}{flag}"
     )
+    if outcome is not None:
+        # `apply`'s per-move execution result (section 9.5): `plan` never
+        # passes `outcome`, so this is a pure addition to the line, not a
+        # second rendering of it (AGENTS.md section 5).
+        line += f"  → {outcome.status}: {outcome.detail}"
+    return line
 
 
 def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: float) -> list[str]:
@@ -610,6 +629,89 @@ def _render_plan_solver_line(outcome: _SolveOutcome) -> str:
     return f"  solver: {outcome.backend}{suffix}"
 
 
+def _render_group_plan_human(
+    group: Group,
+    group_loads: dict[str, GroupLoad],
+    gate_decisions: dict[str, GateDecision],
+    solve_outcomes: dict[str, _SolveOutcome],
+    schedule_results: dict[str, ScheduleResult],
+    payback_results: dict[str, PaybackResult],
+    final_breakdowns: dict[str, ObjectiveBreakdown],
+    load_errors: dict[str, str],
+    payback_ratio: float,
+    execution_result: ExecutionResult | None = None,
+) -> list[str]:
+    """One group's worth of ``_render_plan_human()``'s report -- shared
+    with ``_render_apply_human()`` (AGENTS.md section 5), which passes its
+    real ``execution_result`` so each move line grows the ``→ status:
+    detail`` suffix :func:`_render_plan_move_line` already knows how to
+    add, plus a closing line reporting whether the group's run stopped
+    early. ``plan`` itself always passes ``None``, unchanged from before
+    this was extracted.
+
+    ``gate_decisions`` is looked up with ``.get()``, not ``[]`` -- ``plan``
+    always fills in every group before rendering, but ``apply`` can stop
+    the whole run early (an operator's ``[q]uit``, section 9.1) with
+    later groups never planned at all, and those still need a line here,
+    not a ``KeyError``."""
+    lines: list[str] = []
+    if group.name in load_errors:
+        lines.append(f"Group {group.name} — plan unavailable: {load_errors[group.name]}")
+        lines.append("")
+        return lines
+
+    decision = gate_decisions.get(group.name)
+    if decision is None:
+        lines.append(f"Group {group.name} — not evaluated this run")
+        lines.append("")
+        return lines
+    verdict = "ACT" if decision.act else "NO ACTION"
+    lines.append(f"Group {group.name} → {verdict}: {decision.reason}")
+
+    schedule_result = schedule_results.get(group.name)
+    if schedule_result is None:
+        lines.append("")
+        return lines
+
+    lines.append(_render_plan_solver_line(solve_outcomes[group.name]))
+    group_load = group_loads[group.name]
+    load_by_key = group_load.load_by_disk_key()
+    payback_result = payback_results.get(group.name)
+    move_costs_by_key = (
+        {mc.disk_key: mc for mc in payback_result.move_costs} if payback_result else {}
+    )
+
+    outcomes = execution_result.outcomes if execution_result is not None else ()
+    for i, move in enumerate(schedule_result.order, start=1):
+        outcome = outcomes[i - 1] if i - 1 < len(outcomes) else None
+        lines.append(
+            _render_plan_move_line(
+                i, move, move_costs_by_key.get(move.disk_key), load_by_key, outcome
+            )
+        )
+    if schedule_result.deadlocked_msg:
+        lines.append(f"  ⚠ {schedule_result.deadlocked_msg}")
+    if execution_result is not None and execution_result.stopped_early:
+        lines.append(f"  ⚠ run stopped early: {execution_result.stop_reason}")
+
+    final_breakdown = final_breakdowns[group.name]
+    before_spread = _spread_fraction(
+        {s.storage_id: s.utilization for s in group_load.storages},
+        group_load.average_utilization,
+    )
+    after_spread = _spread_fraction(final_breakdown.utilization, group_load.average_utilization)
+    if schedule_result.order:
+        after_line = "  after: " + "  ".join(
+            f"{sid}={u:.2f}" for sid, u in sorted(final_breakdown.utilization.items())
+        )
+        lines.append(after_line)
+        lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
+        if payback_result is not None:
+            lines.extend(_render_plan_payback_lines(payback_result, payback_ratio))
+    lines.append("")
+    return lines
+
+
 def _render_plan_human(
     topology: Topology,
     group_loads: dict[str, GroupLoad],
@@ -623,55 +725,146 @@ def _render_plan_human(
 ) -> str:
     lines: list[str] = []
     for group in topology.groups:
-        if group.name in load_errors:
-            lines.append(f"Group {group.name} — plan unavailable: {load_errors[group.name]}")
-            lines.append("")
-            continue
-
-        decision = gate_decisions[group.name]
-        verdict = "ACT" if decision.act else "NO ACTION"
-        lines.append(f"Group {group.name} → {verdict}: {decision.reason}")
-
-        schedule_result = schedule_results.get(group.name)
-        if schedule_result is None:
-            lines.append("")
-            continue
-
-        lines.append(_render_plan_solver_line(solve_outcomes[group.name]))
-        group_load = group_loads[group.name]
-        load_by_key = group_load.load_by_disk_key()
-        payback_result = payback_results.get(group.name)
-        move_costs_by_key = (
-            {mc.disk_key: mc for mc in payback_result.move_costs} if payback_result else {}
-        )
-
-        for i, move in enumerate(schedule_result.order, start=1):
-            lines.append(
-                _render_plan_move_line(i, move, move_costs_by_key.get(move.disk_key), load_by_key)
+        lines.extend(
+            _render_group_plan_human(
+                group,
+                group_loads,
+                gate_decisions,
+                solve_outcomes,
+                schedule_results,
+                payback_results,
+                final_breakdowns,
+                load_errors,
+                payback_ratio,
             )
-        if schedule_result.deadlocked_msg:
-            lines.append(f"  ⚠ {schedule_result.deadlocked_msg}")
-
-        final_breakdown = final_breakdowns[group.name]
-        before_spread = _spread_fraction(
-            {s.storage_id: s.utilization for s in group_load.storages},
-            group_load.average_utilization,
         )
-        after_spread = _spread_fraction(final_breakdown.utilization, group_load.average_utilization)
-        if schedule_result.order:
-            after_line = "  after: " + "  ".join(
-                f"{sid}={u:.2f}" for sid, u in sorted(final_breakdown.utilization.items())
-            )
-            lines.append(after_line)
-            lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
-            if payback_result is not None:
-                lines.extend(_render_plan_payback_lines(payback_result, payback_ratio))
-        lines.append("")
     if topology.warnings:
         lines.append("Warnings:")
         lines.extend(f"  - {warning}" for warning in topology.warnings)
         lines.append("")
     return "\n".join(lines)
+
+
+def _render_apply_human(
+    topology: Topology,
+    group_loads: dict[str, GroupLoad],
+    gate_decisions: dict[str, GateDecision],
+    solve_outcomes: dict[str, _SolveOutcome],
+    schedule_results: dict[str, ScheduleResult],
+    payback_results: dict[str, PaybackResult],
+    final_breakdowns: dict[str, ObjectiveBreakdown],
+    load_errors: dict[str, str],
+    payback_ratio: float,
+    execution_results: dict[str, ExecutionResult],
+) -> str:
+    lines: list[str] = []
+    for group in topology.groups:
+        lines.extend(
+            _render_group_plan_human(
+                group,
+                group_loads,
+                gate_decisions,
+                solve_outcomes,
+                schedule_results,
+                payback_results,
+                final_breakdowns,
+                load_errors,
+                payback_ratio,
+                execution_results.get(group.name),
+            )
+        )
+    if topology.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in topology.warnings)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_group_plan_json(
+    group: Group,
+    decision: GateDecision | None,
+    solve_outcome: _SolveOutcome | None,
+    schedule_result: ScheduleResult | None,
+    payback_result: PaybackResult | None,
+    group_load: GroupLoad | None,
+    final_breakdown: ObjectiveBreakdown | None,
+    load_error: str | None,
+) -> dict[str, object]:
+    """One group's worth of ``_render_plan_json()``'s report -- shared
+    with ``_render_apply_json()`` (AGENTS.md section 5), which adds its
+    own ``"execution"`` key to the returned dict afterwards rather than
+    this function knowing anything about execution at all."""
+    load_by_key = group_load.load_by_disk_key() if group_load else {}
+    move_costs_by_key = (
+        {mc.disk_key: mc for mc in payback_result.move_costs} if payback_result else {}
+    )
+    moves_out = []
+    if schedule_result is not None:
+        for move in schedule_result.order:
+            move_cost = move_costs_by_key.get(move.disk_key)
+            moves_out.append(
+                {
+                    "disk_key": move.disk_key,
+                    "vmid": move.vmid,
+                    "device": move.device,
+                    "from_storage": move.from_storage,
+                    "to_storage": move.to_storage,
+                    "size_bytes": move.size_bytes,
+                    "imbalance_reduction": move.imbalance_reduction,
+                    "resolves_reserve_violation": move.resolves_reserve_violation,
+                    "load_per_tib": _load_per_tib(load_by_key, move),
+                    "duration_mirror_seconds": (
+                        move_cost.duration_mirror_seconds if move_cost else None
+                    ),
+                    "duration_wipe_seconds": (
+                        move_cost.duration_wipe_seconds if move_cost else None
+                    ),
+                    "cost_load_seconds": move_cost.cost_load_seconds if move_cost else None,
+                    "exceeds_max_duration": (move_cost.exceeds_max_duration if move_cost else None),
+                }
+            )
+    gate_out = None
+    if decision is not None:
+        gate_out = {
+            "act": decision.act,
+            "reason": decision.reason,
+            "reserve_override": decision.reserve_override,
+            "drift_fraction": decision.drift_fraction,
+            "imbalance_fraction": decision.imbalance_fraction,
+        }
+    before_spread = after_spread = None
+    if group_load is not None:
+        before_spread = _spread_fraction(
+            {s.storage_id: s.utilization for s in group_load.storages},
+            group_load.average_utilization,
+        )
+        if final_breakdown is not None:
+            after_spread = _spread_fraction(
+                final_breakdown.utilization, group_load.average_utilization
+            )
+    payback_out = None
+    if payback_result is not None:
+        payback_out = {
+            "benefit_load_seconds": payback_result.benefit_load_seconds,
+            "total_cost_load_seconds": payback_result.total_cost_load_seconds,
+            "ratio": payback_result.ratio,
+            "aggregate_ok": payback_result.aggregate_ok,
+            "rejected_moves": list(payback_result.rejected_moves),
+            "accepted": payback_result.accepted,
+        }
+    return {
+        "name": group.name,
+        "load_error": load_error,
+        "gate": gate_out,
+        "solver_backend": solve_outcome.backend if solve_outcome else None,
+        "solver_status": solve_outcome.status if solve_outcome else None,
+        "moves": moves_out,
+        "deadlocked": list(schedule_result.deadlocked) if schedule_result else [],
+        "deadlock_message": schedule_result.deadlocked_msg if schedule_result else None,
+        "before_spread": before_spread,
+        "after_spread": after_spread,
+        "payback": payback_out,
+    }
 
 
 def _render_plan_json(
@@ -684,89 +877,75 @@ def _render_plan_json(
     final_breakdowns: dict[str, ObjectiveBreakdown],
     load_errors: dict[str, str],
 ) -> dict[str, object]:
+    groups_out = [
+        _render_group_plan_json(
+            group,
+            gate_decisions.get(group.name),
+            solve_outcomes.get(group.name),
+            schedule_results.get(group.name),
+            payback_results.get(group.name),
+            group_loads.get(group.name),
+            final_breakdowns.get(group.name),
+            load_errors.get(group.name),
+        )
+        for group in topology.groups
+    ]
+    return {"groups": groups_out, "warnings": list(topology.warnings)}
+
+
+def _render_execution_json(result: ExecutionResult | None) -> dict[str, object] | None:
+    """``None`` for a group ``apply`` never got as far as executing (a
+    load error, or the gate said ``NO ACTION``) -- distinct from a group
+    that executed and produced zero outcomes, which cannot happen in
+    practice but would render as an empty list, not ``None``."""
+    if result is None:
+        return None
+    return {
+        "stopped_early": result.stopped_early,
+        "stop_reason": result.stop_reason,
+        "outcomes": [
+            {
+                "disk_key": outcome.disk_key,
+                "from_storage": outcome.from_storage,
+                "to_storage": outcome.to_storage,
+                "status": outcome.status,
+                "detail": outcome.detail,
+                "upid": outcome.upid,
+                "orphaned_volumes": list(outcome.orphaned_volumes),
+            }
+            for outcome in result.outcomes
+        ],
+    }
+
+
+def _render_apply_json(
+    topology: Topology,
+    group_loads: dict[str, GroupLoad],
+    gate_decisions: dict[str, GateDecision],
+    solve_outcomes: dict[str, _SolveOutcome],
+    schedule_results: dict[str, ScheduleResult],
+    payback_results: dict[str, PaybackResult],
+    final_breakdowns: dict[str, ObjectiveBreakdown],
+    load_errors: dict[str, str],
+    execution_results: dict[str, ExecutionResult],
+) -> dict[str, object]:
+    """``plan``'s own JSON shape (section 9.5: "every mode emits the same
+    machine-readable plan") plus one ``"execution"`` key per group --
+    the per-move outcomes ``plan`` never has anything to report for."""
     groups_out = []
     for group in topology.groups:
-        decision = gate_decisions.get(group.name)
-        solve_outcome = solve_outcomes.get(group.name)
-        schedule_result = schedule_results.get(group.name)
-        payback_result = payback_results.get(group.name)
-        group_load = group_loads.get(group.name)
-        load_by_key = group_load.load_by_disk_key() if group_load else {}
-        move_costs_by_key = (
-            {mc.disk_key: mc for mc in payback_result.move_costs} if payback_result else {}
+        group_out = _render_group_plan_json(
+            group,
+            gate_decisions.get(group.name),
+            solve_outcomes.get(group.name),
+            schedule_results.get(group.name),
+            payback_results.get(group.name),
+            group_loads.get(group.name),
+            final_breakdowns.get(group.name),
+            load_errors.get(group.name),
         )
-        moves_out = []
-        if schedule_result is not None:
-            for move in schedule_result.order:
-                move_cost = move_costs_by_key.get(move.disk_key)
-                moves_out.append(
-                    {
-                        "disk_key": move.disk_key,
-                        "vmid": move.vmid,
-                        "device": move.device,
-                        "from_storage": move.from_storage,
-                        "to_storage": move.to_storage,
-                        "size_bytes": move.size_bytes,
-                        "imbalance_reduction": move.imbalance_reduction,
-                        "resolves_reserve_violation": move.resolves_reserve_violation,
-                        "load_per_tib": _load_per_tib(load_by_key, move),
-                        "duration_mirror_seconds": (
-                            move_cost.duration_mirror_seconds if move_cost else None
-                        ),
-                        "duration_wipe_seconds": (
-                            move_cost.duration_wipe_seconds if move_cost else None
-                        ),
-                        "cost_load_seconds": move_cost.cost_load_seconds if move_cost else None,
-                        "exceeds_max_duration": (
-                            move_cost.exceeds_max_duration if move_cost else None
-                        ),
-                    }
-                )
-        gate_out = None
-        if decision is not None:
-            gate_out = {
-                "act": decision.act,
-                "reason": decision.reason,
-                "reserve_override": decision.reserve_override,
-                "drift_fraction": decision.drift_fraction,
-                "imbalance_fraction": decision.imbalance_fraction,
-            }
-        final_breakdown = final_breakdowns.get(group.name)
-        before_spread = after_spread = None
-        if group_load is not None:
-            before_spread = _spread_fraction(
-                {s.storage_id: s.utilization for s in group_load.storages},
-                group_load.average_utilization,
-            )
-            if final_breakdown is not None:
-                after_spread = _spread_fraction(
-                    final_breakdown.utilization, group_load.average_utilization
-                )
-        payback_out = None
-        if payback_result is not None:
-            payback_out = {
-                "benefit_load_seconds": payback_result.benefit_load_seconds,
-                "total_cost_load_seconds": payback_result.total_cost_load_seconds,
-                "ratio": payback_result.ratio,
-                "aggregate_ok": payback_result.aggregate_ok,
-                "rejected_moves": list(payback_result.rejected_moves),
-                "accepted": payback_result.accepted,
-            }
-        groups_out.append(
-            {
-                "name": group.name,
-                "load_error": load_errors.get(group.name),
-                "gate": gate_out,
-                "solver_backend": solve_outcome.backend if solve_outcome else None,
-                "solver_status": solve_outcome.status if solve_outcome else None,
-                "moves": moves_out,
-                "deadlocked": list(schedule_result.deadlocked) if schedule_result else [],
-                "deadlock_message": schedule_result.deadlocked_msg if schedule_result else None,
-                "before_spread": before_spread,
-                "after_spread": after_spread,
-                "payback": payback_out,
-            }
-        )
+        group_out["execution"] = _render_execution_json(execution_results.get(group.name))
+        groups_out.append(group_out)
     return {"groups": groups_out, "warnings": list(topology.warnings)}
 
 
@@ -861,6 +1040,127 @@ def _solve_group(
     )
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _GroupPlan:
+    """One group's fully-computed plan, or as far as it got -- the one
+    implementation (AGENTS.md section 5) of "gates, load model, solver,
+    payback, ordering" that both ``plan`` and ``apply`` build on, since
+    section 9.2's re-plan protocol says to re-run exactly this pipeline,
+    not a second one apply keeps for itself.
+
+    ``load_error`` set means the load model itself could not be computed
+    (a Prometheus outage) -- every other field is then ``None``.
+    Otherwise ``group_load``/``decision`` are always set; the rest stay
+    ``None`` when the gate decided not to act, since there is nothing to
+    solve, schedule or pay back for a group that is not moving anything
+    this run."""
+
+    load_error: str | None = None
+    group_load: GroupLoad | None = None
+    decision: GateDecision | None = None
+    solve_outcome: _SolveOutcome | None = None
+    schedule_result: ScheduleResult | None = None
+    final_breakdown: ObjectiveBreakdown | None = None
+    payback_result: PaybackResult | None = None
+
+
+def _plan_group(
+    group: Group,
+    resolved: ResolvedConfig,
+    prom_client: PrometheusClient,
+    min_free_bytes: int,
+    last_loads_by_group: dict[str, dict[str, float] | None],
+    state: State,
+    now: datetime,
+) -> _GroupPlan:
+    """One group's worth of ``_handle_plan``'s former loop body, unchanged
+    in behaviour -- see :class:`_GroupPlan` for why this is shared with
+    ``apply`` rather than duplicated."""
+    try:
+        group_load = compute_group_load(
+            prom_client,
+            resolved.config.metrics,
+            resolved.config.window,
+            resolved.config.load_weights,
+            group,
+            last_known_loads=last_loads_by_group.get(group.name),
+        )
+    except MetricsError as exc:
+        # Section 6: gating (and so planning) cannot proceed without a
+        # load to gate on -- unlike show-load's size/reserve report,
+        # nothing here is safe to show without it.
+        return _GroupPlan(load_error=str(exc))
+
+    reserve_statuses: dict[str, ReserveStatus] = {
+        storage.id: compute_reserve_status(storage, group.disks, min_free_bytes)
+        for storage in group.storages
+    }
+    decision = evaluate_group_gates(
+        group_load,
+        reserve_statuses,
+        resolved.config.gates,
+        last_load=last_loads_by_group.get(group.name),
+    )
+    if not decision.act:
+        return _GroupPlan(group_load=group_load, decision=decision)
+
+    cooldown_storages = frozenset(
+        active_storage_cooldowns(
+            state, group.name, resolved.config.gates.cooldown_per_storage_seconds, now
+        )
+    )
+    solve_outcome = _solve_group(
+        group, group_load.load_by_disk_key(), resolved, min_free_bytes, cooldown_storages
+    )
+    schedule_result = order_moves(
+        group,
+        solve_outcome.assignment,
+        group_load.load_by_disk_key(),
+        resolved.config.objective,
+        min_free_bytes,
+    )
+
+    # The heuristic's own `.breakdown` is the *target* assignment's
+    # objective -- every move it proposed, whether or not `order_moves()`
+    # could actually schedule it. `final_breakdown` is instead evaluated
+    # against `schedule_result.final_assignment`, the state reachable by
+    # the moves that actually got ordered, so "after" reporting and the
+    # payback benefit below both reflect the plan as it will really run,
+    # not an aspirational one a partial deadlock never reaches
+    # (REVIEW.md R-02).
+    final_breakdown = evaluate_assignment(
+        group,
+        schedule_result.final_assignment,
+        group_load.load_by_disk_key(),
+        resolved.config.objective,
+        min_free_bytes,
+        group_average_utilization(group, group_load.load_by_disk_key()),
+    )
+
+    storages_by_id = {s.id: s for s in group.storages}
+    move_costs = [
+        compute_move_cost(move, storages_by_id[move.from_storage], resolved.config.migration)
+        for move in schedule_result.order
+    ]
+    spread_metric = resolved.config.objective.spread_metric
+    benefit = compute_benefit_load_seconds(
+        raw_spread(solve_outcome.initial_breakdown, spread_metric),
+        raw_spread(final_breakdown, spread_metric),
+        resolved.config.migration.payback_horizon_seconds,
+    )
+    payback_result = evaluate_plan_payback(
+        move_costs, benefit, resolved.config.migration.payback_ratio
+    )
+    return _GroupPlan(
+        group_load=group_load,
+        decision=decision,
+        solve_outcome=solve_outcome,
+        schedule_result=schedule_result,
+        final_breakdown=final_breakdown,
+        payback_result=payback_result,
+    )
+
+
 def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
     client = build_pve_client(resolved.config.proxmox)
@@ -886,87 +1186,27 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
     load_errors: dict[str, str] = {}
 
     for group in topology.groups:
-        try:
-            group_load = compute_group_load(
-                prom_client,
-                resolved.config.metrics,
-                resolved.config.window,
-                resolved.config.load_weights,
-                group,
-                last_known_loads=last_loads_by_group.get(group.name),
-            )
-        except MetricsError as exc:
-            # Section 6: gating (and so planning) cannot proceed without a
-            # load to gate on -- unlike show-load's size/reserve report,
-            # nothing here is safe to show without it.
-            load_errors[group.name] = str(exc)
+        group_plan = _plan_group(
+            group, resolved, prom_client, min_free_bytes, last_loads_by_group, state, now
+        )
+        if group_plan.load_error is not None:
+            load_errors[group.name] = group_plan.load_error
             continue
-        group_loads[group.name] = group_load
-
-        reserve_statuses: dict[str, ReserveStatus] = {
-            storage.id: compute_reserve_status(storage, group.disks, min_free_bytes)
-            for storage in group.storages
-        }
-        decision = evaluate_group_gates(
-            group_load,
-            reserve_statuses,
-            resolved.config.gates,
-            last_load=last_loads_by_group.get(group.name),
-        )
-        gate_decisions[group.name] = decision
-        if not decision.act:
+        assert group_plan.group_load is not None and group_plan.decision is not None
+        group_loads[group.name] = group_plan.group_load
+        gate_decisions[group.name] = group_plan.decision
+        if not group_plan.decision.act:
             continue
-
-        cooldown_storages = frozenset(
-            active_storage_cooldowns(
-                state, group.name, resolved.config.gates.cooldown_per_storage_seconds, now
-            )
+        assert (
+            group_plan.solve_outcome is not None
+            and group_plan.schedule_result is not None
+            and group_plan.final_breakdown is not None
+            and group_plan.payback_result is not None
         )
-        solve_outcome = _solve_group(
-            group, group_load.load_by_disk_key(), resolved, min_free_bytes, cooldown_storages
-        )
-        solve_outcomes[group.name] = solve_outcome
-        schedule_result = order_moves(
-            group,
-            solve_outcome.assignment,
-            group_load.load_by_disk_key(),
-            resolved.config.objective,
-            min_free_bytes,
-        )
-        schedule_results[group.name] = schedule_result
-
-        # The heuristic's own `.breakdown` is the *target* assignment's
-        # objective -- every move it proposed, whether or not `order_moves()`
-        # could actually schedule it. `final_breakdown` is instead evaluated
-        # against `schedule_result.final_assignment`, the state reachable by
-        # the moves that actually got ordered, so "after" reporting and the
-        # payback benefit below both reflect the plan as it will really run,
-        # not an aspirational one a partial deadlock never reaches
-        # (REVIEW.md R-02).
-        final_breakdown = evaluate_assignment(
-            group,
-            schedule_result.final_assignment,
-            group_load.load_by_disk_key(),
-            resolved.config.objective,
-            min_free_bytes,
-            group_average_utilization(group, group_load.load_by_disk_key()),
-        )
-        final_breakdowns[group.name] = final_breakdown
-
-        storages_by_id = {s.id: s for s in group.storages}
-        move_costs = [
-            compute_move_cost(move, storages_by_id[move.from_storage], resolved.config.migration)
-            for move in schedule_result.order
-        ]
-        spread_metric = resolved.config.objective.spread_metric
-        benefit = compute_benefit_load_seconds(
-            raw_spread(solve_outcome.initial_breakdown, spread_metric),
-            raw_spread(final_breakdown, spread_metric),
-            resolved.config.migration.payback_horizon_seconds,
-        )
-        payback_results[group.name] = evaluate_plan_payback(
-            move_costs, benefit, resolved.config.migration.payback_ratio
-        )
+        solve_outcomes[group.name] = group_plan.solve_outcome
+        schedule_results[group.name] = group_plan.schedule_result
+        final_breakdowns[group.name] = group_plan.final_breakdown
+        payback_results[group.name] = group_plan.payback_result
 
     if args.json:
         print(
@@ -1000,6 +1240,206 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
             )
         )
     return 0
+
+
+def _confirm_move_interactively(move: ScheduledMove) -> str:
+    """The only ``input()`` call in this codebase -- ``execute.py``'s own
+    module docstring reserves interactive prompting for ``cli.py``, since
+    it is the only module allowed to talk to the terminal (see this
+    module's own docstring). Loops on anything but ``y``/``n``/``a``/``q``
+    rather than handing ``execute_plan()`` a value its ``ConfirmCallback``
+    contract does not accept -- retrying badly-typed input is this
+    function's job, not a ``ValueError`` execute.py would have to raise
+    and this function would have to catch anyway."""
+    prompt = (
+        f"  {move.disk_key}  {move.from_storage} → {move.to_storage}  "
+        f"{format_bytes(move.size_bytes)}  [y]es/[n]o skip/[a]ll remaining/[q]uit? "
+    )
+    while True:
+        answer = input(prompt).strip().lower()
+        if answer in ("y", "n", "a", "q"):
+            return answer
+        print("  please answer y, n, a or q", file=sys.stderr)
+
+
+def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+    """Section 9: execute (``confirm``) or merely report (``dry-run``)
+    the same per-group pipeline ``plan`` computes -- :func:`_plan_group`
+    is the one implementation of it both commands share (AGENTS.md
+    section 5), so there is no separate "apply's own solve/schedule"
+    to drift out of sync with what ``plan`` just showed the operator.
+
+    ``auto`` is refused outright: its safety rails
+    (``execution.time_windows``, ``max_migrations_per_run``, the
+    concurrency caps) are IMPLEMENTATION_PLAN.md section 12 phase 8, not
+    this one, and running it unattended without them would be exactly the
+    "partial/unvalidated result" AGENTS.md section 10 forbids.
+    """
+    if mode == "auto":
+        print(
+            "pve-storage-drs: 'apply' does not support --mode auto yet in this "
+            "development build (IMPLEMENTATION_PLAN.md section 12 phase 8: auto mode "
+            "+ time windows); use --mode confirm or --mode dry-run",
+            file=sys.stderr,
+        )
+        return 1
+
+    now = datetime.now(timezone.utc)
+    state = load_state(resolved.config.state.path)
+
+    # Unlike plan/show-load, apply can actually execute a migration, so it
+    # is the one command state.py's advisory lock exists to protect
+    # (state.py's own module docstring). Section 11.2: "a live PID means
+    # another instance is running: exit 0 quietly" -- this is that "quiet
+    # exit", for every mode including dry-run, so a second concurrent
+    # invocation never races the first over which one gets to write
+    # state.json's last_balance/cooldowns at the end. Checked before
+    # touching PVE or Prometheus at all -- an instance that cannot run
+    # this pass has no reason to pay for either round-trip first.
+    lock_handle = acquire_lock(resolved.config.state.path)
+    if lock_handle is None:
+        logger.info(
+            "state.json is already locked by another running instance; exiting quietly",
+            extra={"event": "apply_lock_held", "path": resolved.config.state.path},
+        )
+        return 0
+
+    group_loads: dict[str, GroupLoad] = {}
+    gate_decisions: dict[str, GateDecision] = {}
+    solve_outcomes: dict[str, _SolveOutcome] = {}
+    schedule_results: dict[str, ScheduleResult] = {}
+    payback_results: dict[str, PaybackResult] = {}
+    final_breakdowns: dict[str, ObjectiveBreakdown] = {}
+    load_errors: dict[str, str] = {}
+    execution_results: dict[str, ExecutionResult] = {}
+
+    try:
+        client = build_pve_client(resolved.config.proxmox)
+        topology = _filter_groups(
+            build_topology(client, resolved.config, state=state, now=now), args.group
+        )
+        prom_client = PrometheusClient(resolved.config.prometheus)
+        min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
+        last_loads_by_group = _last_loads_by_group(state, topology)
+
+        for group in topology.groups:
+            group_plan = _plan_group(
+                group, resolved, prom_client, min_free_bytes, last_loads_by_group, state, now
+            )
+            if group_plan.load_error is not None:
+                load_errors[group.name] = group_plan.load_error
+                continue
+            assert group_plan.group_load is not None and group_plan.decision is not None
+            group_loads[group.name] = group_plan.group_load
+            gate_decisions[group.name] = group_plan.decision
+            if not group_plan.decision.act:
+                continue
+            assert (
+                group_plan.solve_outcome is not None
+                and group_plan.schedule_result is not None
+                and group_plan.final_breakdown is not None
+                and group_plan.payback_result is not None
+            )
+            solve_outcomes[group.name] = group_plan.solve_outcome
+            schedule_results[group.name] = group_plan.schedule_result
+            final_breakdowns[group.name] = group_plan.final_breakdown
+            payback_results[group.name] = group_plan.payback_result
+
+            confirm_callback = _confirm_move_interactively if mode == "confirm" else None
+            result = execute_plan(
+                client,
+                group,
+                group_plan.schedule_result,
+                resolved.config.migration,
+                resolved.config.execution,
+                min_free_bytes,
+                mode,
+                confirm=confirm_callback,
+            )
+            execution_results[group.name] = result
+
+            # Section 11.2: last_balance/cooldowns are "updated only after
+            # a run that executed at least one migration" -- "moved" and
+            # "draining" both count (the mirror itself completed either
+            # way, mirroring execute.py's own (C4) accounting choice for
+            # the same two statuses), "would_move"/"skipped"/"failed"/
+            # "replan_needed" do not.
+            executed_moves = [
+                move
+                for move, outcome in zip(group_plan.schedule_result.order, result.outcomes)
+                if outcome.status in ("moved", "draining")
+            ]
+            if executed_moves:
+                state = with_recorded_balance(
+                    state, group.name, group_plan.group_load.load_by_disk_key()
+                )
+                timestamp = now_iso()
+                state = with_recorded_cooldown(
+                    state,
+                    disk_keys={
+                        disk_state_key(group.name, move.vmid, move.device): timestamp
+                        for move in executed_moves
+                    },
+                    # Only the *destination* -- docs/internals/90-heuristic.md:
+                    # "the storage cooldown excludes a destination, never a
+                    # source" -- a storage this run only moved disks away
+                    # from is not a wear/churn concern the cooldown protects
+                    # against.
+                    storage_keys={
+                        storage_state_key(group.name, move.to_storage): timestamp
+                        for move in executed_moves
+                    },
+                )
+
+            if result.stop_reason == "operator quit":
+                # A human asked to stop the whole apply run, not just this
+                # group -- section 9.1's `[q]uit` is an operator decision,
+                # not a per-group one.
+                break
+    finally:
+        save_locked_state(lock_handle, state)
+        release_lock(lock_handle)
+
+    if args.json:
+        print(
+            json.dumps(
+                _render_apply_json(
+                    topology,
+                    group_loads,
+                    gate_decisions,
+                    solve_outcomes,
+                    schedule_results,
+                    payback_results,
+                    final_breakdowns,
+                    load_errors,
+                    execution_results,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            _render_apply_human(
+                topology,
+                group_loads,
+                gate_decisions,
+                solve_outcomes,
+                schedule_results,
+                payback_results,
+                final_breakdowns,
+                load_errors,
+                resolved.config.migration.payback_ratio,
+                execution_results,
+            )
+        )
+
+    any_failure = any(
+        outcome.status == "failed"
+        for result in execution_results.values()
+        for outcome in result.outcomes
+    )
+    return 1 if any_failure else 0
 
 
 def _render_verify_storages_human(topology: Topology, config: Any) -> str:
@@ -1093,6 +1533,7 @@ _COMMAND_HANDLERS["verify-metrics"] = _handle_verify_metrics
 _COMMAND_HANDLERS["show-load"] = _handle_show_load
 _COMMAND_HANDLERS["verify-storages"] = _handle_verify_storages
 _COMMAND_HANDLERS["plan"] = _handle_plan
+_COMMAND_HANDLERS["apply"] = _handle_apply
 
 
 # ------------------------------------------------------------------- main

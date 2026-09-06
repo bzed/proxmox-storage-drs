@@ -24,11 +24,11 @@ from proxmox_storage_drs.topology import (
     Disk,
     Topology,
     _default_format,
-    _parse_disk_spec,
     _parse_pve_config_size_bytes,
     _pin_reason,
     _split_tags,
     build_topology,
+    parse_disk_spec,
 )
 from tests.unit.fakes import fake_api
 
@@ -530,14 +530,14 @@ def test_pick_active_node_raises_when_storage_absent_from_resources(tmp_path: Pa
 
 
 def test_parse_disk_spec() -> None:
-    storage, name, params = _parse_disk_spec("san-a:vm-101-disk-0,size=512G,iothread=1")
+    storage, name, params = parse_disk_spec("san-a:vm-101-disk-0,size=512G,iothread=1")
     assert storage == "san-a"
     assert name == "vm-101-disk-0"
     assert params == {"size": "512G", "iothread": "1"}
 
 
 def test_parse_disk_spec_no_params() -> None:
-    storage, name, params = _parse_disk_spec("san-a:vm-101-disk-0")
+    storage, name, params = parse_disk_spec("san-a:vm-101-disk-0")
     assert storage == "san-a"
     assert name == "vm-101-disk-0"
     assert params == {}

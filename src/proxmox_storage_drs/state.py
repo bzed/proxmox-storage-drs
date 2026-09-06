@@ -4,11 +4,12 @@
 
 The only thing this tool remembers between runs: the load vector as of the
 last *executed* balance (drift, section 6), per-disk/per-storage cooldown
-timestamps (section 5.3 (C2), not yet consumed by any caller -- see below),
-in-flight migration UPIDs and staged disks (both section 9, `execute.py`,
-not yet written), and a node-local advisory lock. Local disk, one copy per
-host, deliberately never `/etc/pve` (`.agents/domain-invariants.md` section
-9: "state belongs in `state.path` on local disk").
+timestamps (section 5.3 (C2)), in-flight migration UPIDs and staged disks
+(both section 9 -- `execute.py` exists now, but neither crash recovery nor
+staging is implemented yet, so nothing writes or reads these two fields),
+and a node-local advisory lock. Local disk, one copy per host, deliberately
+never `/etc/pve` (`.agents/domain-invariants.md` section 9: "state belongs
+in `state.path` on local disk").
 
 **Reading degrades, writing does not.** A missing file is the normal,
 expected first-run state (:func:`load_state` returns :func:`empty_state`
@@ -45,28 +46,22 @@ live PID means another instance is running: exit 0 quietly" -- the
 caller's job, not this module's, to decide what "quietly" means for its
 own command.
 
-**Deliberately not implemented in this pass** (recorded, not forgotten):
-
-- **Nothing calls :func:`acquire_lock`/:func:`with_recorded_balance` yet.**
-  Both exist and are fully tested, but only `execute.py` (section 12 phase
-  7, not yet written) has a reason to take the lock or record a balance --
-  `plan`/`show-load` never execute a migration, so section 11.2's "updated
-  only after a run that executed at least one migration" means they must
-  never call it, and taking the exclusive lock for a read-only report would
-  make an in-progress `apply` block `plan`/`show-load` for no safety
-  reason this codebase can find in the plan text.
-- **Cooldowns are stored, round-tripped and now queryable
-  (:func:`active_disk_cooldowns`/:func:`active_storage_cooldowns`), and
-  both `topology.py` (the (C2) per-disk pin) and `heuristic.py` (the
-  per-storage target exclusion) consume them -- see
-  ``docs/internals/15-state.md`` for the full wiring and its one
-  deliberate asymmetry (repair moves ignore the storage cooldown; nothing
-  yet exempts a disk-cooldown pin the same way).** What is still missing
-  is a *writer*: nothing calls :func:`with_recorded_cooldown` yet, because
-  nothing executes a migration yet -- exactly the same "read side wired,
-  write side waits on `execute.py`" shape as `last_balance` above. Until a
-  real migration records one, every cooldown query here returns empty and
-  every disk/storage behaves exactly as it did before this existed.
+**`cli.py`'s ``apply`` is the one caller of the write side** (:func:`acquire_lock`,
+:func:`with_recorded_balance`, :func:`with_recorded_cooldown`,
+:func:`save_locked_state`, :func:`release_lock`) -- `plan`/`show-load`
+never execute a migration, so section 11.2's "updated only after a run
+that executed at least one migration" means they must never call it, and
+taking the exclusive lock for a read-only report would make an
+in-progress `apply` block `plan`/`show-load` for no safety reason this
+codebase can find in the plan text. Cooldowns are stored, round-tripped
+and queryable (:func:`active_disk_cooldowns`/:func:`active_storage_cooldowns`),
+and both `topology.py` (the (C2) per-disk pin) and `heuristic.py` (the
+per-storage target exclusion) consume them -- see
+``docs/internals/15-state.md`` and ``docs/internals/92-execute.md`` for
+the full wiring and its one deliberate asymmetry (repair moves ignore the
+storage cooldown; nothing yet exempts a disk-cooldown pin the same way).
+A group `apply` never acts on leaves its cooldowns/`last_balance` exactly
+as they were before that run.
 """
 
 from __future__ import annotations
@@ -90,7 +85,7 @@ logger = logging.getLogger(__name__)
 STATE_SCHEMA_VERSION = 1
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     """UTC, second precision, ``Z`` suffix -- exactly section 11.2's own
     example timestamps (``"2026-09-04T02:00:00Z"``), never a `+00:00`
     offset form."""
@@ -343,14 +338,14 @@ def with_recorded_balance(
     """Pure: a new :class:`State` with ``group_name``'s slice of
     ``last_balance.load_vector`` replaced by ``load_by_key`` (every other
     group's entries untouched) and ``last_balance.at`` bumped to ``at``
-    (``_now_iso()`` if not given). For `execute.py` (not yet written) to
+    (``now_iso()`` if not given). For `execute.py` (not yet written) to
     call once a run has executed at least one migration for this group
     (section 11.2) -- not called by anything today, see the module
     docstring."""
     prefix = f"{group_name}:"
     kept = {k: v for k, v in state.last_balance.load_vector.items() if not k.startswith(prefix)}
     updated_vector = {**kept, **{f"{prefix}{key}": value for key, value in load_by_key.items()}}
-    return replace(state, last_balance=LastBalance(at=at or _now_iso(), load_vector=updated_vector))
+    return replace(state, last_balance=LastBalance(at=at or now_iso(), load_vector=updated_vector))
 
 
 # ----------------------------------------------------------------- cooldowns
@@ -372,7 +367,7 @@ def with_recorded_cooldown(
 
 
 def _parse_iso(timestamp: str) -> datetime | None:
-    """Inverse of :func:`_now_iso`. Returns ``None`` on anything that does
+    """Inverse of :func:`now_iso`. Returns ``None`` on anything that does
     not parse -- a hand-edited or otherwise foreign timestamp in
     ``cooldowns.disk``/``.storage`` must degrade to "no active cooldown",
     not crash a ``show-load``/``plan`` run, matching this module's
@@ -487,6 +482,20 @@ def _write_state_to_locked_fd(fd: int, state: State) -> None:
     os.fsync(fd)
 
 
+def _read_locked_state(fd: int, path: str) -> State:
+    """Re-reads whatever is currently written through an already-open,
+    already-``flock()``'d fd -- the one implementation of that (AGENTS.md
+    section 5) shared by :func:`acquire_lock`, :func:`release_lock` and
+    :func:`save_locked_state`, all of which must read through the locked
+    fd itself rather than :func:`load_state` (which reopens ``path`` by
+    name, a distinct, unlocked file descriptor)."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks = []
+    while chunk := os.read(fd, 65536):
+        chunks.append(chunk)
+    return _parse_state_text(b"".join(chunks).decode("utf-8"), path)
+
+
 def acquire_lock(path: str) -> LockHandle | None:
     """Section 11.2's advisory lock: ``fcntl.flock(LOCK_EX | LOCK_NB)`` on
     ``path`` itself, non-blocking -- never sleeps and retries (no
@@ -524,14 +533,10 @@ def acquire_lock(path: str) -> LockHandle | None:
     # inode over `path`, which would silently detach the very lock we just
     # took (see `_write_state_to_locked_fd`'s docstring).
     try:
-        os.lseek(fd, 0, os.SEEK_SET)
-        chunks = []
-        while chunk := os.read(fd, 65536):
-            chunks.append(chunk)
-        current = _parse_state_text(b"".join(chunks).decode("utf-8"), path)
+        current = _read_locked_state(fd, path)
         updated = replace(
             current,
-            lock=LockInfo(pid=os.getpid(), host=socket.gethostname(), acquired_at=_now_iso()),
+            lock=LockInfo(pid=os.getpid(), host=socket.gethostname(), acquired_at=now_iso()),
         )
         _write_state_to_locked_fd(fd, updated)
     except OSError as exc:  # pragma: no cover - needs a write failure after a successful open+lock
@@ -539,6 +544,26 @@ def acquire_lock(path: str) -> LockHandle | None:
         os.close(fd)
         raise StateError(f"could not write state file {path!r}: {exc}") from exc
     return LockHandle(_fd=fd, _path=path)
+
+
+def save_locked_state(handle: LockHandle, state: State) -> None:
+    """Persists ``state``'s business fields (``last_balance``,
+    ``cooldowns``, ``inflight_upids``, ``staged_disks``) into the
+    still-open, still-``flock()``'d fd behind ``handle``, without
+    releasing it -- for `execute.py`/`cli.py`'s ``apply`` to call once a
+    run has recorded a completed migration's balance and cooldowns
+    (:func:`with_recorded_balance`/:func:`with_recorded_cooldown`), before
+    :func:`release_lock`. ``state.lock`` is ignored and replaced with
+    whatever this handle's own :func:`acquire_lock` call last wrote --
+    the caller's in-memory ``state`` was read *before* the lock was taken
+    (for planning inputs) and so does not carry this instance's own
+    ``pid``/``host``/``acquired_at``; reusing :func:`_write_state_to_locked_fd`
+    here (never :func:`save_state_atomic`'s rename) is what keeps this
+    write from detaching the lock the same way :func:`acquire_lock` and
+    :func:`release_lock` already avoid doing (see
+    ``_write_state_to_locked_fd``'s docstring)."""
+    current = _read_locked_state(handle._fd, handle._path)
+    _write_state_to_locked_fd(handle._fd, replace(state, lock=current.lock))
 
 
 def release_lock(handle: LockHandle) -> None:
@@ -549,11 +574,7 @@ def release_lock(handle: LockHandle) -> None:
     ``finally`` always runs, so a write error here never leaves the lock
     held forever."""
     try:
-        os.lseek(handle._fd, 0, os.SEEK_SET)
-        chunks = []
-        while chunk := os.read(handle._fd, 65536):
-            chunks.append(chunk)
-        current = _parse_state_text(b"".join(chunks).decode("utf-8"), handle._path)
+        current = _read_locked_state(handle._fd, handle._path)
         _write_state_to_locked_fd(handle._fd, replace(current, lock=None))
     finally:
         fcntl.flock(handle._fd, fcntl.LOCK_UN)

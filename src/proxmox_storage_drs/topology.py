@@ -36,7 +36,7 @@ from proxmox_storage_drs.units import format_duration_seconds
 # Section 3.5's disk-key regex, verbatim. Every bus counts (AGENTS.md section
 # 6 domain rule 8) -- a regex that only matched scsi* would silently
 # mis-account capacity.
-_DISK_KEY_RE = re.compile(
+DISK_KEY_RE = re.compile(
     r"^(?:ide[0-3]|sata[0-5]|scsi(?:[0-9]|[12][0-9]|30)|virtio(?:[0-9]|1[0-5])"
     r"|efidisk0|tpmstate0|unused\d+)$"
 )
@@ -81,7 +81,7 @@ def _parse_pve_config_size_bytes(value: str) -> int | None:
     return round(float(number) * factor)
 
 
-def _parse_disk_spec(value: str) -> tuple[str, str, dict[str, str]]:
+def parse_disk_spec(value: str) -> tuple[str, str, dict[str, str]]:
     """Split a VM config disk value into ``(storage_id, volume_name, params)``.
 
     E.g. ``"san-a:vm-101-disk-0,size=512G,iothread=1"`` ->
@@ -387,9 +387,9 @@ def _join_vm_disks(
 
     disk_specs: dict[str, tuple[str, str, dict[str, str]]] = {}
     for device, value in raw_config.items():
-        if not _DISK_KEY_RE.match(device):
+        if not DISK_KEY_RE.match(device):
             continue
-        storage_id, volume_name, params = _parse_disk_spec(value)
+        storage_id, volume_name, params = parse_disk_spec(value)
         if params.get("media") == "cdrom":
             continue  # section 3.5: ISO/empty/cloudinit media -- never in D
         disk_specs[device] = (storage_id, volume_name, params)

@@ -35,6 +35,7 @@ from proxmox_storage_drs.state import (
     load_state,
     load_vector_for_group,
     release_lock,
+    save_locked_state,
     save_state_atomic,
     storage_state_key,
     with_recorded_balance,
@@ -449,6 +450,39 @@ def test_acquire_lock_survives_a_pre_existing_corrupt_file(tmp_path: Path) -> No
 def test_acquire_lock_raises_state_error_on_a_permission_failure() -> None:
     with pytest.raises(StateError):
         acquire_lock("/root/pve-storage-drs-test-unwritable/state.json")
+
+
+def test_save_locked_state_persists_business_fields_while_still_held(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    handle = acquire_lock(str(path))
+    assert handle is not None
+    try:
+        updated = with_recorded_balance(empty_state(), "fc-tier1", {"101:scsi0": 1.5})
+        save_locked_state(handle, updated)
+
+        # Still held: a concurrent acquire must still be refused.
+        assert acquire_lock(str(path)) is None
+        # And the write is visible to a plain read even before release.
+        seen = load_state(str(path))
+        assert seen.last_balance.load_vector == {"fc-tier1:101:scsi0": 1.5}
+    finally:
+        release_lock(handle)
+    assert load_state(str(path)).last_balance.load_vector == {"fc-tier1:101:scsi0": 1.5}
+
+
+def test_save_locked_state_preserves_this_handles_own_lock_metadata(tmp_path: Path) -> None:
+    """The caller's in-memory `state` was read *before* the lock was taken,
+    so it never carries this instance's own pid/host -- passing a `state`
+    with `lock=None` must not erase what `acquire_lock()` already wrote."""
+    path = tmp_path / "state.json"
+    handle = acquire_lock(str(path))
+    assert handle is not None
+    try:
+        save_locked_state(handle, empty_state())
+        assert load_state(str(path)).lock is not None
+        assert load_state(str(path)).lock.pid == os.getpid()  # type: ignore[union-attr]
+    finally:
+        release_lock(handle)
 
 
 # ----------------------------------------------------------------- _pid_alive

@@ -7,20 +7,26 @@ section 2 architecture actually exists right now?
 ## The pipeline, as specified and as built
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
-gate, solve, cost, order, execute. As of this page, stages 1 (collect)
-through 6 (cost/order) exist, with **two** interchangeable stage-4 (solve)
-backends — the dependency-free heuristic and the MILP (CP-SAT/CBC) path —
-selected by `solver.backend`; only execute (`IMPLEMENTATION_PLAN.md`
-section 12 phase 7+) is not yet written. Do not take this page as a claim
-that the whole pipeline runs end to end —
-[`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
-is the authoritative per-command status: `plan` is real and prints an
-ordered, transient-feasible, payback-checked dry-run plan (see
-[`../manual/27-plan.md`](../manual/27-plan.md)), but nothing yet *executes*
-one (no `apply`). `state.json` itself exists (`state.py`) and is read by
-both `show-load` and `plan` for real drift history — see
-[`15-state.md`](15-state.md) and [`80-gates.md`](80-gates.md) — but nothing
-writes it yet, since only `execute.py` (not yet written) has a reason to.
+gate, solve, cost, order, execute. As of this page, all seven exist, with
+**two** interchangeable stage-4 (solve) backends — the dependency-free
+heuristic and the MILP (CP-SAT/CBC) path — selected by `solver.backend`.
+Stage 7 (execute) is real for `dry-run`/`confirm`; `auto` mode's own
+safety rails (`IMPLEMENTATION_PLAN.md` section 12 phase 8) are not. Do not
+take this page as a claim that the whole pipeline runs unattended end to
+end — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
+is the authoritative per-command status: `plan` prints an ordered,
+transient-feasible, payback-checked plan (see
+[`../manual/27-plan.md`](../manual/27-plan.md)), and `apply` (see
+[`../manual/28-apply.md`](../manual/28-apply.md)) executes it in `dry-run`
+or `confirm`, re-validating every move against the live cluster
+immediately before issuing it (section 9.2), waiting out a VM lock rather
+than failing (section 9.3.1), and not considering a move done until the
+task succeeded *and* the source volume is gone *and* the VM's lock is
+clear (section 9.3.2) — see [`92-execute.md`](92-execute.md). `state.json`
+itself (`state.py`) is read by `show-load` and `plan` for drift history
+and cooldowns, and now **written** by `apply` after any run that actually
+executed a migration — see [`15-state.md`](15-state.md),
+[`80-gates.md`](80-gates.md) and [`92-execute.md`](92-execute.md).
 
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
@@ -55,13 +61,17 @@ writes it yet, since only `execute.py` (not yet written) has a reason to.
                                      payback.py (evaluate_plan_payback():
                                      cost/benefit acceptance test, section 7)
                                                       │
+                                     execute.py (execute_plan(): pre-flight
+                                     re-check, lock-wait, move_disk, three-
+                                     condition completion, section 9)
+                                                      │
         ┌───────────────────────────────────────────────────────────────────┐
         │            cli.py  (argument parsing, command dispatch,           │
-        │      mode-override rule, show-load, verify-storages, plan)        │
+        │  mode-override rule, show-load, verify-storages, plan, apply)     │
         └───────────────────────┬─────────────────────────────────────────┘
                                  │
                      config.py (load + validate)
-                     state.py (state.json: drift history in, section 11.2)
+                     state.py (state.json: drift/cooldowns in and out, section 11.2)
                      forecast.py (Forecaster protocol + 3 models)
                      logging_setup.py (structured JSON to stderr)
                      units.py (duration/size parsing)
@@ -89,17 +99,22 @@ writes it yet, since only `execute.py` (not yet written) has a reason to.
 | `optimize.py` | `solve()`: CP-SAT/CBC, section 5.3's constraints, the lexicographic two-stage reserve solve | section 5.5 |
 | `schedule.py` | `order_moves()`: transient-feasible ordering of a target assignment's moves, deadlock reporting | section 8 |
 | `payback.py` | `evaluate_plan_payback()`: the cost/benefit acceptance test, with a reserve-override exemption mirroring `gates.py`'s | section 7 |
-| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan` | section 11.3 |
+| `execute.py` | `execute_plan()`: pre-flight re-check per move, VM-lock wait, `move_disk`, the three-condition completion criterion, orphan detection on failure | section 9 |
+| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan`, `apply` | section 11.3 |
 
-Not yet written: `execute.py` (phase 7+) and `auto` mode (phase 8) --
-`optimize.py` (phase 6) is done: `plan` picks CP-SAT, CBC or the
-heuristic per `solver.backend`, see [`91-optimize.md`](91-optimize.md).
-Cooldowns are now read: `topology.py`'s (C2) per-disk pin and
-`heuristic.py`'s per-storage target exclusion both consume `state.py`'s
-cooldown data (see [`15-state.md`](15-state.md),
-[`60-topology.md`](60-topology.md) and [`90-heuristic.md`](90-heuristic.md))
-— only *writing* a cooldown still waits on `execute.py`, and the MILP
-path does not enforce the storage cooldown at all yet (see
+Not yet written: `auto` mode's own safety rails (phase 8) — `apply`
+itself (phase 7) executes `dry-run`/`confirm`, see
+[`92-execute.md`](92-execute.md) and
+[`../manual/28-apply.md`](../manual/28-apply.md). `optimize.py` (phase 6)
+is done: `plan`/`apply` pick CP-SAT, CBC or the heuristic per
+`solver.backend`, see [`91-optimize.md`](91-optimize.md). Cooldowns and
+drift history are now read *and written*: `topology.py`'s (C2) per-disk
+pin and `heuristic.py`'s per-storage target exclusion consume `state.py`'s
+cooldown data, and `apply` writes a fresh one for every disk/destination
+-storage a run actually migrated (see [`15-state.md`](15-state.md),
+[`60-topology.md`](60-topology.md), [`90-heuristic.md`](90-heuristic.md)
+and [`92-execute.md`](92-execute.md)) — the MILP path still does not
+enforce the storage cooldown itself, only the heuristic does (see
 [`91-optimize.md`](91-optimize.md)). Within modules that do exist:
 heuristic step 4 "polish" and (C2) format-compatibility eligibility in
 `heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)), concurrent
@@ -162,3 +177,7 @@ this.
 - [`96-payback.md`](96-payback.md) — the section 7 cost/benefit test,
   the `headroom_src`/`headroom_dst` gap in the plan's own cost formula,
   and why a reserve-fixing plan always passes the economic test.
+- [`92-execute.md`](92-execute.md) — why a completed move needs three
+  conditions, not one, why a VM lock is waited out rather than
+  whitelisted, the injectable `Clock`, and how `cli.py`'s `_plan_group()`
+  gives `plan` and `apply` one shared pipeline instead of two.
