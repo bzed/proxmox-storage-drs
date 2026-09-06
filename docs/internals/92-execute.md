@@ -36,11 +36,15 @@ patch it."
 
 `_live_transient_check()`'s arithmetic is the identical section 8.1
 formula `schedule.transient_invariant_ok()` checks against the in-memory
-model, re-typed against `PveClient.storage_status()`'s live `used`/`total`
-instead of a summed disk list — the same *rule*, a different *data
-source*, not a second implementation of it (AGENTS.md section 5;
-`_live_transient_check()`'s own docstring makes this explicit, since it
-looks at first glance like a duplicate of `schedule.py`'s function).
+model, both now calling the same `reserve.transient_charge_ok()` (see
+`95-schedule.md`) — this one re-typed against `PveClient.storage_status()`'s
+live `used`/`total` instead of a summed disk list. The same *rule*, a
+different *data source*, not a second implementation of it (AGENTS.md
+section 5). `transient_charge_ok()` already takes a *list* of charges, not
+one disk, so it is ready for a future concurrent executor to call with
+every move currently in flight against the same target — this module does
+not do that yet (see "What `execute_plan()` deliberately does not do"
+below).
 
 ## Why "done" needs three conditions, not one
 

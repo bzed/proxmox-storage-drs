@@ -62,6 +62,7 @@ from proxmox_storage_drs.reserve import (
     compute_reserve_status,
     largest_disk_bytes,
     managed_used_bytes,
+    transient_charge_ok,
 )
 from proxmox_storage_drs.topology import Disk, Group, Storage
 
@@ -127,8 +128,11 @@ def transient_invariant_ok(
     target_storage: Storage,
     min_free_bytes: int,
 ) -> bool:
-    """Section 8.1's single-move transient invariant:
-    ``used_b + z_d + f_b * max(Z_b, z_d) <= C_b``.
+    """Section 8.1's transient invariant, called with the single-move set
+    ``{disk}`` -- ``used_b + z_d + f_b * max(Z_b, z_d) <= C_b``, via
+    :func:`reserve.transient_charge_ok`, the one arithmetic core section
+    8.1's own generalized (concurrent) form and this single-move form both
+    reduce to (AGENTS.md section 5; see that function's docstring).
 
     ``state`` is the assignment as of *right before* this move starts --
     every previously-scheduled move already fully applied (this module's
@@ -148,11 +152,14 @@ def transient_invariant_ok(
         + target_storage.foreign_used_bytes
     )
     existing_largest = largest_disk_bytes(group.disks, target_storage.id, storage_of=storage_of)
-    required = max(
-        round(target_storage.reserve_factor * max(existing_largest, disk.size_bytes)),
+    return transient_charge_ok(
+        target_storage.reserve_factor,
+        target_storage.capacity_bytes,
+        used_b,
+        existing_largest,
+        [disk.size_bytes],
         min_free_bytes,
     )
-    return used_b + disk.size_bytes + required <= target_storage.capacity_bytes
 
 
 def _resolves_reserve_violation(

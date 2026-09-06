@@ -18,6 +18,7 @@ from proxmox_storage_drs.reserve import (
     compute_reserve_status,
     largest_disk_bytes,
     managed_used_bytes,
+    transient_charge_ok,
 )
 from proxmox_storage_drs.topology import Disk, Storage
 
@@ -155,3 +156,120 @@ def test_reserve_status_is_frozen() -> None:
     status = compute_reserve_status(storage, [], min_free_bytes=0)
     with pytest.raises(dataclasses.FrozenInstanceError):
         status.shortfall_bytes = 1  # type: ignore[misc]
+
+
+# ------------------------------------------------------------- transient_charge_ok
+
+
+def test_transient_charge_ok_single_move_matches_section_8_1() -> None:
+    """The single-move form section 8.1 states directly:
+    used_b + z_d + f_b * max(Z_b, z_d) <= C_b. 2 TiB used, Z_b=1 TiB
+    existing, a 1 TiB incoming disk, f=2.0, C=8 TiB:
+    2 + 1 + 2*max(1,1) = 5 <= 8 -> ok."""
+    assert transient_charge_ok(
+        reserve_factor=2.0,
+        capacity_bytes=8 * TIB,
+        used_bytes=2 * TIB,
+        existing_largest_bytes=1 * TIB,
+        charge_sizes_bytes=[1 * TIB],
+        min_free_bytes=0,
+    )
+
+
+def test_transient_charge_ok_single_move_over_capacity_rejects() -> None:
+    """Same shape, but the incoming disk is now the new largest (3 TiB):
+    2 + 3 + 2*max(1,3) = 11 > 8 -> not ok."""
+    assert not transient_charge_ok(
+        reserve_factor=2.0,
+        capacity_bytes=8 * TIB,
+        used_bytes=2 * TIB,
+        existing_largest_bytes=1 * TIB,
+        charge_sizes_bytes=[3 * TIB],
+        min_free_bytes=0,
+    )
+
+
+def test_transient_charge_ok_sums_every_concurrent_charge() -> None:
+    """Section 8.1's generalized form: N 1 TiB moves landing on the same
+    storage at once, on top of 2 TiB already used, f=2.0, C=8 TiB, no
+    existing largest disk: total = 2 + N + 2*max(0,1) = 4+N. N=2 -> 6
+    (ok); N=4 -> 8, exactly at capacity (still ok); N=5 -> 9 (breaches)."""
+    assert transient_charge_ok(
+        reserve_factor=2.0,
+        capacity_bytes=8 * TIB,
+        used_bytes=2 * TIB,
+        existing_largest_bytes=0,
+        charge_sizes_bytes=[1 * TIB, 1 * TIB],
+        min_free_bytes=0,
+    )
+    assert transient_charge_ok(
+        reserve_factor=2.0,
+        capacity_bytes=8 * TIB,
+        used_bytes=2 * TIB,
+        existing_largest_bytes=0,
+        charge_sizes_bytes=[1 * TIB] * 4,
+        min_free_bytes=0,
+    )
+    assert not transient_charge_ok(
+        reserve_factor=2.0,
+        capacity_bytes=8 * TIB,
+        used_bytes=2 * TIB,
+        existing_largest_bytes=0,
+        charge_sizes_bytes=[1 * TIB] * 5,
+        min_free_bytes=0,
+    )
+
+
+def test_transient_charge_ok_reserve_term_uses_the_largest_single_charge_not_the_sum() -> None:
+    """The f_b * max(...) term takes the *largest individual* incoming
+    disk (3 TiB here), never the sum of the charges (which would be 5
+    TiB): two 1 TiB disks and one 3 TiB disk land together, used=0, f=2.0.
+    Correct (largest-based): total = 0 + sum(1,1,3) + 2*max(0,3) = 5+6=11.
+    C=11 TiB makes this exactly borderline-ok; a sum-based reserve
+    (2*max(0,5)=10) would instead compute 5+10=15, failing the same C=11
+    -- so this assertion only passes if the implementation takes the
+    largest-charge branch, not the sum."""
+    assert transient_charge_ok(
+        reserve_factor=2.0,
+        capacity_bytes=11 * TIB,
+        used_bytes=0,
+        existing_largest_bytes=0,
+        charge_sizes_bytes=[1 * TIB, 1 * TIB, 3 * TIB],
+        min_free_bytes=0,
+    )
+
+
+def test_transient_charge_ok_existing_largest_still_dominates_when_bigger() -> None:
+    """A storage already holding a 5 TiB disk, and two small 1 TiB moves
+    land on it: the reserve term is f*max(5, 1) = f*5, not f*1."""
+    assert not transient_charge_ok(
+        reserve_factor=2.0,
+        capacity_bytes=8 * TIB,
+        used_bytes=0,
+        existing_largest_bytes=5 * TIB,
+        charge_sizes_bytes=[1 * TIB, 1 * TIB],
+        min_free_bytes=0,
+    )  # 0 + 2 + 2*5 = 12 > 8
+
+
+def test_transient_charge_ok_min_free_bytes_floor_still_applies() -> None:
+    assert not transient_charge_ok(
+        reserve_factor=0.01,
+        capacity_bytes=1 * TIB,
+        used_bytes=round(0.9 * TIB),
+        existing_largest_bytes=0,
+        charge_sizes_bytes=[round(0.05 * TIB)],
+        min_free_bytes=round(0.2 * TIB),
+    )
+
+
+def test_transient_charge_ok_with_no_charges_is_vacuously_true() -> None:
+    """Nothing landing on this storage -- there is nothing to check."""
+    assert transient_charge_ok(
+        reserve_factor=2.0,
+        capacity_bytes=0,
+        used_bytes=10**9,
+        existing_largest_bytes=10**9,
+        charge_sizes_bytes=[],
+        min_free_bytes=0,
+    )
