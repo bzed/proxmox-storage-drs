@@ -369,6 +369,8 @@ def _execute_one_move(
     largest_by_storage: dict[str, int],
     clock: Clock,
     exclude: ExcludeConfig,
+    deadline: datetime | None,
+    estimated_seconds: float,
 ) -> MoveOutcome:
     def outcome(
         status: str,
@@ -407,6 +409,18 @@ def _execute_one_move(
             if execution.locks.on_timeout == "abort":
                 return outcome("failed", detail, always_stop=True)
             return outcome("skipped", detail)
+        # The lock wait can itself burn a large, unpredictable share of
+        # `deadline`'s remaining budget (up to
+        # `execution.locks.wait_timeout_seconds`, hours by default) --
+        # `execute_plan()`'s own pre-loop check only knows the answer as
+        # of *before* this wait, so it is re-checked here, right before
+        # this function commits to actually issuing the move.
+        if _deadline_exceeded(clock, deadline, estimated_seconds):
+            return outcome(
+                "skipped",
+                "insufficient time remaining in execution.time_windows for this move "
+                "after waiting for the VM lock to clear",
+            )
 
     target = storages_by_id[move.to_storage]
     if not _live_transient_check(
@@ -467,11 +481,35 @@ def _confirm_decision(
     raise ValueError(f"confirm callback returned {decision!r}, expected y/n/a/q")
 
 
+def _estimated_duration_seconds(
+    move: ScheduledMove, move_costs_by_key: Mapping[str, MoveCost] | None
+) -> float:
+    """``payback.MoveCost``'s own mirror-plus-wipe estimate for ``move``
+    -- the same one the hard per-move duration rule uses -- or ``0.0``
+    when ``move`` has no entry, so a missing estimate never refuses a
+    move for lack of one."""
+    move_cost = (move_costs_by_key or {}).get(move.disk_key)
+    if move_cost is None:
+        return 0.0
+    return move_cost.duration_mirror_seconds + move_cost.duration_wipe_seconds
+
+
+def _deadline_exceeded(clock: Clock, deadline: datetime | None, estimated_seconds: float) -> bool:
+    """``False`` whenever ``deadline`` is ``None`` (no time-window
+    restriction at all). The one implementation of "does this much more
+    time still fit," shared by the pre-loop check in `execute_plan()`
+    and the post-lock-wait re-check in `_execute_one_move()` (AGENTS.md
+    section 5)."""
+    if deadline is None:
+        return False
+    return clock.now() + timedelta(seconds=estimated_seconds) > deadline
+
+
 def _auto_budget_stop_outcome(
     move: ScheduledMove,
     clock: Clock,
     deadline: datetime | None,
-    move_costs_by_key: Mapping[str, MoveCost] | None,
+    estimated_seconds: float,
     migrations_used: int,
     max_migrations: int | None,
 ) -> MoveOutcome | None:
@@ -482,7 +520,13 @@ def _auto_budget_stop_outcome(
     decreases as a run goes on, and a migration cap already reached stays
     reached, so nothing later in ``order`` could fit either. Checked in
     this order (the cap first) only because it is the cheaper check, not
-    because one takes priority when both apply."""
+    because one takes priority when both apply.
+
+    This is the *pre-flight* time-window check, run before even a
+    network call is made for this move -- `_execute_one_move()` repeats
+    the deadline half of it again after a VM-lock wait (which can itself
+    burn hours of the same budget) succeeds, since the answer here can
+    no longer be trusted by then."""
     if max_migrations is not None and migrations_used >= max_migrations:
         return MoveOutcome(
             move.disk_key,
@@ -491,22 +535,15 @@ def _auto_budget_stop_outcome(
             "skipped",
             f"execution.max_migrations_per_run ({max_migrations}) reached for this invocation",
         )
-    if deadline is not None:
-        move_cost = (move_costs_by_key or {}).get(move.disk_key)
-        estimated_seconds = (
-            move_cost.duration_mirror_seconds + move_cost.duration_wipe_seconds
-            if move_cost is not None
-            else 0.0
+    if _deadline_exceeded(clock, deadline, estimated_seconds):
+        return MoveOutcome(
+            move.disk_key,
+            move.from_storage,
+            move.to_storage,
+            "skipped",
+            "insufficient time remaining in execution.time_windows for this move "
+            f"(needs ~{estimated_seconds:.0f}s more)",
         )
-        if clock.now() + timedelta(seconds=estimated_seconds) > deadline:
-            return MoveOutcome(
-                move.disk_key,
-                move.from_storage,
-                move.to_storage,
-                "skipped",
-                "insufficient time remaining in execution.time_windows for this move "
-                f"(needs ~{estimated_seconds:.0f}s more)",
-            )
     return None
 
 
@@ -632,8 +669,9 @@ def execute_plan(
             outcomes.append(drained_skip)
             continue
 
+        estimated_seconds = _estimated_duration_seconds(move, move_costs_by_key)
         budget_stop = _auto_budget_stop_outcome(
-            move, clock, deadline, move_costs_by_key, migrations_used, max_migrations
+            move, clock, deadline, estimated_seconds, migrations_used, max_migrations
         )
         if budget_stop is not None:
             outcomes.append(budget_stop)
@@ -673,6 +711,8 @@ def execute_plan(
             largest_by_storage,
             clock,
             exclude,
+            deadline,
+            estimated_seconds,
         )
         outcomes.append(result)
         migrations_used += 1

@@ -793,6 +793,51 @@ def test_deadline_allows_a_move_that_fits() -> None:
     assert result.outcomes[0].status == "moved"
 
 
+def test_deadline_recheck_after_a_lock_wait_refuses_a_move_that_no_longer_fits() -> None:
+    """Section 9.1: the pre-loop time-window check (above) only knows the
+    answer as of *before* a VM-lock wait -- that wait can itself burn a
+    large, unpredictable share of the remaining window. This move fits
+    comfortably when first checked, but the lock takes long enough to
+    clear that the *post*-wait re-check inside `_execute_one_move()` must
+    refuse it before ever issuing `move_disk`."""
+    calls = {"n": 0}
+
+    def status_current(**kwargs: object) -> dict[str, object]:
+        calls["n"] += 1
+        return {"lock": "backup" if calls["n"] < 3 else None}
+
+    client, api = client_with(
+        {
+            "nodes/pve01/qemu/101/config": {
+                "scsi0": "san-a:vm-101-disk-0,size=1024G",
+                "lock": "backup",
+            },
+            "nodes/pve01/qemu/101/status/current": status_current,
+        }
+    )
+    execution = ExecutionConfig(
+        locks=LocksConfig(wait_timeout_seconds=600.0, poll_interval_seconds=200.0)
+    )
+    move_costs = {"101:scsi0": MoveCost("101:scsi0", 60.0, 0.0, 60.0, False, False)}
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    # At t=0, 60s needed vs. 450s remaining: comfortably fits. But the
+    # lock takes 400s (two 200s polls) to clear, leaving only 50s -- no
+    # longer enough for the move's own 60s.
+    deadline = datetime(2026, 9, 6, 12, 7, 30, tzinfo=timezone.utc)
+    result = run(
+        client,
+        default_group(),
+        (make_move(),),
+        execution=execution,
+        clock=fc,
+        deadline=deadline,
+        move_costs_by_key=move_costs,
+    )
+    assert result.outcomes[0].status == "skipped"
+    assert "after waiting for the VM lock" in result.outcomes[0].detail
+    assert not any("move_disk" in c[1] for c in api.calls)
+
+
 def test_deadline_with_no_cost_estimate_assumes_zero_duration() -> None:
     """A move missing from `move_costs_by_key` is never refused for lack
     of an estimate -- it is assumed to take no time at all."""

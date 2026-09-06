@@ -25,6 +25,17 @@ comparable against a UTC ``now`` elsewhere (Python compares aware
 datetimes by absolute instant, not by which zone either one is
 expressed in), so nothing downstream needs to know this module thought
 in local time at all.
+
+**DST correctness depends on the caller's ``now`` carrying a real IANA
+zone, not a frozen UTC offset.** :func:`window_close`'s "closes
+tomorrow" case (an overnight window) combines *today's* `tzinfo` with
+*tomorrow's* date -- correct only if that `tzinfo` can re-resolve its
+own UTC offset for a different date, which a `zoneinfo.ZoneInfo` does
+and a fixed `datetime.timezone` (what bare ``datetime.now().astimezone()``
+returns) cannot. `cli._real_local_now()` -- the real callers' source for
+``now`` -- goes to the extra effort of resolving the host's actual IANA
+zone for exactly this reason; see its own docstring for the narrower
+residual gap that remains only in its own fallback path.
 """
 
 from __future__ import annotations

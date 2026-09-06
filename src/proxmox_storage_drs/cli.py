@@ -21,12 +21,14 @@ import argparse
 import dataclasses
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from proxmox_storage_drs import __version__, optimize
 from proxmox_storage_drs.config import (
@@ -1391,7 +1393,29 @@ def _apply_payback_gate(
 
 
 def _real_local_now() -> datetime:
-    return datetime.now().astimezone()
+    """The host's local time, DST-aware across date arithmetic when
+    possible -- reads ``/etc/localtime``'s own symlink target for the
+    IANA zone name (the standard mechanism on Debian and virtually every
+    other Linux distribution; this project packages for Debian only, see
+    ``pyproject.toml``) rather than ``datetime.now().astimezone()``'s
+    *fixed*-offset ``tzinfo``. The distinction matters specifically for
+    `timewindow.window_close()`'s "closes tomorrow" case (an overnight
+    window): a fixed offset carries today's UTC offset forward onto
+    tomorrow's date unchanged, which is wrong by exactly the DST shift
+    on the two nights a year a DST-observing zone's clocks actually
+    change (an overnight window could then stay "active" up to an hour
+    longer than configured, on that one night). Falls back to the
+    fixed-offset form when the zone name cannot be determined (no
+    ``/etc/localtime`` symlink, or a zone the local `tzdata` lacks) --
+    correct on every date except those same two nights, exactly as
+    `timewindow.py`'s own module docstring documents for that fallback
+    case.
+    """
+    try:
+        zone_name = os.path.realpath("/etc/localtime").split("zoneinfo/", 1)[1]
+        return datetime.now(ZoneInfo(zone_name))
+    except (IndexError, OSError, ZoneInfoNotFoundError):
+        return datetime.now().astimezone()
 
 
 def _run_auto_group(

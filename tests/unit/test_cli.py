@@ -1771,6 +1771,42 @@ def test_apply_confirm_mode_shows_the_payback_verdict_before_the_first_prompt(
 # --------------------------------------------------------- auto mode (phase 8)
 
 
+def test_real_local_now_resolves_a_real_iana_zone_when_available() -> None:
+    """On a real Linux host (this project's only packaged target), the
+    result should carry a genuine `zoneinfo.ZoneInfo`, not a frozen UTC
+    offset -- the whole reason `cli._real_local_now()` exists instead of
+    a bare `datetime.now().astimezone()` call."""
+    import os
+    from zoneinfo import ZoneInfo
+
+    if not os.path.exists("/etc/localtime"):
+        pytest.skip("no /etc/localtime on this system")
+    now = cli._real_local_now()
+    assert isinstance(now.tzinfo, ZoneInfo)
+
+
+def test_real_local_now_falls_back_when_the_zone_cannot_be_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_a: object, **_k: object) -> str:
+        raise OSError("no such file")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.os.path.realpath", fail)
+    now = cli._real_local_now()
+    # Still a usable, timezone-aware datetime -- just not IANA-backed.
+    assert now.tzinfo is not None
+
+
+def test_real_local_now_falls_back_for_an_unknown_zone_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.os.path.realpath", lambda _p: "/usr/share/zoneinfo/Nowhere/Fake"
+    )
+    now = cli._real_local_now()
+    assert now.tzinfo is not None
+
+
 def _make_group_plan(
     group: Group,
     resolved: ResolvedConfig,
