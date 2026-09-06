@@ -40,10 +40,12 @@ from proxmox_storage_drs.config import (
     ResolvedConfig,
     load_config,
 )
+from proxmox_storage_drs.crashrecovery import reconcile_inflight
 from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
 from proxmox_storage_drs.execute import (
     ConfirmCallback,
     ExecutionResult,
+    InflightCallback,
     MoveOutcome,
     execute_plan,
 )
@@ -72,6 +74,7 @@ from proxmox_storage_drs.pve import build_client as build_pve_client
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, largest_disk_bytes
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult, order_moves
 from proxmox_storage_drs.state import (
+    LockHandle,
     State,
     acquire_lock,
     active_storage_cooldowns,
@@ -82,8 +85,10 @@ from proxmox_storage_drs.state import (
     release_lock,
     save_locked_state,
     storage_state_key,
+    with_inflight_upid,
     with_recorded_balance,
     with_recorded_cooldown,
+    without_inflight_upid,
 )
 from proxmox_storage_drs.timewindow import current_deadline
 from proxmox_storage_drs.topology import Group, Topology, build_topology
@@ -1282,6 +1287,44 @@ def _confirm_move_interactively(move: ScheduledMove) -> str:
         print("  please answer y, n, a or q", file=sys.stderr)
 
 
+@dataclasses.dataclass
+class _InflightStateBox:
+    """A mutable box around the one field of ``state`` that
+    `execute.execute_plan()`'s own crash-recovery callbacks (see
+    ``execute.InflightCallback``) need to update *synchronously*, from
+    inside a running move, rather than only once `_handle_apply()`'s own
+    loop gets back control (see :func:`_make_inflight_callbacks`). A
+    deliberate, narrow exception to this codebase's functional state
+    -threading style everywhere else (AGENTS.md; `docs/internals/92-execute.md`),
+    forced by section 13's own requirement: a value only ever persisted at
+    the end of a whole `apply` run cannot protect against the engine
+    itself dying (killed, host reboot) partway through one."""
+
+    value: State
+
+
+def _make_inflight_callbacks(
+    lock_handle: LockHandle, box: _InflightStateBox
+) -> tuple[InflightCallback, InflightCallback]:
+    """Builds the ``on_inflight_started``/``on_inflight_finished`` pair
+    `execute_plan()` calls immediately after issuing (respectively,
+    completing) each `move_disk` in `confirm`/`auto` mode. Each write
+    goes straight to disk via :func:`save_locked_state`, through the same
+    still-held lock `_handle_apply()` itself will eventually release —
+    see `crashrecovery.py`'s module docstring for why this has to happen
+    in real time rather than only once at the end of the run."""
+
+    def on_started(upid: str) -> None:
+        box.value = with_inflight_upid(box.value, upid)
+        save_locked_state(lock_handle, box.value)
+
+    def on_finished(upid: str) -> None:
+        box.value = without_inflight_upid(box.value, upid)
+        save_locked_state(lock_handle, box.value)
+
+    return on_started, on_finished
+
+
 def _apply_payback_gate(
     client: PveClient,
     group: Group,
@@ -1295,6 +1338,8 @@ def _apply_payback_gate(
     confirm: ConfirmCallback | None,
     deadline: datetime | None = None,
     max_migrations: int | None = None,
+    on_inflight_started: InflightCallback | None = None,
+    on_inflight_finished: InflightCallback | None = None,
 ) -> ExecutionResult:
     """Section 7.3's payback verdict gates *execution*, not merely the
     report (REVIEW.md S-02): a move `rejected_moves` names (the hard
@@ -1324,6 +1369,11 @@ def _apply_payback_gate(
     values for either, and computes ``group_plan.payback_result.move_costs``
     into the ``move_costs_by_key`` `execute_plan()` needs for the deadline
     estimate).
+
+    ``on_inflight_started``/``on_inflight_finished`` are threaded straight
+    through too -- section 13's crash-recovery hooks, built once by
+    `_handle_apply()` (:func:`_make_inflight_callbacks`) and passed down
+    through here and (in ``auto`` mode) :func:`_run_auto_group` unchanged.
     """
     assert group_plan.schedule_result is not None and group_plan.payback_result is not None
     order = group_plan.schedule_result.order
@@ -1384,6 +1434,8 @@ def _apply_payback_gate(
         deadline=deadline,
         move_costs_by_key=move_costs_by_key,
         max_migrations=max_migrations,
+        on_inflight_started=on_inflight_started,
+        on_inflight_finished=on_inflight_finished,
     )
     return ExecutionResult(
         outcomes=tuple(refused) + executed.outcomes,
@@ -1427,6 +1479,8 @@ def _run_auto_group(
     group: Group,
     group_plan: _GroupPlan,
     migrations_budget: int | None,
+    on_inflight_started: InflightCallback | None = None,
+    on_inflight_finished: InflightCallback | None = None,
     local_now: Callable[[], datetime] = _real_local_now,
 ) -> tuple[ExecutionResult, int | None]:
     """``auto`` mode's own orchestration: section 9.1's time-window budget
@@ -1450,6 +1504,12 @@ def _run_auto_group(
     deterministic answer to "is now inside this configured window"
     without actually waiting for (or being sensitive to) real wall-clock
     time (`.agents/testing.md`).
+
+    ``on_inflight_started``/``on_inflight_finished`` are passed straight
+    through to every `_apply_payback_gate()` call this function makes,
+    including across a re-plan -- section 13's crash-recovery hooks do
+    not care which plan attempt a move came from, only that every
+    `move_disk` this run issues is bracketed by one of each.
     """
     execution = resolved.config.execution
     replans_left = execution.max_replans_per_run
@@ -1493,6 +1553,8 @@ def _run_auto_group(
             None,
             deadline=deadline,
             max_migrations=migrations_budget,
+            on_inflight_started=on_inflight_started,
+            on_inflight_finished=on_inflight_finished,
         )
         all_outcomes.extend(result.outcomes)
         stopped_early = result.stopped_early
@@ -1603,6 +1665,36 @@ def _record_executed_moves(
     return with_recorded_cooldown(state, disk_keys=disk_keys, storage_keys=storage_keys)
 
 
+def _reconcile_inflight_and_fold_exclusions(
+    client: PveClient, resolved: ResolvedConfig, state_box: _InflightStateBox
+) -> tuple[ResolvedConfig, State]:
+    """Section 13's own words: "on startup, check for running move_disk
+    UPIDs owned by the DRS user" -- *before planning anything*, which is
+    why `_handle_apply()` calls this immediately after building the PVE
+    client and nowhere else. A discovered vmid is folded into
+    ``exclude.vmids`` on the returned, otherwise-identical
+    ``ResolvedConfig``, reusing `topology.py`'s existing (C2) pin rather
+    than a second exclusion mechanism (AGENTS.md section 5) --
+    `crashrecovery.py`'s own `logger.warning()` calls already told the
+    operator *why* a vmid it names shows up pinned in the report.
+    Factored out of `_handle_apply()` purely to stay within this
+    project's flake8 complexity limit."""
+    inflight_vmids, state_box.value = reconcile_inflight(
+        client, state_box.value, resolved.config.proxmox.auth
+    )
+    if not inflight_vmids:
+        return resolved, state_box.value
+    merged_vmids = tuple(sorted(set(resolved.config.exclude.vmids) | inflight_vmids))
+    resolved = dataclasses.replace(
+        resolved,
+        config=dataclasses.replace(
+            resolved.config,
+            exclude=dataclasses.replace(resolved.config.exclude, vmids=merged_vmids),
+        ),
+    )
+    return resolved, state_box.value
+
+
 def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     """Section 9: execute (``confirm``/``auto``) or merely report
     (``dry-run``) the same per-group pipeline ``plan`` computes --
@@ -1654,6 +1746,15 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
         )
         return 0
 
+    # Section 13's own in-flight box: `execute.execute_plan()`'s
+    # crash-recovery callbacks write into this synchronously (see
+    # `_make_inflight_callbacks()`), so the plain `state` variable this
+    # function otherwise threads functionally is re-synced from it after
+    # every group's execution below, and again for the final
+    # `save_locked_state()` call in `finally`.
+    state_box = _InflightStateBox(state)
+    on_inflight_started, on_inflight_finished = _make_inflight_callbacks(lock_handle, state_box)
+
     group_loads: dict[str, GroupLoad] = {}
     gate_decisions: dict[str, GateDecision] = {}
     solve_outcomes: dict[str, _SolveOutcome] = {}
@@ -1665,6 +1766,8 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
 
     try:
         client = build_pve_client(resolved.config.proxmox)
+        resolved, state = _reconcile_inflight_and_fold_exclusions(client, resolved, state_box)
+
         topology = _filter_groups(
             build_topology(client, resolved.config, state=state, now=now), args.group
         )
@@ -1728,6 +1831,8 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     group,
                     group_plan,
                     migrations_budget,
+                    on_inflight_started=on_inflight_started,
+                    on_inflight_finished=on_inflight_finished,
                 )
             else:
                 confirm_callback = _confirm_move_interactively if mode == "confirm" else None
@@ -1742,11 +1847,22 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     resolved.config.migration.payback_ratio,
                     resolved.config.exclude,
                     confirm_callback,
+                    on_inflight_started=on_inflight_started,
+                    on_inflight_finished=on_inflight_finished,
                 )
             execution_results[group.name] = result
+            # Pick up whatever `on_inflight_started`/`on_inflight_finished`
+            # wrote to `state_box` while this group's moves ran, before
+            # layering this group's own cooldowns/balance on top -- and
+            # push the combined result back into the box so the *next*
+            # group's callbacks build on it rather than reverting these.
             state = _record_executed_moves(
-                state, group.name, group_plan.group_load.load_by_disk_key(), result.outcomes
+                state_box.value,
+                group.name,
+                group_plan.group_load.load_by_disk_key(),
+                result.outcomes,
             )
+            state_box.value = state
 
             if result.stop_reason == "operator quit":
                 # A human asked to stop the whole apply run, not just this
@@ -1754,7 +1870,16 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                 # not a per-group one.
                 break
     finally:
-        save_locked_state(lock_handle, state)
+        # `state_box.value`, not the plain `state` variable: if an
+        # exception propagates out of a group's execution (a `move_disk`
+        # task's own status poll raising mid-wait, say), an
+        # `on_inflight_started` callback earlier in that same group can
+        # already have written a newer `inflight_upids` straight to disk
+        # than whatever `state` was last assigned in this function's own
+        # loop -- saving the (older) local variable here would silently
+        # clobber that write and erase the very crash trace section 13
+        # exists to leave behind.
+        save_locked_state(lock_handle, state_box.value)
         release_lock(lock_handle)
 
     if args.json:

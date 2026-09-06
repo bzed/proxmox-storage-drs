@@ -171,6 +171,26 @@ A group that never executes anything (the gate said `NO ACTION`, or a
 `load_error`/`replan_needed` stopped it before any move ran) leaves
 `state.json` untouched for that group.
 
+## Crash and two-instance recovery
+
+Before planning anything, every `apply` run (including `dry-run`) checks
+for a `move_disk` left running by a crashed previous run or a second,
+concurrently-running instance: `state.json`'s own `inflight_upids` are
+re-checked, and every node's task list is scanned for a still-running
+`qmmove` task from this tool's own configured user. Any vmid this finds is
+excluded from this run's planning exactly like a manually-configured
+`exclude.vmids` entry — it shows up pinned in the report with the reason
+"excluded by config (`exclude.vmids`)", and a log line at `WARNING`
+explains which check actually found it. It is never force-cancelled, and
+this run never assumes it is safe to touch that VM's disk again.
+
+During execution, `state.json`'s `inflight_upids` is written **before**
+each `move_disk` is issued and cleared once that task itself has finished
+— synchronously, so a crash (killed, OOM, host reboot) partway through a
+move leaves a trace the *next* run's own startup check will find, rather
+than only ever being updated at the very end of a whole `apply` run. See
+`docs/internals/93-crashrecovery.md` for the full mechanism.
+
 ## `--json`
 
 Identical to `plan`'s own `groups[]` shape (see `docs/manual/27-plan.md`),
@@ -194,7 +214,3 @@ and `orphaned_volumes` (only ever non-empty after a `failed` outcome).
   `max_concurrent_per_storage` above `1` are refused outright in `auto`
   mode rather than silently run sequentially against them — see the
   table above and `docs/manual/30-safety-and-status.md`.
-- **No crash recovery.** Section 13's "on startup, check for running
-  `move_disk` UPIDs owned by the DRS user before planning anything" is
-  not implemented — `state.json`'s `inflight_upids` field exists and
-  round-trips but nothing writes or reads it yet.

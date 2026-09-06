@@ -141,6 +141,15 @@ class ExecutionResult:
 
 ConfirmCallback = Callable[[ScheduledMove], str]  # returns "y" | "n" | "a" | "q"
 
+# Section 13 / 11.2's crash-recovery mechanism: `cli.py` supplies these so a
+# UPID reaches `state.json` *before* the move it names can crash the engine,
+# and is cleared once that task itself has finished -- see
+# `crashrecovery.py`'s module docstring for the two failure modes this
+# protects against, and `_execute_one_move()` below for exactly when each
+# fires. `None` (the default, for `plan`/`show-load`'s own read-only paths
+# and anything else that has no `state.json` to write) means "do nothing".
+InflightCallback = Callable[[str], None]
+
 
 @dataclass(frozen=True, slots=True)
 class _PreflightResult:
@@ -371,6 +380,8 @@ def _execute_one_move(
     exclude: ExcludeConfig,
     deadline: datetime | None,
     estimated_seconds: float,
+    on_inflight_started: InflightCallback | None,
+    on_inflight_finished: InflightCallback | None,
 ) -> MoveOutcome:
     def outcome(
         status: str,
@@ -440,10 +451,27 @@ def _execute_one_move(
         delete=True,
         bwlimit_bytes_per_sec=migration.bwlimit_bytes_per_sec,
     )
+    # Section 11.2: written *before* this function does anything else with
+    # `upid` -- if the engine crashes, is killed, or the host reboots
+    # anywhere from here on, `state.json` already has a trace of this move
+    # for the next startup's `crashrecovery.reconcile_inflight()` to find.
+    if on_inflight_started is not None:
+        on_inflight_started(upid)
     source = storages_by_id[move.from_storage]
     status, detail = _wait_for_move_completion(
         client, preflight.node, disk.vmid, upid, source, preflight.volid, execution, clock
     )
+    # Deliberately *not* wrapped in try/finally: a "draining" source is
+    # still tracked by its own content-listing poll, not by `upid` (see
+    # `state.with_inflight_upid()`'s own docstring), so clearing it here
+    # exactly once `_wait_for_move_completion()` returns -- for any status
+    # -- is correct either way. If a call inside that wait itself raises
+    # (a network failure mid-poll, say) this callback never fires and
+    # `upid` stays recorded, which is exactly what section 13 wants: the
+    # move might still be running, so the next startup's scan must still
+    # find it.
+    if on_inflight_finished is not None:
+        on_inflight_finished(upid)
     orphans: tuple[str, ...] = ()
     if status == "failed":
         orphans = _detect_orphan_volumes(client, preflight.node, move.to_storage, disk.vmid)
@@ -613,6 +641,8 @@ def execute_plan(
     deadline: datetime | None = None,
     move_costs_by_key: Mapping[str, MoveCost] | None = None,
     max_migrations: int | None = None,
+    on_inflight_started: InflightCallback | None = None,
+    on_inflight_finished: InflightCallback | None = None,
 ) -> ExecutionResult:
     """Execute (or, in ``dry-run``, merely report) one group's already
     -ordered plan. ``mode`` is ``"dry-run"``, ``"confirm"`` or ``"auto"``
@@ -639,6 +669,18 @@ def execute_plan(
     hard per-move duration rule uses) for that check; a move missing from
     it is assumed to take no time at all, never refused for lack of an
     estimate.
+
+    ``on_inflight_started``/``on_inflight_finished`` are section 13's
+    crash-recovery hooks (see ``crashrecovery.py``'s module docstring):
+    `cli.py` is the only caller that ever supplies them (`plan`/`show-load`
+    have no `state.json` write path to hook into at all), and they are the
+    *only* place in this module that reaches back out to a caller-owned
+    mutable side effect rather than returning a value -- a deliberate,
+    narrow exception to this codebase's otherwise-pure functional state
+    -threading (see ``docs/internals/92-execute.md``), forced by the fact
+    that persisting `state.json` only at the end of a whole `execute_plan()`
+    call would never survive the exact crash section 13 exists to recover
+    from.
     """
     disks_by_key = {d.key: d for d in group.disks}
     storages_by_id = {s.id: s for s in group.storages}
@@ -713,6 +755,8 @@ def execute_plan(
             exclude,
             deadline,
             estimated_seconds,
+            on_inflight_started,
+            on_inflight_finished,
         )
         outcomes.append(result)
         migrations_used += 1

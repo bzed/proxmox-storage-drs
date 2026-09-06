@@ -168,10 +168,12 @@ keyboard should not look like a bug report.
   `cli._handle_apply()` refuses to start `auto` mode at all when either
   is configured above `1`, rather than run sequentially against a
   requested concurrency this module cannot deliver.
-- **No crash recovery.** Section 13's "on startup, check for running
-  `move_disk` UPIDs owned by the DRS user before planning anything" is
-  not implemented; `state.State.inflight_upids` exists and round-trips
-  but nothing writes or reads it yet.
+- **Crash recovery is not this module's own job.** `execute_plan()`
+  accepts `on_inflight_started`/`on_inflight_finished` callbacks
+  (`execute.InflightCallback`) and calls them around each `move_disk` --
+  writing what they actually persist, and section 13's startup scan that
+  reads it back, both live in `crashrecovery.py`/`cli.py`. See
+  [`93-crashrecovery.md`](93-crashrecovery.md).
 
 ## `cli.py`: one planning pipeline, shared by `plan` and `apply`
 

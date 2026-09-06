@@ -221,6 +221,22 @@ class PveClient:
         )
         return result
 
+    def cluster_tasks(self) -> list[dict[str, Any]]:
+        """``GET /cluster/tasks``: recent/active tasks across **every**
+        node -- the one read that actually crosses the cluster (section
+        13's startup scan for an in-flight `move_disk`; `state.json`'s own
+        `fcntl.flock()` cannot see another node at all). Confirmed live
+        against a real cluster: each entry carries `node`/`type`/`id`
+        (the vmid, for a VM-scoped task type)/`upid`/`user`/`starttime`,
+        plus `endtime`/`status` -- both present once the task has
+        finished, both absent while it is still running (`status` is
+        `"OK"` or an error string there, not the `"running"` value the
+        per-task `task_status()` endpoint below uses)."""
+        result: list[dict[str, Any]] = self._call(
+            "fetching cluster-wide task list", lambda: self._api.cluster.tasks.get()
+        )
+        return result
+
     def storage_resources(self) -> list[dict[str, Any]]:
         """``GET /cluster/resources?type=storage``: storage inventory."""
         result: list[dict[str, Any]] = self._call(
