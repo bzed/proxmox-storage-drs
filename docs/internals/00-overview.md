@@ -11,12 +11,12 @@ gate, solve, cost, order, execute. As of this page, all seven exist, with
 **two** interchangeable stage-4 (solve) backends — the dependency-free
 heuristic and the MILP (CP-SAT/CBC) path — selected by `solver.backend`.
 Stage 7 (execute) is real for all three `execution.mode` values,
-including `auto`'s own section 9.1 time-window/migration-count budgets
-and section 9.2 re-plan loop (`IMPLEMENTATION_PLAN.md` section 12 phase
-8) — the one thing still missing there is concurrent execution
+including `auto`'s own section 9.1 time-window/migration-count budgets,
+section 9.2 re-plan loop, and section 8.1/9.2's concurrent execution
 (`execution.max_concurrent_migrations`/`max_concurrent_per_storage`
-above `1`), which `apply` refuses outright rather than run sequentially
-against. Do not take this page as a claim that every phase-8 knob does
+above their default of `1`, `auto`-only, strictly FIFO — see
+[`92-execute.md`](92-execute.md)'s own "Concurrent execution" section).
+Do not take this page as a claim that every phase-8 knob does
 something — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
 is the authoritative per-command status: `plan` prints an ordered,
 transient-feasible, payback-checked plan (see
@@ -108,13 +108,16 @@ executed a migration — see [`15-state.md`](15-state.md),
 | `timewindow.py` | `current_deadline()`: is `now` (local time) inside a configured `execution.time_windows` entry, and when does it close | section 9.1 |
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan`, `apply` (including `auto`'s own re-plan loop) | section 11.3 |
 
-Not yet written: concurrent execution
+Every phase 8 knob is now real: time windows, `max_migrations_per_run`,
+the re-plan loop, and concurrent execution
 (`execution.max_concurrent_migrations`/`max_concurrent_per_storage`
-above `1`) — `apply` refuses `auto` mode outright rather than run
-sequentially against a higher configured value; everything else phase 8
-names (time windows, `max_migrations_per_run`, the re-plan loop) is
-real, see [`92-execute.md`](92-execute.md) and
-[`../manual/28-apply.md`](../manual/28-apply.md). `optimize.py` (phase 6)
+above their default of `1`, `auto`-only, strictly FIFO) — see
+[`92-execute.md`](92-execute.md) and
+[`../manual/28-apply.md`](../manual/28-apply.md). `schedule.py` itself
+still only ever produces a strictly-sequential *order* (see below);
+`execute.py`'s concurrent executor uses that same order as a launch
+queue rather than needing `schedule.py` to reason about overlapping
+in-flight windows itself. `optimize.py` (phase 6)
 is done: `plan`/`apply` pick CP-SAT, CBC or the heuristic per
 `solver.backend`, and both MILP backends now enforce the storage cooldown
 identically to the heuristic (see [`91-optimize.md`](91-optimize.md)).
@@ -126,9 +129,12 @@ disk and **both** of a move's storages a run actually migrated (see
 [`90-heuristic.md`](90-heuristic.md) and [`92-execute.md`](92-execute.md)).
 Within modules that do exist:
 heuristic step 4 "polish" and (C2) format-compatibility eligibility in
-`heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)), concurrent
-scheduling, priority-2 ordering and staging in `schedule.py` (see
-[`95-schedule.md`](95-schedule.md)), and the payback re-solve-and-retry
+`heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)); `schedule.py`
+itself still only ever produces a strictly-sequential order (not
+`execute.py`'s own concurrent *execution* of it, which is real -- see
+above -- but reasoning about which pairs of moves could safely be
+*scheduled* to overlap, priority-2 ordering, and staging, per
+[`95-schedule.md`](95-schedule.md)); and the payback re-solve-and-retry
 loop plus the section 7.3 saturation check in `payback.py` (see
 [`96-payback.md`](96-payback.md)).
 

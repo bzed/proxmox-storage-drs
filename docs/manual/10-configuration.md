@@ -657,17 +657,16 @@ moving *toward* less safety is logged at warning level
 
 Integer `>= 1`, default `1`.
 
-How many moves may be in flight across the whole run at once. Above `1`
-requires the *generalized* transient reserve invariant (section 8.1): several
-disks can land on one storage at once, and none of their sources release
-space until each individually completes.
-
-**Not yet effective in this build.** `apply`'s executor runs strictly
-sequentially, one move at a time, regardless of this setting. `--mode auto`
-is refused outright when this is set above `1` (or so is
-`max_concurrent_per_storage`, below), rather than silently running
-sequentially against a requested concurrency it does not implement — see
-`docs/manual/30-safety-and-status.md`.
+How many moves may be in flight across the whole run at once, in `--mode
+auto` only (`dry-run`/`confirm` always run strictly sequentially
+regardless of this setting). Above `1` requires the *generalized*
+transient reserve invariant (section 8.1): several disks can land on one
+storage at once, and none of their sources release space until each
+individually completes — `apply` re-checks it live before launching each
+move. Launch order stays strictly FIFO: `apply` never reorders the
+scheduler's own queue to keep every slot busy, so a move that cannot
+launch yet is waited for rather than skipped past — see
+`docs/manual/28-apply.md`'s own "Concurrent execution" section.
 
 ### `execution.max_migrations_per_run`
 
@@ -683,15 +682,12 @@ budget across every group the run visits, not reset per group.
 Integer `>= 1`, default `1`.
 
 Caps concurrent moves touching one storage, counting it as either source or
-target. At the default of `1`, two moves targeting the same storage
-serialize automatically and the generalized transient invariant collapses to
-its simple single-move form. Raising it should be a deliberate act on a
-storage with real spare headroom — two moves off the same source also means
-two concurrent `saferemove` wipes sharing one throttle.
-
-**Not yet effective in this build**, for the same reason as
-`max_concurrent_migrations` above — there is no concurrent execution yet to
-cap. `--mode auto` is refused outright when this is set above `1`.
+target, in `--mode auto` only. At the default of `1`, two moves targeting
+the same storage serialize automatically and the generalized transient
+invariant collapses to its simple single-move form. Raising it should be a
+deliberate act on a storage with real spare headroom — two moves off the
+same source also means two concurrent `saferemove` wipes sharing one
+throttle.
 
 ### `execution.max_replans_per_run`
 

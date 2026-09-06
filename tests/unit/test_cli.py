@@ -1442,34 +1442,55 @@ def _balanced_apply_group_load() -> GroupLoad:
     )
 
 
-def test_apply_refuses_concurrent_auto_execution_without_touching_the_network(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+def test_apply_auto_mode_honours_a_configured_concurrency_above_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`execute.py` runs strictly sequentially -- a configured
-    concurrency above the default of `1` is refused outright rather than
-    silently running sequentially anyway."""
+    """`execute.execute_plan()` itself now dispatches to a concurrent
+    executor once either cap is configured above `1`
+    (`docs/internals/92-execute.md`) -- `_handle_apply()` no longer
+    refuses this outright the way it once did; the configured
+    `ExecutionConfig` simply reaches `execute_plan()` unchanged, exactly
+    as it always has for every other setting."""
+    from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
 
-    def fail(*_a: object, **_k: object) -> None:
-        raise AssertionError("a concurrency refusal must return before touching PVE")
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    seen_execution: list[object] = []
 
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", fail)
-    path = write_config(tmp_path, execution={"max_concurrent_migrations": 2})
-    assert cli.main(["-c", str(path), "--mode", "auto", "apply"]) == 1
-    err = capsys.readouterr().err
-    assert "does not support concurrent execution yet" in err
+    def fake_execute_plan(
+        client: object,
+        group: object,
+        schedule_result: object,
+        migration: object,
+        execution: object,
+        min_free_bytes: object,
+        mode: object,
+        exclude: object,
+        confirm: object = None,
+        clock: object = None,
+        deadline: object = None,
+        move_costs_by_key: object = None,
+        max_migrations: object = None,
+        on_inflight_started: object = None,
+        on_inflight_finished: object = None,
+    ) -> ExecutionResult:
+        seen_execution.append(execution)
+        move = schedule_result.order[0]  # type: ignore[attr-defined]
+        return ExecutionResult(
+            (MoveOutcome(move.disk_key, move.from_storage, move.to_storage, "moved", "ok"),),
+            False,
+            None,
+        )
 
-
-def test_apply_refuses_concurrent_per_storage_auto_execution(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fail(*_a: object, **_k: object) -> None:
-        raise AssertionError("a concurrency refusal must return before touching PVE")
-
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", fail)
-    path = write_config(tmp_path, execution={"max_concurrent_per_storage": 2})
-    assert cli.main(["-c", str(path), "--mode", "auto", "apply"]) == 1
-    err = capsys.readouterr().err
-    assert "does not support concurrent execution yet" in err
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fake_execute_plan)
+    path = write_config(
+        tmp_path,
+        state={"path": str(tmp_path / "state.json")},
+        execution={"max_concurrent_migrations": 3, "max_concurrent_per_storage": 2},
+    )
+    assert cli.main(["-c", str(path), "--mode", "auto", "apply"]) == 0
+    assert len(seen_execution) == 1
+    assert seen_execution[0].max_concurrent_migrations == 3  # type: ignore[attr-defined]
+    assert seen_execution[0].max_concurrent_per_storage == 2  # type: ignore[attr-defined]
 
 
 def test_apply_dry_run_reports_would_move_and_writes_no_state(

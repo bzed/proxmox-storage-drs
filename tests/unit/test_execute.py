@@ -947,3 +947,573 @@ def test_no_inflight_callback_needed_for_dry_run() -> None:
     )
     assert result.outcomes[0].status == "would_move"
     assert events == []
+
+
+# ------------------------------------------------------- concurrent execution
+#
+# Two disjoint moves (different vmids, different sources, different
+# targets) so `execution.max_concurrent_per_storage`'s default of `1`
+# never blocks them from running together -- each test below overrides
+# only what it needs to exercise (a shared storage, a tight target, a
+# locked VM, ...).
+
+UPID_A = "UPID:pve01:00001234:00ABCDEF:qmmove:201:root@pam:"
+UPID_B = "UPID:pve01:00001235:00ABCDEF:qmmove:202:root@pam:"
+
+
+def two_source_two_target_group() -> Group:
+    return Group(
+        name="fc-tier1",
+        storages=(
+            make_storage("san-a"),
+            make_storage("san-b"),
+            make_storage("san-c"),
+            make_storage("san-d"),
+        ),
+        disks=(
+            make_disk("201:scsi0", 1.0, "san-a"),
+            make_disk("202:scsi0", 1.0, "san-b"),
+        ),
+    )
+
+
+def two_disjoint_moves() -> tuple[ScheduledMove, ...]:
+    return (
+        make_move("201:scsi0", 201, "scsi0", "san-a", "san-c"),
+        make_move("202:scsi0", 202, "scsi0", "san-b", "san-d"),
+    )
+
+
+def concurrent_client_with(overrides: dict[str, object]) -> tuple[PveClient, FakeProxmoxResource]:
+    responses: dict[str, object] = {
+        "cluster/resources": [
+            {"vmid": 201, "node": "pve01", "status": "running"},
+            {"vmid": 202, "node": "pve01", "status": "running"},
+        ],
+        "nodes/pve01/qemu/201/config": {"scsi0": "san-a:vm-201-disk-0,size=1024G"},
+        "nodes/pve01/qemu/201/snapshot": [{"name": "current"}],
+        "nodes/pve01/qemu/201/status/current": {"lock": None},
+        "nodes/pve01/qemu/201/move_disk": UPID_A,
+        f"nodes/pve01/tasks/{UPID_A}/status": {"status": "stopped", "exitstatus": "OK"},
+        "nodes/pve01/qemu/202/config": {"scsi0": "san-b:vm-202-disk-0,size=1024G"},
+        "nodes/pve01/qemu/202/snapshot": [{"name": "current"}],
+        "nodes/pve01/qemu/202/status/current": {"lock": None},
+        "nodes/pve01/qemu/202/move_disk": UPID_B,
+        f"nodes/pve01/tasks/{UPID_B}/status": {"status": "stopped", "exitstatus": "OK"},
+        "nodes/pve01/storage/san-c/status": {"total": 8 * TIB, "used": 0},
+        "nodes/pve01/storage/san-d/status": {"total": 8 * TIB, "used": 0},
+    }
+    responses.update(overrides)
+    api = fake_api(responses)
+    return PveClient(api), api
+
+
+def run_concurrent(
+    client: PveClient,
+    group: Group,
+    moves: tuple[ScheduledMove, ...],
+    execution: ExecutionConfig,
+    clock: FakeClock | None = None,
+    deadline: datetime | None = None,
+    move_costs_by_key: dict[str, MoveCost] | None = None,
+    max_migrations: int | None = None,
+    on_inflight_started: object = None,
+    on_inflight_finished: object = None,
+) -> ExecutionResult:
+    schedule_result = ScheduleResult(
+        order=moves, deadlocked=(), final_assignment={d.key: d.current_storage for d in group.disks}
+    )
+    fc = clock or FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    return execute_plan(
+        client,
+        group,
+        schedule_result,
+        MIGRATION,
+        execution,
+        0,
+        "auto",
+        EXCLUDE,
+        clock=fc.clock(),
+        deadline=deadline,
+        move_costs_by_key=move_costs_by_key,
+        max_migrations=max_migrations,
+        on_inflight_started=on_inflight_started,  # type: ignore[arg-type]
+        on_inflight_finished=on_inflight_finished,  # type: ignore[arg-type]
+    )
+
+
+def test_execute_plan_uses_the_sequential_path_at_default_concurrency() -> None:
+    """`ExecutionConfig()`'s own defaults (both caps `1`) must dispatch to
+    the strictly-sequential executor, not the concurrent one -- this is
+    what makes every pre-existing test in this file (all written before
+    concurrency existed) a real regression check on `execute_plan()`'s
+    dispatch, not just on `_execute_sequential()` in isolation."""
+    client, api = client_with({})
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "moved"
+    # Exactly the calls the sequential path always made -- confirms this
+    # request never touched the concurrent machinery's own extra
+    # `storage_status()` read inside `_launch_decision()` (the sequential
+    # path's own `_live_transient_check()` already covers that).
+    assert [c[1] for c in api.calls].count("nodes/pve01/storage/san-b/status") == 1
+
+
+def test_concurrent_launches_both_moves_before_either_resolves() -> None:
+    """The defining property of concurrency: `move_disk` for the second
+    move is issued while the first is still running, not after it
+    completes -- `task_status` reports 201's task as still `"running"` for
+    its first poll, only `"stopped"` from the second poll on, so 202 can
+    only have launched *during* that window if this test's own move_disk
+    call for it appears before 201's task ever resolves."""
+    poll_count = {"n": 0}
+
+    def upid_a_status(**kwargs: object) -> dict[str, object]:
+        poll_count["n"] += 1
+        return (
+            {"status": "running"}
+            if poll_count["n"] == 1
+            else {"status": "stopped", "exitstatus": "OK"}
+        )
+
+    client, api = concurrent_client_with({f"nodes/pve01/tasks/{UPID_A}/status": upid_a_status})
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+
+    assert {o.disk_key: o.status for o in result.outcomes} == {
+        "201:scsi0": "moved",
+        "202:scsi0": "moved",
+    }
+    move_disk_calls = [c[1] for c in api.calls if c[1].endswith("/move_disk")]
+    b_move_disk_call = next(
+        i for i, c in enumerate(api.calls) if c[1] == "nodes/pve01/qemu/202/move_disk"
+    )
+    a_status_calls_before_b = sum(
+        1 for c in api.calls[:b_move_disk_call] if c[1] == f"nodes/pve01/tasks/{UPID_A}/status"
+    )
+    assert move_disk_calls == ["nodes/pve01/qemu/201/move_disk", "nodes/pve01/qemu/202/move_disk"]
+    # 202's move_disk was issued after only 201's *first* status poll (the
+    # one that still reported "running") -- i.e. before 201 had any
+    # chance to be known-finished.
+    assert a_status_calls_before_b == 1
+
+
+def test_concurrent_inflight_callbacks_fire_independently_per_move() -> None:
+    """Each move's own UPID reaches both callbacks correctly attributed --
+    `test_concurrent_launches_both_moves_before_either_resolves` already
+    covers the overlap property itself; this test's own fixture resolves
+    each move on its first poll (no artificial delay), so it would not
+    demonstrate overlap even if it asserted one."""
+    events: list[str] = []
+    client, _api = concurrent_client_with({})
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(
+        client,
+        two_source_two_target_group(),
+        two_disjoint_moves(),
+        execution,
+        on_inflight_started=lambda upid: events.append(f"started:{upid}"),
+        on_inflight_finished=lambda upid: events.append(f"finished:{upid}"),
+    )
+    assert all(o.status == "moved" for o in result.outcomes)
+    assert set(events) == {
+        f"started:{UPID_A}",
+        f"finished:{UPID_A}",
+        f"started:{UPID_B}",
+        f"finished:{UPID_B}",
+    }
+    # Each UPID's own start strictly precedes its own finish.
+    assert events.index(f"started:{UPID_A}") < events.index(f"finished:{UPID_A}")
+    assert events.index(f"started:{UPID_B}") < events.index(f"finished:{UPID_B}")
+
+
+def test_concurrent_max_concurrent_per_storage_serializes_a_shared_target() -> None:
+    """Two otherwise-independent moves landing on the *same* target: even
+    with `max_concurrent_migrations=2`, the default
+    `max_concurrent_per_storage: 1` means the second cannot launch until
+    the first resolves."""
+    moves = (
+        make_move("201:scsi0", 201, "scsi0", "san-a", "san-c"),
+        make_move("202:scsi0", 202, "scsi0", "san-b", "san-c"),
+    )
+    client, api = concurrent_client_with({})
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(client, two_source_two_target_group(), moves, execution)
+    assert [o.status for o in result.outcomes] == ["moved", "moved"]
+    # 202 could not have launched before 201's task resolved: its
+    # move_disk call must come after 201's task_status ever reports
+    # "stopped".
+    move_disk_calls = [
+        i for i, c in enumerate(api.calls) if c[1] == "nodes/pve01/qemu/202/move_disk"
+    ]
+    a_status_calls = [
+        i for i, c in enumerate(api.calls) if c[1] == f"nodes/pve01/tasks/{UPID_A}/status"
+    ]
+    assert move_disk_calls[0] > a_status_calls[0]
+
+
+def test_concurrent_transient_invariant_blocks_a_second_move_onto_a_tight_target() -> None:
+    """Section 8.1's generalized invariant, live: san-c has only 2 TiB of
+    headroom (capacity 3 TiB, nothing used yet, reserve_factor 2.0 ->
+    after one 1 TiB charge, required reserve is already 2 TiB, leaving no
+    room for a second 1 TiB charge onto the *same* storage). 201's task
+    is made to take one extra poll to resolve, so 202 is evaluated for
+    launch *while* 201 is still occupying its charge against san-c --
+    without that, 201 would already have finished and freed its charge
+    before 202 is ever considered, and this test would prove nothing."""
+    poll_count = {"n": 0}
+
+    def upid_a_status(**kwargs: object) -> dict[str, object]:
+        poll_count["n"] += 1
+        return (
+            {"status": "running"}
+            if poll_count["n"] == 1
+            else {"status": "stopped", "exitstatus": "OK"}
+        )
+
+    moves = (
+        make_move("201:scsi0", 201, "scsi0", "san-a", "san-c"),
+        make_move("202:scsi0", 202, "scsi0", "san-b", "san-c"),
+    )
+    group = Group(
+        name="fc-tier1",
+        storages=(
+            make_storage("san-a"),
+            make_storage("san-b"),
+            make_storage("san-c", capacity_tib=3.0),
+        ),
+        disks=(make_disk("201:scsi0", 1.0, "san-a"), make_disk("202:scsi0", 1.0, "san-b")),
+    )
+    # max_concurrent_per_storage raised so the per-storage-count gate does
+    # not mask the transient-invariant gate this test actually targets.
+    # The live `storage_status()` reply must match the model's own 3 TiB
+    # capacity too -- `concurrent_client_with()`'s own default (8 TiB) is
+    # for its own two-disjoint-move fixture, not this test's tight target.
+    client, _api = concurrent_client_with(
+        {
+            f"nodes/pve01/tasks/{UPID_A}/status": upid_a_status,
+            "nodes/pve01/storage/san-c/status": {"total": 3 * TIB, "used": 0},
+        }
+    )
+    execution = ExecutionConfig(max_concurrent_migrations=2, max_concurrent_per_storage=2)
+    result = run_concurrent(client, group, moves, execution)
+    outcomes_by_key = {o.disk_key: o for o in result.outcomes}
+    assert outcomes_by_key["201:scsi0"].status == "moved"
+    assert outcomes_by_key["202:scsi0"].status == "replan_needed"
+    assert "transient invariant" in outcomes_by_key["202:scsi0"].detail
+
+
+def test_concurrent_strict_fifo_does_not_skip_a_locked_head() -> None:
+    """The deliberate simplification documented in `_execute_concurrent()`'s
+    own docstring: 201 (the head of the queue) is locked for its first
+    pre-flight re-check and clears by its second -- 202 could have
+    launched immediately on its own merit while 201 was still locked, but
+    this executor never considers a candidate behind an unresolved head,
+    so 202's `move_disk` must not appear before 201's own."""
+    config_calls = {"n": 0}
+
+    def vm_201_config(**kwargs: object) -> dict[str, object]:
+        config_calls["n"] += 1
+        config: dict[str, object] = {"scsi0": "san-a:vm-201-disk-0,size=1024G"}
+        if config_calls["n"] == 1:
+            config["lock"] = "backup"
+        return config
+
+    client, api = concurrent_client_with({"nodes/pve01/qemu/201/config": vm_201_config})
+    execution = ExecutionConfig(
+        max_concurrent_migrations=2,
+        locks=LocksConfig(wait_timeout_seconds=600.0, poll_interval_seconds=5.0),
+    )
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    outcomes_by_key = {o.disk_key: o for o in result.outcomes}
+    assert outcomes_by_key["201:scsi0"].status == "moved"
+    assert outcomes_by_key["202:scsi0"].status == "moved"
+    a_move_disk_call = next(
+        i for i, c in enumerate(api.calls) if c[1] == "nodes/pve01/qemu/201/move_disk"
+    )
+    b_move_disk_call = next(
+        i for i, c in enumerate(api.calls) if c[1] == "nodes/pve01/qemu/202/move_disk"
+    )
+    assert a_move_disk_call < b_move_disk_call
+
+
+def test_concurrent_max_migrations_stops_launching_but_drains_inflight() -> None:
+    """`max_migrations=1`: 201 is allowed to launch (bringing the count to
+    the cap), 202 is refused *before* ever being pre-flighted -- but 201,
+    already in flight, is still polled to completion and reported, not
+    abandoned."""
+    client, api = concurrent_client_with({})
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(
+        client, two_source_two_target_group(), two_disjoint_moves(), execution, max_migrations=1
+    )
+    outcomes_by_key = {o.disk_key: o for o in result.outcomes}
+    assert outcomes_by_key["201:scsi0"].status == "moved"
+    assert outcomes_by_key["202:scsi0"].status == "skipped"
+    assert "max_migrations_per_run" in outcomes_by_key["202:scsi0"].detail
+    assert result.stopped_early is True
+    assert not any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
+
+
+def test_concurrent_deadline_stops_launching_but_drains_inflight() -> None:
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    deadline = datetime(2026, 9, 6, 12, 0, 1, tzinfo=timezone.utc)
+    move_costs = {
+        "201:scsi0": MoveCost("201:scsi0", 0.0, 0.0, 0.0, False, False),
+        "202:scsi0": MoveCost("202:scsi0", 3600.0, 0.0, 3600.0, False, False),
+    }
+    client, api = concurrent_client_with({})
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(
+        client,
+        two_source_two_target_group(),
+        two_disjoint_moves(),
+        execution,
+        clock=fc,
+        deadline=deadline,
+        move_costs_by_key=move_costs,
+    )
+    statuses = {o.disk_key: o.status for o in result.outcomes}
+    assert statuses["201:scsi0"] == "moved"
+    assert statuses["202:scsi0"] == "skipped"
+    assert result.stopped_early is True
+    assert not any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
+
+
+def test_concurrent_failed_move_with_abort_on_failure_stops_launching_but_drains_inflight() -> None:
+    """201 fails outright (its very first poll already reports the task
+    stopped with a non-OK exitstatus, so there is no window in which 202
+    could have already launched concurrently) -- `execution.abort_on_failure`
+    means 202 is never even pre-flighted, exactly like
+    `_execute_sequential()`'s own early `return` leaves every move after
+    the one that failed completely unreported, not merely skipped."""
+    client, api = concurrent_client_with(
+        {
+            f"nodes/pve01/tasks/{UPID_A}/status": {
+                "status": "stopped",
+                "exitstatus": "mirror failed",
+            },
+            "nodes/pve01/storage/san-c/content": [],
+        }
+    )
+    execution = ExecutionConfig(max_concurrent_migrations=2, abort_on_failure=True)
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    assert [o.disk_key for o in result.outcomes] == ["201:scsi0"]
+    assert result.outcomes[0].status == "failed"
+    assert result.stopped_early is True
+    assert not any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
+
+
+def test_concurrent_draining_source_excludes_a_later_move_off_the_same_source() -> None:
+    """A `saferemove` source that goes `"draining"` is excluded as both
+    source and target for the rest of *this* run (section 9.3) --
+    `_drained_skip_outcome()` is reused unchanged by the concurrent
+    executor's own `_advance_pending()`, so 202 (sharing 201's source,
+    san-a) is skipped once 201 resolves `"draining"`, not launched once
+    the concurrency slot frees up. This is a stronger exclusion than the
+    concurrency-slot bookkeeping alone would give: even after 201's own
+    `_InflightMove` is gone from the in-flight set (freeing the slot),
+    202 still cannot use the same source this run."""
+    moves = (
+        make_move("201:scsi0", 201, "scsi0", "san-a", "san-c"),
+        make_move("202:scsi0", 202, "scsi0", "san-a", "san-d"),
+    )
+    group = Group(
+        name="fc-tier1",
+        storages=(
+            make_storage("san-a", saferemove=True),
+            make_storage("san-c"),
+            make_storage("san-d"),
+        ),
+        disks=(make_disk("201:scsi0", 1.0, "san-a"), make_disk("202:scsi0", 1.0, "san-a")),
+    )
+    client, _api = concurrent_client_with(
+        {
+            "cluster/resources": [
+                {"vmid": 201, "node": "pve01", "status": "running"},
+                {"vmid": 202, "node": "pve01", "status": "running"},
+            ],
+            "nodes/pve01/qemu/202/config": {"scsi0": "san-a:vm-202-disk-0,size=1024G"},
+            "nodes/pve01/storage/san-a/content": [
+                {"volid": "san-a:vm-201-disk-0", "vmid": 201},
+            ],
+        }
+    )
+    execution = ExecutionConfig(
+        max_concurrent_migrations=2,
+        source_release=SourceReleaseConfig(timeout_seconds=0.0),
+    )
+    result = run_concurrent(client, group, moves, execution)
+    outcomes_by_key = {o.disk_key: o for o in result.outcomes}
+    assert outcomes_by_key["201:scsi0"].status == "draining"
+    assert outcomes_by_key["202:scsi0"].status == "skipped"
+    assert "still draining" in outcomes_by_key["202:scsi0"].detail
+
+
+def test_concurrent_lock_timeout_with_abort_semantics_fails_and_stops() -> None:
+    """`execution.locks.on_timeout: abort` under concurrency: the locked
+    head never clears, resolves `"failed"` with `always_stop`, and 202
+    (never even pre-flighted) is abandoned entirely -- the non-blocking
+    counterpart to `_execute_one_move()`'s own identical lock-timeout
+    -abort path."""
+    client, api = concurrent_client_with(
+        {
+            "nodes/pve01/qemu/201/config": {
+                "scsi0": "san-a:vm-201-disk-0,size=1024G",
+                "lock": "backup",
+            }
+        }
+    )
+    execution = ExecutionConfig(
+        max_concurrent_migrations=2,
+        locks=LocksConfig(wait_timeout_seconds=5.0, poll_interval_seconds=10.0, on_timeout="abort"),
+    )
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    assert [o.disk_key for o in result.outcomes] == ["201:scsi0"]
+    assert result.outcomes[0].status == "failed"
+    assert result.outcomes[0].always_stop is True
+    assert "still locked" in result.outcomes[0].detail
+    assert result.stopped_early is True
+    assert not any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
+
+
+def test_concurrent_lock_timeout_with_skip_semantics_continues_to_the_next_move() -> None:
+    """`execution.locks.on_timeout: skip` (the default): the locked head
+    times out `"skipped"`, not `"failed"`, and -- unlike the abort case --
+    the queue simply advances to 202, which launches normally."""
+    client, api = concurrent_client_with(
+        {
+            "nodes/pve01/qemu/201/config": {
+                "scsi0": "san-a:vm-201-disk-0,size=1024G",
+                "lock": "backup",
+            }
+        }
+    )
+    execution = ExecutionConfig(
+        max_concurrent_migrations=2,
+        locks=LocksConfig(wait_timeout_seconds=5.0, poll_interval_seconds=10.0, on_timeout="skip"),
+    )
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    outcomes_by_key = {o.disk_key: o for o in result.outcomes}
+    assert outcomes_by_key["201:scsi0"].status == "skipped"
+    assert outcomes_by_key["201:scsi0"].always_stop is False
+    assert outcomes_by_key["202:scsi0"].status == "moved"
+    assert result.stopped_early is False
+    assert any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
+
+
+def test_concurrent_preflight_mismatch_replans_and_stops() -> None:
+    """201 vanished from `cluster/resources` since this plan was built (a
+    live-migration or deletion) -- the concurrent executor's own
+    `_launch_decision()` re-checks this exactly like
+    `_execute_one_move()`'s `_preflight()` always has, and stops the run
+    with `"replan_needed"`, abandoning 202 unreported."""
+    client, api = concurrent_client_with(
+        {"cluster/resources": [{"vmid": 202, "node": "pve01", "status": "running"}]}
+    )
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    assert [o.disk_key for o in result.outcomes] == ["201:scsi0"]
+    assert result.outcomes[0].status == "replan_needed"
+    assert "no longer found" in result.outcomes[0].detail
+    assert result.stopped_early is True
+    assert not any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
+
+
+def test_concurrent_waits_for_a_free_slot_before_launching_a_third_move() -> None:
+    """Three fully-disjoint moves, `max_concurrent_migrations=2`: the
+    third cannot even be pre-flighted while both slots are occupied.
+    Every poll cycle resolves at most one move at a time here (each
+    of 201/202 needs three polls, staggered so neither ever resolves on
+    the exact same cycle as the other) -- without that staggering, a
+    slot freed by polling would always be immediately available to the
+    *same* cycle's launch attempt, and the "no free slot, wait" branch
+    this test targets would never actually be exercised."""
+    poll_counts = {"a": 0, "b": 0}
+
+    def delayed_status(counter_key: str) -> object:
+        def status(**kwargs: object) -> dict[str, object]:
+            poll_counts[counter_key] += 1
+            return (
+                {"status": "running"}
+                if poll_counts[counter_key] < 3
+                else {"status": "stopped", "exitstatus": "OK"}
+            )
+
+        return status
+
+    group = Group(
+        name="fc-tier1",
+        storages=(
+            make_storage("san-a"),
+            make_storage("san-b"),
+            make_storage("san-c"),
+            make_storage("san-d"),
+            make_storage("san-e"),
+            make_storage("san-f"),
+        ),
+        disks=(
+            make_disk("201:scsi0", 1.0, "san-a"),
+            make_disk("202:scsi0", 1.0, "san-b"),
+            make_disk("203:scsi0", 1.0, "san-e"),
+        ),
+    )
+    moves = (
+        make_move("201:scsi0", 201, "scsi0", "san-a", "san-c"),
+        make_move("202:scsi0", 202, "scsi0", "san-b", "san-d"),
+        make_move("203:scsi0", 203, "scsi0", "san-e", "san-f"),
+    )
+    upid_c = "UPID:pve01:00001236:00ABCDEF:qmmove:203:root@pam:"
+    client, api = concurrent_client_with(
+        {
+            "cluster/resources": [
+                {"vmid": 201, "node": "pve01", "status": "running"},
+                {"vmid": 202, "node": "pve01", "status": "running"},
+                {"vmid": 203, "node": "pve01", "status": "running"},
+            ],
+            "nodes/pve01/qemu/203/config": {"scsi0": "san-e:vm-203-disk-0,size=1024G"},
+            "nodes/pve01/qemu/203/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/203/status/current": {"lock": None},
+            "nodes/pve01/qemu/203/move_disk": upid_c,
+            f"nodes/pve01/tasks/{upid_c}/status": {"status": "stopped", "exitstatus": "OK"},
+            "nodes/pve01/storage/san-f/status": {"total": 8 * TIB, "used": 0},
+            f"nodes/pve01/tasks/{UPID_A}/status": delayed_status("a"),
+            f"nodes/pve01/tasks/{UPID_B}/status": delayed_status("b"),
+        }
+    )
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(client, group, moves, execution)
+    assert {o.disk_key: o.status for o in result.outcomes} == {
+        "201:scsi0": "moved",
+        "202:scsi0": "moved",
+        "203:scsi0": "moved",
+    }
+    # 203 is never even pre-flighted (`_advance_pending()`'s own free-slot
+    # check returns before ever calling `_launch_decision()`) until a slot
+    # has actually freed -- i.e. not before 201's task was polled at least
+    # once.
+    first_203_config_call = next(
+        i for i, c in enumerate(api.calls) if c[1] == "nodes/pve01/qemu/203/config"
+    )
+    first_a_status_call = next(
+        i for i, c in enumerate(api.calls) if c[1] == f"nodes/pve01/tasks/{UPID_A}/status"
+    )
+    assert first_a_status_call < first_203_config_call
+
+
+def test_concurrent_orphan_detection_after_a_move_fails_while_polled() -> None:
+    """A `"failed"` outcome resolved by polling (not at launch time) still
+    runs the section 9.4 orphan check -- `_poll_inflight_once()`'s own
+    counterpart to `_execute_one_move()`'s identical check."""
+    client, _api = concurrent_client_with(
+        {
+            f"nodes/pve01/tasks/{UPID_A}/status": {
+                "status": "stopped",
+                "exitstatus": "mirror failed",
+            },
+            "nodes/pve01/storage/san-c/content": [{"volid": "san-c:vm-201-disk-0", "vmid": 201}],
+        }
+    )
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    assert result.outcomes[0].status == "failed"
+    assert result.outcomes[0].orphaned_volumes == ("san-c:vm-201-disk-0",)

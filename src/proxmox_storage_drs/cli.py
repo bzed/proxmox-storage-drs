@@ -1707,25 +1707,14 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
     call.
 
     ``execution.max_concurrent_migrations``/``max_concurrent_per_storage``
-    above `1` are refused outright in `auto` mode: `execute.py` runs every
-    move strictly sequentially, which trivially satisfies either cap's
-    *default* of `1` but not a configured value above it, and running
-    sequentially anyway while silently ignoring a requested concurrency
-    would be exactly the "partial/unvalidated result" AGENTS.md section 10
-    forbids -- refusing outright names the gap instead of hiding it.
+    above `1` are honoured only in `auto` mode: `execute.execute_plan()`
+    itself dispatches to its own concurrent executor once either is
+    configured above its default of `1` (`docs/internals/92-execute.md`),
+    strictly FIFO and `auto`-only -- `dry-run`/`confirm` always run
+    strictly sequentially regardless of these settings, matching section
+    9.1's own per-mode description, which discusses concurrency only
+    under `auto`.
     """
-    if mode == "auto" and (
-        resolved.config.execution.max_concurrent_migrations > 1
-        or resolved.config.execution.max_concurrent_per_storage > 1
-    ):
-        print(
-            "pve-storage-drs: 'apply' does not support concurrent execution yet in this "
-            "development build (execution.max_concurrent_migrations/max_concurrent_per_storage "
-            "> 1); set both to 1, or use --mode confirm",
-            file=sys.stderr,
-        )
-        return 1
-
     now = datetime.now(timezone.utc)
     state = load_state(resolved.config.state.path)
 

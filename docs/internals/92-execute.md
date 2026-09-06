@@ -166,12 +166,11 @@ keyboard should not look like a bug report.
   (`cli._run_auto_group()`, `auto` mode only — see below), not something
   this module does itself. `dry-run`/`confirm` never re-plan at all: the
   operator re-runs `apply` by hand once ready.
-- **No concurrent execution.** `execution.max_concurrent_migrations`/
-  `max_concurrent_per_storage` are accepted in `ExecutionConfig` but
-  never consulted here — every move is issued strictly sequentially.
-  `cli._handle_apply()` refuses to start `auto` mode at all when either
-  is configured above `1`, rather than run sequentially against a
-  requested concurrency this module cannot deliver.
+- **Section 7.3's saturation check is not enforced, concurrently or
+  sequentially.** It is not implemented anywhere in this codebase yet
+  (`docs/internals/96-payback.md`), so section 8.1 point 4 of
+  `concurrency_ok` stays a documented gap the concurrent executor
+  inherits rather than closes.
 - **Crash recovery is not this module's own job.** `execute_plan()`
   accepts `on_inflight_started`/`on_inflight_finished` callbacks
   (`execute.InflightCallback`) and calls them around each `move_disk` --
@@ -353,9 +352,82 @@ shows *why* it stopped and *what happened next* per outcome.
 `execution.max_migrations_per_run` is a per-*invocation* budget, shared
 across every group `_handle_apply()` visits — `_run_auto_group()` returns
 the updated remaining count, which its caller threads into the next
-group's call rather than resetting it. `max_concurrent_migrations`/
-`max_concurrent_per_storage` above `1` are refused before `_handle_apply()`
-does anything else (before even acquiring `state.json`'s lock): the
-executor has no concurrent-execution mechanism at all, so honouring
-either cap's default of `1` is automatic but a higher configured value is
-not something this build can actually deliver.
+group's call rather than resetting it.
+
+## Concurrent execution: `_execute_concurrent()` and its non-blocking helpers
+
+`execute_plan()` dispatches to `_execute_concurrent()`, an entirely
+separate orchestration loop from `_execute_sequential()` above, whenever
+`mode == "auto"` and either `execution.max_concurrent_migrations` or
+`max_concurrent_per_storage` is configured above its default of `1`.
+Every other case (`dry-run`, `confirm`, or `auto` at the default caps)
+uses `_execute_sequential()` completely unchanged — this is a genuine
+regression guarantee, not just a claim: every test written before
+concurrency existed still passes unmodified, because none of them touch
+the new dispatch condition.
+
+**Why a second loop, not one generalized loop.** The sequential loop's
+`_wait_for_unlocked()` and `_wait_for_move_completion()` both *block*,
+sleeping in a tight loop until their own condition resolves. A concurrent
+executor cannot reuse either directly: blocking on one move's lock or
+completion would stall every *other* in-flight or candidate move for as
+long as that wait lasts, which defeats the entire point of running
+several at once. Both were refactored into a non-blocking step plus a
+thin blocking wrapper *before* concurrency was added at all, so the
+refactor's own correctness could be verified by the full pre-existing
+test suite passing unchanged, independent of any new concurrent-specific
+test:
+
+- `_check_lock_once()` is the one live lock read; `_wait_for_unlocked()`
+  is now just that read in a loop.
+- `_poll_move_once()` is section 9.3.2's completion criterion as a single
+  step, returning `None` while still in progress or `(status, detail)`
+  once terminal; `_wait_for_move_completion()` is now just that in a
+  loop. `_MoveWaitState` carries the one thing that has to survive across
+  calls (`drain_start`, once the source-release phase begins) since there
+  is no longer a local variable's lifetime to hold it.
+
+**`_launch_decision()`** is section 9.2's five pre-flight re-checks plus
+section 8.1's generalized transient invariant, for one poll cycle,
+without blocking — the concurrent counterpart to `_execute_one_move()`'s
+own pre-flight-then-lock-then-live-check sequence. `_LockWaitTracker`
+plays the same role for a lock wait that `_MoveWaitState` plays for a
+move's completion: `start`/`warned` survive across cycles so the
+executor logs the "VM is locked" warning once, not once per poll, and
+knows when `execution.locks.wait_timeout_seconds` has actually elapsed.
+The generalized invariant itself lives in `reserve.transient_charge_ok()`
+(`docs/internals/95-schedule.md`) — `_launch_decision()`'s only job is to
+assemble its inputs: a live `storage_status()` read for `used`/`total`,
+this run's own (C4) `largest_by_storage` tracking for `Z_b`, and
+`_target_charges()` (every other in-flight move's own disk size, for
+moves already landing on the same target) alongside the candidate's own
+size.
+
+**Strict FIFO, deliberately.** `_advance_pending()` only ever considers
+`pending[0]` — the same move a sequential run would try next. If it
+cannot launch yet (a per-storage cap, or a lock that has not cleared),
+the executor does not skip ahead to a later candidate that might launch
+immediately; it waits (polling everything already in flight in the
+meantime) and re-evaluates the same head next cycle. Several moves
+genuinely run concurrently once launched — nothing ever blocks waiting
+for one to finish before starting another — but *which* move launches
+next is always the scheduler's own next-in-line choice. A more
+sophisticated scheduler could reorder around a blocked head to keep
+every slot busy; this one can only ever under-deliver on throughput
+doing that, never launch a move out of the payback-scored order
+`schedule.order_moves()` computed, matching this codebase's existing
+tolerance for a documented, safe simplification over a more optimal but
+harder-to-verify one (`schedule.py`'s own deferred ordering-priority-2
+and staging are the same trade).
+
+**A stop condition drains, it does not abandon.** Once a budget is
+exhausted, a move fails under `execution.abort_on_failure`, or a
+pre-flight/live-invariant mismatch produces `"replan_needed"`,
+`_execute_concurrent()` stops calling `_advance_pending()` (no further
+moves launch) but keeps polling whatever is still in flight to its own
+natural conclusion before returning — their outcomes, and their
+crash-recovery callbacks, must still fire. Whatever is still in
+`pending` at that point (never even pre-flighted) is abandoned
+unreported, exactly like `_execute_sequential()`'s own early `return`
+already leaves every move after the one that triggered a stop
+completely unaccounted for.
