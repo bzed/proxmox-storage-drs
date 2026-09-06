@@ -272,6 +272,19 @@ the same `_auto_budget_stop_outcome()` helper, since remaining time only
 ever decreases and a spent cap stays spent — there is never a reason to
 skip one move for a budget reason and then try a later one anyway.
 
+The deadline is actually checked **twice** for a locked VM:
+`_auto_budget_stop_outcome()`'s pre-flight check runs before any network
+call for this move, but a VM-lock wait (`_wait_for_unlocked()`) can burn
+a large, unpredictable share of the same budget — up to
+`execution.locks.wait_timeout_seconds`, hours by default — entirely
+*after* that first check already said yes. `_execute_one_move()`
+re-checks the identical condition (`_deadline_exceeded()`, the one
+shared implementation of "does this much more time still fit") right
+after a lock clears and before committing to `move_disk`, refusing the
+move there instead if the wait alone consumed what was left. Caught by
+re-reading section 9.1 against the code before any test existed, not by
+a failing test.
+
 `timewindow.py` is a small, dependency-free module answering exactly one
 question, `current_deadline(windows, now) -> datetime | None`: `None`
 means no restriction at all (no `time_windows` configured), and a
@@ -286,6 +299,22 @@ how an operator actually thinks about a maintenance window. The classic
 overnight-window bug — a `days: [fri]` window tagged Friday still needing
 to match at 2am *Saturday* — gets its own two-piece matching logic
 (`is_window_active()`) and its own regression tests.
+
+`timewindow.py` itself never reads the clock (every function takes `now`
+as a parameter); `cli._real_local_now()` is what production actually
+passes. It resolves the host's real IANA zone from `/etc/localtime`'s
+own symlink target (the standard mechanism on Debian and virtually
+every Linux distribution) rather than settling for
+`datetime.now().astimezone()`'s *fixed*-offset result — the difference
+matters specifically for `window_close()`'s "closes tomorrow" case,
+which combines today's `tzinfo` with tomorrow's date: a real
+`zoneinfo.ZoneInfo` re-resolves its own UTC offset for that date, a
+frozen offset does not, so an overnight window could otherwise stay
+"active" up to an hour longer than configured on the two nights a year
+the local zone's clocks actually change. `_real_local_now()` falls back
+to the frozen-offset form only when the zone name cannot be determined
+at all, at which point that same narrow, two-nights-a-year discrepancy
+returns — a residual, documented limitation, not a silent one.
 
 `cli._run_auto_group()` is where section 9.2's re-plan protocol actually
 lives: a loop, bounded by `execution.max_replans_per_run`, that calls
