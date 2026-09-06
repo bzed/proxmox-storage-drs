@@ -34,6 +34,8 @@ import pytest
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.optimize import (
     OptimizeResult,
+    _assert_nonzero_when_weighted,
+    _assert_objective_magnitude_within_int64,
     _pinned_by_storage,
     _relevant_vmids,
     cbc_available,
@@ -99,6 +101,7 @@ def _solve(
     objective: ObjectiveConfig,
     backend: str,
     min_free_bytes: int = 0,
+    cooldown_storages: frozenset[str] = frozenset(),
 ) -> OptimizeResult:
     result = solve(
         group,
@@ -108,6 +111,7 @@ def _solve(
         backend,
         time_limit_seconds=10.0,
         mip_gap=0.0,
+        cooldown_storages=cooldown_storages,
     )
     assert result is not None, f"{backend} found no feasible solution"
     return result
@@ -264,6 +268,32 @@ def test_reserve_tradeoff_lexicographic_solve_does_not_fall_for_the_big_m_trap(
     assert total_nonreserve == pytest.approx(10.0, abs=1e-4)
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_stage_one_reserve_floor_ignores_a_generous_mip_gap(backend: str) -> None:
+    """REVIEW.md S-07: stage 1's own proof that the reserve floor is
+    achieved must not be relaxed by `solver.mip_gap` -- only stage 2's
+    real objective may trade off within that gap. A generous gap here
+    must not let either backend "cheat" by moving a disk into a
+    cheaper-looking but reserve-violating placement -- `_solve()`'s own
+    helper always passes `mip_gap=0.0`, so this calls `solve()` directly
+    to exercise a gap the fixed stage-1 solve must ignore."""
+    objective = ObjectiveConfig(
+        alpha_spread=1.0, beta_move_count=0.25, gamma_move_bytes_per_tib=0.05, kappa_vm_affinity=0.5
+    )
+    result = solve(
+        reserve_tradeoff_group(),
+        {"201:scsi0": 5.0, "202:scsi0": 5.0},
+        objective,
+        0,
+        backend,
+        time_limit_seconds=10.0,
+        mip_gap=0.5,
+    )
+    assert result is not None
+    assert result.breakdown.moves == 0
+    assert not result.breakdown.reserve_statuses["cramped"].violated
+
+
 # ---------------------------------------------------------------------- pinning
 
 
@@ -386,17 +416,115 @@ def test_solve_with_no_movable_disks_skips_the_model_entirely(backend: str) -> N
 # --------------------------------------------------------------------- cooldown
 
 
-def test_solve_warns_when_cooldown_storages_is_non_empty(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    import logging
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_solve_excludes_a_cooldown_storage_as_a_target_for_a_movable_disk(backend: str) -> None:
+    """Mirrors `test_heuristic.py`'s
+    `test_descend_blocks_new_arrivals_onto_a_cooldown_storage` exactly,
+    against both MILP backends (REVIEW.md S-04): section 6's "a storage
+    involved in a migration ... accepts no new incoming moves". Structural,
+    not an exact-assignment check, so it holds regardless of which
+    alternative the solver settles on."""
+    group = section_14_group()
+    loads = section_14_loads()
+    original_storage = {key: storage for key, _s, _l, storage in _SECTION_14_DISKS}
 
+    result = _solve(
+        group, loads, DEFAULT_OBJECTIVE, backend, cooldown_storages=frozenset({"san-b"})
+    )
+
+    for disk_key, target in result.assignment.items():
+        if target == "san-b":
+            assert original_storage[disk_key] == "san-b"  # never a *new* arrival
+    # The cooldown had a real effect: the baseline's own san-b arrival
+    # (see test_beta_025_reproduces_the_three_move_solution) is blocked.
+    assert result.assignment["101:scsi1"] != "san-b"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_solve_still_allows_a_disk_to_move_away_from_a_cooldown_storage(backend: str) -> None:
+    """Mirrors `test_heuristic.py`'s
+    `test_descend_still_allows_a_disk_to_move_away_from_a_cooldown_storage`:
+    san-a is only ever a *source* in the section 14 three-move optimum, so
+    putting it in cooldown must not change the result at all -- the
+    cooldown blocks incoming moves, never outgoing ones (REVIEW.md S-04)."""
+    result = _solve(
+        section_14_group(),
+        section_14_loads(),
+        DEFAULT_OBJECTIVE,
+        backend,
+        cooldown_storages=frozenset({"san-a"}),
+    )
+
+    assert result.assignment == {
+        "101:scsi0": "san-a",
+        "101:scsi1": "san-b",
+        "102:scsi0": "san-c",
+        "103:scsi0": "san-b",
+        "104:scsi0": "san-b",
+        "105:scsi0": "san-b",
+    }
+
+
+# ------------------------------------------------------- section 5.5 assertions
+
+
+def test_assert_nonzero_when_weighted_passes_for_a_disabled_weight() -> None:
+    _assert_nonzero_when_weighted(0.0, 0, "x")  # a deliberately disabled weight: no assertion
+
+
+def test_assert_nonzero_when_weighted_passes_when_both_are_nonzero() -> None:
+    _assert_nonzero_when_weighted(0.05, 500, "x")
+
+
+def test_assert_nonzero_when_weighted_raises_on_the_gamma_trap() -> None:
+    """Section 5.5's regression guard (REVIEW.md S-09): a non-zero
+    configured weight whose *scaled, rounded* coefficient collapsed to 0
+    is exactly the silent-drop failure `_cpsat_objective_terms()` would
+    otherwise ship."""
+    with pytest.raises(AssertionError, match="rounded to 0"):
+        _assert_nonzero_when_weighted(0.05, 0, "gamma_scaled[101:scsi0]")
+
+
+def test_assert_objective_magnitude_within_int64_passes_for_realistic_sizes() -> None:
+    _assert_objective_magnitude_within_int64(
+        beta_scaled=2_500_000,
+        gamma_scaled_values=[500_000, 500_000],
+        kappa_scaled=5_000_000,
+        alpha_scaled=10_000,
+        num_movable=2,
+        num_vmids=2,
+        num_storages=3,
+        load_bound=10_000_000,
+    )
+
+
+def test_assert_objective_magnitude_within_int64_raises_when_over_the_bound() -> None:
+    with pytest.raises(AssertionError, match=r"2\*\*62"):
+        _assert_objective_magnitude_within_int64(
+            beta_scaled=0,
+            gamma_scaled_values=[],
+            kappa_scaled=0,
+            alpha_scaled=2**60,
+            num_movable=0,
+            num_vmids=0,
+            num_storages=1000,
+            load_bound=2**60,
+        )
+
+
+@pytest.mark.skipif(not cpsat_available(), reason="ortools not installed")
+def test_gamma_trap_assertion_fires_end_to_end_for_a_sub_kilobyte_disk() -> None:
+    """A disk small enough that `gamma_move_bytes_per_tib`'s own folded
+    coefficient rounds to 0 despite a non-zero configured weight --
+    exactly the case section 5.5's assertion exists to catch, exercised
+    through the real `solve()` entry point rather than only the helper
+    directly."""
     group = Group(
         name="g",
         storages=(make_storage("san-a"), make_storage("san-b")),
-        disks=(make_disk("101:scsi0", 1.0, 1.0, "san-a"),),
+        disks=(make_disk("101:scsi0", 1e-10, 1.0, "san-a"),),
     )
-    with caplog.at_level(logging.WARNING):
+    with pytest.raises(AssertionError, match="rounded to 0"):
         solve(
             group,
             {"101:scsi0": 1.0},
@@ -405,6 +533,4 @@ def test_solve_warns_when_cooldown_storages_is_non_empty(
             "cpsat",
             time_limit_seconds=5.0,
             mip_gap=0.0,
-            cooldown_storages=frozenset({"san-b"}),
         )
-    assert any("does not yet enforce" in r.message for r in caplog.records)

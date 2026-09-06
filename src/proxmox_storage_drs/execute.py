@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
-from proxmox_storage_drs.config import ExecutionConfig, LocksConfig, MigrationConfig
+from proxmox_storage_drs.config import ExcludeConfig, ExecutionConfig, LocksConfig, MigrationConfig
 from proxmox_storage_drs.exceptions import PveApiError
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.reserve import largest_disk_bytes
@@ -96,9 +96,11 @@ class MoveOutcome:
     ``execution.locks.on_timeout: abort``), ``"draining"`` (task succeeded
     but the source has not released within
     ``execution.source_release.timeout`` -- not a failure, an ongoing
-    `saferemove` wipe section 8.2 already models), or ``"replan_needed"``
-    (a pre-flight or live transient-invariant mismatch -- the plan no
-    longer matches reality).
+    `saferemove` wipe section 8.2 already models; ``execute_plan()``
+    excludes that source as both source and target for every later move
+    in the *same* run, per section 9.3), or ``"replan_needed"`` (a
+    pre-flight or live transient-invariant mismatch -- the plan no longer
+    matches reality).
 
     ``always_stop`` is set only for a lock timeout with
     ``execution.locks.on_timeout: abort`` -- the manual's own words for that
@@ -152,7 +154,25 @@ def _vm_resource(client: PveClient, vmid: int) -> dict[str, object] | None:
     return None
 
 
-def _preflight(client: PveClient, disk: Disk, move: ScheduledMove) -> _PreflightResult:
+def _is_excluded_by_tag_or_vmid(
+    resource: dict[str, object], vmid: int, exclude: ExcludeConfig
+) -> bool:
+    """The vmid/tag half of `topology.py`'s own `_pin_reason()` exclusion
+    predicate, duplicated rather than imported -- that name is private to
+    that module, and every sibling in this codebase already prefers a
+    small duplicate over reaching into another module's private names
+    (AGENTS.md section 5; see `optimize.py`'s `_movable_disks()` for the
+    same precedent). Only the vmid/tag half: section 9.2 step 3 says
+    "untagged for exclusion", not the disk/storage exclusion lists, which
+    a plan already accounts for by never proposing an excluded disk."""
+    tags_raw = str(resource.get("tags", ""))
+    tags = {t.strip() for t in tags_raw.replace(",", ";").split(";") if t.strip()}
+    return vmid in set(exclude.vmids) or bool(tags & set(exclude.tags))
+
+
+def _preflight(
+    client: PveClient, disk: Disk, move: ScheduledMove, exclude: ExcludeConfig
+) -> _PreflightResult:
     """Section 9.2's five re-checks, immediately before issuing one move.
 
     Re-fetches everything needed fresh -- the per-run topology cache
@@ -163,6 +183,11 @@ def _preflight(client: PveClient, disk: Disk, move: ScheduledMove) -> _Preflight
     if resource is None:
         return _PreflightResult(f"VM {disk.vmid} no longer found in cluster resources")
     node = str(resource.get("node"))
+    if _is_excluded_by_tag_or_vmid(resource, disk.vmid, exclude):
+        return _PreflightResult(
+            f"VM {disk.vmid} is now excluded (exclude.vmids or exclude.tags) since this plan "
+            "was built"
+        )
 
     try:
         config = client.vm_config(node, disk.vmid)
@@ -336,6 +361,7 @@ def _execute_one_move(
     min_free_bytes: int,
     largest_by_storage: dict[str, int],
     clock: Clock,
+    exclude: ExcludeConfig,
 ) -> MoveOutcome:
     def outcome(
         status: str,
@@ -355,7 +381,7 @@ def _execute_one_move(
             always_stop,
         )
 
-    preflight = _preflight(client, disk, move)
+    preflight = _preflight(client, disk, move, exclude)
     if preflight.mismatch is not None:
         return outcome("replan_needed", preflight.mismatch)
     assert (
@@ -410,6 +436,49 @@ def _execute_one_move(
     return outcome(status, detail, upid, orphans)
 
 
+def _confirm_decision(
+    move: ScheduledMove, confirm: ConfirmCallback | None
+) -> tuple[str, MoveOutcome | None]:
+    """Resolves one ``confirm`` callback answer to ``("quit", None)``,
+    ``("all", None)``, ``("proceed", None)`` or ``("skip", outcome)`` --
+    factored out of `execute_plan()`'s own loop purely to stay within
+    this project's flake8 complexity limit. Raises ``ValueError`` on
+    anything outside ``y``/``n``/``a``/``q``, exactly as before this was
+    extracted -- `cli._confirm_move_interactively()` never produces one,
+    since it retries bad input itself."""
+    decision = confirm(move) if confirm is not None else "n"
+    if decision == "q":
+        return "quit", None
+    if decision == "a":
+        return "all", None
+    if decision == "n":
+        return "skip", MoveOutcome(
+            move.disk_key, move.from_storage, move.to_storage, "skipped", "operator declined"
+        )
+    if decision == "y":
+        return "proceed", None
+    raise ValueError(f"confirm callback returned {decision!r}, expected y/n/a/q")
+
+
+def _drained_skip_outcome(move: ScheduledMove, drained_storages: set[str]) -> MoveOutcome | None:
+    """``None`` when neither of ``move``'s storages is draining this run;
+    otherwise the ``"skipped"`` outcome for it -- factored out of
+    `execute_plan()`'s own loop purely to stay within this project's
+    flake8 complexity limit (the same reason `optimize.py`'s constraint
+    builders are factored out)."""
+    if move.from_storage not in drained_storages and move.to_storage not in drained_storages:
+        return None
+    drained = move.from_storage if move.from_storage in drained_storages else move.to_storage
+    return MoveOutcome(
+        move.disk_key,
+        move.from_storage,
+        move.to_storage,
+        "skipped",
+        f"{drained!r} is still draining a saferemove wipe from earlier in this run "
+        "(section 9.3); re-evaluate on the next run",
+    )
+
+
 def execute_plan(
     client: PveClient,
     group: Group,
@@ -418,6 +487,7 @@ def execute_plan(
     execution: ExecutionConfig,
     min_free_bytes: int,
     mode: str,
+    exclude: ExcludeConfig,
     confirm: ConfirmCallback | None = None,
     clock: Clock = _REAL_CLOCK,
 ) -> ExecutionResult:
@@ -425,7 +495,11 @@ def execute_plan(
     -ordered plan. ``mode`` is ``"dry-run"``, ``"confirm"`` or ``"auto"``
     -- see the module docstring for what ``"auto"`` does and does not do
     here. ``confirm`` is required (and only ever called) in ``"confirm"``
-    mode; ``cli.py`` owns the actual prompting.
+    mode; ``cli.py`` owns the actual prompting. ``exclude`` is
+    ``config.exclude`` -- section 9.2 step 3's "confirm the VM is still
+    running and untagged for exclusion" re-check (REVIEW.md S-06), the
+    same vmid/tag predicate `topology.py`'s own (C2) pin already applies
+    at planning time.
     """
     disks_by_key = {d.key: d for d in group.disks}
     storages_by_id = {s.id: s for s in group.storages}
@@ -436,9 +510,24 @@ def execute_plan(
     largest_by_storage = {s.id: largest_disk_bytes(group.disks, s.id) for s in group.storages}
 
     outcomes: list[MoveOutcome] = []
+    # Section 9.3: a `source_release.timeout` "does not fail the run:
+    # mark the storage draining, exclude it as both source and target for
+    # the remainder of the run" (REVIEW.md S-05 -- an earlier revision
+    # tracked the largest-disk accounting for a draining target (above)
+    # but never actually excluded the storage from later moves in the
+    # same run). The storage that goes here is the *source* of a
+    # `"draining"` outcome -- the wipe holding a storage-level lock runs
+    # there, per section 9.3's own account of what makes a subsequent
+    # `move_disk` touching that storage fail.
+    drained_storages: set[str] = set()
     auto_confirmed = mode != "confirm"
     for move in schedule_result.order:
         disk = disks_by_key[move.disk_key]
+
+        drained_skip = _drained_skip_outcome(move, drained_storages)
+        if drained_skip is not None:
+            outcomes.append(drained_skip)
+            continue
 
         if mode == "dry-run":
             outcomes.append(
@@ -453,24 +542,15 @@ def execute_plan(
             continue
 
         if not auto_confirmed:
-            decision = confirm(move) if confirm is not None else "n"
-            if decision == "q":
+            verdict, skip_outcome = _confirm_decision(move, confirm)
+            if verdict == "quit":
                 return ExecutionResult(tuple(outcomes), True, "operator quit")
-            if decision == "a":
+            if verdict == "all":
                 auto_confirmed = True
-            elif decision == "n":
-                outcomes.append(
-                    MoveOutcome(
-                        move.disk_key,
-                        move.from_storage,
-                        move.to_storage,
-                        "skipped",
-                        "operator declined",
-                    )
-                )
+            elif verdict == "skip":
+                assert skip_outcome is not None
+                outcomes.append(skip_outcome)
                 continue
-            elif decision != "y":
-                raise ValueError(f"confirm callback returned {decision!r}, expected y/n/a/q")
 
         result = _execute_one_move(
             client,
@@ -482,6 +562,7 @@ def execute_plan(
             min_free_bytes,
             largest_by_storage,
             clock,
+            exclude,
         )
         outcomes.append(result)
 
@@ -494,6 +575,8 @@ def execute_plan(
             largest_by_storage[move.to_storage] = max(
                 largest_by_storage[move.to_storage], disk.size_bytes
             )
+            if result.status == "draining":
+                drained_storages.add(move.from_storage)
         elif result.status == "replan_needed":
             return ExecutionResult(tuple(outcomes), True, result.detail)
         elif result.status == "failed" and (result.always_stop or execution.abort_on_failure):

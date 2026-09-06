@@ -662,12 +662,22 @@ requires the *generalized* transient reserve invariant (section 8.1): several
 disks can land on one storage at once, and none of their sources release
 space until each individually completes.
 
+**Not yet effective in this build.** `apply`'s executor runs strictly
+sequentially, one move at a time, regardless of this setting — it belongs to
+`auto` mode's concurrency machinery (`IMPLEMENTATION_PLAN.md` section 12
+phase 8), not yet implemented. See `docs/manual/30-safety-and-status.md`.
+
 ### `execution.max_migrations_per_run`
 
 Integer `>= 1`, default `5`.
 
 A ceiling on how many moves one invocation executes, independent of how many
 the plan contains — the remainder waits for the next run.
+
+**Not yet effective in this build.** `apply` executes every move in the
+scheduled plan (subject to section 7.3's payback gate); this per-run cap is
+part of `auto` mode's not-yet-implemented safety rails (phase 8). See
+`docs/manual/30-safety-and-status.md`.
 
 ### `execution.max_concurrent_per_storage`
 
@@ -680,6 +690,10 @@ its simple single-move form. Raising it should be a deliberate act on a
 storage with real spare headroom — two moves off the same source also means
 two concurrent `saferemove` wipes sharing one throttle.
 
+**Not yet effective in this build**, for the same reason as
+`max_concurrent_migrations` above — there is no concurrent execution yet to
+cap. See `docs/manual/30-safety-and-status.md`.
+
 ### `execution.max_replans_per_run`
 
 Integer `>= 0`, default `3`.
@@ -689,6 +703,12 @@ from newly observed state (section 9.2) — a mismatch between the plan and
 reality (a VM live-migrated mid-plan, a lock appeared) is normal, but a
 cluster churning faster than the engine can plan is a condition for a human,
 not for indefinite retrying.
+
+**Not yet effective in this build.** `apply` detects the need to re-plan
+(`replan_needed`) and stops the group's run cleanly, but does not yet
+re-invoke the pipeline automatically — that loop, capped by this setting, is
+`cli.py`-level orchestration not implemented yet. See
+`docs/manual/28-apply.md` and `docs/manual/30-safety-and-status.md`.
 
 ### `execution.abort_on_failure`
 

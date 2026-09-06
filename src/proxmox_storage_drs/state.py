@@ -359,8 +359,12 @@ def with_recorded_cooldown(
 ) -> State:
     """Pure: merges new disk/storage cooldown timestamps into ``state``,
     keyed exactly as :func:`disk_state_key`/:func:`storage_state_key`
-    produce them. Not called by anything today -- see the module
-    docstring's note on cooldowns not yet being consumed."""
+    produce them. Called by `cli.py`'s `_handle_apply()` for every disk
+    and **both storage endpoints** of an executed move (section 6: "a
+    storage involved in a migration ... accepts no new incoming moves"
+    covers source and destination alike; REVIEW.md S-03) -- recording
+    both is independent of `heuristic.py`'s own *enforcement*, which
+    stays destination-only (see ``docs/internals/90-heuristic.md``)."""
     disk = {**state.cooldowns.disk, **(disk_keys or {})}
     storage = {**state.cooldowns.storage, **(storage_keys or {})}
     return replace(state, cooldowns=Cooldowns(disk=disk, storage=storage))

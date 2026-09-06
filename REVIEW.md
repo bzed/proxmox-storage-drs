@@ -54,6 +54,18 @@ extensions those modules needed. Two new findings (Q-01..Q-02) are identified, b
 suggested fix would have computed the wrong quantity), and the manual now documents the
 per-group Prometheus query multiplier for multi-group configs.
 
+A **ninth pass** (section 15) reviews phases 4-5: `schedule.py`, `payback.py` and the `plan`
+command. Six findings (R-01..R-06) are identified; **section 16** records how all six were
+resolved.
+
+A **tenth pass** (section 17) reviews the state/cooldown work and phases 6-7: `state.py`
+(section 11.2), the cooldown wiring, `optimize.py` (CP-SAT/CBC MILP backends) and `execute.py`
+(move execution, `apply`). Nine findings (S-01..S-09) are identified — two High: the CBC
+backend crashes on the pulp version Debian trixie actually ships (reproduced against 2.7.0;
+CI installs exactly that version and its CBC tests cannot pass), and `apply` executes plans
+that failed the section 7.3 payback acceptance test, including moves the hard per-move
+duration rule rejected. **Section 18** records how all nine were resolved.
+
 ---
 
 ## 0. Overall assessment
@@ -1725,6 +1737,432 @@ All six findings were real; all six are fixed, not refuted.
 As a side effect of R-01/R-02 together, `_render_plan_human()`/`_render_plan_json()` no longer take a `heuristic_results` parameter at all — everything they previously read from it (`.breakdown.utilization` for "after") is now read from the new, more correct `final_breakdowns` dict instead, and nothing else in either render function ever needed the raw `HeuristicResult`.
 
 Verification: `python3 -m pytest` — 317 passed, 1 skipped (`statsmodels` not installed), 98.68% coverage. `make check` clean (fmt, lint, typecheck, test, fixtures, docs-check — internals PDF rebuilt to 23 pages, manual PDF to 26).
+
+---
+
+## 17. Tenth-pass review — state, cooldowns, MILP backends (phase 6) and execution (phase 7)
+
+Reviewed commit range `2ad37a5..HEAD`: `de7deda` (the R-01..R-06 fixes, already recorded in
+section 16), `d0e9f2f` (`state.py`, section 11.2, drift history wired into `show-load`/`plan`),
+`a573855` (cooldown wiring: `state.py` queries, `topology.py`'s (C2) per-disk pin,
+`heuristic.py`'s per-storage target exclusion), `375d3a9` (`optimize.py`, phase 6: CP-SAT and
+CBC MILP backends, wired into `plan`), `c6760c9` (`execute.py`, phase 7: move execution,
+`apply` wiring). Roughly 5,500 inserted lines of source and tests across the five commits,
+~2,700 of them tests.
+
+The engineering quality remains high — the state-file locking design (and the
+rename-detaches-the-`flock` trap it documents and tests), the section 5.5 coefficient folding,
+the three-condition completion criterion and the injectable `Clock` are all better than the
+plan strictly demands. But this pass also found the two most serious implementation defects
+so far, and both are in the newest code: the CBC backend cannot run on the pulp version
+Debian trixie ships (the packaged solver path, §2.1), and `apply` ignores the payback
+acceptance test entirely.
+
+### 17.1 Verification run
+
+- Dev venv `python3 -m pytest`: **424 passed, 17 skipped** (ortools, pulp and statsmodels are
+  absent from the venv), **90% line coverage** — above the 85% floor.
+- `tests/fixtures/generate_expected.py --check`: OK. `sha256sum --check` on all three PDF
+  stamps: OK. (`make check`-equivalent for the local toolchain is green.)
+- **CI environment reproduced locally.** This host's system Python carries pulp **2.7.0** —
+  the same version Debian trixie packages (`python3-pulp 2.7.0+dfsg-4`, confirmed with
+  `rmadison`), which is also exactly what `.github/workflows/tests.yml` installs from apt in
+  its `debian:trixie` container. Running the suite with it: **24 failed, 408 passed** — every
+  CBC-parametrized test in `test_optimize.py` dies on the same `AttributeError` (S-01). The
+  CBC tests do *not* skip there: `cbc_available()` only checks that `import pulp` succeeds,
+  which it does.
+- **The CBC logic itself is sound.** In a throwaway venv with pulp **3.3.2**, the same tests
+  all pass — including both §14 fixture reproductions (β=0.25 three-move, β=0.50 two-move),
+  the `reserve-tradeoff` lexicographic-optimum test and the minmax/heuristic-agreement test.
+  The defect is purely library-version compatibility, not model logic.
+- Bisected pulp's releases by downloading and inspecting each wheel: `LpProblem.add_variable`
+  first exists in **pulp 3.3.1**; 3.3.0 and every earlier release (including 2.7.0) lack it.
+- `python3 -c "import pulp; ..."` on the system 2.7.0 confirms `LpProblem` exposes only the
+  camelCase `addVariable`/`addVariables`, and that `pulp.apis.coin_api` raises
+  `PulpSolverError` when the cbc binary cannot be executed (relevant to S-01's second half).
+
+### 17.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| S-01 | High | `optimize.py`, `pyproject.toml` | CBC backend calls `prob.add_variable()`, which needs pulp ≥ 3.3.1 — but the extra declares `pulp>=2.7` and the target platform packages 2.7.0, so the packaged solver path crashes; CI installs that version and its CBC tests cannot pass |
+| S-02 | High | `cli.py`, `execute.py` | `apply` executes the scheduled plan regardless of the §7.3 payback verdict — including individual moves the *hard* per-move duration rule rejected; §7.3's re-solve-with-doubled-β/γ retry is absent too |
+| S-03 | Medium | `cli.py`, `state.py` | the per-storage cooldown is recorded for the **destination** only, so a still-draining *source* storage is never protected — defeating the exact scenario §9.3's knob-sizing rule and `verify-storages`' own warning text describe |
+| S-04 | Medium | `optimize.py` | the MILP backends ignore `cooldown_storages` (heuristic-only enforcement); the module docstring's "cooldowns are inert today" justification went stale the moment phase 7 landed, and §5.5's "backends directly comparable" requirement is now violated |
+| S-05 | Medium | `execute.py` | §9.3's "mark the storage draining, exclude it as both source and target for the remainder of the run" is not implemented — a `draining` outcome changes nothing for later moves in the same run |
+| S-06 | Low | `execute.py` | §9.2's pre-flight does not re-check exclusion tags (step 3's "untagged for exclusion"); a VM tagged `no-drs` between planning and execution is still moved |
+| S-07 | Low | `optimize.py` | lexicographic stage 1 accepts a gapped incumbent as the reserve floor (CP-SAT `FEASIBLE`; CBC's gap-satisfied "Optimal"), weakening §5.3's "provably never traded" guarantee by up to `mip_gap`, and the two backends pin it differently (`==` vs `<=`) |
+| S-08 | Low | `docs/manual/10-configuration.md` | the four phase-8 knobs are documented as functional with no "not yet effective" caveat — the same pattern P-01/P-02 established as a finding |
+| S-09 | Low | `optimize.py` vs plan §5.5 | the plan's model-build-time assertions (non-zero integer coefficient wherever the unscaled weight is non-zero; objective magnitude < 2⁶²) are neither implemented nor removed from the plan; the docstring argues only against the *post-solve* half |
+
+### 17.3 S-01 — the CBC backend requires pulp ≥ 3.3.1 but targets trixie's 2.7.0
+
+**Severity:** High
+**Files:** `src/proxmox_storage_drs/optimize.py:517-531`, `pyproject.toml:37`,
+`docs/internals/91-optimize.md:80`, `IMPLEMENTATION_PLAN.md` §2.1
+
+`_cbc_feasibility_constraints()` builds every variable with `prob.add_variable(...)`, with a
+comment saying the direct `pulp.LpVariable(...)` constructor is "PuLP's v4 migration
+deprecates". Two facts make that choice wrong for this project:
+
+1. `LpProblem.add_variable` does not exist in pulp ≤ 3.3.0 — verified by wheel inspection
+   across 2.7.0, 2.8.0, 2.9.0, 3.0.0, 3.1.1, 3.2.0, 3.2.2, 3.3.0 (absent) and 3.3.1, 3.3.2
+   (present). The "v4 migration" is a *future* API; the present-tense deprecation direction
+   only applies to 3.3+.
+2. The deployment target packages **pulp 2.7.0** (`python3-pulp 2.7.0+dfsg-4` in trixie), and
+   §2.1 says plainly: "on a Debian install the MILP is solved by **CBC through
+   `python3-pulp`**". This is the packaged solver path.
+
+Consequences, all reproduced locally:
+
+- With pulp 2.7.0 installed, `_solve_cbc()` raises
+  `AttributeError: 'LpProblem' object has no attribute 'add_variable'. Did you mean: 'addVariable'?`
+  on the first variable — `solve()`'s "returns None, never raises" contract is violated, no
+  heuristic fallback happens (§13's "solver infeasible or timing out → fall back to the
+  heuristic" — a backend that *cannot construct its model* is at least that), and the whole
+  `plan`/`apply` invocation crashes with a traceback.
+- The test suite parametrizes every solve test over `cbc` with a skip condition of
+  `not cbc_available()`, and `cbc_available()` only checks `import pulp`. On trixie, pulp
+  imports — so the tests **run and fail**: 24 failures (17.1). `make check` in the dev venv is
+  green only because the venv installs neither solver (17 skips). The GitHub Actions
+  `debian:trixie` job installs `python3-pulp` from apt (this is precisely what the L-03 fix
+  added) and runs `python3 -m pytest` — in that deterministic environment the job cannot be
+  green on current `main` as committed (CI status was not directly observable from this
+  checkout, but the container, the apt version and the test command all are). This is exactly
+  the failure mode L-03 predicted in reverse: the local pip-or-nothing toolchain hid an
+  apt-version incompatibility.
+- `pyproject.toml`'s solver extra declares `pulp>=2.7`, so even a pip user following the
+  project's own constraint can resolve a version (2.7–3.3.0) that crashes.
+
+A second, smaller defect in the same function: `prob.solve()` is not wrapped for
+`pulp.PulpSolverError`. Debian splits the CBC binary into `coinor-cbc` (a separate package,
+`Recommends`, not `Depends`); a host with `python3-pulp` but without `coinor-cbc` hits
+`PulpSolverError("Pulp: cannot execute ...")` — again a raised exception where the module
+docstring promises `None` and §13 promises heuristic fallback.
+
+**Recommendation:** construct variables with `pulp.LpVariable(...)` directly (works on every
+version including 2.7.0 and 3.3.2; if the 3.3+ deprecation warnings are a concern, silence
+them explicitly rather than adopting an API the target platform cannot provide), or
+feature-detect `add_variable` with a fallback. Wrap `prob.solve()` in `except
+pulp.PulpSolverError → return None`. Then either raise the extra to the version actually
+required (`pulp>=3.3.1`, wrong for trixie) or — better — keep `>=2.7` and *prove* trixie
+compatibility by running the CBC tests in CI, which the fix makes pass. Also correct
+`91-optimize.md`'s claim that `add_variable` is "not the older constructor" in a way that
+implies availability, and re-examine the module docstring's "both backends were exercised for
+real during development" — true, but under pip's pulp 3.3+, which is not the packaged path
+the plan designates as primary.
+
+### 17.4 S-02 — `apply` executes plans that failed the payback acceptance test
+
+**Severity:** High
+**Files:** `src/proxmox_storage_drs/cli.py:1325-1358` (`_handle_apply`),
+`src/proxmox_storage_drs/execute.py:281-304`, `IMPLEMENTATION_PLAN.md` §7, §7.3, §9
+
+Section 7 is explicit that the payback rule is "a **hard acceptance test on the finished
+plan**, not merely a soft `γ` penalty, because a penalty can always be outweighed by a large
+enough imbalance term", and §7.3's per-move rules "**reject** individual migrations
+regardless of the aggregate test" (`duration_d > max_single_move_duration` → reject the
+move). §1 lists "a migration's own I/O cost must not exceed the imbalance it removes" as a
+goal-scope requirement.
+
+`_plan_group()` computes `payback_result` (the verdict, including `aggregate_ok` and
+`rejected_moves`) — and nothing ever consults it on the execution path. `_handle_apply`
+calls `execute_plan()` with `group_plan.schedule_result` whenever the gate said `act`, and
+`execute_plan()` walks `order` unconditionally. Concretely:
+
+- A plan that fails the aggregate economic test (benefit < `payback_ratio`·cost) is executed
+  in full in `apply --mode confirm` — the operator is prompted move by move with no
+  indication the tool's own §7.3 verdict was ✗, because the human/JSON report that *shows*
+  the verdict is rendered only after all groups have executed. The tool's answer to "why did
+  it move disks the payback test rejected" is, today, "it didn't check".
+- Worse, a move whose `duration_d` (mirror + wipe) exceeds `max_single_move_duration` is
+  listed in `rejected_moves` yet still sits in `schedule_result.order` and is issued to PVE.
+  `_wait_for_move_completion()`'s own docstring claims "a move that was accepted at planning
+  time already passed `migration.max_single_move_duration`" — nothing enforces that; the
+  claim is false. §7.3's hard rule is exactly the operational guard against a multi-day
+  wipe being started.
+- §7.3's prescribed response to aggregate failure — "re-solve with `β` and `γ` doubled and
+  retry, up to three times" — is implemented nowhere.
+
+No test covers a payback-failing plan reaching `execute_plan` (grep confirms; the apply tests
+cover prompts, declines, locks, failures, state writes — never the payback gate), so the gap
+is invisible to the suite. The reserve-override exemption is already handled correctly
+*inside* `evaluate_plan_payback` (a plan containing a reserve-resolving move passes the
+economic test, and the hard duration rule still applies) — which makes the missing
+enforcement the only thing between a rejected plan and production disks.
+
+**Recommendation:** in `_handle_apply`, before executing a group: drop moves in
+`rejected_moves` from the order (report them as refused per §7.3), and refuse to execute the
+remaining plan when `not aggregate_ok` (report; §7.3's re-solve loop is the follow-up, and
+until it exists, refusing is the correct conservative behavior — the reserve-override
+exemption already lives in `aggregate_ok`). At minimum, in confirm mode show the payback
+verdict *before* the first prompt, not in the post-execution report. `execute.py`'s
+docstring claim about planning-time duration filtering should become true by construction.
+
+### 17.5 S-03 — storage cooldown recorded for the destination only
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/cli.py:1388-1391`, `docs/manual/28-apply.md:114-118`,
+`state.py:362-363` (stale docstring), `IMPLEMENTATION_PLAN.md` §6, §9.3
+
+`_handle_apply` records a `cooldowns.storage` timestamp for `move.to_storage` only, with an
+inline justification ("a storage this run only moved disks away from is not a wear/churn
+concern the cooldown protects against") echoed by the manual. The plan disagrees twice:
+
+- §6: "a storage **involved in** a migration within `cooldown_per_storage` accepts no new
+  incoming moves" — a migration has two endpoints, and the phrase covers both.
+- §9.3's sizing rule is written *specifically about sources*: "`gates.cooldown_per_storage`
+  must exceed the expected wipe time for that storage's largest disk, or the next run will
+  plan moves onto a storage that is still draining". The wipe runs on the **source**. With
+  destination-only recording, no value of `cooldown_per_storage` — however large — can ever
+  protect a draining source, because sources never get a timestamp. The same inversion
+  affects §11.1's validation warning and `verify-storages`' own message ("the next run may
+  plan onto a still-draining storage"), which advertises a mitigation the implementation
+  cannot deliver for the storage the warning is about.
+
+The code comment (and `90-heuristic.md`) conflates two different statements: "the cooldown
+excludes a storage as a *destination*, never as a source" (correct — it is about how the
+cooldown is *enforced* against candidate moves) and "only destinations *get* a cooldown" (not
+what §6/§9.3 say). On a saferemove cluster this is the difference between the next run
+(15-30 min later, per §2.1's cadence) excluding a storage that will be zeroing a LUN for
+44 hours, and planning a move onto it that then fails against the storage-level lock §9.3
+warns about. Note also `state.with_recorded_cooldown`'s docstring still says "Not called by
+anything today" — stale since `c6760c9`.
+
+**Recommendation:** record timestamps for both endpoints (`from_storage` and `to_storage`);
+keep the destination-only *exclusion* semantics in the heuristic/MILP exactly as they are.
+Update `28-apply.md`, `15-state.md`, and the two stale docstrings. If the project genuinely
+wants destination-only recording, that is a defensible policy — but then §6, §9.3, §11.1 and
+the `verify-storages` message must be rewritten to stop promising source protection, in the
+same commit (AGENTS.md §7.6).
+
+### 17.6 S-04 — the MILP backends ignore `cooldown_storages`
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/optimize.py:48-65, 210-215`, `schedule.py:44-46`
+
+`solve()` accepts `cooldown_storages` "for interface symmetry" and logs a warning when it is
+non-empty, but neither model excludes those storages as targets. The module docstring
+justifies the gap with "Cooldowns are inert today anyway (nothing calls
+`state.with_recorded_cooldown()` yet)" — true when phase 6 landed, **false since phase 7**:
+`apply` now writes cooldown timestamps (S-03). The stated plan for the hard-fix
+(a big-M penalty or per-solve feasibility check) is a real difficulty, but the consequence
+is no longer hypothetical:
+
+- After any `apply` run that executed a move, the next `plan`/`apply` within
+  `cooldown_per_storage` — the exact scenario the cooldown exists for — will, whenever
+  ortools or pulp is importable, solve with cpsat/cbc (the default `solver.backend: auto`
+  cascades to them first) and may assign disks onto the cooling/draining storage. The
+  heuristic would not. §5.5's "the heuristic must use the same feasibility and objective
+  functions as the MILP path so the two backends are directly comparable" is violated —
+  the backends can now return different optima for the same input, which is precisely the
+  class of divergence that requirement exists to prevent.
+- Nothing downstream catches it: `schedule.py` documents that it schedules "as if no
+  cooldown applies", so §8.1's `concurrency_ok` condition 5 is unimplemented there too, and
+  the executor's live transient check only guards *capacity*, not the wear/churn and
+  storage-lock reasons the cooldown encodes.
+
+**Recommendation:** for stage 2, hard-fix `x_{d,s} = 0` for `s ∈ cooldown_storages` *and*
+re-run stage 1 (or verify stage 1's optimum still stands) so the lexicographic invariant is
+not invalidated — or, simpler and matching the heuristic's own semantics, filter cooldown
+storages out of the *candidate target set* for movable disks in both stages and treat the
+current assignment (which never violates its own feasibility) as always available, exactly
+as `_descend()` does. Either way, delete the "inert today" sentence: it is now misleading in
+the direction that matters.
+
+### 17.7 S-05 — a drained storage is not excluded for the remainder of the run
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/execute.py:488-502`, `docs/internals/92-execute.md:55-73`
+
+§9.3, on a `source_release` timeout: "do not fail the run: mark the storage `draining`,
+**exclude it as both source and target for the remainder of the run**, report it". The
+implementation does the "mark" (`status="draining"`, reported per-move) and the "do not
+fail" (draining is treated like moved), but not the exclusion: `execute_plan()` simply
+continues to the next move with nothing changed. A subsequent move in the same run whose
+source or target is the drained storage proceeds — into the storage-level lock §9.3 says the
+wipe holds, i.e. it either queues behind a potentially day-long wipe (the task-status loop
+is unbounded) or fails, aborting the run under `abort_on_failure`. The live transient check
+only partially protects the target direction (the un-wiped volume still counts in live
+`used`), and does nothing for the source direction.
+
+`92-execute.md` presents the draining state as fully handled ("the next run will see the
+storage as it actually is") without mentioning that the *current* run keeps going — so this
+is not an honestly-documented phase gap like the re-plan protocol, but an unimplemented
+sentence of the section the module says it implements.
+
+**Recommendation:** track drained storages in `execute_plan()`; skip (and report as skipped,
+with the draining storage named) any later move whose `from_storage` or `to_storage` is in
+that set, exactly like a cooldown skip. Cheap, self-contained, and it removes the one way
+this run can still shoot itself in the foot after correctly detecting the wipe.
+
+### 17.8 S-06 — pre-flight does not re-check exclusion tags
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/execute.py:155-195`, `IMPLEMENTATION_PLAN.md` §9.2 step 3
+
+§9.2 step 3: "confirm the VM is still running **and untagged for exclusion**". `_preflight()`
+re-checks existence, node, disk placement, running state, snapshots and lock — but not
+`exclude.vmids`/tags/`no-drs`. The `resource` dict it already fetched carries `tags`, and
+the config is in scope at the call site, so this is a two-line check. A VM tagged `no-drs`
+between planning and execution is moved anyway. Low because the window is minutes and the
+operator configured the exclusion at planning time, but §9.2 lists it as one of the five
+re-checks and four of the five are implemented.
+
+**Recommendation:** pass the exclusion predicate into `execute_plan()`/`_preflight()` (or
+pre-resolve the excluded vmid set) and return `replan_needed` on a tag match, mirroring the
+snapshot case.
+
+### 17.9 S-07 — lexicographic stage 1 may stop at the gap, and the backends pin it differently
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/optimize.py:456-468` (CP-SAT), `654-672` (CBC)
+
+The whole strength of the lexicographic solve (§5.3 option 1) is that stage 1's minimum is
+*proven*, so "Σ r_s > 0 provably means physically impossible". Both implementations
+compromise that proof in a different way:
+
+- CP-SAT stage 1 accepts `OPTIMAL` **or** `FEASIBLE`, with `relative_gap_limit = mip_gap`
+  (default 0.02). On `FEASIBLE`, `min_slack` is an incumbent, not the minimum — and stage 2
+  pins `Σ r_s == min_slack`, which both allows trading up to the gap *and forbids finding
+  less slack than the incumbent.
+- CBC's `LpStatus == "Optimal"` does not distinguish a proven optimum from a search that
+  stopped because `gapRel` was satisfied; its stage 2 uses `<= min_slack + 1e-6` —
+  monotone-safe (cannot be worse than the incumbent) but still permits up-to-gap shortfall.
+
+In practice stage 1 is a near-feasibility problem that closes instantly on realistic groups,
+so this needs a big group, a positive slack and a slow solve to bite. But the code
+structurally accepts the gapped case without distinguishing it, the two backends behave
+differently when it happens (another §5.5 comparability dent), and the reported
+"unfixable shortfall" could overstate what is physically possible.
+
+**Recommendation:** run stage 1 with the gap forced to 0 (it is the cheap stage), or require
+`status1 == OPTIMAL` and fall back to the heuristic otherwise; use `<=` rather than `==` for
+stage 2 in both backends so stage 2 can only improve on the stage-1 value.
+
+### 17.10 S-08 — phase-8 knobs documented as functional in the configuration reference
+
+**Severity:** Low
+**Files:** `docs/manual/10-configuration.md:656-697`, `28-apply.md`, `30-safety-and-status.md`
+
+`execution.max_concurrent_migrations`, `max_migrations_per_run`,
+`max_concurrent_per_storage` and `max_replans_per_run` each have a full configuration-reference
+entry describing behaviour ("How many moves may be in flight...", "A ceiling on how many
+moves one invocation executes...", "Caps concurrent moves touching one storage...", "A cap
+on how many times one run may abandon its current plan and re-plan") with no hint that none
+of it exists yet: the executor is strictly sequential, has no per-run cap, and never
+re-plans. `28-apply.md` and the `30-safety-and-status.md` table *are* honest ("Its own
+safety rails ... are phase 8"; "re-invoking the whole pipeline automatically ... is not
+implemented yet") — but the reference page is where an operator looks a knob up, and it is
+the exact P-01/P-02 pattern this review has twice established as a finding: a knob
+documented as doing something the code does not do. The cross-reference tests only check
+existence, not effect.
+
+**Recommendation:** add the one-line "not yet effective in this build; the executor is
+strictly sequential / re-planning is not implemented" caveat to each of the four entries in
+`10-configuration.md` (and remove the caveat when phase 8 lands, in the same commit as the
+behaviour).
+
+### 17.11 S-09 — §5.5's model-build-time assertions are neither implemented nor removed
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/optimize.py:69-78`, `IMPLEMENTATION_PLAN.md` §5.5
+
+§5.5: "Assert at model-build time that every coefficient is a non-zero integer wherever its
+unscaled weight is non-zero — the regression test for the γ trap above — and that the
+maximum objective magnitude is below 2⁶²." The code has neither assertion, and the plan was
+not updated. The module docstring rebuts only the *other* assertion of that paragraph (the
+post-solve floating-point agreement check, arguing `evaluate_assignment()` is a sharper
+version — a fair argument). It does not address the build-time pair. Notably, the code's
+`if gamma_scaled: terms.append(...)` pattern *silently drops* a zero coefficient — the exact
+failure shape the demanded assertion exists to catch; it is unreachable at the default
+weights after per-disk folding (a coefficient rounds to zero only for a sub-kilobyte disk),
+but the plan's text is a requirement, and "practically can't happen" is what assertions are
+for. Per AGENTS.md §7.6, either implement them or fix the plan in the same commit.
+
+**Recommendation:** a three-line guard in `_cpsat_objective_terms` (raise/log when a
+computed coefficient rounds to zero under a non-zero weight, and when any term's maximum
+magnitude exceeds 2⁶²) costs nothing and turns §5.5's regression test back into code.
+Alternatively, rewrite §5.5's sentence to delegate the guarantee to the shared
+`evaluate_assignment()` recomputation — but then say so in the plan.
+
+### 17.12 What this pass confirms
+
+- **state.py's locking is genuinely well designed.** `flock()` on the file itself as the
+  mechanism, the in-JSON `lock` field demoted to descriptive metadata (which dissolves the
+  stale-lock-recovery question rather than answering it), and — the subtle one —
+  `_write_state_to_locked_fd()`'s discovery that `save_state_atomic()`'s rename would
+  *replace the inode the lock was taken on*, documented with the test that caught it
+  (`test_a_second_acquire_while_the_first_is_held_returns_none`). Reads correctly skip
+  locking because atomic writes make torn reads impossible. Read-degrades/write-raises is a
+  coherent policy and consistently applied.
+- **The cooldown wiring follows the plan's structure**: disk cooldowns as a (C2) pin in
+  `topology.py` (reported with a human reason, in the plan's own priority order), storage
+  cooldowns as a target exclusion in the heuristic, cooldown `<= 0` meaning "disabled"
+  rather than "always cooling". The `_repair()`-ignores-cooldowns choice is a documented,
+  defensible extension of the reserve-override principle.
+- **optimize.py's model is a faithful transcription of §5.3-§5.5**: (C1)-(C6) all present,
+  including the `affinity_counts_pinned_disks` variants of (C3) with the `y==1` forcing for
+  pinned-of-VM disks; pinned disks counted in `Σ z·x`, `Z_s` and (C5) exactly as §3.6
+  demands; warm start from the current assignment; the γ coefficient folded per-disk
+  (`round(γ·W·K·z_d^TiB)`, the N-01 fix) rather than factored; `a_{d,s} = round(K·ℓ_d/c_s)`
+  folding; the reserve factor's own fixed-point scale — a wrinkle the plan did not name and
+  the implementation had to invent, correctly.
+- **The shared-objective architecture pays off**: both MILP backends hand their assignment
+  to `heuristic.evaluate_assignment()` for the reported numbers, so a modelling mistake can
+  choose a worse plan but cannot mis-report one — and the fixture cross-checks (which pass
+  on pulp 3.3.2, 17.1) are exactly the sharper guard the docstring claims.
+- **execute.py's completion criterion, lock waiting and orphan handling match §9.3**: three
+  conditions, open-ended lock set never whitelisted, orphans reported never deleted, the
+  KiB/s conversion at the one call site, pre-flight re-fetches genuinely bypassing all
+  caching (PveClient has none). The injectable `Clock` lets every wait loop's timeout
+  arithmetic be tested without real sleeps, and the 30 execute tests use it.
+- **`apply`'s state bookkeeping is right**: lock-first quiet-exit-0, `last_balance`/
+  cooldowns written only after executed moves, `--mode auto` refused outright rather than
+  run without its rails, `dry-run` issuing zero API calls (tested).
+
+### 17.13 Assessment
+
+The state, cooldown and executor work is careful and the MILP model itself is correct —
+proven against both fixtures once the right pulp is present. But this is the first pass
+whose findings include defects that make the tool *crash* or *act against its own safety
+rules* rather than merely omit a feature: S-01 breaks the primary packaged solver path on
+the target platform (and CI's own trixie job cannot be green with it in), and S-02 executes
+plans §7.3 explicitly rejects — with the hard per-move duration rule, the one §7.3 calls an
+operational limit rather than an economic one, as the sharpest instance. S-03/S-04/S-05 all
+weaken the same protection from different directions: the cooldown/draining machinery that
+§9.3 exists to keep a wiping storage out of trouble has, as implemented, a write-side gap
+(S-03), a solver-side gap (S-04) and an executor-side gap (S-05). Fixing S-01 and S-02
+should precede any further feature work; S-03..S-05 belong in the same fix series, since
+each is small and they compose into one story — "a storage that is draining must be left
+alone" — that the plan states three times and the implementation currently honours zero
+times end to end.
+
+---
+
+## 18. Resolution of tenth-pass findings (S-01..S-09)
+
+All nine findings were real; all nine are fixed, not refuted.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| S-01 | Resolved | Every MILP variable in both backends is now built via a new `_lp_variable()` helper wrapping `pulp.LpVariable(...)` directly (not `prob.add_variable(...)`, PuLP v4's replacement, absent before pulp 3.3.1), with the resulting v4-migration `DeprecationWarning` suppressed explicitly via `warnings.catch_warnings()` rather than adopting an API the packaged trixie version (`python3-pulp` 2.7.0) cannot provide. `_pulp_solve()` also wraps `prob.solve()` in `except pulp.PulpSolverError → None`, so a `python3-pulp` install without `coinor-cbc` degrades the same way an unimportable library does, never a bare traceback. Reproduced and verified against a throwaway venv pinned to pulp 2.7.0 (the exact version `rmadison`/CI's `debian:trixie` container installs): all CBC `test_optimize.py` cases pass; also re-verified against pulp 3.3.2 to confirm no regression there. `docs/internals/91-optimize.md` and the module docstring updated; the `pulp>=2.7` extra constraint is unchanged (now actually true, not merely declared). |
+| S-02 | Resolved | New `cli._apply_payback_gate()`: a move in `payback_result.rejected_moves` (the hard per-move duration rule) is dropped from the order and reported `"skipped"` ("refused: exceeds migration.max_single_move_duration...") without ever reaching `execute_plan()`; when `not payback_result.aggregate_ok`, the *whole* group's remaining plan is refused the same way and `execute_plan()` is never called at all, issuing zero API calls, same as `dry-run`. `_handle_apply()` also prints the group's payback lines once, before the first `confirm` prompt, not only in the post-run report. `_render_group_plan_human()`'s move-line lookup switched from positional indexing to a `disk_key`-keyed dict, since a refusal can make `ExecutionResult.outcomes` a reordered subset of `schedule_result.order`. Six new `test_cli.py` cases cover: an individually-rejected move refused with `execute_plan` monkeypatched to raise on any call; a plan failing the aggregate test refused the same way; the payback preview appearing before the first prompt. |
+| S-03 | Resolved | `_handle_apply()` now records a `gates.cooldown_per_storage` timestamp for **both** of an executed move's storages, source and destination — section 6's "involved in a migration" covers both, and section 9.3's sizing rule is specifically about protecting a still-draining *source*. `heuristic.py`'s own *enforcement* is untouched (destination-only exclusion, per `docs/internals/90-heuristic.md`) — this was a recording gap, not an enforcement one. `state.with_recorded_cooldown()`'s stale "not called by anything today" docstring, and the equivalent claims in `docs/manual/28-apply.md`/`docs/internals/92-execute.md`, are corrected. `test_apply_records_balance_and_cooldowns_after_an_executed_move` now asserts both storages get a cooldown, not just the destination. |
+| S-04 | Resolved | Both `_cpsat_feasibility_constraints()` and `_cbc_feasibility_constraints()` now take `cooldown_storages` and add `x_{d,s} = 0` for every movable disk `d` and cooldown storage `s` that is not `d`'s current storage — applied identically in both lexicographic stages, matching `heuristic._descend()`'s own destination-only exclusion. `solve()`'s "not enforced yet" warning is removed; the module docstring's bullet is rewritten to describe what *is* now enforced and the one thing deliberately not replicated (`_repair()`'s reserve-override exemption from the same cooldown — a narrower, documented gap, not the original all-or-nothing one). New tests mirror `test_heuristic.py`'s own cooldown pair exactly (`test_solve_excludes_a_cooldown_storage_as_a_target_for_a_movable_disk`, `test_solve_still_allows_a_disk_to_move_away_from_a_cooldown_storage`), parametrized over both backends and verified against real `ortools`/pulp 2.7.0 installs. |
+| S-05 | Resolved | `execute_plan()` now tracks a `drained_storages` set, adding a move's `from_storage` whenever its outcome is `"draining"`; `_drained_skip_outcome()` (factored out to stay within the flake8 complexity limit) skips — with zero API calls — any later move in the same run whose source or target is in that set, reporting it plainly rather than letting it queue behind or fail against the storage-level lock section 9.3 describes. Two new tests construct a two-move run where the first move drains a storage and assert the second (as source, then as target) is skipped without a single additional API call. |
+| S-06 | Resolved | `_preflight()` takes a new `exclude: ExcludeConfig` parameter and re-checks `exclude.vmids`/`exclude.tags` via a new `_is_excluded_by_tag_or_vmid()` (a small duplicate of `topology.py`'s own private predicate, matching this codebase's established preference over reaching into another module's private name) — a VM tagged for exclusion (or added to `exclude.vmids`) between planning and execution now stops that move with `replan_needed` instead of moving it anyway. `execute_plan()`/`cli._apply_payback_gate()` thread the parameter through; two new tests cover the tag and vmid cases. |
+| S-07 | Resolved | Stage 1 in both backends now forces its own solver gap to exactly `0` regardless of the configured `solver.mip_gap` (which now applies only to stage 2's real objective) — CP-SAT's stage 1 requires `status1 == OPTIMAL` (never accepts `FEASIBLE`), and CBC's stage 1 uses a separate `pulp.COIN_CMD(gapRel=0.0)`, since PuLP's own `LpStatus` string cannot otherwise distinguish a proven optimum from a search that merely satisfied `gapRel`. Stage 2's slack-pinning constraint changed from `==` to `<=` in both backends — monotone-safe, and equivalent to `==` now that stage 1 is exact. New test `test_stage_one_reserve_floor_ignores_a_generous_mip_gap` calls `solve()` directly (bypassing the test helper's hardcoded `mip_gap=0.0`) with `mip_gap=0.5` against the `reserve-tradeoff` fixture and asserts neither backend trades the reserve floor away; verified against real `ortools`/pulp 2.7.0. |
+| S-08 | Resolved | Added a one-line "**Not yet effective in this build**" caveat, naming the phase-8 dependency and cross-referencing `docs/manual/30-safety-and-status.md`, to each of `execution.max_concurrent_migrations`, `max_migrations_per_run`, `max_concurrent_per_storage` and `max_replans_per_run` in `docs/manual/10-configuration.md`. |
+| S-09 | Resolved | `_cpsat_objective_terms()` now calls two new assertions: `_assert_nonzero_when_weighted()` (raises if a non-zero configured weight's rounded, scaled coefficient collapsed to `0` — the exact γ-trap shape the `if gamma_scaled:` guard would otherwise silently absorb) for `beta_scaled`, `kappa_scaled`, `alpha_scaled` and every disk's `gamma_scaled`; and `_assert_objective_magnitude_within_int64()` (a coarse, deliberately conservative worst-case sum of every term, asserted below `2**62`, an order of magnitude under CP-SAT's own `2**63-1` domain). Both are CP-SAT-only, matching that this is specifically an integer-coefficient-discipline guard CBC's continuous model has no analogous need for. New direct unit tests for both helpers plus an end-to-end `test_gamma_trap_assertion_fires_end_to_end_for_a_sub_kilobyte_disk` (a synthetic 1.1×10⁻¹⁰ TiB disk, verified to actually trip the guard against a real `ortools` install), and the module docstring's bullet on the plan's assertion paragraph now names both as implemented rather than only rebutting the post-solve one. |
+
+Verification: dev venv `python3 -m pytest` — 435 passed, 24 skipped (ortools/pulp/statsmodels
+absent), 89.57% coverage. Every backend-parametrized new/changed test independently re-run
+against a throwaway venv pinned to pulp **2.7.0** (the exact Debian trixie/CI version S-01's
+own finding was about) and again against a separate venv with `ortools` installed (no working
+CP-SAT venv existed from the ninth-pass review) — all pass under both, not merely under the
+pip-resolved newer pulp the ninth-pass verification used. `make check` clean (fmt, lint,
+typecheck, test, fixtures, docs-check — internals PDF rebuilt to 35 pages, manual PDF to 32).
 
 ---
 
