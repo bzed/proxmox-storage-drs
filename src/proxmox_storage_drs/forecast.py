@@ -29,7 +29,7 @@ import logging
 import statistics
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Protocol, Sequence
+from typing import Iterable, Mapping, Protocol, Sequence
 
 from proxmox_storage_drs.config import ForecastConfig
 
@@ -64,6 +64,29 @@ class Forecaster(Protocol):
     def predict(self, series: TimeSeries, horizon: timedelta) -> Forecast:
         """Return a point estimate and an upper bound for ``horizon``."""
         ...  # pragma: no cover - Protocol method body is never executed
+
+
+def storage_upper_bound(
+    forecaster: Forecaster,
+    disk_load_series: Mapping[str, TimeSeries],
+    disk_keys: Iterable[str],
+    horizon: timedelta,
+) -> float:
+    """Section 10.1: ``L̂_s(Δ) = Σ_{d : x_{d,s}=1} û_d(Δ)`` -- every given
+    disk's own upper bound, forecast independently from its own series,
+    summed. Summing upper bounds (rather than forecasting the storage's
+    own already-summed series directly) is deliberately conservative: it
+    assumes every disk peaks together, the right direction for a guard
+    whose failure mode is starting a mirror onto an already-busy array
+    (section 10.1's own words). A ``disk_keys`` entry missing from
+    ``disk_load_series`` (no data fetched for it at all) forecasts an
+    empty series -- every :class:`Forecaster` already returns a zero
+    :class:`Forecast` for that, per its own docstring, so this never
+    raises a ``KeyError`` for a disk this run simply has no history for
+    yet."""
+    return sum(
+        forecaster.predict(disk_load_series.get(key, ()), horizon).upper_bound for key in disk_keys
+    )
 
 
 def _quantile(values: Sequence[float], q: float) -> float:

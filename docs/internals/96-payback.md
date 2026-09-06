@@ -60,6 +60,47 @@ within the limit and rejected (correctly, via the hard rule, not the
 economic one) when a slow `saferemove` wipe pushes it over
 `max_single_move_duration`.
 
+## The section 7.3 saturation guard: `compute_move_cost()`'s optional `target`
+
+`compute_move_cost()` stays pure (the module docstring's own promise:
+"nothing fetches anything") by taking the guard's inputs already
+computed, rather than fetching a forecast itself: `target`, and
+`l_hat_src`/`l_hat_dst` — the caller's own already-computed
+`L_hat_s(duration_mirror)` for each endpoint
+(`forecast.storage_upper_bound()`, section 10.1, summed over the disks
+*currently* resident on that storage — not the moving disk's own
+hypothetical arrival, since during mirroring it is still served from
+`src`, and its mirror-write traffic to `dst` is exactly what the
+`ω_dst` charge below already accounts for separately). Left at their
+defaults (`target=None`, both `0.0`) the check is simply inactive — every
+call site written before this existed, and `cli.py`'s own `dry-run`/
+`plan` paths that have not been updated to compute a forecast, keep
+working unchanged.
+
+`mirror_duration_seconds()` is `compute_move_cost()`'s own
+`duration_mirror_d` arithmetic, factored out so a caller can learn it
+*before* calling `compute_move_cost()` — a genuine ordering dependency:
+the guard's forecast horizon is this move's own mirror duration, but
+`compute_move_cost()` is also what turns that forecast into the
+`saturation_deferred` verdict. A caller wanting the check active must:
+call `mirror_duration_seconds()`, use it as the horizon for
+`forecast.storage_upper_bound()` against each endpoint's own resident
+disks, then call `compute_move_cost()` with the results.
+
+`_saturation_deferred()` charges `migration.source_load_weight`/
+`target_load_weight` (`ω_src`/`ω_dst`) on top of each endpoint's own
+`l_hat`, matching section 7.3's `ω_role` table for the mirroring state —
+the same two config values `compute_move_cost()`'s own cost formula
+already uses (AGENTS.md section 5: no second pair of weights invented
+for this). `MoveCost.saturation_deferred`/`PaybackResult.deferred_moves`
+mirror `exceeds_max_duration`/`rejected_moves`'s existing shape exactly,
+but are kept as distinct fields — section 7.3 itself draws the same
+distinction ("reject the move" vs. "defer the move to a later run"), and
+a report should be able to say which of the two happened, one hard and
+always active, the other best-effort and silently inactive wherever
+`saturation_load` is unset. `PaybackResult.accepted` now requires
+neither being non-empty.
+
 ## What this pass deliberately does not do
 
 - **The 3-retry re-solve-with-doubled-`beta`/`gamma` loop** (section 7.3)
@@ -75,17 +116,18 @@ economic one) when a slow `saferemove` wipe pushes it over
   (`MoveCost.exceeds_max_duration`, `PaybackResult.rejected_moves`) — the
   same "report, never force" choice `schedule.py`'s deadlock reporting
   already makes for an unschedulable move.
-- **The section 7.3 saturation-ceiling defer check**
-  (`L_during(s) <= saturation_ceiling * N_s`). It needs the forecaster's
-  upper bound over a horizon equal to a specific move's own duration,
-  which `forecast.py`'s `Forecaster` protocol does not expose (it answers
-  for `window.lookback` only); and no group in this project's own
-  dogfooding cluster has `storages[].saturation_load` set, which the plan
-  itself says makes this check's absence "fully supported... loses only
-  this one advisory check." `max_single_move_duration` (implemented) and
-  the transient reserve invariant (`schedule.py`, already enforced before
-  a move is ever scheduled) are the two bounds section 7.3 calls "always
-  active"; this deferred one is explicitly the best-effort extra.
+- **The section 7.3 saturation-ceiling defer check beyond its mirroring
+  -phase reading.** `compute_move_cost()` now implements `L_during(s) <=
+  saturation_ceiling * N_s` for each endpoint (see the new section
+  below), but only at the mirroring-phase horizon the section's own
+  header names ("push either endpoint above ... during *the mirror*") —
+  not a second, separate check for the *draining* phase (`ω_wipe` over
+  `duration_wipe_seconds`), which the full generalized in-flight-set
+  model implies but which needs `schedule.py` to reason about overlapping
+  moves, something it does not do (`95-schedule.md`). `N_s` unset on a
+  storage still skips the check for that endpoint entirely, exactly as
+  the plan's own words allow ("fully supported... loses only this one
+  advisory check").
 
 ## Wired into `plan`, not yet into `apply`
 
