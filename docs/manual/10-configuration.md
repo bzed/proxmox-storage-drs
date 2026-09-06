@@ -427,7 +427,9 @@ Fraction, default `0.20`.
 
 The minimum relative spread across a group's storages before a plan is
 actually built. A group under this threshold is left alone even if it has
-drifted.
+drifted. Also, unrelatedly, the section 10.2 backtest error ceiling a
+non-`quantile` `forecast.model` must stay within to drive the section 7.3
+saturation guard — see `forecast.model` above.
 
 ### `gates.cooldown_per_disk`
 
@@ -876,12 +878,27 @@ and `holt_winters` need more history than the decision window alone — see
 below — and `pve-storage-drs` refuses to start if `window.lookback` (or your
 Prometheus retention) cannot supply it, rather than silently falling back.
 
+**Backtest-validated before use.** Only when the section 7.3 saturation
+guard is actually active (some `groups[].storages[].saturation_load` is
+set): a `seasonal_naive`/`holt_winters` model is fit on the older half of
+its own recent history and checked against what actually happened in the
+newer half, once per group, before it is trusted for that run. A model
+that misses by more than `gates.imbalance_threshold` — or that does not
+yet have enough history to backtest at all — falls back to `quantile` for
+that group's saturation guard this run, logged at warning
+(`IMPLEMENTATION_PLAN.md` section 10.2). `quantile` itself is never
+backtested; there is nothing to validate and nothing more conservative to
+fall back to.
+
 ### `forecast.seasonal_lookback_days`
 
 Days, default `7`.
 
 History `seasonal_naive` needs: same-hour-of-day samples across this many
-days. `0` disables `seasonal_naive` (falls back to `quantile`, logged).
+days. `0` does not disable the model or fall back to anything — it simply
+stops requiring history beyond `window.lookback`, which for a lookback
+under 24h can leave no same-hour-of-day sample to match at all (predicting
+`0.0`, not a fallback).
 
 ### `forecast.holt_winters.seasonal_periods`
 

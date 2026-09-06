@@ -322,3 +322,91 @@ def build_forecaster(
     raise ValueError(
         f"unknown forecast.model {forecast.model!r}"
     )  # pragma: no cover - schema-guarded
+
+
+# --------------------------------------------------------------- backtest gate
+#
+# Section 10.2/phase 9: "validate by backtesting: fit on [t-2T, t-T],
+# predict [t-T, t], compare against actual. Refuse to let a model whose
+# backtest error exceeds the imbalance threshold drive migrations." This
+# is a one-time-per-group gate on *which forecaster object to use at
+# all* -- distinct from (and composable with) HoltWintersForecaster's own
+# per-call "too few samples/statsmodels missing" fallback inside
+# predict() itself, which answers a different question (can this model
+# even run right now) from the one here (has this model actually been
+# accurate). `quantile` is never backtested -- it does no fitting at all,
+# so there is nothing to validate and nothing more conservative to fall
+# back to.
+
+
+def group_aggregate_series(disk_series: Mapping[str, TimeSeries]) -> TimeSeries:
+    """Sum every disk's own series into one group-aggregate series, at the
+    union of every timestamp seen across all of them (a timestamp missing
+    from one disk's own series contributes 0 for it, the same "absence
+    means no I/O" convention :func:`~proxmox_storage_drs.loadmodel._blend_loads`
+    already uses). The backtest gate below validates ``forecast.model``
+    itself, once per group, against this aggregate -- not once per disk
+    -- because the model is a single, deployment-wide configuration
+    choice, never something that could differ disk by disk."""
+    per_disk_lookup = {key: dict(series) for key, series in disk_series.items()}
+    timestamps: set[float] = set()
+    for series in disk_series.values():
+        timestamps.update(ts for ts, _v in series)
+    return tuple(
+        (ts, sum(lookup.get(ts, 0.0) for lookup in per_disk_lookup.values()))
+        for ts in sorted(timestamps)
+    )
+
+
+def backtest_error(
+    forecaster: Forecaster, series: TimeSeries, now_epoch_seconds: float, window_seconds: float
+) -> float | None:
+    """Section 10.2's backtest: fit ``forecaster`` on
+    ``[now-2*window, now-window)``, predict ``window`` ahead, and compare
+    that single point estimate against the *actual* mean observed over
+    ``[now-window, now]`` -- a relative error, so it is directly
+    comparable against ``gates.imbalance_threshold`` (both fractions).
+    ``window_seconds`` is the caller's own choice (``window.lookback_seconds``,
+    the same "decision window" section 10.1 already ties every forecaster
+    to for its point estimate).
+
+    Returns ``None`` when ``series`` does not cover a full ``2*window``
+    of history to split into two non-empty halves at all -- "not yet
+    validated" is treated by the caller exactly like "failed validation"
+    (fall back), matching :class:`HoltWintersForecaster`'s own existing
+    "not enough data yet -> fall back" precedent rather than giving a
+    fresh deployment's still-unvalidated model a free pass.
+
+    The relative error's denominator is ``actual`` normally, falling back
+    to ``predicted`` only when ``actual`` is exactly zero (an idle
+    backtest window) so a nonzero prediction against true silence reads
+    as a full, bounded miss (``1.0``) instead of a division by zero; two
+    zeros (correctly predicted silence) is a perfect score (``0.0``).
+    """
+    fit_start = now_epoch_seconds - 2 * window_seconds
+    split = now_epoch_seconds - window_seconds
+    fit_series = tuple((ts, v) for ts, v in series if fit_start <= ts < split)
+    actual_series = tuple((ts, v) for ts, v in series if split <= ts <= now_epoch_seconds)
+    if not fit_series or not actual_series:
+        return None
+    predicted = forecaster.predict(fit_series, timedelta(seconds=window_seconds)).point_estimate
+    actual = statistics.mean(v for _, v in actual_series)
+    denominator = actual if actual != 0 else predicted
+    if denominator == 0:
+        return 0.0
+    return abs(predicted - actual) / abs(denominator)
+
+
+def backtest_validated(
+    forecaster: Forecaster,
+    series: TimeSeries,
+    now_epoch_seconds: float,
+    window_seconds: float,
+    imbalance_threshold: float,
+) -> bool:
+    """``True`` only when :func:`backtest_error` both ran (enough history
+    existed to backtest at all) and came back within
+    ``gates.imbalance_threshold`` -- the one boolean gate
+    ``cli._saturation_forecast_inputs()`` actually acts on."""
+    error = backtest_error(forecaster, series, now_epoch_seconds, window_seconds)
+    return error is not None and error <= imbalance_threshold

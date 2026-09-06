@@ -16,7 +16,10 @@ from proxmox_storage_drs.forecast import (
     QuantileForecaster,
     SeasonalNaiveForecaster,
     _quantile,
+    backtest_error,
+    backtest_validated,
     build_forecaster,
+    group_aggregate_series,
     required_range_seconds,
     storage_upper_bound,
 )
@@ -214,3 +217,117 @@ def test_storage_upper_bound_missing_disk_key_contributes_zero() -> None:
 def test_storage_upper_bound_empty_disk_keys_is_zero() -> None:
     forecaster = QuantileForecaster(lookback_seconds=DAY)
     assert storage_upper_bound(forecaster, {}, [], timedelta(hours=1)) == 0.0
+
+
+# --------------------------------------------------------- group_aggregate_series
+
+
+def test_group_aggregate_series_sums_across_disks_per_timestamp() -> None:
+    series = {
+        "101:scsi0": ((0.0, 1.0), (1.0, 2.0)),
+        "102:scsi0": ((0.0, 3.0), (1.0, 4.0)),
+    }
+    assert group_aggregate_series(series) == ((0.0, 4.0), (1.0, 6.0))
+
+
+def test_group_aggregate_series_missing_disk_at_a_timestamp_contributes_zero() -> None:
+    """101:scsi0 has no sample at t=1 at all -- that timestamp still
+    appears (from 102:scsi0's own contribution), with 101:scsi0 counted
+    as 0, not a KeyError or a dropped timestamp."""
+    series = {
+        "101:scsi0": ((0.0, 1.0),),
+        "102:scsi0": ((0.0, 1.0), (1.0, 5.0)),
+    }
+    assert group_aggregate_series(series) == ((0.0, 2.0), (1.0, 5.0))
+
+
+def test_group_aggregate_series_empty_input_is_empty() -> None:
+    assert group_aggregate_series({}) == ()
+
+
+# ------------------------------------------------------------------- backtest gate
+
+# window_seconds=100, now=200: the fit half covers [0, 100), the actual
+# half covers [100, 200] -- every test below places its points squarely
+# inside one half or the other so there is no ambiguity about which side
+# of the split they land on.
+BACKTEST_WINDOW = 100.0
+BACKTEST_NOW = 200.0
+
+
+def test_backtest_error_is_zero_for_a_perfect_prediction() -> None:
+    """A constant series: the median of the fit half exactly matches the
+    mean of the actual half."""
+    series = tuple((float(ts), 5.0) for ts in (10, 30, 50, 70, 90, 110, 130, 150, 170, 190))
+    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
+    error = backtest_error(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW)
+    assert error == pytest.approx(0.0)
+
+
+def test_backtest_error_detects_a_real_miss() -> None:
+    fit = tuple((float(ts), 1.0) for ts in (10, 30, 50, 70, 90))
+    actual = tuple((float(ts), 10.0) for ts in (110, 130, 150, 170, 190))
+    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
+    error = backtest_error(forecaster, fit + actual, BACKTEST_NOW, BACKTEST_WINDOW)
+    assert error == pytest.approx(0.9)  # |1 - 10| / 10
+
+
+def test_backtest_error_both_halves_idle_is_a_perfect_score() -> None:
+    """Zero predicted, zero actual -- correctly forecasting silence is not
+    a division-by-zero, it is the best possible score."""
+    series = tuple((float(ts), 0.0) for ts in (10, 30, 50, 70, 90, 110, 130, 150, 170, 190))
+    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
+    error = backtest_error(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW)
+    assert error == pytest.approx(0.0)
+
+
+def test_backtest_error_nonzero_prediction_against_true_silence_is_bounded() -> None:
+    """actual == 0 with a nonzero prediction falls back to normalizing by
+    the prediction itself, rather than raising -- a full, bounded miss
+    (1.0), not an unbounded ratio."""
+    fit = tuple((float(ts), 5.0) for ts in (10, 30, 50, 70, 90))
+    actual = tuple((float(ts), 0.0) for ts in (110, 130, 150, 170, 190))
+    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
+    error = backtest_error(forecaster, fit + actual, BACKTEST_NOW, BACKTEST_WINDOW)
+    assert error == pytest.approx(1.0)
+
+
+def test_backtest_error_returns_none_without_a_full_fit_half() -> None:
+    """Every point falls in the *actual* half only -- there is nothing
+    old enough to fit on yet."""
+    series = tuple((float(ts), 1.0) for ts in (110, 130, 150))
+    forecaster = QuantileForecaster(lookback_seconds=DAY)
+    assert backtest_error(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW) is None
+
+
+def test_backtest_error_returns_none_without_a_full_actual_half() -> None:
+    """Every point falls in the *fit* half only -- nothing recent enough
+    to compare a prediction against."""
+    series = tuple((float(ts), 1.0) for ts in (10, 30, 50))
+    forecaster = QuantileForecaster(lookback_seconds=DAY)
+    assert backtest_error(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW) is None
+
+
+def test_backtest_error_returns_none_for_a_completely_empty_series() -> None:
+    forecaster = QuantileForecaster(lookback_seconds=DAY)
+    assert backtest_error(forecaster, (), BACKTEST_NOW, BACKTEST_WINDOW) is None
+
+
+def test_backtest_validated_true_when_error_is_within_the_threshold() -> None:
+    series = tuple((float(ts), 5.0) for ts in (10, 30, 50, 70, 90, 110, 130, 150, 170, 190))
+    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
+    assert backtest_validated(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW, 0.20)
+
+
+def test_backtest_validated_false_when_error_exceeds_the_threshold() -> None:
+    fit = tuple((float(ts), 1.0) for ts in (10, 30, 50, 70, 90))
+    actual = tuple((float(ts), 10.0) for ts in (110, 130, 150, 170, 190))
+    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
+    assert not backtest_validated(forecaster, fit + actual, BACKTEST_NOW, BACKTEST_WINDOW, 0.20)
+
+
+def test_backtest_validated_false_without_enough_history() -> None:
+    """Not yet validated is treated the same as failed validation, not a
+    free pass for a fresh deployment."""
+    forecaster = QuantileForecaster(lookback_seconds=DAY)
+    assert not backtest_validated(forecaster, (), BACKTEST_NOW, BACKTEST_WINDOW, 0.20)
