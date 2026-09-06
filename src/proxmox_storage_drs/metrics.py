@@ -240,6 +240,33 @@ def parse_disk_series(
     return out
 
 
+def parse_disk_range_series(
+    result: list[dict[str, Any]], vmid_label: str, device_label: str
+) -> dict[DiskKey, tuple[tuple[float, float], ...]]:
+    """The ``query_range`` counterpart to :func:`parse_disk_series`: turns a
+    ``query_range`` ``result`` list (each series carrying ``values``, a
+    ``[[timestamp, value_str], ...]`` matrix, rather than one ``value``)
+    into ``{DiskKey: TimeSeries}`` -- section 10's raw material for a
+    :class:`~proxmox_storage_drs.forecast.Forecaster`, and
+    ``loadmodel.compute_disk_load_series()``'s own input before its section
+    4 blend. Skips a series missing either label, identically to
+    :func:`parse_disk_series` and for the same reason."""
+    out: dict[DiskKey, tuple[tuple[float, float], ...]] = {}
+    for series in result:
+        labels = series.get("metric", {})
+        vmid_raw = labels.get(vmid_label)
+        device = labels.get(device_label)
+        if vmid_raw is None or not device:
+            continue
+        try:
+            vmid = int(vmid_raw)
+        except (TypeError, ValueError):
+            continue
+        points = tuple((float(ts), float(value_raw)) for ts, value_raw in series.get("values", []))
+        out[DiskKey(vmid=vmid, device=device)] = points
+    return out
+
+
 # ----------------------------------------------------------- verify-metrics
 
 
