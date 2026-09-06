@@ -192,3 +192,8 @@ this.
   gives `plan` and `apply` one shared pipeline instead of two, and
   `auto` mode's time-window budget and re-plan loop (`timewindow.py`,
   `cli._run_auto_group()`).
+- [`93-crashrecovery.md`](93-crashrecovery.md) — section 13's startup scan
+  for a `move_disk` left running by a crash or a second instance, the
+  cluster-wide `/cluster/tasks` read that `state.json`'s own `flock()`
+  cannot do, and how a UPID reaches disk *before* the move that owns it can
+  crash the engine.

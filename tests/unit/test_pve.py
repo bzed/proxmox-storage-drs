@@ -28,6 +28,13 @@ def test_vm_resources() -> None:
     assert api.calls == [("GET", "cluster/resources", {"type": "vm"})]
 
 
+def test_cluster_tasks() -> None:
+    api = fake_api({"cluster/tasks": [{"upid": "UPID:pve01:...:qmconfig:104:root@pam:"}]})
+    client = PveClient(api)
+    assert client.cluster_tasks() == [{"upid": "UPID:pve01:...:qmconfig:104:root@pam:"}]
+    assert api.calls == [("GET", "cluster/tasks", {})]
+
+
 def test_storage_resources() -> None:
     api = fake_api({"cluster/resources": [{"storage": "san-a"}]})
     client = PveClient(api)

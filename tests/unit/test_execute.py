@@ -158,6 +158,8 @@ def run(
     deadline: datetime | None = None,
     move_costs_by_key: dict[str, MoveCost] | None = None,
     max_migrations: int | None = None,
+    on_inflight_started: object = None,
+    on_inflight_finished: object = None,
 ) -> ExecutionResult:
     schedule_result = ScheduleResult(
         order=moves, deadlocked=(), final_assignment={d.key: d.current_storage for d in group.disks}
@@ -177,6 +179,8 @@ def run(
         deadline=deadline,
         move_costs_by_key=move_costs_by_key,
         max_migrations=max_migrations,
+        on_inflight_started=on_inflight_started,  # type: ignore[arg-type]
+        on_inflight_finished=on_inflight_finished,  # type: ignore[arg-type]
     )
 
 
@@ -857,3 +861,89 @@ def test_deadline_already_passed_refuses_immediately() -> None:
     result = run(client, default_group(), (make_move(),), clock=fc, deadline=deadline)
     assert result.outcomes[0].status == "skipped"
     assert api.calls == []
+
+
+# --------------------------------------------------------- crash-recovery hooks
+
+
+def test_inflight_started_fires_right_after_move_disk_before_it_is_waited_on() -> None:
+    """Section 13: `state.json` must learn about a UPID *before* this
+    function goes on to wait for it -- a crash during that wait must still
+    find the UPID recorded."""
+    events: list[str] = []
+    client, _api = client_with({})
+    result = run(
+        client,
+        default_group(),
+        (make_move(),),
+        on_inflight_started=lambda upid: events.append(f"started:{upid}"),
+        on_inflight_finished=lambda upid: events.append(f"finished:{upid}"),
+    )
+    assert result.outcomes[0].status == "moved"
+    assert events == [f"started:{UPID}", f"finished:{UPID}"]
+
+
+def test_inflight_finished_fires_for_a_failed_move_too() -> None:
+    """Not only the happy path -- a `move_disk` task that itself fails
+    still finished (`exitstatus` is known), so `state.json` must stop
+    tracking it exactly as promptly as a successful one."""
+    events: list[str] = []
+    client, _api = client_with(
+        {
+            f"nodes/pve01/tasks/{UPID}/status": {"status": "stopped", "exitstatus": "some error"},
+            "nodes/pve01/storage/san-b/content": [],
+        }
+    )
+    result = run(
+        client,
+        default_group(),
+        (make_move(),),
+        on_inflight_started=lambda upid: events.append(f"started:{upid}"),
+        on_inflight_finished=lambda upid: events.append(f"finished:{upid}"),
+    )
+    assert result.outcomes[0].status == "failed"
+    assert events == [f"started:{UPID}", f"finished:{UPID}"]
+
+
+def test_inflight_finished_fires_for_a_draining_move_too() -> None:
+    """A "draining" source is no longer tracked by this UPID at all (only
+    by its own content-listing poll, see `state.without_inflight_upid()`'s
+    own docstring) -- cleared here exactly as promptly as a `"moved"`
+    one, not left recorded until the source actually releases."""
+    saferemove_group = Group(
+        name="fc-tier1",
+        storages=(make_storage("san-a", saferemove=True), make_storage("san-b")),
+        disks=(make_disk("101:scsi0", 1.0, "san-a"),),
+    )
+    events: list[str] = []
+    client, _api = client_with(
+        {"nodes/pve01/storage/san-a/content": [{"volid": "san-a:vm-101-disk-0", "vmid": 101}]}
+    )
+    execution = ExecutionConfig(source_release=SourceReleaseConfig(timeout_seconds=0.0))
+    result = run(
+        client,
+        saferemove_group,
+        (make_move(),),
+        execution=execution,
+        on_inflight_started=lambda upid: events.append(f"started:{upid}"),
+        on_inflight_finished=lambda upid: events.append(f"finished:{upid}"),
+    )
+    assert result.outcomes[0].status == "draining"
+    assert events == [f"started:{UPID}", f"finished:{UPID}"]
+
+
+def test_no_inflight_callback_needed_for_dry_run() -> None:
+    """`dry-run` never calls `move_disk` at all -- the callbacks must
+    simply never fire, not be required."""
+    events: list[str] = []
+    client, _api = client_with({})
+    result = run(
+        client,
+        default_group(),
+        (make_move(),),
+        mode="dry-run",
+        on_inflight_started=lambda upid: events.append(f"started:{upid}"),
+        on_inflight_finished=lambda upid: events.append(f"finished:{upid}"),
+    )
+    assert result.outcomes[0].status == "would_move"
+    assert events == []

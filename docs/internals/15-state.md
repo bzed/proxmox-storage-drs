@@ -160,7 +160,11 @@ read-only-report reason as always.
   `topology.py` into two passes (build every disk first, compute reserve
   status per storage, then finalize cooldown pins), which is a real,
   separately-scoped change.
-- **`inflight_upids`/`staged_disks`** exist in the dataclass and round-trip
-  correctly, but nothing writes or reads them yet — they belong to
-  `execute.py` (crash recovery, section 13) and `schedule.py`'s staging
-  (section 8.3 option 1, also not implemented), respectively.
+- **`inflight_upids`** is now written and read — see
+  `docs/internals/93-crashrecovery.md` for the full mechanism
+  (`with_inflight_upid()`/`without_inflight_upid()`, `crashrecovery.py`'s
+  startup scan, and `cli.py`'s synchronous-write callback into
+  `execute_plan()`).
+- **`staged_disks`** exists in the dataclass and round-trips correctly,
+  but nothing writes or reads it yet — it belongs to `schedule.py`'s
+  staging (section 8.3 option 1), not implemented.

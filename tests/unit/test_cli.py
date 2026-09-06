@@ -760,6 +760,62 @@ def test_group_flag_with_an_unknown_name_is_a_hard_failure(
 # --------------------------------------------------------------------------- plan
 
 
+def _fake_reconcile_inflight(
+    client: object, state: object, auth: object
+) -> tuple[frozenset[int], object]:
+    """Every `apply` test here uses `build_pve_client`'s "fake-client"
+    string stand-in, which `crashrecovery.reconcile_inflight()`'s own
+    `client.cluster_tasks()`/`client.task_status()` calls cannot run
+    against -- this is `_handle_apply()`'s crash-recovery scan finding
+    nothing in flight and leaving ``state`` untouched, the ordinary case
+    every test not specifically about that scan should get by default
+    (see `test_crashrecovery.py` for the scan's own unit tests, and
+    `test_reconcile_inflight_and_fold_exclusions_merges_discovered_vmids`
+    below for `_handle_apply()`'s wiring of a non-empty result)."""
+    return frozenset(), state
+
+
+def test_reconcile_inflight_and_fold_exclusions_merges_discovered_vmids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Section 13: a vmid `crashrecovery.reconcile_inflight()` reports is
+    folded into ``exclude.vmids`` on the *returned* `ResolvedConfig`
+    -- reusing `topology.py`'s existing (C2) pin (AGENTS.md section 5)
+    rather than a second exclusion mechanism -- deduplicated against
+    whatever the config already excluded."""
+
+    def fake_reconcile(
+        client: object, state: object, auth: object
+    ) -> tuple[frozenset[int], object]:
+        assert client == "fake-client"
+        return frozenset({101, 105}), state
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.reconcile_inflight", fake_reconcile)
+    resolved = _resolved_config(tmp_path, exclude={"vmids": [105, 200]})
+    box = cli._InflightStateBox(empty_state())
+    new_resolved, new_state = cli._reconcile_inflight_and_fold_exclusions(
+        "fake-client", resolved, box  # type: ignore[arg-type]
+    )
+    assert new_resolved.config.exclude.vmids == (101, 105, 200)
+    # The original ResolvedConfig is untouched -- callers that still hold
+    # a reference to it (there are none today, but nothing here should
+    # assume otherwise) must not see the fold-in reach through it.
+    assert resolved.config.exclude.vmids == (105, 200)
+    assert new_state is box.value
+
+
+def test_reconcile_inflight_and_fold_exclusions_is_a_noop_when_nothing_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.reconcile_inflight", _fake_reconcile_inflight)
+    resolved = _resolved_config(tmp_path)
+    box = cli._InflightStateBox(empty_state())
+    new_resolved, _new_state = cli._reconcile_inflight_and_fold_exclusions(
+        "fake-client", resolved, box  # type: ignore[arg-type]
+    )
+    assert new_resolved is resolved
+
+
 def _patch_plan_deps(
     monkeypatch: pytest.MonkeyPatch, topology: Topology, group_load: GroupLoad
 ) -> None:
@@ -769,6 +825,7 @@ def _patch_plan_deps(
         "proxmox_storage_drs.cli.compute_group_load",
         lambda prom_client, metrics, window, load_weights, group, last_known_loads=None: group_load,
     )
+    monkeypatch.setattr("proxmox_storage_drs.cli.reconcile_inflight", _fake_reconcile_inflight)
 
 
 def _repairable_sample_topology() -> Topology:
@@ -1500,6 +1557,8 @@ def test_apply_records_balance_and_cooldowns_after_an_executed_move(
         deadline: object = None,
         move_costs_by_key: object = None,
         max_migrations: object = None,
+        on_inflight_started: object = None,
+        on_inflight_finished: object = None,
     ) -> ExecutionResult:
         return ExecutionResult(
             outcomes=(
@@ -1536,6 +1595,73 @@ def test_apply_records_balance_and_cooldowns_after_an_executed_move(
     assert storage_state_key("fc-tier1", "san-a") in saved.cooldowns.storage
 
 
+def test_apply_writes_inflight_upid_to_disk_synchronously_during_a_move(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Section 13's whole point: `state.json` must carry the UPID
+    *before* the move that owns it can crash the engine, and lose it
+    again once that move has finished -- not only once `_handle_apply()`
+    itself gets back control after `execute_plan()` returns. Stubs
+    `execute_plan()` to call `on_inflight_started()`/`on_inflight_finished()`
+    itself (mirroring exactly when `execute.py`'s own `_execute_one_move()`
+    calls them) and reads `state.json` straight off disk in between, the
+    same way a crash-dump inspection or a second instance's own startup
+    scan would."""
+    from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
+
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    upid = "UPID:pve01:00001234:00ABCDEF:qmmove:101:root@pam:"
+    state_path = tmp_path / "state.json"
+    observed: dict[str, tuple[str, ...]] = {}
+
+    def fake_execute_plan(
+        client: object,
+        group: object,
+        schedule_result: object,
+        migration: object,
+        execution: object,
+        min_free_bytes: object,
+        mode: object,
+        exclude: object = None,
+        confirm: object = None,
+        clock: object = None,
+        deadline: object = None,
+        move_costs_by_key: object = None,
+        max_migrations: object = None,
+        on_inflight_started: object = None,
+        on_inflight_finished: object = None,
+    ) -> ExecutionResult:
+        assert on_inflight_started is not None and on_inflight_finished is not None
+        on_inflight_started(upid)  # type: ignore[operator]
+        observed["during"] = load_state(str(state_path)).inflight_upids
+        on_inflight_finished(upid)  # type: ignore[operator]
+        observed["after"] = load_state(str(state_path)).inflight_upids
+        return ExecutionResult(
+            outcomes=(
+                MoveOutcome(
+                    disk_key="101:scsi0",
+                    from_storage="san-a",
+                    to_storage="san-b",
+                    status="moved",
+                    detail="task UPID:... completed OK",
+                    upid=upid,
+                ),
+            ),
+            stopped_early=False,
+            stop_reason=None,
+        )
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fake_execute_plan)
+    path = write_config(tmp_path, state={"path": str(state_path)})
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
+    assert observed["during"] == (upid,)
+    assert observed["after"] == ()
+    # And the run's own final save (recording this move's cooldowns) must
+    # not have reverted `on_inflight_finished()`'s own already-persisted
+    # clearing of it (see `_handle_apply()`'s own `finally` block).
+    assert load_state(str(state_path)).inflight_upids == ()
+
+
 def test_apply_stops_the_whole_run_when_the_operator_quits(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1565,6 +1691,8 @@ def test_apply_stops_the_whole_run_when_the_operator_quits(
         deadline: object = None,
         move_costs_by_key: object = None,
         max_migrations: object = None,
+        on_inflight_started: object = None,
+        on_inflight_finished: object = None,
     ) -> ExecutionResult:
         return ExecutionResult(outcomes=(), stopped_early=True, stop_reason="operator quit")
 
@@ -1605,6 +1733,7 @@ def test_apply_reports_a_metrics_error_and_a_no_action_group_without_executing(
     two_groups = _two_group_topology()
     monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
     monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", _fake_build_topology(two_groups))
+    monkeypatch.setattr("proxmox_storage_drs.cli.reconcile_inflight", _fake_reconcile_inflight)
 
     def per_group_load(
         prom_client: object,
@@ -1668,6 +1797,8 @@ def test_apply_exits_1_when_a_move_fails(
         deadline: object = None,
         move_costs_by_key: object = None,
         max_migrations: object = None,
+        on_inflight_started: object = None,
+        on_inflight_finished: object = None,
     ) -> ExecutionResult:
         return ExecutionResult(
             outcomes=(
@@ -2217,6 +2348,8 @@ def test_apply_auto_mode_shares_max_migrations_per_run_across_groups(
         deadline: object = None,
         move_costs_by_key: object = None,
         max_migrations: object = None,
+        on_inflight_started: object = None,
+        on_inflight_finished: object = None,
     ) -> ExecutionResult:
         calls.append((group.name, max_migrations))
         move = schedule_result.order[0]  # type: ignore[attr-defined]

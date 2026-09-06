@@ -4,12 +4,13 @@
 
 The only thing this tool remembers between runs: the load vector as of the
 last *executed* balance (drift, section 6), per-disk/per-storage cooldown
-timestamps (section 5.3 (C2)), in-flight migration UPIDs and staged disks
-(both section 9 -- `execute.py` exists now, but neither crash recovery nor
-staging is implemented yet, so nothing writes or reads these two fields),
-and a node-local advisory lock. Local disk, one copy per host, deliberately
-never `/etc/pve` (`.agents/domain-invariants.md` section 9: "state belongs
-in `state.path` on local disk").
+timestamps (section 5.3 (C2)), in-flight migration UPIDs (section 9/13 --
+`with_inflight_upid()`/`without_inflight_upid()` below, `crashrecovery.py`'s
+startup scan, and `cli.py`'s callback into `execute_plan()`) and staged disks
+(section 8.3 option 1, not implemented -- nothing writes or reads that field
+yet), and a node-local advisory lock. Local disk, one copy per host,
+deliberately never `/etc/pve` (`.agents/domain-invariants.md` section 9:
+"state belongs in `state.path` on local disk").
 
 **Reading degrades, writing does not.** A missing file is the normal,
 expected first-run state (:func:`load_state` returns :func:`empty_state`
@@ -48,6 +49,7 @@ own command.
 
 **`cli.py`'s ``apply`` is the one caller of the write side** (:func:`acquire_lock`,
 :func:`with_recorded_balance`, :func:`with_recorded_cooldown`,
+:func:`with_inflight_upid`, :func:`without_inflight_upid`,
 :func:`save_locked_state`, :func:`release_lock`) -- `plan`/`show-load`
 never execute a migration, so section 11.2's "updated only after a run
 that executed at least one migration" means they must never call it, and
@@ -368,6 +370,33 @@ def with_recorded_cooldown(
     disk = {**state.cooldowns.disk, **(disk_keys or {})}
     storage = {**state.cooldowns.storage, **(storage_keys or {})}
     return replace(state, cooldowns=Cooldowns(disk=disk, storage=storage))
+
+
+# ------------------------------------------------------------- inflight_upids
+
+
+def with_inflight_upid(state: State, upid: str) -> State:
+    """Pure: adds ``upid`` to ``state.inflight_upids`` (a no-op if already
+    present). Section 11.2: "written *before* issuing each ``move_disk``
+    ... so a crashed run can be reconciled on the next start" (section
+    13) -- `execute.py` calls this immediately after `move_disk()`
+    returns a UPID, via a caller-supplied callback, so the write actually
+    reaches disk before the move itself can crash the engine."""
+    if upid in state.inflight_upids:
+        return state
+    return replace(state, inflight_upids=state.inflight_upids + (upid,))
+
+
+def without_inflight_upid(state: State, upid: str) -> State:
+    """Pure: removes ``upid`` from ``state.inflight_upids`` (a no-op if
+    absent). Called once the task itself has finished (``exitstatus``
+    known, one way or another) -- not once the *move* is fully done in
+    section 9.3.2's three-condition sense: a ``"draining"`` source is no
+    longer tracked by this UPID at all, only by its own content-listing
+    poll, so it is cleared here exactly as promptly as a `"moved"` one."""
+    if upid not in state.inflight_upids:
+        return state
+    return replace(state, inflight_upids=tuple(u for u in state.inflight_upids if u != upid))
 
 
 def _parse_iso(timestamp: str) -> datetime | None:
