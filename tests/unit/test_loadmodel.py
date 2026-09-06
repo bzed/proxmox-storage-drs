@@ -32,6 +32,7 @@ from proxmox_storage_drs.config import (
 from proxmox_storage_drs.loadmodel import (
     GroupLoad,
     _is_metrics_expected_absent,
+    compute_disk_load_series,
     compute_group_load,
 )
 from proxmox_storage_drs.metrics import (
@@ -138,6 +139,7 @@ class FakeSession:
     query_data: dict[str, list[dict[str, Any]]]
     range_data: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     calls: list[tuple[str, str]] = field(default_factory=list)
+    range_params: list[dict[str, str]] = field(default_factory=list)
 
     def get(
         self,
@@ -151,6 +153,7 @@ class FakeSession:
         query = params["query"]
         if url.endswith("/api/v1/query_range"):
             self.calls.append(("range", query))
+            self.range_params.append(params)
             result = self.range_data[query]
         elif url.endswith("/api/v1/query"):
             self.calls.append(("query", query))
@@ -466,6 +469,216 @@ def test_efidisk0_is_held_to_the_normal_coverage_bar() -> None:
 
 
 # ------------------------------------------------------------- GroupLoad helper
+
+
+def _rate_promql(field_name: str) -> str:
+    """The exact PromQL `_fetch_raw_quantity_series` builds for one raw
+    field -- the bare `rate(...)` expression, unlike `_quantile_promql`'s
+    `quantile_over_time`-wrapped instant-query form."""
+    metric_name = raw_metric_name(METRICS, field_name)
+    return build_rate_promql(
+        metric_name, METRICS.labels.vmid, METRICS.labels.device, METRICS.rate_window_seconds
+    )
+
+
+def range_series(vmid: int, device: str, points: list[tuple[float, float]]) -> dict[str, Any]:
+    """A `query_range`-shaped series with an explicit `[[ts, value], ...]`
+    matrix, unlike `series()`'s single-`value` instant-query shape."""
+    return {
+        "metric": {"vmid": str(vmid), "instance": device},
+        "values": [[ts, str(v)] for ts, v in points],
+    }
+
+
+def _series_client(
+    *,
+    read_time: list[dict[str, Any]] | None = None,
+    write_time: list[dict[str, Any]] | None = None,
+    read_ops: list[dict[str, Any]] | None = None,
+    write_ops: list[dict[str, Any]] | None = None,
+    read_bytes: list[dict[str, Any]] | None = None,
+    write_bytes: list[dict[str, Any]] | None = None,
+) -> tuple[PrometheusClient, FakeSession]:
+    """Build a `PrometheusClient` over a `FakeSession` answering
+    `compute_disk_load_series()`'s own six raw-quantity range queries --
+    `_client()`'s counterpart for the series path, keyed by the bare
+    `rate(...)` expression rather than the quantile-wrapped instant-query
+    form. Every argument defaults to no series at all."""
+    range_data = {
+        _rate_promql("read_time_ns"): read_time or [],
+        _rate_promql("write_time_ns"): write_time or [],
+        _rate_promql("read_ops"): read_ops or [],
+        _rate_promql("write_ops"): write_ops or [],
+        _rate_promql("read_bytes"): read_bytes or [],
+        _rate_promql("write_bytes"): write_bytes or [],
+    }
+    session = FakeSession(query_data={}, range_data=range_data)
+    return PrometheusClient(PROM_CONFIG, session=session), session
+
+
+# ------------------------------------------------------------- compute_disk_load_series
+
+
+def test_compute_disk_load_series_matches_section_14_2_at_every_timestamp() -> None:
+    """Under the default weights section 4's rescale is an exact identity,
+    l_d(t) = raw_t(d, t) -- put each disk's l_d value directly on
+    read_time_ns at two timestamps and expect both back unchanged, the
+    section 14.2 cross-check reproduced per-timestamp instead of once."""
+    group = _section_14_group()
+    values = {
+        "101:scsi0": 3.0e9,
+        "101:scsi1": 1.0e9,
+        "102:scsi0": 2.5e9,
+        "103:scsi0": 0.4e9,
+        "104:scsi0": 0.3e9,
+        "105:scsi0": 0.2e9,
+    }
+    read_time = [
+        range_series(int(k.split(":")[0]), k.split(":")[1], [(0.0, v), (300.0, v)])
+        for k, v in values.items()
+    ]
+    client, _session = _series_client(read_time=read_time)
+
+    result = compute_disk_load_series(
+        client,
+        METRICS,
+        LoadWeights(),
+        group,
+        range_seconds=300.0,
+        step_seconds=300.0,
+        now_epoch_seconds=300.0,
+    )
+
+    for key, expected in values.items():
+        ell_d = expected / 1e9
+        assert dict(result[key]) == {0.0: pytest.approx(ell_d), 300.0: pytest.approx(ell_d)}
+
+
+def test_compute_disk_load_series_normalizes_each_timestamp_independently() -> None:
+    """Two disks whose iotime split flips between the two timestamps --
+    normalizing over the *whole range* instead of per-timestamp would
+    blend the two splits together; this must not happen."""
+    group = Group(
+        name="g",
+        storages=(make_storage("san-a"),),
+        disks=(make_disk("101:scsi0", "san-a"), make_disk("102:scsi0", "san-a")),
+    )
+    read_time = [
+        range_series(101, "scsi0", [(0.0, 3.0e9), (300.0, 1.0e9)]),
+        range_series(102, "scsi0", [(0.0, 1.0e9), (300.0, 3.0e9)]),
+    ]
+    client, _session = _series_client(read_time=read_time)
+
+    result = compute_disk_load_series(
+        client,
+        METRICS,
+        LoadWeights(),
+        group,
+        range_seconds=300.0,
+        step_seconds=300.0,
+        now_epoch_seconds=300.0,
+    )
+
+    # Default weights: l_d = raw_t exactly, so each disk keeps its own
+    # value at each timestamp -- no cross-timestamp blending occurred.
+    assert dict(result["101:scsi0"]) == {0.0: pytest.approx(3.0), 300.0: pytest.approx(1.0)}
+    assert dict(result["102:scsi0"]) == {0.0: pytest.approx(1.0), 300.0: pytest.approx(3.0)}
+
+
+def test_compute_disk_load_series_missing_sample_at_a_timestamp_defaults_to_zero() -> None:
+    """101:scsi0 has no sample at t=300 at all (a shorter series than
+    102:scsi0's) -- that timestamp must still appear (from 102:scsi0's own
+    contribution to the timestamp union) with 101:scsi0 contributing 0,
+    not KeyError."""
+    group = Group(
+        name="g",
+        storages=(make_storage("san-a"),),
+        disks=(make_disk("101:scsi0", "san-a"), make_disk("102:scsi0", "san-a")),
+    )
+    read_time = [
+        range_series(101, "scsi0", [(0.0, 1.0e9)]),
+        range_series(102, "scsi0", [(0.0, 1.0e9), (300.0, 1.0e9)]),
+    ]
+    client, _session = _series_client(read_time=read_time)
+
+    result = compute_disk_load_series(
+        client,
+        METRICS,
+        LoadWeights(),
+        group,
+        range_seconds=300.0,
+        step_seconds=300.0,
+        now_epoch_seconds=300.0,
+    )
+
+    assert dict(result["101:scsi0"]) == {0.0: pytest.approx(1.0), 300.0: pytest.approx(0.0)}
+    assert dict(result["102:scsi0"]) == {0.0: pytest.approx(1.0), 300.0: pytest.approx(1.0)}
+
+
+def test_compute_disk_load_series_returns_an_empty_series_for_a_disk_with_no_data() -> None:
+    """Every disk in `group` gets an entry, even one with no samples at
+    all -- an empty series, never a missing key."""
+    group = Group(
+        name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
+    )
+    client, _session = _series_client()
+
+    result = compute_disk_load_series(
+        client,
+        METRICS,
+        LoadWeights(),
+        group,
+        range_seconds=300.0,
+        step_seconds=300.0,
+        now_epoch_seconds=300.0,
+    )
+
+    assert result == {"101:scsi0": ()}
+
+
+def test_compute_disk_load_series_empty_group_makes_no_calls() -> None:
+    group = Group(name="g", storages=(), disks=())
+    client, session = _series_client()
+
+    result = compute_disk_load_series(
+        client,
+        METRICS,
+        LoadWeights(),
+        group,
+        range_seconds=300.0,
+        step_seconds=300.0,
+        now_epoch_seconds=300.0,
+    )
+
+    assert result == {}
+    assert session.calls == []
+
+
+def test_compute_disk_load_series_uses_the_given_range_not_window_lookback() -> None:
+    """`range_seconds`/`step_seconds`/`now_epoch_seconds` are the caller's
+    own choice, not `window.lookback_seconds` (300.0 in this fixture) --
+    confirmed by using a wildly different range/step/step and checking the
+    actual `start`/`end`/`step` params a range query carried."""
+    group = Group(
+        name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
+    )
+    client, session = _series_client(read_time=[range_series(101, "scsi0", [(0.0, 1.0e9)])])
+
+    compute_disk_load_series(
+        client,
+        METRICS,
+        LoadWeights(),
+        group,
+        range_seconds=604800.0,
+        step_seconds=3600.0,
+        now_epoch_seconds=604800.0,
+    )
+
+    assert session.range_params  # at least one range query was actually issued
+    params = session.range_params[0]
+    assert float(params["start"]) == pytest.approx(0.0)  # 604800 - 604800
+    assert float(params["end"]) == pytest.approx(604800.0)
+    assert params["step"] == "3600s"
 
 
 def test_load_by_disk_key_matches_disks_tuple() -> None:

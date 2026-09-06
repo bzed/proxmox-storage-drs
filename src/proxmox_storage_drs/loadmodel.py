@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from proxmox_storage_drs.config import LoadWeights, MetricsConfig, WindowConfig
+from proxmox_storage_drs.forecast import TimeSeries
 from proxmox_storage_drs.metrics import (
     RAW_METRIC_FIELDS,
     DiskKey,
@@ -27,6 +28,7 @@ from proxmox_storage_drs.metrics import (
     build_quantile_over_time_promql,
     build_rate_promql,
     compute_disk_coverage,
+    parse_disk_range_series,
     parse_disk_series,
     raw_metric_name,
 )
@@ -136,28 +138,146 @@ def _fetch_all_raw_quantities(
     return _RawQuantities(**fetched)
 
 
+#: :func:`parse_disk_range_series`'s own concrete value type -- used here
+#: instead of :data:`~proxmox_storage_drs.forecast.TimeSeries` (a
+#: ``Sequence``) purely because ``dict`` is invariant in its value type;
+#: any :class:`_RawTimeSeries` is already a valid ``TimeSeries`` wherever
+#: one is expected (:func:`compute_disk_load_series`'s own return type).
+_RawTimeSeries = tuple[tuple[float, float], ...]
+
+
+def _fetch_raw_quantity_series(
+    client: PrometheusClient,
+    metrics: MetricsConfig,
+    field: str,
+    start_epoch_seconds: float,
+    end_epoch_seconds: float,
+    step_seconds: float,
+) -> dict[DiskKey, _RawTimeSeries]:
+    """One of the six section 3.4 raw quantities as a raw time series over
+    ``[start, end]`` at ``step`` -- section 10's own material for a
+    :class:`~proxmox_storage_drs.forecast.Forecaster`, as opposed to
+    :func:`_fetch_raw_quantity`'s single quantile-reduced scalar for the
+    decision statistic. The identical ``rate(...)`` expression
+    :func:`_fetch_raw_quantity` builds, `query_range`'d instead of wrapped
+    in `quantile_over_time` and `instant_query`'d -- not a second PromQL
+    formula, only a different query type against the same expression."""
+    metric_name = raw_metric_name(metrics, field)
+    rate_expr = build_rate_promql(
+        metric_name, metrics.labels.vmid, metrics.labels.device, metrics.rate_window_seconds
+    )
+    result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, step_seconds)
+    return parse_disk_range_series(result, metrics.labels.vmid, metrics.labels.device)
+
+
+@dataclass(frozen=True, slots=True)
+class _RawSeriesQuantities:
+    """The six section 3.4 series, as time series -- :class:`_RawQuantities`'
+    own counterpart for :func:`compute_disk_load_series`."""
+
+    read_ops: dict[DiskKey, _RawTimeSeries]
+    write_ops: dict[DiskKey, _RawTimeSeries]
+    read_bytes: dict[DiskKey, _RawTimeSeries]
+    write_bytes: dict[DiskKey, _RawTimeSeries]
+    read_time_ns: dict[DiskKey, _RawTimeSeries]
+    write_time_ns: dict[DiskKey, _RawTimeSeries]
+
+
+def _fetch_all_raw_quantity_series(
+    client: PrometheusClient,
+    metrics: MetricsConfig,
+    start_epoch_seconds: float,
+    end_epoch_seconds: float,
+    step_seconds: float,
+) -> _RawSeriesQuantities:
+    fetched = {
+        field: _fetch_raw_quantity_series(
+            client, metrics, field, start_epoch_seconds, end_epoch_seconds, step_seconds
+        )
+        for field in RAW_METRIC_FIELDS
+    }
+    return _RawSeriesQuantities(**fetched)
+
+
+def _combine_raw_values(
+    read_time_ns: float,
+    write_time_ns: float,
+    read_ops: float,
+    write_ops: float,
+    read_bytes: float,
+    write_bytes: float,
+    load_weights: LoadWeights,
+) -> tuple[float, float, float]:
+    """`(raw_t, raw_o, raw_b)` for one disk **at one instant**, section 4:
+    ``raw_t/o/b(d) = rho*rd_X(d) + omega*wr_X(d)``, read and write combined
+    *before* normalization using the configured asymmetry factors.
+    ``raw_time_ns`` is converted to seconds here (section 3.4's PromQL
+    divides by 1e9 inline; this project applies that conversion
+    engine-side instead, for the same reason F-03 moved
+    read_factor/write_factor engine-side: one tested unit conversion beats
+    the same constant repeated across deployed query strings).
+
+    Takes plain numbers, not a whole raw-quantities structure, so it is
+    the one implementation (AGENTS.md section 5) both `_combined_raw()`
+    (one call per disk, from a single scalar snapshot) and
+    `compute_disk_load_series()` (one call per disk *per timestamp*, from
+    a time series) share -- the same rule, evaluated at a different
+    number of instants."""
+    rho, omega = load_weights.read_factor, load_weights.write_factor
+    raw_t = (rho * read_time_ns + omega * write_time_ns) / 1e9
+    raw_o = rho * read_ops + omega * write_ops
+    raw_b = rho * read_bytes + omega * write_bytes
+    return raw_t, raw_o, raw_b
+
+
 def _combined_raw(
     key: DiskKey, raw: _RawQuantities, load_weights: LoadWeights
 ) -> tuple[float, float, float]:
-    """`(raw_t, raw_o, raw_b)` for one disk, section 4:
+    """`(raw_t, raw_o, raw_b)` for one disk, section 4 -- see
+    :func:`_combine_raw_values`. A key absent from a series (no data at
+    all, e.g. an idle disk or a tpmstate0/unusedN device -- section 3.4's
+    note) contributes 0, not a missing-key error: `.get(key, 0.0)` is
+    deliberate here, not a shortcut -- absence is exactly what "no I/O
+    this window" looks like for a disk that genuinely has none."""
+    return _combine_raw_values(
+        raw.read_time_ns.get(key, 0.0),
+        raw.write_time_ns.get(key, 0.0),
+        raw.read_ops.get(key, 0.0),
+        raw.write_ops.get(key, 0.0),
+        raw.read_bytes.get(key, 0.0),
+        raw.write_bytes.get(key, 0.0),
+        load_weights,
+    )
 
-    ``raw_t/o/b(d) = rho*rd_X(d) + omega*wr_X(d)``, read and write combined
-    *before* normalization using the configured asymmetry factors. A key
-    absent from a series (no data at all, e.g. an idle disk or a
-    tpmstate0/unusedN device -- section 3.4's note) contributes 0, not a
-    missing-key error: `.get(key, 0.0)` is deliberate here, not a shortcut --
-    absence is exactly what "no I/O this window" looks like for a disk that
-    genuinely has none. ``raw_time_ns`` is converted to seconds (section
-    3.4's PromQL divides by 1e9 inline; this project applies that conversion
-    here instead, engine-side, for the same reason F-03 moved
-    read_factor/write_factor engine-side: one tested unit conversion beats
-    the same constant repeated across deployed query strings).
-    """
-    rho, omega = load_weights.read_factor, load_weights.write_factor
-    raw_t = (rho * raw.read_time_ns.get(key, 0.0) + omega * raw.write_time_ns.get(key, 0.0)) / 1e9
-    raw_o = rho * raw.read_ops.get(key, 0.0) + omega * raw.write_ops.get(key, 0.0)
-    raw_b = rho * raw.read_bytes.get(key, 0.0) + omega * raw.write_bytes.get(key, 0.0)
-    return raw_t, raw_o, raw_b
+
+def _blend_loads(
+    raw_by_key: Mapping[str, tuple[float, float, float]], load_weights: LoadWeights
+) -> dict[str, float]:
+    """Section 4's normalize-then-weight-then-rescale blend, given every
+    key's own already-combined `(raw_t, raw_o, raw_b)` for one instant:
+    the group totals, then per-key normalized shares, then the weighted
+    blend rescaled back onto the in-flight-I/O scale
+    (``T_g * blend``). Shared by `compute_group_load()` (called once,
+    over its `accepted_raw` scalar snapshot) and
+    `compute_disk_load_series()` (called once per timestamp) -- the one
+    implementation of the formula itself (AGENTS.md section 5); only how
+    many times it is invoked differs between a scalar snapshot and a time
+    series. Guards every division exactly as section 4 requires: a zero
+    group total for one term means that term contributes 0 for every key,
+    never `NaN`."""
+    t_total = sum(t for t, _o, _b in raw_by_key.values())
+    o_total = sum(o for _t, o, _b in raw_by_key.values())
+    b_total = sum(b for _t, _o, b in raw_by_key.values())
+    w_t, w_o, w_b = load_weights.iotime, load_weights.ops, load_weights.bytes
+    weight_sum = w_t + w_o + w_b
+    result: dict[str, float] = {}
+    for key, (raw_t, raw_o, raw_b) in raw_by_key.items():
+        i_d = raw_t / t_total if t_total else 0.0
+        o_d = raw_o / o_total if o_total else 0.0
+        b_d = raw_b / b_total if b_total else 0.0
+        blended = (w_t * i_d + w_o * o_d + w_b * b_d) / weight_sum if weight_sum else 0.0
+        result[key] = t_total * blended
+    return result
 
 
 def compute_group_load(
@@ -209,11 +329,7 @@ def compute_group_load(
         accepted_raw[disk.key] = _combined_raw(key, raw, load_weights)
 
     t_total = sum(t for t, _o, _b in accepted_raw.values())
-    o_total = sum(o for _t, o, _b in accepted_raw.values())
-    b_total = sum(b for _t, _o, b in accepted_raw.values())
-
-    w_t, w_o, w_b = load_weights.iotime, load_weights.ops, load_weights.bytes
-    weight_sum = w_t + w_o + w_b
+    blended_by_key = _blend_loads(accepted_raw, load_weights)
 
     disk_loads: list[DiskLoad] = []
     for disk in group.disks:
@@ -236,14 +352,9 @@ def compute_group_load(
                 )
             continue
 
-        raw_t, raw_o, raw_b = accepted_raw[disk.key]
-        # Section 4: guard every division -- a zero group total for one term
-        # means that term contributes 0 for every disk, not NaN.
-        i_d = raw_t / t_total if t_total else 0.0
-        o_d = raw_o / o_total if o_total else 0.0
-        b_d = raw_b / b_total if b_total else 0.0
-        blended = (w_t * i_d + w_o * o_d + w_b * b_d) / weight_sum if weight_sum else 0.0
-        disk_loads.append(DiskLoad(disk_key=disk.key, load=t_total * blended, flagged_reason=None))
+        disk_loads.append(
+            DiskLoad(disk_key=disk.key, load=blended_by_key[disk.key], flagged_reason=None)
+        )
 
     load_by_key = {d.disk_key: d.load for d in disk_loads}
     storage_loads: list[StorageLoad] = []
@@ -269,3 +380,94 @@ def compute_group_load(
         disks=tuple(disk_loads),
         storages=tuple(storage_loads),
     )
+
+
+def _per_disk_lookup(disk_key: DiskKey, raw: _RawSeriesQuantities) -> dict[str, dict[float, float]]:
+    """One disk's six raw series, each turned into a ``{timestamp: value}``
+    lookup for :func:`compute_disk_load_series`'s per-timestamp blend --
+    factored out purely so that function's own loop stays within this
+    project's flake8 complexity limit."""
+    return {
+        "rt": dict(raw.read_time_ns.get(disk_key, ())),
+        "wt": dict(raw.write_time_ns.get(disk_key, ())),
+        "ro": dict(raw.read_ops.get(disk_key, ())),
+        "wo": dict(raw.write_ops.get(disk_key, ())),
+        "rb": dict(raw.read_bytes.get(disk_key, ())),
+        "wb": dict(raw.write_bytes.get(disk_key, ())),
+    }
+
+
+def compute_disk_load_series(
+    client: PrometheusClient,
+    metrics: MetricsConfig,
+    load_weights: LoadWeights,
+    group: Group,
+    range_seconds: float,
+    step_seconds: float,
+    now_epoch_seconds: float,
+) -> dict[str, TimeSeries]:
+    """Section 4's `ℓ_d` blend, as a time series per disk over
+    ``[now - range_seconds, now]`` at ``step_seconds`` -- the raw material
+    a section 10 :class:`~proxmox_storage_drs.forecast.Forecaster` needs,
+    as opposed to :func:`compute_group_load`'s single p95-reduced scalar
+    per disk for the decision statistic. ``range_seconds``/``step_seconds``
+    are the caller's own choice (typically
+    ``forecast.required_range_seconds()``/``metrics.step_seconds`` -- see
+    ``payback.py``'s section 7.3 saturation guard, the one caller today),
+    not fixed to ``window.lookback`` the way :func:`compute_group_load`
+    is: section 10.1 is explicit that a forecaster's own history
+    requirement and the decision window are "genuinely different things."
+
+    Every disk in ``group`` gets an entry, even one with no samples at all
+    (an empty series -- every :class:`~proxmox_storage_drs.forecast.Forecaster`
+    already handles that, returning a zero forecast, per its own
+    docstring), never a ``KeyError`` for a caller iterating ``group.disks``.
+    Deliberately **not** filtered by ``window.min_coverage`` the way
+    :func:`compute_group_load`'s decision-window scalar is: a forecaster's
+    own ``required_range()`` is typically a much longer, coarser signal
+    (up to 7 days for ``seasonal_naive``) than that coverage rule was
+    designed to validate over one 24h decision window, and a genuinely
+    sparse history is exactly what a forecaster needs to see for itself in
+    order to decide it cannot trust its own fit -- silently dropping those
+    samples here would hide that from it instead.
+    """
+    if not group.disks:
+        return {}
+
+    end = now_epoch_seconds
+    start = end - range_seconds
+    raw = _fetch_all_raw_quantity_series(client, metrics, start, end, step_seconds)
+
+    timestamps: set[float] = set()
+    for field_series in (
+        raw.read_ops,
+        raw.write_ops,
+        raw.read_bytes,
+        raw.write_bytes,
+        raw.read_time_ns,
+        raw.write_time_ns,
+    ):
+        for series in field_series.values():
+            timestamps.update(ts for ts, _v in series)
+
+    disk_keys = {d.key: DiskKey(vmid=d.vmid, device=d.device) for d in group.disks}
+    lookups = {d_key: _per_disk_lookup(prom_key, raw) for d_key, prom_key in disk_keys.items()}
+
+    result: dict[str, list[tuple[float, float]]] = {d_key: [] for d_key in disk_keys}
+    for ts in sorted(timestamps):
+        raw_by_key: dict[str, tuple[float, float, float]] = {}
+        for d_key, lut in lookups.items():
+            raw_by_key[d_key] = _combine_raw_values(
+                lut["rt"].get(ts, 0.0),
+                lut["wt"].get(ts, 0.0),
+                lut["ro"].get(ts, 0.0),
+                lut["wo"].get(ts, 0.0),
+                lut["rb"].get(ts, 0.0),
+                lut["wb"].get(ts, 0.0),
+                load_weights,
+            )
+        blended = _blend_loads(raw_by_key, load_weights)
+        for d_key, value in blended.items():
+            result[d_key].append((ts, value))
+
+    return {d_key: tuple(points) for d_key, points in result.items()}

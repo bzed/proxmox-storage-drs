@@ -20,6 +20,7 @@ from proxmox_storage_drs.metrics import (
     PrometheusClient,
     build_quantile_over_time_promql,
     build_rate_promql,
+    parse_disk_range_series,
     parse_disk_series,
     raw_metric_name,
     verify_metrics,
@@ -108,6 +109,35 @@ def test_parse_disk_series_skips_series_missing_labels() -> None:
         {"metric": {"vmid": "not-a-number", "instance": "scsi0"}, "value": [1.0, "1"]},
     ]
     assert parse_disk_series(result, "vmid", "instance") == {}
+
+
+def test_parse_disk_range_series_happy_path() -> None:
+    result = [
+        {
+            "metric": {"vmid": "101", "instance": "scsi0"},
+            "values": [[100.0, "1.0"], [200.0, "2.5"]],
+        },
+        {"metric": {"vmid": "102", "instance": "scsi1"}, "values": [[100.0, "0.0"]]},
+    ]
+    parsed = parse_disk_range_series(result, "vmid", "instance")
+    assert parsed == {
+        DiskKey(101, "scsi0"): ((100.0, 1.0), (200.0, 2.5)),
+        DiskKey(102, "scsi1"): ((100.0, 0.0),),
+    }
+
+
+def test_parse_disk_range_series_skips_series_missing_labels() -> None:
+    result = [
+        {"metric": {"vmid": "101"}, "values": [[1.0, "1"]]},  # no device label
+        {"metric": {"instance": "scsi0"}, "values": [[1.0, "1"]]},  # no vmid label
+        {"metric": {"vmid": "not-a-number", "instance": "scsi0"}, "values": [[1.0, "1"]]},
+    ]
+    assert parse_disk_range_series(result, "vmid", "instance") == {}
+
+
+def test_parse_disk_range_series_defaults_missing_values_to_empty() -> None:
+    result = [{"metric": {"vmid": "101", "instance": "scsi0"}}]  # no "values" key at all
+    assert parse_disk_range_series(result, "vmid", "instance") == {DiskKey(101, "scsi0"): ()}
 
 
 # --------------------------------------------------------------------- client

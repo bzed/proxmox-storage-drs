@@ -98,6 +98,36 @@ yet written) will evaluate the identical per-disk `ℓ_d` values against a
 for that, since `ℓ_d` itself does not depend on which storage a disk is
 currently on.
 
+## `compute_disk_load_series()`: the same blend, as a time series
+
+`compute_group_load()` reduces each raw quantity to one already
+-quantile'd scalar per disk via `quantile_over_time` at query time.
+Section 10's forecaster needs the opposite: the *raw* per-disk `ℓ_d`
+signal, unreduced, over a range and step of its own choosing (typically
+`forecast.required_range_seconds()`, not `window.lookback` — section 10.1
+is explicit these are "genuinely different things"). `compute_disk_load_series()`
+fetches the identical six `rate(...)` expressions
+`_fetch_raw_quantity()` builds, `query_range`'d instead of wrapped in
+`quantile_over_time` and `instant_query`'d, then runs section 4's exact
+normalize-then-weight-then-rescale blend once **per timestamp** instead
+of once. `_combine_raw_values()`/`_blend_loads()` are that formula
+factored out to plain-number arguments so both this function and
+`compute_group_load()` call the identical implementation (AGENTS.md
+section 5) — extracted, then proven behavior-preserving by
+`test_loadmodel.py`'s full existing suite passing unchanged before any
+series-specific test was added, the same regression-by-refactor
+discipline `reserve.transient_charge_ok()`'s own extraction used.
+
+Every disk in the group gets an entry, even an empty one — unlike
+`compute_group_load()`, this function does not apply `window.min_coverage`
+at all: a forecaster's own `required_range()` is a much longer, coarser
+signal than that rule was built to validate, and a sparse history is
+exactly what the forecaster itself needs to see to distrust its own fit.
+Not called from anywhere yet — this is section 10's raw material for the
+section 7.3 saturation guard `payback.py` does not implement yet either
+(see that page's own note on the gap); this function exists so that work
+has its data source in place first.
+
 ## What is still missing from phase 3
 
 `IMPLEMENTATION_PLAN.md` section 12 phase 3's own "done when" is "correct
