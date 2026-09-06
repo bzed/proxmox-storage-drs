@@ -607,11 +607,14 @@ the default) needs no penalty at all and is unaffected by this key.
 
 One of `auto`, `cpsat`, `cbc`, `heuristic`; default `auto`.
 
-`auto` prefers CP-SAT, falls back to CBC (the packaged solver path via
-`python3-pulp` + `coinor-cbc`), then the dependency-free heuristic. Force a
-specific backend only to reproduce or compare a result — `heuristic` is also
-the automatic choice for a group too large for either MILP backend to solve
-within `solver.time_limit_seconds`.
+`auto` prefers CP-SAT (`pip install proxmox-storage-drs[solver]` -- not
+packaged for Debian), falls back to CBC (the packaged solver path via
+`python3-pulp` + `coinor-cbc`), then the dependency-free heuristic. `cpsat`/
+`cbc` force one specific backend, failing that group's solve back to the
+heuristic (never a silent substitution of the *other* MILP backend) if its
+library is not importable or it cannot solve within `solver.time_limit_seconds`
+-- force a specific backend only to reproduce or compare a result.
+`heuristic` skips the solver entirely. See `docs/internals/91-optimize.md`.
 
 ### `solver.time_limit_seconds`
 

@@ -37,7 +37,7 @@ than a document that reads as if the tool were finished:
 | `verify-metrics` | Implemented: all six `IMPLEMENTATION_PLAN.md` section 3.3 checks, human and `--json` output. |
 | `show-load` | Implemented: every storage in every group, its disks (all buses), sizes, reserve status ((C4)/(C5)), per-disk/per-storage I/O load (`ℓ_d`/`L_s`/`u_s`, section 4), and a section 6 act/no-act verdict per group with its reasoning, pinned and low-coverage disks flagged with their reason (including a disk within `gates.cooldown_per_disk`, once `state.json` has recorded one), human and `--json` output. A Prometheus outage degrades this one group's load (and its gate verdict) to "unavailable" rather than failing the whole command — sizes and reserve status are unaffected. The gate verdict now reads real drift history from `state.json` when a group has one recorded; a group with none yet still evaluates as a first run (reserve override or imbalance only, never drift-suppressed) — see `docs/internals/15-state.md` and `docs/internals/80-gates.md`. |
 | `verify-storages` | Implemented: `saferemove` and the implied wipe time per storage, warning when `gates.cooldown_per_storage` or `migration.max_single_move_duration` is shorter than it. |
-| `plan` | Implemented via the heuristic backend (section 5.5): per group, evaluates the section 6 gate (reading real drift history from `state.json` when a group has one recorded — same as `show-load`, see `docs/internals/15-state.md`), and on `ACT` runs the heuristic solver (excluding, as a migration target, any storage within `gates.cooldown_per_storage` — except when repairing a live reserve violation, which is never deferred for a cooldown), orders its moves under the section 8 transient reserve invariant, and checks the whole plan against section 7's payback (cost/benefit) test — a plan resolving a reserve violation is exempt from the economic half of that test but not from the hard per-move duration rule. Human and `--json` output. **No automatic re-solve-and-shrink on a failing payback test** — a plan that fails is reported, not silently adjusted (section 7.3's 3-retry loop is not implemented). **No section 7.3 saturation-ceiling check** — needs a forecaster upper bound this codebase does not compute yet; fully supported to be absent per the plan's own words, since it is the one advisory (not hard) check. The MILP backend (`optimize.py`, phase 6) does not exist, so `solver.backend` has no effect yet — see `docs/manual/27-plan.md` and `docs/internals/90-heuristic.md`/`95-schedule.md`/`96-payback.md`. |
+| `plan` | Implemented: per group, evaluates the section 6 gate (reading real drift history from `state.json` when a group has one recorded — same as `show-load`, see `docs/internals/15-state.md`), and on `ACT` solves it with `solver.backend` (`auto` tries CP-SAT, then CBC, then the dependency-free heuristic — see `docs/internals/91-optimize.md`; both MILP backends and the heuristic exclude, as a migration target, any storage within `gates.cooldown_per_storage`, except when repairing a live reserve violation, which is never deferred for a cooldown, in the heuristic only — see `docs/internals/91-optimize.md`'s own note on that gap), orders its moves under the section 8 transient reserve invariant, and checks the whole plan against section 7's payback (cost/benefit) test — a plan resolving a reserve violation is exempt from the economic half of that test but not from the hard per-move duration rule. Human and `--json` output report which backend actually solved each group. **No automatic re-solve-and-shrink on a failing payback test** — a plan that fails is reported, not silently adjusted (section 7.3's 3-retry loop is not implemented). **No section 7.3 saturation-ceiling check** — needs a forecaster upper bound this codebase does not compute yet; fully supported to be absent per the plan's own words, since it is the one advisory (not hard) check. See `docs/manual/27-plan.md` and `docs/internals/90-heuristic.md`/`91-optimize.md`/`95-schedule.md`/`96-payback.md`. |
 | `explain` | Not implemented yet — needs the payback arithmetic it exists to explain (phase 5). |
 | `apply` | Not implemented yet — needs `execute.py` (phase 7 onward). |
 
@@ -59,11 +59,19 @@ pve-storage-drs: 'apply' is not implemented yet in this development build; see I
 ## Optional dependencies
 
 `pve-storage-drs` runs, plans and (once implemented) executes with only
-`requests`, `ruamel.yaml` and `jsonschema` installed. Two dependencies are
+`requests`, `ruamel.yaml` and `jsonschema` installed. Three dependencies are
 optional and are imported only where they are used, never at module level:
 
 - **`pulp` + `coinor-cbc`** (Debian `Recommends`) — the packaged MILP solver
-  path. Without it, the solver falls back to the dependency-free heuristic.
+  path (`solver.backend: cbc`, or `auto` when CP-SAT is unavailable).
+- **`ortools`** (`pip install proxmox-storage-drs[solver]`, **not** packaged
+  for Debian — CP-SAT has no Debian package at all) — the preferred MILP
+  backend (`solver.backend: cpsat`, or `auto`'s first choice) when installed
+  by hand outside the Debian path.
 - **`statsmodels`** (Debian `Suggests`) — needed only for
   `forecast.model: holt_winters`. Without it, that model logs a warning and
   falls back to `quantile` automatically rather than failing.
+
+Without either MILP library, `solver.backend: auto` (the default) falls back
+to the dependency-free heuristic; nothing in `pve-storage-drs` requires a
+MILP solver to be installed at all — see `docs/internals/91-optimize.md`.

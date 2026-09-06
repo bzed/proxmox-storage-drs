@@ -12,6 +12,8 @@ import pytest
 import yaml
 
 from proxmox_storage_drs import __version__, cli
+from proxmox_storage_drs.config import ResolvedConfig
+from proxmox_storage_drs.heuristic import ObjectiveBreakdown
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
 from proxmox_storage_drs.topology import Disk, Group, Storage, Topology
 
@@ -1298,3 +1300,179 @@ def test_mode_override_flows_through_main(
     assert override_events
     assert override_events[0]["effective_mode"] == "auto"
     assert override_events[0]["level"] == "WARNING"
+
+
+# --------------------------------------------------------- solver backend dispatch
+
+
+def _resolved_config(tmp_path: Path, **overrides: object) -> ResolvedConfig:
+    from proxmox_storage_drs.config import load_config
+
+    path = write_config(tmp_path, **overrides)
+    return load_config(str(path), env={})
+
+
+def _one_disk_group() -> Group:
+    storages = tuple(
+        Storage(
+            id=sid,
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=8 * (1 << 40),
+            used_bytes=0,
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        )
+        for sid in ("san-a", "san-b")
+    )
+    disks = (
+        Disk(
+            key="101:scsi0",
+            vmid=101,
+            device="scsi0",
+            vm_name="a",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason=None,
+        ),
+    )
+    return Group(name="fc-tier1", storages=storages, disks=disks)
+
+
+def _fake_breakdown(
+    group: Group, loads: dict[str, float], resolved: ResolvedConfig
+) -> ObjectiveBreakdown:
+    from proxmox_storage_drs.heuristic import (
+        evaluate_assignment,
+        group_average_utilization,
+        seed_assignment,
+    )
+
+    u_star = group_average_utilization(group, loads)
+    return evaluate_assignment(
+        group, seed_assignment(group), loads, resolved.config.objective, 0, u_star
+    )
+
+
+def test_solve_group_uses_the_milp_result_when_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.optimize import OptimizeResult
+
+    resolved = _resolved_config(tmp_path, solver={"backend": "cpsat"})
+    group = _one_disk_group()
+    loads = {"101:scsi0": 1.0}
+    breakdown = _fake_breakdown(group, loads, resolved)
+    fake_result = OptimizeResult(
+        assignment={"101:scsi0": "san-b"},
+        breakdown=breakdown,
+        initial_breakdown=breakdown,
+        backend="cpsat",
+        status="optimal",
+    )
+    calls: list[str] = []
+
+    def fake_solve(
+        group: object,
+        load_by_key: object,
+        objective: object,
+        min_free_bytes: object,
+        backend: str,
+        time_limit_seconds: object,
+        mip_gap: object,
+        cooldown_storages: object = frozenset(),
+    ) -> object:
+        calls.append(backend)
+        return fake_result
+
+    def fail_heuristic(*args: object, **kwargs: object) -> None:
+        raise AssertionError("must not fall back to the heuristic when cpsat succeeds")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", fake_solve)
+    monkeypatch.setattr("proxmox_storage_drs.cli.run_heuristic", fail_heuristic)
+
+    outcome = cli._solve_group(group, loads, resolved, 0, frozenset())
+
+    assert calls == ["cpsat"]
+    assert outcome.backend == "cpsat"
+    assert outcome.status == "optimal"
+    assert outcome.assignment == {"101:scsi0": "san-b"}
+
+
+def test_solve_group_auto_cascades_cpsat_then_cbc_then_heuristic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolved_config(tmp_path)  # solver.backend defaults to "auto"
+    group = _one_disk_group()
+    loads = {"101:scsi0": 1.0}
+    calls: list[str] = []
+
+    def fake_solve(*args: object, **kwargs: object) -> None:
+        calls.append(args[4])  # type: ignore[arg-type]
+        return None
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", fake_solve)
+
+    outcome = cli._solve_group(group, loads, resolved, 0, frozenset())
+
+    assert calls == ["cpsat", "cbc"]
+    assert outcome.backend == "heuristic"
+    assert outcome.status is None
+    assert outcome.assignment == {"101:scsi0": "san-a"}  # nothing improves a lone disk's spread
+
+
+def test_solve_group_never_calls_optimize_when_backend_is_heuristic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolved_config(tmp_path, solver={"backend": "heuristic"})
+    group = _one_disk_group()
+
+    def fail_solve(*args: object, **kwargs: object) -> None:
+        raise AssertionError("solver.backend=heuristic must never call optimize.solve")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", fail_solve)
+
+    outcome = cli._solve_group(group, {"101:scsi0": 1.0}, resolved, 0, frozenset())
+    assert outcome.backend == "heuristic"
+
+
+def test_solve_group_warns_when_an_explicit_backend_falls_back(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import logging
+
+    resolved = _resolved_config(tmp_path, solver={"backend": "cpsat"})
+    group = _one_disk_group()
+    monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", lambda *a, **k: None)
+
+    with caplog.at_level(logging.WARNING):
+        outcome = cli._solve_group(group, {"101:scsi0": 1.0}, resolved, 0, frozenset())
+
+    assert outcome.backend == "heuristic"
+    assert any("falling back to the heuristic" in r.message for r in caplog.records)
+
+
+def test_plan_human_output_shows_the_solver_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert "solver: heuristic" in out  # no solver extras installed in the test venv
+
+
+def test_plan_json_output_includes_the_solver_backend_and_status(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    group_payload = payload["groups"][0]
+    assert group_payload["solver_backend"] == "heuristic"
+    assert group_payload["solver_status"] is None
