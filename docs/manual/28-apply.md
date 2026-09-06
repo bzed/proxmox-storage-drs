@@ -61,7 +61,13 @@ reports the move as `draining`, not `moved` and not `failed`: it is a
 normal, expected state, bounded by `execution.source_release.timeout`
 (default 48h), not an error. A `draining` move still counts as
 "executed" for `state.json`'s bookkeeping below — the mirror itself
-completed; only the source's own cleanup is still in flight.
+completed; only the source's own cleanup is still in flight. For the
+*rest of this same run*, that storage is excluded as both a source and a
+target for any later move: it holds a storage-level lock for as long as
+the wipe runs, so a subsequent `move_disk` touching it would either queue
+behind a wipe that can take days or fail outright. A move skipped this
+way is reported plainly (`skipped`, naming the draining storage) rather
+than attempted into that lock.
 
 Before *every* move, `apply` re-checks the live cluster rather than
 trusting the plan: the VM may have moved node, the disk may no longer be
@@ -111,11 +117,17 @@ executed (`moved` or `draining` — both mean the mirror itself completed):
   real balance instead of treating every run as the first one.
 - Every executed disk gets a fresh `gates.cooldown_per_disk` timestamp at
   its **new** location.
-- Every move's **destination** storage (never its source —
-  `docs/internals/90-heuristic.md`'s "the storage cooldown excludes a
-  destination, never a source") gets a fresh `gates.cooldown_per_storage`
-  timestamp, so the heuristic and both MILP backends exclude it as an
-  incoming-move target on the next run until that cooldown expires.
+- **Both** of the move's storages — source and destination — get a fresh
+  `gates.cooldown_per_storage` timestamp: section 6 says a storage
+  "involved in a migration" accepts no new incoming moves, and section
+  9.3's sizing rule for this cooldown is specifically about protecting a
+  *source* still draining a `saferemove` wipe, so recording the
+  destination alone could never deliver on it. What the cooldown actually
+  *excludes* on the next run stays destination-only (the heuristic/MILP
+  backends refuse a cooldown storage as an incoming-move target, never as
+  a source a disk may still leave) — recording both endpoints only
+  widens which storages carry a timestamp, not what that timestamp
+  blocks.
 
 A group that never executes anything (the gate said `NO ACTION`, or a
 `load_error`/`replan_needed` stopped it before any move ran) leaves

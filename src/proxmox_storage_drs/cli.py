@@ -32,11 +32,19 @@ from proxmox_storage_drs import __version__, optimize
 from proxmox_storage_drs.config import (
     DEFAULT_CONFIG_PATH,
     ENV_CONFIG_VAR,
+    ExcludeConfig,
+    ExecutionConfig,
+    MigrationConfig,
     ResolvedConfig,
     load_config,
 )
 from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
-from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome, execute_plan
+from proxmox_storage_drs.execute import (
+    ConfirmCallback,
+    ExecutionResult,
+    MoveOutcome,
+    execute_plan,
+)
 from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
 from proxmox_storage_drs.heuristic import (
     Assignment,
@@ -57,6 +65,7 @@ from proxmox_storage_drs.payback import (
     compute_wipe_duration_seconds,
     evaluate_plan_payback,
 )
+from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.pve import build_client as build_pve_client
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, largest_disk_bytes
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult, order_moves
@@ -681,9 +690,17 @@ def _render_group_plan_human(
         {mc.disk_key: mc for mc in payback_result.move_costs} if payback_result else {}
     )
 
-    outcomes = execution_result.outcomes if execution_result is not None else ()
+    # Keyed by disk_key, not position: a payback-refused move (section 7.3,
+    # REVIEW.md S-02) never reaches `execute.py` at all, so
+    # `execution_result.outcomes` can legitimately be a *reordered subset*
+    # of `schedule_result.order` (refused moves' outcomes first, then
+    # whatever `execute_plan()` actually attempted) -- positional
+    # indexing would silently pair the wrong outcome with the wrong move.
+    outcomes_by_key = {
+        o.disk_key: o for o in (execution_result.outcomes if execution_result is not None else ())
+    }
     for i, move in enumerate(schedule_result.order, start=1):
-        outcome = outcomes[i - 1] if i - 1 < len(outcomes) else None
+        outcome = outcomes_by_key.get(move.disk_key)
         lines.append(
             _render_plan_move_line(
                 i, move, move_costs_by_key.get(move.disk_key), load_by_key, outcome
@@ -1262,6 +1279,103 @@ def _confirm_move_interactively(move: ScheduledMove) -> str:
         print("  please answer y, n, a or q", file=sys.stderr)
 
 
+def _apply_payback_gate(
+    client: PveClient,
+    group: Group,
+    group_plan: _GroupPlan,
+    migration: MigrationConfig,
+    execution: ExecutionConfig,
+    min_free_bytes: int,
+    mode: str,
+    payback_ratio: float,
+    exclude: ExcludeConfig,
+    confirm: ConfirmCallback | None,
+) -> ExecutionResult:
+    """Section 7.3's payback verdict gates *execution*, not merely the
+    report (REVIEW.md S-02): a move `rejected_moves` names (the hard
+    per-move `migration.max_single_move_duration` rule) must never reach
+    `execute.py` regardless of the plan's aggregate economics, and a plan
+    that fails the aggregate economic test (``not aggregate_ok``) must
+    not be executed at all. This is the same "report, never force"
+    policy `payback.py` itself follows (a reserve-resolving plan is
+    exempted from the economic half there, never from the hard duration
+    rule) -- applied here to mean the tool also refuses *on its own
+    verdict*, rather than reporting a plan as rejected in one command and
+    executing it anyway in the next. `execute.py`'s
+    `_wait_for_move_completion()` docstring's assumption ("a move that
+    was accepted at planning time already passed
+    `migration.max_single_move_duration`") is only true by construction
+    because of the filtering below -- until now it was simply false.
+
+    A refused move's outcome is reported exactly like any other
+    `execute_plan()` outcome (``status="skipped"``) so the shared
+    renderers need no special case for it; ``execute_plan()`` itself is
+    never called at all when the aggregate test fails, so a rejected plan
+    issues zero API calls, the same as `dry-run`.
+    """
+    assert group_plan.schedule_result is not None and group_plan.payback_result is not None
+    order = group_plan.schedule_result.order
+    payback = group_plan.payback_result
+    rejected_keys = set(payback.rejected_moves)
+
+    refused: list[MoveOutcome] = [
+        MoveOutcome(
+            m.disk_key,
+            m.from_storage,
+            m.to_storage,
+            "skipped",
+            "refused: exceeds migration.max_single_move_duration (section 7.3's hard "
+            "per-move duration rule)",
+        )
+        for m in order
+        if m.disk_key in rejected_keys
+    ]
+
+    if not payback.aggregate_ok:
+        refused.extend(
+            MoveOutcome(
+                m.disk_key,
+                m.from_storage,
+                m.to_storage,
+                "skipped",
+                f"refused: plan failed the payback acceptance test (ratio {payback.ratio:.3g} "
+                f"< required {payback_ratio:g}, section 7.3)",
+            )
+            for m in order
+            if m.disk_key not in rejected_keys
+        )
+        return ExecutionResult(
+            outcomes=tuple(refused),
+            stopped_early=True,
+            stop_reason="plan failed the payback acceptance test (section 7.3)",
+        )
+
+    kept = tuple(m for m in order if m.disk_key not in rejected_keys)
+    if not kept:
+        # Every move was individually rejected -- nothing left to
+        # execute, but that is not "stopped early": there was nothing
+        # this run could have done about it either way.
+        return ExecutionResult(outcomes=tuple(refused), stopped_early=False, stop_reason=None)
+
+    filtered = dataclasses.replace(group_plan.schedule_result, order=kept)
+    executed = execute_plan(
+        client,
+        group,
+        filtered,
+        migration,
+        execution,
+        min_free_bytes,
+        mode,
+        exclude,
+        confirm=confirm,
+    )
+    return ExecutionResult(
+        outcomes=tuple(refused) + executed.outcomes,
+        stopped_early=executed.stopped_early,
+        stop_reason=executed.stop_reason,
+    )
+
+
 def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     """Section 9: execute (``confirm``) or merely report (``dry-run``)
     the same per-group pipeline ``plan`` computes -- :func:`_plan_group`
@@ -1345,16 +1459,33 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
             final_breakdowns[group.name] = group_plan.final_breakdown
             payback_results[group.name] = group_plan.payback_result
 
+            if mode == "confirm" and group_plan.schedule_result.order:
+                # Section 7.3's verdict is shown *before* the first
+                # prompt, not only in the post-run report -- an operator
+                # confirming moves one at a time deserves to know the
+                # tool's own payback verdict (including a hard-duration
+                # rejection) before being asked anything, not after
+                # everything already ran (REVIEW.md S-02). Just the
+                # payback lines, not the whole group block the final
+                # report already prints in full -- this is a preview, not
+                # a second copy of it.
+                for line in _render_plan_payback_lines(
+                    group_plan.payback_result, resolved.config.migration.payback_ratio
+                ):
+                    print(line)
+
             confirm_callback = _confirm_move_interactively if mode == "confirm" else None
-            result = execute_plan(
+            result = _apply_payback_gate(
                 client,
                 group,
-                group_plan.schedule_result,
+                group_plan,
                 resolved.config.migration,
                 resolved.config.execution,
                 min_free_bytes,
                 mode,
-                confirm=confirm_callback,
+                resolved.config.migration.payback_ratio,
+                resolved.config.exclude,
+                confirm_callback,
             )
             execution_results[group.name] = result
 
@@ -1363,32 +1494,55 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
             # "draining" both count (the mirror itself completed either
             # way, mirroring execute.py's own (C4) accounting choice for
             # the same two statuses), "would_move"/"skipped"/"failed"/
-            # "replan_needed" do not.
+            # "replan_needed"/a payback refusal do not. Keyed by
+            # disk_key, not zipped positionally: a payback refusal
+            # (S-02) can make `result.outcomes` a reordered subset of
+            # `group_plan.schedule_result.order`.
+            outcomes_by_key = {o.disk_key: o for o in result.outcomes}
             executed_moves = [
                 move
-                for move, outcome in zip(group_plan.schedule_result.order, result.outcomes)
-                if outcome.status in ("moved", "draining")
+                for move in group_plan.schedule_result.order
+                if (outcome := outcomes_by_key.get(move.disk_key)) is not None
+                and outcome.status in ("moved", "draining")
             ]
             if executed_moves:
                 state = with_recorded_balance(
                     state, group.name, group_plan.group_load.load_by_disk_key()
                 )
                 timestamp = now_iso()
+                # Both endpoints get a timestamp -- section 6's own words
+                # are "a storage **involved in** a migration ... accepts
+                # no new incoming moves", and section 9.3's knob-sizing
+                # rule ("cooldown_per_storage must exceed the expected
+                # wipe time ... or the next run will plan moves onto a
+                # storage that is still draining") is specifically about
+                # the *source*, where the saferemove wipe actually runs
+                # (REVIEW.md S-03: recording the destination only can
+                # never protect a draining source, no matter how long
+                # the cooldown is configured for). This is a *recording*
+                # decision only -- which storages get a timestamp;
+                # `heuristic.py`'s own *enforcement* of that cooldown
+                # stays destination-only, excluding a cooldown storage as
+                # a move/swap target but never as a source
+                # (docs/internals/90-heuristic.md), which is unaffected
+                # by recording the source's own timestamp here too.
+                storage_keys = {
+                    storage_state_key(group.name, move.to_storage): timestamp
+                    for move in executed_moves
+                }
+                storage_keys.update(
+                    {
+                        storage_state_key(group.name, move.from_storage): timestamp
+                        for move in executed_moves
+                    }
+                )
                 state = with_recorded_cooldown(
                     state,
                     disk_keys={
                         disk_state_key(group.name, move.vmid, move.device): timestamp
                         for move in executed_moves
                     },
-                    # Only the *destination* -- docs/internals/90-heuristic.md:
-                    # "the storage cooldown excludes a destination, never a
-                    # source" -- a storage this run only moved disks away
-                    # from is not a wear/churn concern the cooldown protects
-                    # against.
-                    storage_keys={
-                        storage_state_key(group.name, move.to_storage): timestamp
-                        for move in executed_moves
-                    },
+                    storage_keys=storage_keys,
                 )
 
             if result.stop_reason == "operator quit":

@@ -16,11 +16,18 @@ cluster taken at planning time. By the time a move near the end of a long
 live cluster routinely produces: an operator touched the VM, PVE's own
 Dynamic Load Balancer moved it to another node, a snapshot appeared, or
 another process changed the target storage's free space. `_preflight()`
-re-fetches the VM's current node, config, running status and snapshot list
-fresh for every single move — deliberately bypassing the per-run topology
-cache (`topology.py`'s section 3.5 cache exists to avoid re-fetching for
-*planning*, not to avoid re-validating immediately before a mutation) —
-and `_live_transient_check()` re-derives the section 8.1 reserve formula
+re-fetches the VM's current node, config, running status, snapshot list
+and exclusion tags fresh for every single move — deliberately bypassing
+the per-run topology cache (`topology.py`'s section 3.5 cache exists to
+avoid re-fetching for *planning*, not to avoid re-validating immediately
+before a mutation). The exclusion re-check (section 9.2 step 3:
+"untagged for exclusion", REVIEW.md S-06) is
+`_is_excluded_by_tag_or_vmid()`, a small duplicate of `topology.py`'s own
+vmid/tag predicate rather than an import of it — that name is private to
+that module, matching this codebase's usual choice for a one-line filter
+(AGENTS.md section 5; `optimize.py`'s `_movable_disks()` is the same
+precedent). And `_live_transient_check()` re-derives the section 8.1
+reserve formula
 against the target's live `storage_status()`, not the in-memory model.
 Either kind of mismatch stops the group's run with `"replan_needed"`
 rather than trying to patch the plan around it — `IMPLEMENTATION_PLAN.md`
@@ -68,6 +75,22 @@ updates on `"moved"` **and** `"draining"`, not `"moved"` alone: the mirror
 itself is physically complete either way, so a target storage's own
 accounting must already include this disk regardless of whether its
 *source* has finished releasing.
+
+A `"draining"` outcome also adds that move's *source* to a `drained_storages`
+set `execute_plan()` carries for the rest of the run (REVIEW.md S-05): the
+next move whose own source or target is in that set is skipped outright,
+`_drained_skip_outcome()` reporting it without a single API call. Section
+9.3 asks for exactly this ("exclude it as both source and target for the
+remainder of the run") — a draining storage holds a storage-level lock
+for as long as the wipe runs, so a subsequent `move_disk` touching it
+would either queue behind a potentially day-long wipe (the task-status
+poll loop is unbounded) or fail outright, tripping `abort_on_failure` for
+no reason a human would consider a real failure. An earlier revision of
+this module tracked the *(C4) accounting* consequence of a draining
+target (the paragraph above) but never actually excluded the storage
+from later moves in the same run — found by a review pass, not a test,
+since nothing at the time exercised two moves sharing a storage within
+one run.
 
 ## VM locks are an open set, waited out, never whitelisted
 
@@ -188,12 +211,46 @@ never `"would_move"`/`"skipped"`/`"failed"`/`"replan_needed"`. For those,
 it calls `state.with_recorded_balance()` (this group's measured load
 vector, feeding the next run's drift gate) and `state.with_recorded_cooldown()`
 — a fresh disk cooldown for every executed disk at its *new* location, and
-a fresh storage cooldown for every move's **destination** only, never its
-source (`docs/internals/90-heuristic.md`: "the storage cooldown excludes a
-destination, never a source"). The accumulated `state` is written once, at
-the very end of the whole run (every group, not per-group), through
-`state.save_locked_state()` — never `state.save_state_atomic()`'s
-rename, which would silently detach the very lock `acquire_lock()` just
-took (see `docs/internals/15-state.md`'s account of that bug) — and only
-then released via `state.release_lock()`, in a `finally` so a mid-run
-exception never leaves the lock held.
+a fresh storage cooldown for **both** of the move's storages, source and
+destination (section 6: "a storage involved in a migration ... accepts no
+new incoming moves" covers both; REVIEW.md S-03 — an earlier revision of
+this code recorded the destination only, which meant no configured
+`gates.cooldown_per_storage` could ever protect a still-draining
+*source*, exactly the scenario section 9.3's knob-sizing rule and
+`verify-storages`' own warning describe). Recording both endpoints is
+independent of `heuristic.py`'s own *enforcement*, which stays
+destination-only: a cooldown storage is excluded as a move/swap target,
+never as a source a disk may still leave (`docs/internals/90-heuristic.md`).
+The accumulated `state` is written once, at the very end of the whole run
+(every group, not per-group), through `state.save_locked_state()` —
+never `state.save_state_atomic()`'s rename, which would silently detach
+the very lock `acquire_lock()` just took (see `docs/internals/15-state.md`'s
+account of that bug) — and only then released via `state.release_lock()`,
+in a `finally` so a mid-run exception never leaves the lock held.
+
+## The payback gate: `apply` refuses on its own verdict (REVIEW.md S-02)
+
+Section 7 calls the payback rule "a **hard acceptance test on the
+finished plan**, not merely a soft `γ` penalty" — a verdict `plan` shows
+the operator, not a suggestion. An earlier revision of `_handle_apply()`
+computed `payback_result` and then ignored it entirely on the execution
+path: a plan whose aggregate economics failed, or whose one move exceeded
+`migration.max_single_move_duration` (`payback_result.rejected_moves`,
+the *hard* per-move rule §7.3 separates from the aggregate one), was
+executed anyway. `_apply_payback_gate()` is the fix: it never calls
+`execute_plan()` at all for a move in `rejected_moves`, or for *any* move
+in the group when `not payback_result.aggregate_ok` — both report a
+`"skipped"` outcome ("refused: ...") through the exact same
+`MoveOutcome`/`ExecutionResult` shapes `execute.py` itself produces, so
+neither the renderers nor `state.json`'s bookkeeping need a special case:
+a refused move was never "executed" (it is not `"moved"`/`"draining"`),
+so it earns no cooldown and contributes nothing to `last_balance`. A plan
+that clears both checks is passed to `execute_plan()` with its
+individually-rejected moves (if any) simply absent from `order` — which
+is also what makes `_wait_for_move_completion()`'s own docstring claim
+("a move that was accepted at planning time already passed
+`migration.max_single_move_duration`") true by construction rather than
+merely asserted. In `confirm` mode, the group's payback lines print once,
+before the first prompt — an operator confirming moves one at a time
+sees the tool's own verdict before being asked anything, not only in the
+post-run report.

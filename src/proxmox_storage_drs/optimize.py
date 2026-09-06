@@ -48,21 +48,27 @@ occasion to reach for it.
 **Deliberately not implemented in this pass** (see
 ``docs/internals/91-optimize.md``):
 
-- **The storage cooldown** (`heuristic.py`'s `cooldown_storages`
-  parameter, section 6's "accepts no new incoming moves") is accepted for
-  interface symmetry with `heuristic.run_heuristic()` but not yet
-  enforced by either MILP model. Hard-fixing `x_{d,s}=0` for a cooldown
-  storage inside stage 2, after stage 1 has already fixed the *value* of
-  `Σ r_s` (not the assignment that achieves it), can make stage 2
-  infeasible in a case the heuristic's sequential repair-then-descend
-  never hits (descend only ever *extends* repair's assignment, it never
-  re-derives it against a competing hard constraint). Getting this right
-  needs either a soft big-M-style penalty or a per-solve feasibility
-  check this pass does not implement. Cooldowns are inert today anyway
-  (nothing calls `state.with_recorded_cooldown()` yet), so this gap
-  changes no currently-observable behavior; `solve()` logs a warning if
-  it is ever called with a non-empty `cooldown_storages` so the day that
-  changes, the gap is loud rather than silent.
+- **The storage cooldown's repair-exemption asymmetry is not replicated
+  here** (REVIEW.md S-04 fixed the gap this bullet used to describe: both
+  MILP models now hard-fix `x_{d,s}=0` for `s in cooldown_storages` in
+  *both* lexicographic stages, whenever `s` is not `d`'s current storage
+  -- section 6's "accepts no new incoming moves", identical to
+  `heuristic._descend()`'s own `target.id in cooldown_storages` check).
+  What is *not* replicated is `heuristic._repair()`'s own exemption from
+  that same cooldown when fixing a live (C4)/(C5) violation (section 13's
+  reserve-override principle) -- the fix here is a single feasibility
+  constraint applied uniformly to both stages, including stage 1's own
+  reserve-shortfall minimization, so a cooldown storage stays unavailable
+  even when it is the *only* way to resolve a violation, which the
+  heuristic would still do. Replicating the exemption exactly needs
+  either a second, repair-only relaxation of the same constraint or a
+  restructured two-phase solve; this pass takes the simpler, uniform
+  fix instead, on the judgment that a group both mid-violation and
+  mid-cooldown on the one storage that could fix it is a narrow edge
+  case, and reports the fixture's own numbers if it is ever hit (the
+  slack is genuinely 0 with the cooldown storage excluded, so `plan`
+  reports an accurate, if pessimistic-relative-to-the-heuristic,
+  shortfall rather than a wrong one).
 - **(C2) format-compatibility eligibility** -- the same gap
   `heuristic.py` already documents (`topology.Storage` does not expose
   storage type/format).
@@ -75,12 +81,20 @@ occasion to reach for it.
   would go unnoticed. `test_optimize.py`'s cross-checks against the
   exhaustively-enumerated fixtures are the sharper version of the same
   guard: not just "internally consistent" but "agrees with a
-  independently proven optimum".
+  independently proven optimum". Section 5.5's other two assertions from
+  the same paragraph -- every coefficient a non-zero integer wherever its
+  unscaled weight is non-zero, and the objective's maximum magnitude
+  under `2**62` -- *are* implemented, as `_assert_nonzero_when_weighted()`
+  and `_assert_objective_magnitude_within_int64()` in
+  `_cpsat_objective_terms()` (REVIEW.md S-09; CP-SAT's own integer
+  -coefficient discipline is what these two guard, so neither applies to
+  CBC's continuous, unscaled model).
 """
 
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -170,6 +184,44 @@ def cbc_available() -> bool:
     return True
 
 
+def _lp_variable(pulp: Any, name: str, **kwargs: Any) -> Any:
+    """``pulp.LpVariable(name, ...)`` -- not ``prob.add_variable(...)``,
+    PuLP v4's replacement, which does not exist before pulp 3.3.1.
+    Debian trixie packages pulp **2.7.0** (`python3-pulp`), and
+    section 2.1 designates that as the primary, packaged CBC path, so
+    `add_variable` would crash on the platform this project targets
+    (REVIEW.md S-01 -- confirmed by wheel inspection across every pulp
+    release from 2.7.0 to 3.3.2). Direct construction works unchanged on
+    every one of those versions; on 3.3+ it also raises a v4-migration
+    `DeprecationWarning` recommending `add_variable` instead, which this
+    function suppresses explicitly -- adopting an API the target platform
+    cannot provide, just to silence a warning about an alternative that
+    does not yet apply there, would fix the wrong thing."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        return pulp.LpVariable(name, **kwargs)
+
+
+def _pulp_solve(pulp: Any, prob: Any, solver_cmd: Any) -> int | None:
+    """``prob.solve(solver_cmd)``, returning ``None`` instead of raising
+    when the CBC binary itself cannot be executed -- Debian splits it
+    into `coinor-cbc`, a `Recommends`, not a `Depends`, of `python3-pulp`,
+    so the library can be importable with no working solver behind it
+    (REVIEW.md S-01). Matches this module's own contract (see the module
+    docstring): a backend that cannot produce a plan returns ``None``,
+    never an exception, so `cli.py`'s fallback cascade -- not a
+    traceback -- is what an operator sees."""
+    try:
+        return int(prob.solve(solver_cmd))
+    except pulp.PulpSolverError as exc:
+        logger.warning(
+            "solver.backend=cbc could not run the CBC solver: %s",
+            exc,
+            extra={"event": "optimize_backend_unavailable", "backend": "cbc"},
+        )
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class OptimizeResult:
     """One group's MILP solve. ``breakdown``/``initial_breakdown`` are
@@ -207,13 +259,6 @@ def solve(
     decides what "fall back" means; this function's only job is one
     group's solve attempt.
     """
-    if cooldown_storages:
-        logger.warning(
-            "the MILP backend does not yet enforce gates.cooldown_per_storage "
-            "(see optimize.py's module docstring); the heuristic backend does",
-            extra={"event": "optimize_cooldown_not_enforced", "group": group.name},
-        )
-
     movable = _movable_disks(group)
     average_utilization = group_average_utilization(group, load_by_key)
     initial = seed_assignment(group)
@@ -236,7 +281,14 @@ def solve(
     if backend not in solvers:  # pragma: no cover - cli.py never passes anything else
         raise ValueError(f"optimize.solve() does not know backend {backend!r}")
     outcome = solvers[backend](
-        group, movable, load_by_key, objective, min_free_bytes, time_limit_seconds, mip_gap
+        group,
+        movable,
+        load_by_key,
+        objective,
+        min_free_bytes,
+        time_limit_seconds,
+        mip_gap,
+        cooldown_storages,
     )
 
     if outcome is None:
@@ -276,6 +328,7 @@ def _cpsat_feasibility_constraints(
     objective: ObjectiveConfig,
     min_free_bytes: int,
     size_bound: int,
+    cooldown_storages: frozenset[str] = frozenset(),
 ) -> tuple[dict[Any, Any], dict[Any, Any], dict[Any, Any], dict[Any, Any]]:
     """(C1)/(C3)/(C4)/(C5) -- identical in both lexicographic stages, so
     built once per stage by both `_solve_cpsat()` calls to `build()`
@@ -294,6 +347,16 @@ def _cpsat_feasibility_constraints(
     for d in movable:
         model.Add(sum(x[d.key, s.id] for s in group.storages) == 1)
         model.AddHint(x[d.key, d.current_storage], 1)
+        for s in group.storages:
+            if s.id in cooldown_storages and s.id != d.current_storage:
+                # Section 6: "a storage involved in a migration within
+                # cooldown_per_storage accepts no new incoming moves" --
+                # excludes a cooldown storage as a *destination* only,
+                # exactly like `heuristic._descend()`'s own
+                # `target.id in cooldown_storages` check. A disk already
+                # resident there (`d.current_storage == s.id`) is left
+                # free to stay -- the cooldown never blocks that.
+                model.Add(x[d.key, s.id] == 0)
 
     for v in vmids:
         movable_of_v = [d for d in movable if d.vmid == v]
@@ -358,6 +421,53 @@ def _cpsat_storage_lhs(
     return sum(coeffs[d.key] * x[d.key, s.id] for d in movable) + pinned_scaled
 
 
+def _assert_nonzero_when_weighted(unscaled_weight: float, scaled: int, name: str) -> None:
+    """Section 5.5: "assert... every coefficient is a non-zero integer
+    wherever its unscaled weight is non-zero" -- the regression guard
+    for the gamma trap (REVIEW.md S-09): `if gamma_scaled: terms.append(...)`
+    a few lines above *silently drops* a coefficient that rounded to
+    zero, which is exactly the failure shape this assertion exists to
+    catch. Unreachable at the default weights after per-disk folding (a
+    coefficient rounds to zero only for a sub-kilobyte disk), but "can't
+    happen in practice" is what an assertion is for, not a reason to skip
+    writing it."""
+    assert not (unscaled_weight and not scaled), (
+        f"{name} rounded to 0 despite a non-zero configured weight ({unscaled_weight!r}) -- "
+        "section 5.5's coefficient-folding regression guard"
+    )
+
+
+def _assert_objective_magnitude_within_int64(
+    beta_scaled: int,
+    gamma_scaled_values: list[int],
+    kappa_scaled: int,
+    alpha_scaled: int,
+    num_movable: int,
+    num_vmids: int,
+    num_storages: int,
+    load_bound: int,
+) -> None:
+    """Section 5.5: "assert... the maximum objective magnitude is below
+    2**62" (REVIEW.md S-09). A coarse, deliberately conservative upper
+    bound -- every term at its own worst case simultaneously, which no
+    real solution reaches -- computed directly from the same scaled
+    coefficients and bounds the model already uses, not a second solve or
+    a second pass over the built model. CP-SAT's own `IntVar`/objective
+    domain is bounded at `2**63 - 1`; staying an order of magnitude under
+    that is what makes overflow structurally impossible at any realistic
+    cluster size, rather than merely unlikely."""
+    worst_case = (
+        beta_scaled * num_movable
+        + sum(abs(g) for g in gamma_scaled_values)
+        + abs(kappa_scaled) * num_vmids * num_storages
+        + abs(alpha_scaled) * load_bound * num_storages
+    )
+    assert worst_case < 2**62, (
+        f"objective magnitude bound {worst_case} exceeds 2**62 -- solver.* weights or "
+        "disk/group sizes are large enough to risk CP-SAT integer overflow (section 5.5)"
+    )
+
+
 def _cpsat_objective_terms(
     model: Any,
     group: Group,
@@ -377,6 +487,9 @@ def _cpsat_objective_terms(
     terms: list[Any] = []
     beta_scaled = round(objective.beta_move_count * _WEIGHT_SCALE * _LOAD_SCALE)
     kappa_scaled = round(objective.kappa_vm_affinity * _WEIGHT_SCALE * _LOAD_SCALE)
+    _assert_nonzero_when_weighted(objective.beta_move_count, beta_scaled, "beta_scaled")
+    _assert_nonzero_when_weighted(objective.kappa_vm_affinity, kappa_scaled, "kappa_scaled")
+    gamma_scaled_values: list[int] = []
     for d in movable:
         moved = 1 - x[d.key, d.current_storage]
         if beta_scaled:
@@ -387,6 +500,10 @@ def _cpsat_objective_terms(
             * _LOAD_SCALE
             * (d.size_bytes / _BYTES_PER_TIB)
         )
+        _assert_nonzero_when_weighted(
+            objective.gamma_move_bytes_per_tib, gamma_scaled, f"gamma_scaled[{d.key}]"
+        )
+        gamma_scaled_values.append(gamma_scaled)
         if gamma_scaled:
             terms.append(gamma_scaled * moved)
     if kappa_scaled:
@@ -394,6 +511,7 @@ def _cpsat_objective_terms(
             terms.append(kappa_scaled * (sum(y[v, s.id] for s in group.storages) - 1))
 
     alpha_scaled = round(objective.alpha_spread * _WEIGHT_SCALE)
+    _assert_nonzero_when_weighted(objective.alpha_spread, alpha_scaled, "alpha_scaled")
     u_star_scaled = round(_LOAD_SCALE * u_star)
     if objective.spread_metric == "minmax":
         t = model.NewIntVar(0, load_bound, "t")
@@ -409,6 +527,17 @@ def _cpsat_objective_terms(
             model.Add(u_star_scaled - lhs <= e[s.id])
         if alpha_scaled:
             terms.append(alpha_scaled * sum(e.values()))
+
+    _assert_objective_magnitude_within_int64(
+        beta_scaled,
+        gamma_scaled_values,
+        kappa_scaled,
+        alpha_scaled,
+        len(movable),
+        len(vmids),
+        len(group.storages),
+        load_bound,
+    )
     return terms
 
 
@@ -420,6 +549,7 @@ def _solve_cpsat(
     min_free_bytes: int,
     time_limit_seconds: float,
     mip_gap: float,
+    cooldown_storages: frozenset[str] = frozenset(),
 ) -> tuple[Assignment, str] | None:
     try:
         from ortools.sat.python import cp_model
@@ -450,6 +580,7 @@ def _solve_cpsat(
             objective,
             min_free_bytes,
             size_bound,
+            cooldown_storages,
         )
         return model, x, y, slack
 
@@ -457,15 +588,29 @@ def _solve_cpsat(
     model1.Minimize(sum(slack1.values()))
     solver1 = cp_model.CpSolver()
     solver1.parameters.max_time_in_seconds = time_limit_seconds
-    solver1.parameters.relative_gap_limit = mip_gap
+    # Stage 1's whole point is a *proven* minimum -- "Σ r_s > 0 provably
+    # means physically impossible", not "impossible within mip_gap"
+    # (REVIEW.md S-07). `mip_gap` is stage 2's tolerance on the real
+    # objective, not stage 1's on the reserve floor; forced to 0 here
+    # regardless of what the operator configured, and only `OPTIMAL`
+    # (never `FEASIBLE`, which would mean the gap was merely satisfied,
+    # not proven closed) is accepted as this stage's answer. Cheap: this
+    # stage is a near-feasibility problem that closes instantly on
+    # realistic groups, per this module's own docstring.
+    solver1.parameters.relative_gap_limit = 0.0
     status1 = solver1.Solve(model1)
-    if status1 not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    if status1 != cp_model.OPTIMAL:
         _no_feasible_solution("cpsat", group, "1 (reserve)")
         return None
     min_slack = round(solver1.ObjectiveValue())
 
     model2, x2, y2, slack2 = build()
-    model2.Add(sum(slack2.values()) == min_slack)
+    # `<=`, not `==`: stage 1 already proved `min_slack` is the true
+    # minimum, so stage 2 can never find less of it -- `<=` is exactly as
+    # tight as `==` there, but stays monotone-safe (never worse than the
+    # incumbent) rather than brittle against a hypothetical floating
+    # -point disagreement between the two solves (REVIEW.md S-07).
+    model2.Add(sum(slack2.values()) <= min_slack)
     terms = _cpsat_objective_terms(
         model2,
         group,
@@ -510,28 +655,33 @@ def _cbc_feasibility_constraints(
     pinned_by_storage: dict[str, tuple[Disk, ...]],
     objective: ObjectiveConfig,
     min_free_bytes: int,
+    cooldown_storages: frozenset[str] = frozenset(),
 ) -> tuple[dict[Any, Any], dict[Any, Any], dict[Any, Any], dict[Any, Any]]:
     """(C1)/(C3)/(C4)/(C5), continuous -- "direct transcription" per the
     plan's own words for this backend, no scaling needed. Factored out for
     the same reason as `_cpsat_feasibility_constraints()`."""
-    # `prob.add_variable()`, not the direct `pulp.LpVariable(...)`
-    # constructor PuLP's v4 migration deprecates.
     x = {
-        (d.key, s.id): prob.add_variable(f"x_{d.key}_{s.id}", cat="Binary")
+        (d.key, s.id): _lp_variable(pulp, f"x_{d.key}_{s.id}", cat="Binary")
         for d in movable
         for s in group.storages
     }
     y = {
-        (v, s.id): prob.add_variable(f"y_{v}_{s.id}", cat="Binary")
+        (v, s.id): _lp_variable(pulp, f"y_{v}_{s.id}", cat="Binary")
         for v in vmids
         for s in group.storages
     }
-    z = {s.id: prob.add_variable(f"Z_{s.id}", lowBound=0) for s in group.storages}
-    r = {s.id: prob.add_variable(f"R_{s.id}", lowBound=0) for s in group.storages}
-    slack = {s.id: prob.add_variable(f"r_{s.id}", lowBound=0) for s in group.storages}
+    z = {s.id: _lp_variable(pulp, f"Z_{s.id}", lowBound=0) for s in group.storages}
+    r = {s.id: _lp_variable(pulp, f"R_{s.id}", lowBound=0) for s in group.storages}
+    slack = {s.id: _lp_variable(pulp, f"r_{s.id}", lowBound=0) for s in group.storages}
 
     for d in movable:
         prob += pulp.lpSum(x[d.key, s.id] for s in group.storages) == 1
+        for s in group.storages:
+            if s.id in cooldown_storages and s.id != d.current_storage:
+                # See `_cpsat_feasibility_constraints()`'s identical
+                # comment -- a cooldown storage is excluded as a
+                # *destination* only, never for a disk already there.
+                prob += x[d.key, s.id] == 0
 
     for v in vmids:
         movable_of_v = [d for d in movable if d.vmid == v]
@@ -610,13 +760,13 @@ def _cbc_objective_terms(
             )
 
     if objective.spread_metric == "minmax":
-        t = prob.add_variable("t", lowBound=0)
+        t = _lp_variable(pulp, "t", lowBound=0)
         for s in group.storages:
             prob += _cbc_storage_load(pulp, s, movable, pinned_by_storage, load_by_key, x) <= t
         if objective.alpha_spread:
             terms.append(objective.alpha_spread * t)
     else:
-        e = {s.id: prob.add_variable(f"e_{s.id}", lowBound=0) for s in group.storages}
+        e = {s.id: _lp_variable(pulp, f"e_{s.id}", lowBound=0) for s in group.storages}
         for s in group.storages:
             lhs = _cbc_storage_load(pulp, s, movable, pinned_by_storage, load_by_key, x)
             prob += lhs - u_star <= e[s.id]
@@ -634,6 +784,7 @@ def _solve_cbc(
     min_free_bytes: int,
     time_limit_seconds: float,
     mip_gap: float,
+    cooldown_storages: frozenset[str] = frozenset(),
 ) -> tuple[Assignment, str] | None:
     try:
         import pulp
@@ -650,13 +801,35 @@ def _solve_cbc(
     # COIN_CMD, not the older PULP_CBC_CMD alias PuLP now deprecates -- same
     # CBC binary, same keyword arguments.
     solver_cmd = pulp.COIN_CMD(msg=0, timeLimit=time_limit_seconds, gapRel=mip_gap)
+    # Stage 1's whole point is a *proven* minimum -- "Σ r_s > 0 provably
+    # means physically impossible", not "impossible within mip_gap"
+    # (REVIEW.md S-07). PuLP's own `LpStatus` collapses "proved optimal"
+    # and "stopped because gapRel was satisfied" into the identical
+    # "Optimal" string, so the only way to make that distinction real is
+    # to force `gapRel=0` for this stage's own solve, regardless of what
+    # the operator configured `solver.mip_gap` to -- that setting is
+    # stage 2's tolerance on the real objective, not stage 1's on the
+    # reserve floor. Cheap: this stage is a near-feasibility problem that
+    # closes instantly on realistic groups, per this module's own
+    # docstring.
+    stage1_solver_cmd = pulp.COIN_CMD(msg=0, timeLimit=time_limit_seconds, gapRel=0.0)
 
     prob1 = pulp.LpProblem("stage1_reserve", pulp.LpMinimize)
     _x1, _y1, _z1, slack1 = _cbc_feasibility_constraints(
-        pulp, prob1, group, movable, vmids, pinned_by_storage, objective, min_free_bytes
+        pulp,
+        prob1,
+        group,
+        movable,
+        vmids,
+        pinned_by_storage,
+        objective,
+        min_free_bytes,
+        cooldown_storages,
     )
     prob1 += pulp.lpSum(slack1.values())
-    status1 = prob1.solve(solver_cmd)
+    status1 = _pulp_solve(pulp, prob1, stage1_solver_cmd)
+    if status1 is None:
+        return None
     if pulp.LpStatus[status1] not in ("Optimal",):
         _no_feasible_solution("cbc", group, "1 (reserve)")
         return None
@@ -664,7 +837,15 @@ def _solve_cbc(
 
     prob2 = pulp.LpProblem("stage2_objective", pulp.LpMinimize)
     x2, y2, _z2, slack2 = _cbc_feasibility_constraints(
-        pulp, prob2, group, movable, vmids, pinned_by_storage, objective, min_free_bytes
+        pulp,
+        prob2,
+        group,
+        movable,
+        vmids,
+        pinned_by_storage,
+        objective,
+        min_free_bytes,
+        cooldown_storages,
     )
     # A small tolerance: CBC's own reported stage-1 slack already carries
     # solver rounding noise, and pinning it exactly can make stage 2
@@ -684,7 +865,9 @@ def _solve_cbc(
         y2,
     )
     prob2 += pulp.lpSum(terms)
-    status2 = prob2.solve(solver_cmd)
+    status2 = _pulp_solve(pulp, prob2, solver_cmd)
+    if status2 is None:
+        return None
     if pulp.LpStatus[status2] not in ("Optimal",):
         _no_feasible_solution("cbc", group, "2 (objective)")
         return None

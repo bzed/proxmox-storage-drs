@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from proxmox_storage_drs.config import (
+    ExcludeConfig,
     ExecutionConfig,
     LocksConfig,
     MigrationConfig,
@@ -95,13 +96,19 @@ def make_storage(
     )
 
 
-def make_move(disk_key: str = "101:scsi0", vmid: int = 101, device: str = "scsi0") -> ScheduledMove:
+def make_move(
+    disk_key: str = "101:scsi0",
+    vmid: int = 101,
+    device: str = "scsi0",
+    from_storage: str = "san-a",
+    to_storage: str = "san-b",
+) -> ScheduledMove:
     return ScheduledMove(
         disk_key=disk_key,
         vmid=vmid,
         device=device,
-        from_storage="san-a",
-        to_storage="san-b",
+        from_storage=from_storage,
+        to_storage=to_storage,
         size_bytes=round(1.0 * TIB),
         imbalance_reduction=1.0,
         resolves_reserve_violation=False,
@@ -135,6 +142,7 @@ def client_with(overrides: dict[str, object]) -> tuple[PveClient, FakeProxmoxRes
 
 MIGRATION = MigrationConfig(bwlimit_bytes_per_sec=209_715_200)
 EXECUTION = ExecutionConfig()
+EXCLUDE = ExcludeConfig()
 
 
 def run(
@@ -145,6 +153,7 @@ def run(
     execution: ExecutionConfig = EXECUTION,
     clock: FakeClock | None = None,
     confirm: object = None,
+    exclude: ExcludeConfig = EXCLUDE,
 ) -> ExecutionResult:
     schedule_result = ScheduleResult(
         order=moves, deadlocked=(), final_assignment={d.key: d.current_storage for d in group.disks}
@@ -158,6 +167,7 @@ def run(
         execution,
         0,
         mode,
+        exclude,
         confirm=confirm,  # type: ignore[arg-type]
         clock=fc.clock(),
     )
@@ -423,9 +433,34 @@ def test_preflight_vm_config_fetch_error_triggers_replan() -> None:
     assert "connection refused" in result.outcomes[0].detail
 
 
+def test_preflight_tagged_for_exclusion_since_planning_triggers_replan() -> None:
+    """Section 9.2 step 3: "confirm the VM is still running **and
+    untagged for exclusion**" (REVIEW.md S-06) -- an operator tagging a
+    VM `no-drs` between planning and execution must stop this move, not
+    move it anyway."""
+    client, _api = client_with(
+        {
+            "cluster/resources": [
+                {"vmid": 101, "node": "pve01", "status": "running", "tags": "no-drs"}
+            ]
+        }
+    )
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "replan_needed"
+    assert "excluded" in result.outcomes[0].detail
+
+
+def test_preflight_vmid_added_to_exclude_list_since_planning_triggers_replan() -> None:
+    client, _api = client_with({})
+    exclude = ExcludeConfig(vmids=(101,))
+    result = run(client, default_group(), (make_move(),), exclude=exclude)
+    assert result.outcomes[0].status == "replan_needed"
+    assert "excluded" in result.outcomes[0].detail
+
+
 def test_preflight_helper_returns_lock_and_volid_on_success() -> None:
     client, _api = client_with({})
-    result = _preflight(client, default_group().disks[0], make_move())
+    result = _preflight(client, default_group().disks[0], make_move(), EXCLUDE)
     assert result.mismatch is None
     assert result.node == "pve01"
     assert result.volid == "san-a:vm-101-disk-0"
@@ -558,6 +593,81 @@ def test_saferemove_source_never_releases_within_timeout_marks_draining() -> Non
     assert result.outcomes[0].status == "draining"
     assert "still running" in result.outcomes[0].detail
     assert result.stopped_early is False  # draining is not a failure
+
+
+def test_a_draining_storage_is_excluded_as_a_source_for_later_moves_in_the_same_run() -> None:
+    """Section 9.3: a source_release timeout "does not fail the run: mark
+    the storage draining, exclude it as both source and target for the
+    remainder of the run" (REVIEW.md S-05). The second move's own
+    *source* is the storage the first move just left draining -- it must
+    be skipped without ever reaching the API, not queued behind the
+    storage-level lock the wipe holds."""
+    group = Group(
+        name="g",
+        storages=(
+            make_storage("san-a", saferemove=True, saferemove_throughput=10 * (1 << 20)),
+            make_storage("san-b"),
+            make_storage("san-c"),
+        ),
+        disks=(
+            make_disk("101:scsi0", 1.0, "san-a"),
+            make_disk("102:scsi0", 1.0, "san-a"),
+        ),
+    )
+    client, api = client_with(
+        {"nodes/pve01/storage/san-a/content": [{"volid": "san-a:vm-101-disk-0"}]}
+    )
+    execution = ExecutionConfig(
+        poll_interval_seconds=3600.0,
+        source_release=SourceReleaseConfig(wait=True, timeout_seconds=7200.0),
+    )
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    moves = (
+        make_move("101:scsi0", 101, "scsi0", from_storage="san-a", to_storage="san-b"),
+        make_move("102:scsi0", 102, "scsi0", from_storage="san-a", to_storage="san-c"),
+    )
+    result = run(client, group, moves, execution=execution, clock=fc)
+    assert result.outcomes[0].status == "draining"
+    assert result.outcomes[1].status == "skipped"
+    assert "san-a" in result.outcomes[1].detail
+    assert "draining" in result.outcomes[1].detail
+    assert result.stopped_early is False
+    # Only the first move's move_disk was ever issued.
+    assert len([c for c in api.calls if c[0] == "POST"]) == 1
+
+
+def test_a_draining_storage_is_excluded_as_a_target_for_later_moves_in_the_same_run() -> None:
+    """Same as above, except the second move's *target* -- not source --
+    is the storage draining from the first move."""
+    group = Group(
+        name="g",
+        storages=(
+            make_storage("san-a", saferemove=True, saferemove_throughput=10 * (1 << 20)),
+            make_storage("san-b"),
+            make_storage("san-c"),
+        ),
+        disks=(
+            make_disk("101:scsi0", 1.0, "san-a"),
+            make_disk("102:scsi0", 1.0, "san-c"),
+        ),
+    )
+    client, api = client_with(
+        {"nodes/pve01/storage/san-a/content": [{"volid": "san-a:vm-101-disk-0"}]}
+    )
+    execution = ExecutionConfig(
+        poll_interval_seconds=3600.0,
+        source_release=SourceReleaseConfig(wait=True, timeout_seconds=7200.0),
+    )
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    moves = (
+        make_move("101:scsi0", 101, "scsi0", from_storage="san-a", to_storage="san-b"),
+        make_move("102:scsi0", 102, "scsi0", from_storage="san-c", to_storage="san-a"),
+    )
+    result = run(client, group, moves, execution=execution, clock=fc)
+    assert result.outcomes[0].status == "draining"
+    assert result.outcomes[1].status == "skipped"
+    assert "san-a" in result.outcomes[1].detail
+    assert len([c for c in api.calls if c[0] == "POST"]) == 1
 
 
 def test_saferemove_source_releases_before_timeout() -> None:

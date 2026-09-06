@@ -1308,6 +1308,80 @@ def test_mode_override_flows_through_main(
 # --------------------------------------------------------------------- apply
 
 
+def _balanced_apply_topology() -> Topology:
+    """Two evenly-sized, evenly-loaded disks on one storage, none on the
+    other, no `saferemove` -- deliberately *not*
+    `_repairable_sample_topology()`: that fixture's one movable disk sits
+    on a `saferemove` storage and is large enough that its wipe alone
+    exceeds `migration.max_single_move_duration`, so REVIEW.md S-02's
+    payback gate now refuses it outright. Every apply test that only
+    cares about execution mechanics (dry-run, confirm, state recording,
+    `--json` shape, a failed move) uses this fixture instead, so the
+    payback gate never has an opinion about them; S-02's own gate
+    behaviour gets its own dedicated fixtures/tests below."""
+    disks = (
+        Disk(
+            key="101:scsi0",
+            vmid=101,
+            device="scsi0",
+            vm_name="a",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason=None,
+        ),
+        Disk(
+            key="102:scsi0",
+            vmid=102,
+            device="scsi0",
+            vm_name="b",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason=None,
+        ),
+    )
+    storages = tuple(
+        Storage(
+            id=sid,
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=100 * (1 << 40),
+            used_bytes=2 * (1 << 40) if sid == "san-a" else 0,
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        )
+        for sid in ("san-a", "san-b")
+    )
+    return Topology(groups=(Group(name="fc-tier1", storages=storages, disks=disks),), warnings=())
+
+
+def _balanced_apply_group_load() -> GroupLoad:
+    """Matches `_balanced_apply_topology()`: both disks on san-a, load 5.0
+    each (200% imbalance -> ACT), san-b idle. The heuristic's one
+    resulting move (101:scsi0 san-a -> san-b) mirrors in under 1.5h with
+    no wipe, and its huge load-imbalance benefit clears
+    `migration.payback_ratio` (10, by default) by two orders of
+    magnitude -- both halves of section 7.3's test pass comfortably."""
+    return GroupLoad(
+        group_name="fc-tier1",
+        idle=False,
+        average_utilization=5.0,
+        disks=(
+            DiskLoad(disk_key="101:scsi0", load=5.0, flagged_reason=None),
+            DiskLoad(disk_key="102:scsi0", load=5.0, flagged_reason=None),
+        ),
+        storages=(
+            StorageLoad(storage_id="san-a", load=10.0, utilization=10.0),
+            StorageLoad(storage_id="san-b", load=0.0, utilization=0.0),
+        ),
+    )
+
+
 def test_apply_refuses_auto_mode_without_touching_the_network(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1328,7 +1402,7 @@ def test_apply_dry_run_reports_would_move_and_writes_no_state(
     `test_execute.py`), so `build_pve_client`'s "fake-client" string is
     never actually called into -- this only checks `_handle_apply()`'s
     wiring, not `execute.py`'s own dry-run behaviour again."""
-    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
     state_path = tmp_path / "state.json"
     path = write_config(tmp_path, state={"path": str(state_path)})
     assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
@@ -1347,7 +1421,7 @@ def test_apply_confirm_mode_prompts_and_honours_a_decline(
     (see `execute_plan()`), so "fake-client" is never called into here
     either -- this checks that `_handle_apply()` wires the interactive
     `input()`-based callback through correctly and honours its answer."""
-    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
     prompts = []
 
     def fake_input(prompt: str) -> str:
@@ -1369,7 +1443,7 @@ def test_apply_confirm_mode_prompts_and_honours_a_decline(
 def test_apply_confirm_mode_retries_on_unrecognized_input(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
     answers = iter(["maybe", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     state_path = tmp_path / "state.json"
@@ -1390,7 +1464,7 @@ def test_apply_records_balance_and_cooldowns_after_an_executed_move(
     from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
     from proxmox_storage_drs.state import disk_state_key, storage_state_key
 
-    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
 
     def fake_execute_plan(
         client: object,
@@ -1400,6 +1474,7 @@ def test_apply_records_balance_and_cooldowns_after_an_executed_move(
         execution: object,
         min_free_bytes: object,
         mode: object,
+        exclude: object = None,
         confirm: object = None,
         clock: object = None,
     ) -> ExecutionResult:
@@ -1427,12 +1502,15 @@ def test_apply_records_balance_and_cooldowns_after_an_executed_move(
 
     saved = load_state(str(state_path))
     assert saved.last_balance.at is not None
-    assert saved.last_balance.load_vector == {"fc-tier1:101:scsi0": 3.0, "fc-tier1:102:scsi0": 0.0}
+    assert saved.last_balance.load_vector == {"fc-tier1:101:scsi0": 5.0, "fc-tier1:102:scsi0": 5.0}
     disk_key = disk_state_key("fc-tier1", 101, "scsi0")
-    storage_key = storage_state_key("fc-tier1", "san-b")
     assert disk_key in saved.cooldowns.disk
-    assert storage_key in saved.cooldowns.storage
-    assert storage_state_key("fc-tier1", "san-a") not in saved.cooldowns.storage
+    # Both endpoints -- section 6's "a storage involved in a migration
+    # ... accepts no new incoming moves" covers source and destination
+    # alike (REVIEW.md S-03); recording is independent of the heuristic's
+    # own destination-only *enforcement* of the cooldown.
+    assert storage_state_key("fc-tier1", "san-b") in saved.cooldowns.storage
+    assert storage_state_key("fc-tier1", "san-a") in saved.cooldowns.storage
 
 
 def test_apply_stops_the_whole_run_when_the_operator_quits(
@@ -1440,15 +1518,15 @@ def test_apply_stops_the_whole_run_when_the_operator_quits(
 ) -> None:
     from proxmox_storage_drs.execute import ExecutionResult
 
-    repairable = _repairable_sample_topology()
+    balanced = _balanced_apply_topology()
     two_groups = Topology(
         groups=(
-            repairable.groups[0],
-            Group(name="fc-tier2", storages=repairable.groups[0].storages, disks=()),
+            balanced.groups[0],
+            Group(name="fc-tier2", storages=balanced.groups[0].storages, disks=()),
         ),
         warnings=(),
     )
-    _patch_plan_deps(monkeypatch, two_groups, _sample_group_load())
+    _patch_plan_deps(monkeypatch, two_groups, _balanced_apply_group_load())
 
     def fake_execute_plan(
         client: object,
@@ -1458,6 +1536,7 @@ def test_apply_stops_the_whole_run_when_the_operator_quits(
         execution: object,
         min_free_bytes: object,
         mode: object,
+        exclude: object = None,
         confirm: object = None,
         clock: object = None,
     ) -> ExecutionResult:
@@ -1533,7 +1612,7 @@ def test_apply_reports_a_metrics_error_and_a_no_action_group_without_executing(
 def test_apply_json_output_includes_the_execution_key(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
     path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
     assert cli.main(["-c", str(path), "--mode", "dry-run", "--json", "apply"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1547,7 +1626,7 @@ def test_apply_exits_1_when_a_move_fails(
 ) -> None:
     from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
 
-    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
 
     def fake_execute_plan(
         client: object,
@@ -1557,6 +1636,7 @@ def test_apply_exits_1_when_a_move_fails(
         execution: object,
         min_free_bytes: object,
         mode: object,
+        exclude: object = None,
         confirm: object = None,
         clock: object = None,
     ) -> ExecutionResult:
@@ -1580,6 +1660,83 @@ def test_apply_exits_1_when_a_move_fails(
     out = capsys.readouterr().out
     assert "failed: move_disk task failed" in out
     assert "run stopped early" in out
+
+
+# ------------------------------------------------------ apply's payback gate (S-02)
+
+
+def test_apply_refuses_a_move_rejected_by_the_hard_duration_rule(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_repairable_sample_topology()`'s one move sits on a `saferemove`
+    storage large enough that its wipe alone exceeds the default
+    `migration.max_single_move_duration` (6h) -- `payback_result.rejected_moves`
+    names it, `aggregate_ok` is still `True` (the reserve-override
+    exemption). Section 7.3's hard per-move rule must refuse it
+    regardless: `execute_plan()` must never be called at all (REVIEW.md
+    S-02), not merely have its outcome relabeled afterwards."""
+
+    def fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("a payback-rejected move must never reach execute_plan()")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fail)
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "101:scsi0" in out
+        and "refused: exceeds migration.max_single_move_duration" in out
+        and "section 7.3" in out
+    )
+
+
+def test_apply_refuses_the_whole_plan_when_the_aggregate_payback_test_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_balanced_apply_topology()`'s one move easily clears the default
+    `migration.payback_ratio` (10) on its own economics -- raising the
+    configured ratio well above its real one (≈577) fails the *aggregate*
+    test without tripping the hard per-move duration rule, so this
+    exercises the other half of S-02's gate: refuse the whole plan,
+    never call `execute_plan()` at all, even though nothing about this
+    move is individually rejected."""
+
+    def fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("a plan failing the aggregate payback test must never execute")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fail)
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    path = write_config(
+        tmp_path,
+        state={"path": str(tmp_path / "state.json")},
+        migration={"payback_ratio": 1000},
+    )
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
+    out = capsys.readouterr().out
+    assert "101:scsi0" in out
+    assert "refused: plan failed the payback acceptance test" in out
+    assert "section 7.3" in out
+    # Refused, not failed -- state.json must be untouched, same as a
+    # group the gate never acted on.
+    assert load_state(str(tmp_path / "state.json")).last_balance.at is None
+
+
+def test_apply_confirm_mode_shows_the_payback_verdict_before_the_first_prompt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    seen_before_prompt = {}
+
+    def fake_input(prompt: str) -> str:
+        seen_before_prompt["out"] = capsys.readouterr().out
+        return "n"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
+    assert "payback:" in seen_before_prompt["out"]
+    assert "✓" in seen_before_prompt["out"]
 
 
 # --------------------------------------------------------- solver backend dispatch

@@ -38,6 +38,24 @@ second code path for. `Σ r_s > 0` in a lexicographic result provably means
 *no* assignment could do better, at any weight — never merely
 "unattractive".
 
+**That proof depends on stage 1 actually being solved to proven
+optimality, not merely to `solver.mip_gap`** (REVIEW.md S-07). An earlier
+revision applied the same `mip_gap` to both stages: CP-SAT's stage 1
+accepted `FEASIBLE` (an incumbent, not a proven minimum) whenever the gap
+was satisfied, and PuLP's own `LpStatus` string is `"Optimal"` whether
+CBC proved the bound or merely stopped because `gapRel` was satisfied --
+either way, stage 2 then pinned `Σ r_s` to that unproven incumbent
+(`==`), which can both accept a shortfall up to the gap *and* forbid
+finding less of it. Fixed by forcing stage 1's own gap to `0` in both
+backends regardless of the configured `solver.mip_gap` (which now applies
+to stage 2's real objective alone), requiring CP-SAT's stage 1 status to
+be exactly `OPTIMAL` (never `FEASIBLE`), and changing stage 2's slack
+constraint from `==` to `<=` in both backends -- monotone-safe (stage 2
+can never do worse than the now-proven stage-1 value) rather than brittle
+against a hypothetical disagreement between the two solves. Cheap in
+practice: stage 1 is a near-feasibility problem that closes instantly on
+realistic groups, so forcing an exact proof costs nothing measurable.
+
 ## CP-SAT: section 5.5's exact integer scaling
 
 Every coefficient is folded and rounded exactly as section 5.5 specifies:
@@ -67,6 +85,18 @@ Every coefficient is folded and rounded exactly as section 5.5 specifies:
   linear constraint, correct to within `1/SCALE` MiB, utterly negligible
   next to any real disk size.
 
+Section 5.5 also asks for two build-time assertions guarding this
+folding, and `_cpsat_objective_terms()` now has both (REVIEW.md S-09):
+`_assert_nonzero_when_weighted()` catches exactly the `γ` trap the
+paragraph above describes — a non-zero configured weight whose *rounded*
+coefficient collapsed to `0` (only ever a sub-kilobyte disk at the
+default `γ`, per `test_gamma_trap_assertion_fires_end_to_end_for_a_sub_kilobyte_disk`)
+— and `_assert_objective_magnitude_within_int64()` checks a coarse,
+deliberately conservative worst-case sum of every term against `2⁶²`,
+an order of magnitude under CP-SAT's own `2⁶³-1` domain limit. Neither
+applies to CBC, whose continuous, unscaled model has no analogous
+overflow risk.
+
 `AddHint(x[d, σ₀(d)], 1)` warm-starts every candidate from the current
 assignment, in both stages (harmless when unused, and stage 1's own
 optimum is frequently "keep everyone where they are" when nothing already
@@ -76,12 +106,34 @@ violates (C5)).
 
 The plan's own words for this backend: "continuous `e_s`, `Z_s`, `r_s` are
 fine." `_cbc_feasibility_constraints()`/`_cbc_objective_terms()` write the
-identical constraints CP-SAT does, but with plain floats and PuLP's
-`prob.add_variable(...)` (not the older `pulp.LpVariable(...)` constructor
-PuLP's own v4 migration deprecates) — no `_LOAD_SCALE`/`_WEIGHT_SCALE`
-anywhere, because CBC needs none of CP-SAT's integer-coefficient
-discipline. `solver.mip_gap` and `solver.time_limit_seconds` map onto
-`pulp.COIN_CMD(gapRel=..., timeLimit=...)` directly.
+identical constraints CP-SAT does, but with plain floats — no
+`_LOAD_SCALE`/`_WEIGHT_SCALE` anywhere, because CBC needs none of
+CP-SAT's integer-coefficient discipline. `solver.mip_gap` and
+`solver.time_limit_seconds` map onto `pulp.COIN_CMD(gapRel=...,
+timeLimit=...)` directly.
+
+Every variable is built with `_lp_variable()`, a thin wrapper around the
+direct `pulp.LpVariable(name, ...)` constructor — **not**
+`prob.add_variable(...)`, PuLP v4's replacement, despite an earlier
+version of this module having switched to it (REVIEW.md S-01, found by
+running the CBC tests against the exact pulp version Debian trixie
+packages). `LpProblem.add_variable` does not exist before pulp 3.3.1;
+trixie packages 2.7.0, and section 2.1 designates CBC-through-`python3-pulp`
+as *the* packaged solver path, so the "modernize to v4" choice crashed on
+the platform this project targets, while working fine — and passing every
+test — against a hand-picked newer pulp installed by hand. Direct
+`LpVariable(...)` construction works unchanged across every pulp version
+from 2.7.0 through 3.3.2 (bisected by wheel inspection); on 3.3+ it also
+raises a `DeprecationWarning` recommending `add_variable`, which
+`_lp_variable()` suppresses explicitly with a `warnings.catch_warnings()`
+block — the warning is real, but the alternative it recommends is the one
+that cannot run on the deployment target, so silencing it is the correct
+fix, not a workaround. `_pulp_solve()` similarly turns a `PulpSolverError`
+(Debian splits the `coinor-cbc` binary into a separate `Recommends`, not a
+`Depends`, of `python3-pulp` — the library can import with no working
+solver behind it) into this module's usual `None`, matching `solve()`'s
+"never raises, `cli.py`'s fallback cascade handles it" contract instead of
+a bare traceback.
 
 ## `(C1)`/`(C3)`/`(C4)`/`(C5)` are shared code, factored once per backend
 
@@ -124,20 +176,48 @@ backend actually produced each group's plan (`solver: cpsat (optimal)` /
 `"solver_backend": "cpsat", "solver_status": "optimal"`), precisely so
 that distinction is never hidden.
 
+## The storage cooldown: enforced in both stages, both backends (REVIEW.md S-04)
+
+`_cpsat_feasibility_constraints()`/`_cbc_feasibility_constraints()` both
+take `cooldown_storages` now and add one constraint per `(d, s)` pair
+where `s` is in it and is not `d`'s current storage: `x_{d,s} = 0`.
+Applied inside the shared feasibility-constraint builder, it lands in
+*both* lexicographic stages automatically (built once per stage, per
+`solve()`'s own architecture) — a disk cannot be assigned to a cooldown
+storage it is not already on, in either the reserve-minimization stage or
+the real-objective one, matching section 6's "accepts no new incoming
+moves" and `heuristic._descend()`'s own identical `target.id in
+cooldown_storages` check. A disk already resident on a cooldown storage
+is left free to leave it, or to stay — the cooldown only ever blocks an
+*arrival*.
+
+An earlier revision of this module left the parameter accepted but
+unenforced, reasoning that cooldowns were inert anyway since nothing
+wrote `state.json`'s cooldown timestamps yet. That reasoning stopped
+holding the moment `execute.py`/`apply` (phase 7) started calling
+`state.with_recorded_cooldown()` — from that point on, `solver.backend:
+auto`'s default cascade to CP-SAT/CBC could plan straight through a
+cooldown the heuristic would have respected, silently disagreeing with it
+on the exact case the cooldown exists for. Fixed as above.
+
+**Not replicated**: `heuristic._repair()`'s own exemption from this same
+cooldown when fixing a live (C4)/(C5) violation (section 13's
+reserve-override principle — a repair move is never deferred for a
+cooldown). The fix here is one constraint applied uniformly to both
+solve stages, including stage 1's reserve-shortfall minimization itself,
+so a cooldown storage stays excluded even when it is the *only* way to
+resolve a violation — narrower than the heuristic's behaviour in that
+one specific edge case (a group simultaneously mid-violation and
+mid-cooldown on its one viable target). Reported honestly rather than
+silently: stage 1's own slack is genuinely 0 achievable-within-constraints
+with the cooldown storage excluded, so `plan` still reports an accurate
+number, just a more conservative one than the heuristic would compute for
+the identical input. Replicating the exemption exactly would need a
+second, repair-only relaxation of the same constraint or a restructured
+two-phase solve — a real, separately-scoped piece of work.
+
 ## Deliberately not implemented in this pass
 
-- **The storage cooldown is not enforced by either MILP model.**
-  `solve()` accepts `cooldown_storages` for interface symmetry with
-  `heuristic.run_heuristic()`, but hard-fixing `x_{d,s}=0` for a cooldown
-  storage inside stage 2 — after stage 1 has already fixed the *value* of
-  `Σ r_s`, not the specific assignment that achieves it — can make stage
-  2 infeasible in a case the heuristic's sequential repair-then-descend
-  never hits, because descend only ever *extends* repair's assignment
-  rather than jointly re-deriving it against a competing hard constraint.
-  `solve()` logs a warning whenever it is called with a non-empty
-  `cooldown_storages`, so this is loud, not silent, the day
-  `state.json`'s cooldowns stop being permanently empty (nothing calls
-  `state.with_recorded_cooldown()` yet — see `docs/internals/15-state.md`).
 - **(C2) format-compatibility eligibility** — the same gap `heuristic.py`
   already documents (`topology.Storage` does not expose storage
   type/format).
@@ -153,7 +233,25 @@ that distinction is never hidden.
   happens to pull in an affected numpy version into the *same* venv
   `make typecheck` runs against — `make install`'s own `.[dev]` never
   does, so it does not affect this project's actual gate. Both MILP
-  backends were still verified for real during development (`pip install
+  backends were verified for real during development (`pip install
   -e .[solver]`, all of `test_optimize.py` passing and reproducing the
   section 14 and `reserve-tradeoff.yaml` fixtures' exact numbers for both
   CP-SAT and CBC) — see `tests/unit/test_optimize.py`'s own docstring.
+  That first pass installed pulp 3.3+ from PyPI, not the version actually
+  packaged for the deployment target — a gap REVIEW.md's tenth pass
+  caught (S-01): `python3-pulp 2.7.0+dfsg` (Debian trixie, also what CI's
+  `debian:trixie` job installs) predates `LpProblem.add_variable`, PuLP
+  v4's variable-construction API, which an earlier revision of this
+  module had adopted and which crashed immediately on that version. Fixed
+  by constructing every variable with `pulp.LpVariable(...)` directly
+  (works unchanged on every pulp release from 2.7.0 through 3.3.2,
+  bisected by wheel inspection) and suppressing the resulting v4-migration
+  `DeprecationWarning` on 3.3+ explicitly, plus catching `PulpSolverError`
+  around `prob.solve()` (the `coinor-cbc` binary is a separate Debian
+  `Recommends`, not a `Depends`, of `python3-pulp` — the library can
+  import with no working solver behind it) so a missing solver returns
+  `None` like every other "this backend cannot produce a plan" case,
+  rather than a bare traceback. `test_optimize.py`'s CBC cases now pass
+  against pulp 2.7.0 too, verified directly against a throwaway venv
+  pinned to that exact version — the packaged path, not just the newer
+  one pip happens to resolve.
