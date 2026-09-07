@@ -172,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit the machine-readable report (section 9.5) instead of the human one.",
+        help="Emit the machine-readable report instead of the human one.",
     )
     parser.add_argument(
         "-v",
@@ -687,9 +687,9 @@ def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: flo
     ]
     if not payback_result.aggregate_ok:
         lines.append(
-            "  ⚠ this plan's balance benefit does not outweigh its migration cost "
-            "(section 7.3) -- automatically re-solving with adjusted weights is "
-            "not yet implemented (phase 5 gap); review before applying"
+            "  ⚠ this plan's balance benefit does not outweigh its migration cost -- "
+            "automatically re-solving with adjusted weights is not implemented yet; "
+            "review before applying"
         )
     if payback_result.rejected_moves:
         lines.append(
@@ -698,8 +698,8 @@ def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: flo
         )
     if payback_result.deferred_moves:
         lines.append(
-            "  ⚠ deferred by the section 7.3 saturation guard (migration."
-            "saturation_ceiling): " + ", ".join(payback_result.deferred_moves)
+            "  ⚠ deferred: would push a target storage's I/O over migration."
+            "saturation_ceiling: " + ", ".join(payback_result.deferred_moves)
         )
     return lines
 
@@ -1173,7 +1173,7 @@ def _render_group_explain_human(
         )
         for storage in group.storages
     }
-    extra.append("  measured load (section 4):")
+    extra.append("  measured load:")
     extra.extend(
         _render_storage_and_disk_load_lines(group, group_plan.group_load, reserve_statuses)
     )
@@ -1615,8 +1615,9 @@ def _backtest_gated_forecaster(
     if backtest_validated(forecaster, aggregate, now_epoch, window_seconds, threshold):
         return forecaster
     logger.warning(
-        "forecast.model %r failed its section 10.2 backtest validation (or lacks the history "
-        "for one yet); falling back to quantile for this group's saturation guard this run",
+        "forecast.model %r did not accurately predict this group's own recent history (or "
+        "there is not enough history yet to check); using the simpler quantile model for "
+        "this run's saturation guard instead",
         forecast_config.model,
         extra={"event": "forecast_backtest_failed", "model": forecast_config.model},
     )
@@ -1995,14 +1996,11 @@ def _refused_move_outcomes(
     outcomes: list[MoveOutcome] = []
     for m in order:
         if m.disk_key in rejected_keys:
-            detail = (
-                "refused: exceeds migration.max_single_move_duration (section 7.3's hard "
-                "per-move duration rule)"
-            )
+            detail = "refused: would take longer than migration.max_single_move_duration allows"
         elif m.disk_key in deferred_keys:
             detail = (
-                "deferred: section 7.3 saturation guard (migration.saturation_ceiling) -- "
-                "re-evaluate on a later run"
+                "deferred: would push a target storage's I/O over migration."
+                "saturation_ceiling -- re-evaluate on a later run"
             )
         else:
             continue
@@ -2074,8 +2072,8 @@ def _apply_payback_gate(
                 m.from_storage,
                 m.to_storage,
                 "skipped",
-                f"refused: plan failed the payback acceptance test (ratio {payback.ratio:.3g} "
-                f"< required {payback_ratio:g}, section 7.3)",
+                "refused: this plan's balance benefit does not outweigh its migration cost "
+                f"(ratio {payback.ratio:.3g}, need {payback_ratio:g})",
             )
             for m in order
             if m.disk_key not in excluded_keys
@@ -2083,7 +2081,7 @@ def _apply_payback_gate(
         return ExecutionResult(
             outcomes=tuple(refused),
             stopped_early=True,
-            stop_reason="plan failed the payback acceptance test (section 7.3)",
+            stop_reason="this plan's balance benefit does not outweigh its migration cost",
         )
 
     kept = tuple(m for m in order if m.disk_key not in excluded_keys)
@@ -2679,7 +2677,7 @@ def _render_verify_storages_human(topology: Topology, config: Any) -> str:
                     "    ⚠ gates.cooldown_per_storage "
                     f"({format_duration_seconds(config.gates.cooldown_per_storage_seconds)}) "
                     "is shorter than the implied wipe time -- the next run may plan onto a "
-                    "still-draining storage (section 9.3)"
+                    "still-draining storage"
                 )
             max_move_seconds = config.migration.max_single_move_duration_seconds
             if wipe_seconds > max_move_seconds:
@@ -2687,11 +2685,11 @@ def _render_verify_storages_human(topology: Topology, config: Any) -> str:
                     "    ⚠ migration.max_single_move_duration "
                     f"({format_duration_seconds(max_move_seconds)}) "
                     "is shorter than the implied wipe time -- a move of the largest disk would "
-                    "be rejected outright (section 7.3)"
+                    "be rejected outright"
                 )
         lines.append("")
     if topology.pattern_expansions:
-        lines.append("Pattern expansions (section 11.4):")
+        lines.append("Pattern expansions:")
         for expansion in topology.pattern_expansions:
             matched = ", ".join(expansion.matched_ids) if expansion.matched_ids else "(none)"
             lines.append(f"  [{expansion.group_name}] {expansion.pattern} → {matched}")

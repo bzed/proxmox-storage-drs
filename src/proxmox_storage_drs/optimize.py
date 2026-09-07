@@ -433,7 +433,7 @@ def _assert_nonzero_when_weighted(unscaled_weight: float, scaled: int, name: str
     writing it."""
     assert not (unscaled_weight and not scaled), (
         f"{name} rounded to 0 despite a non-zero configured weight ({unscaled_weight!r}) -- "
-        "section 5.5's coefficient-folding regression guard"
+        "this is an internal solver bug, please report it"
     )
 
 
@@ -464,7 +464,7 @@ def _assert_objective_magnitude_within_int64(
     )
     assert worst_case < 2**62, (
         f"objective magnitude bound {worst_case} exceeds 2**62 -- solver.* weights or "
-        "disk/group sizes are large enough to risk CP-SAT integer overflow (section 5.5)"
+        "disk/group sizes are large enough to risk CP-SAT integer overflow"
     )
 
 

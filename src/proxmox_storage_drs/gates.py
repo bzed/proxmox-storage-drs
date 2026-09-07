@@ -90,8 +90,9 @@ def evaluate_group_gates(
         return GateDecision(
             act=True,
             reason=(
-                f"reserve violated on {', '.join(violated)}; bypassing the drift and "
-                "imbalance gates (section 13: safety is not subject to hysteresis)"
+                f"reserve violated on {', '.join(violated)}; acting now regardless of the "
+                "normal drift/imbalance thresholds -- a capacity shortfall is never delayed "
+                "by them"
             ),
             reserve_override=True,
             drift_fraction=None,

@@ -13,7 +13,7 @@ section rather than invented for this page:
 
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml show-load
-Group fc-tier1 → ACT: reserve violated on san-a; bypassing the drift and imbalance gates (section 13: safety is not subject to hysteresis)
+Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the normal drift/imbalance thresholds -- a capacity shortfall is never delayed by them
   san-a  used 4.50 TiB/8.00 TiB  L=6.50 u=6.50  ⚠ reserve short by 512.00 GiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
     101:scsi0        2.00 TiB  raw     ℓ 3.00
     101:scsi1        1.00 TiB  raw     ℓ 1.00
@@ -162,7 +162,7 @@ gives per disk, but at the storage level and independent of whether a disk
 currently happens to be on it:
 
 ```
-Pattern expansions (section 11.4):
+Pattern expansions:
   [fc-tier1] /san-.*/ → san-a, san-b, san-c
 
 Cluster storages matched by no group:

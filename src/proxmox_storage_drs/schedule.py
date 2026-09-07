@@ -105,11 +105,12 @@ class ScheduleResult:
         if not self.deadlocked:
             return None
         return (
-            "no transient-feasible order found for: "
+            "no safe order found for: "
             + ", ".join(sorted(self.deadlocked))
-            + " -- every remaining move would breach the transient reserve invariant "
-            "on its target (section 8.1); see section 8.3 for resolution options "
-            "this module does not yet implement (staging, splitting the plan)"
+            + " -- every remaining move would leave its target without enough free space "
+            "while the disk briefly exists on both storages during the mirror; splitting "
+            "this into a smaller plan or staging the moves is not automated yet, so this "
+            "needs a manual look"
         )
 
 

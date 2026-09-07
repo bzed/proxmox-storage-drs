@@ -493,7 +493,7 @@ def test_live_transient_check_failure_triggers_replan() -> None:
     )
     result = run(client, default_group(), (make_move(),))
     assert result.outcomes[0].status == "replan_needed"
-    assert "transient invariant" in result.outcomes[0].detail
+    assert "no longer has enough free space" in result.outcomes[0].detail
 
 
 def test_live_transient_check_helper_directly() -> None:
@@ -1311,7 +1311,7 @@ def test_concurrent_transient_invariant_blocks_a_second_move_onto_a_tight_target
     outcomes_by_key = {o.disk_key: o for o in result.outcomes}
     assert outcomes_by_key["201:scsi0"].status == "moved"
     assert outcomes_by_key["202:scsi0"].status == "replan_needed"
-    assert "transient invariant" in outcomes_by_key["202:scsi0"].detail
+    assert "no longer has enough free space" in outcomes_by_key["202:scsi0"].detail
 
 
 def test_concurrent_strict_fifo_does_not_skip_a_locked_head() -> None:

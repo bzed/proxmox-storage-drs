@@ -1170,7 +1170,7 @@ def test_apply_excludes_a_saturation_deferred_move_from_execution(
     assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
     out = capsys.readouterr().out
     assert "101:scsi0" in out
-    assert "skipped: deferred: section 7.3 saturation guard" in out
+    assert "skipped: deferred: would push a target storage's I/O over migration." in out
     assert "would_move" not in out  # the only move in this plan was deferred, never executed
 
 
@@ -1267,7 +1267,7 @@ def test_backtest_gate_falls_back_to_quantile_when_validation_fails(
             window_seconds=100.0,
         )
     assert isinstance(result, QuantileForecaster)
-    assert any("backtest" in r.message for r in caplog.records)
+    assert any("did not accurately predict" in r.message for r in caplog.records)
 
 
 def test_plan_human_output_shows_the_payback_verdict(
@@ -1384,7 +1384,7 @@ def test_plan_reports_a_deadlock_when_even_the_best_target_still_violates(
     assert group_payload["moves"] == []  # but nothing could actually be scheduled
     assert group_payload["deadlocked"] == ["101:scsi0"]
     assert group_payload["deadlock_message"] is not None
-    assert "section 8.1" in group_payload["deadlock_message"]
+    assert "no safe order found" in group_payload["deadlock_message"]
 
 
 def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_deadlock(
@@ -1545,7 +1545,7 @@ def test_plan_human_output_shows_the_deadlock_warning_line(
     assert cli.main(["-c", str(path), "plan"]) == 0
     out = capsys.readouterr().out
     assert "⚠" in out
-    assert "section 8.1" in out
+    assert "no safe order found" in out
 
 
 def _balanced_non_violating_topology() -> Topology:
@@ -2184,8 +2184,7 @@ def test_apply_refuses_a_move_rejected_by_the_hard_duration_rule(
     out = capsys.readouterr().out
     assert (
         "101:scsi0" in out
-        and "refused: exceeds migration.max_single_move_duration" in out
-        and "section 7.3" in out
+        and "refused: would take longer than migration.max_single_move_duration allows" in out
     )
 
 
@@ -2213,8 +2212,7 @@ def test_apply_refuses_the_whole_plan_when_the_aggregate_payback_test_fails(
     assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
     out = capsys.readouterr().out
     assert "101:scsi0" in out
-    assert "refused: plan failed the payback acceptance test" in out
-    assert "section 7.3" in out
+    assert "refused: this plan's balance benefit does not outweigh its migration cost" in out
     # Refused, not failed -- state.json must be untouched, same as a
     # group the gate never acted on.
     assert load_state(str(tmp_path / "state.json")).last_balance.at is None
@@ -2528,7 +2526,7 @@ def test_render_group_explain_human_shows_pins_fragmentation_and_objective(
     lines = cli._render_group_explain_human(group, group_plan, resolved)
     text = "\n".join(lines)
     assert "objective:" in text
-    assert "measured load (section 4):" in text
+    assert "measured load:" in text
     assert "san-a" in text and "san-b" in text  # the group's own storages, not just pins
     assert "pinned (not movable this run):" in text
     assert "101:scsi1" in text and "snapshots present (1)" in text
@@ -2649,7 +2647,7 @@ def test_explain_handler_human_output(
     assert "pinned (not movable this run):" in out
     assert "102:scsi0" in out and "locked: backup" in out
     assert "objective:" in out
-    assert "measured load (section 4):" in out
+    assert "measured load:" in out
     assert "data source:" not in out  # -v not passed
 
 

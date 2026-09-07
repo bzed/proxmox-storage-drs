@@ -532,7 +532,8 @@ def _resolve_disk_size_and_format(
     size_bytes = _parse_pve_config_size_bytes(params.get("size", "")) or 0
     warning = (
         f"{key}: {volid!r} not found in {storage_id!r}'s content listing; "
-        "using the VM config's own size= (unauthoritative, section 3.5)"
+        "using the VM config's own size= instead, which can be stale if the volume was "
+        "resized outside Proxmox"
     )
     return size_bytes, _default_format(storage_type), warning
 
