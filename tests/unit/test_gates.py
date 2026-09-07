@@ -78,8 +78,8 @@ def test_reserve_violation_bypasses_drift_and_imbalance_and_always_acts() -> Non
     assert decision == GateDecision(
         act=True,
         reason=(
-            "reserve violated on san-a; bypassing the drift and imbalance gates "
-            "(section 13: safety is not subject to hysteresis)"
+            "reserve violated on san-a; acting now regardless of the normal "
+            "drift/imbalance thresholds -- a capacity shortfall is never delayed by them"
         ),
         reserve_override=True,
         drift_fraction=None,

@@ -390,7 +390,7 @@ def test_build_topology_content_missing_falls_back_to_config_size(tmp_path: Path
     topology = build_topology(client, config)
     disk = topology.groups[0].disks[0]
     assert disk.size_bytes == 7 * (1 << 30)
-    assert any("unauthoritative" in w for w in topology.warnings)
+    assert any("VM config's own size=" in w for w in topology.warnings)
 
 
 def test_build_topology_stopped_vm_included_when_running_only_false(tmp_path: Path) -> None:

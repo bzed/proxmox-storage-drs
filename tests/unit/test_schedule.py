@@ -180,7 +180,7 @@ def test_deadlock_is_reported_not_forced() -> None:
     assert set(result.deadlocked) == {"101:scsi0", "102:scsi0"}
     assert result.deadlocked_msg is not None
     assert "101:scsi0" in result.deadlocked_msg
-    assert "section 8.1" in result.deadlocked_msg
+    assert "no safe order found" in result.deadlocked_msg
 
 
 def test_no_deadlock_message_when_fully_scheduled() -> None:

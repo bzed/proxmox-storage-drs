@@ -405,8 +405,8 @@ def _poll_move_once(
         return (
             "draining",
             f"task {upid} completed OK, but the source volume ({volid}) is still present "
-            f"after {elapsed:.0f}s -- saferemove wipe likely still running (section 8.2 "
-            "'draining'); the next run will see this storage as it actually is",
+            f"after {elapsed:.0f}s -- saferemove wipe likely still running; the next run "
+            "will see this storage as it actually is",
         ), wait_state
     return None, _MoveWaitState(drain_start=drain_start)
 
@@ -515,8 +515,8 @@ def _execute_one_move(
     ):
         return outcome(
             "replan_needed",
-            f"the section 8.1 transient invariant no longer holds for {target.id!r} "
-            "against its live storage status",
+            f"{target.id!r} no longer has enough free space to safely hold this disk "
+            "during the move, checked again just before starting",
         )
 
     upid = client.move_disk(
@@ -665,8 +665,8 @@ def _drained_skip_outcome(move: ScheduledMove, drained_storages: set[str]) -> Mo
         move.from_storage,
         move.to_storage,
         "skipped",
-        f"{drained!r} is still draining a saferemove wipe from earlier in this run "
-        "(section 9.3); re-evaluate on the next run",
+        f"{drained!r} is still draining a saferemove wipe from earlier in this run; "
+        "re-evaluate on the next run",
     )
 
 
@@ -1188,8 +1188,8 @@ def _launch_decision(
             candidate.from_storage,
             candidate.to_storage,
             "replan_needed",
-            f"the section 8.1 transient invariant no longer holds for {target.id!r} "
-            "against its live storage status",
+            f"{target.id!r} no longer has enough free space to safely hold this disk "
+            "during the move, checked again just before starting",
         )
         return _LaunchDecision("resolved", outcome=outcome)
 

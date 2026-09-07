@@ -755,13 +755,22 @@ def _check_forecast_window(config: Config, errors: list[str]) -> None:
 
 
 def _check_saturation_load(config: Config, warnings: list[str]) -> None:
-    """Warn (never error) where section 7.3's saturation guard is inactive."""
+    """Warn (never error) where section 7.3's saturation guard is inactive.
+
+    The warning text itself names no section: a plain-language explanation
+    plus the exact config key to set is something an operator who has
+    never opened IMPLEMENTATION_PLAN.md can act on; a bare "section 7.3"
+    citation is not (the user's own words: "a normal user will not
+    understand" it, and "error messages must point to the instructions
+    with a wording" they can follow)."""
     for group in config.groups:
         for storage in group.storages:
             if storage.saturation_load is None:
                 warnings.append(
                     f"group {group.name!r} storage {storage.id!r}: no saturation_load "
-                    "configured; the section 7.3 saturation guard is inactive for it"
+                    "configured, so migrations onto it are never checked against its I/O "
+                    "capacity before starting -- set groups[].storages[].saturation_load "
+                    "for it if you know the storage's queue-depth limit"
                 )
 
 

@@ -30,7 +30,7 @@ Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   spread: 257.1% → 17.9%
   payback: benefit 5.2e+06 load·s vs cost 4.72e+04 load·s → ratio 110 (need 10) ✓
   objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 0.5 + reserve 0 = 2.32
-  measured load (section 4):
+  measured load:
   san-a  used 4.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 1.50 TiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
     101:scsi0        2.00 TiB  raw     ℓ 3.00
     101:scsi1        1.00 TiB  raw     ℓ 1.00
@@ -67,7 +67,7 @@ instead of collapsing to only `.total` in the first place. Only printed
 when the gate said `ACT`; a `NO ACTION` group solved nothing this run, so
 there is no objective to show.
 
-## `measured load (section 4):`
+## `measured load:`
 
 The section 4 input every number above derives from — identical to
 `show-load`'s own per-storage, per-disk report (`docs/manual/25-show-load-
