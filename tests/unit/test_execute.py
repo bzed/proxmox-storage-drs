@@ -840,6 +840,118 @@ def test_deadline_recheck_after_a_lock_wait_refuses_a_move_that_no_longer_fits()
     assert result.outcomes[0].status == "skipped"
     assert "after waiting for the VM lock" in result.outcomes[0].detail
     assert not any("move_disk" in c[1] for c in api.calls)
+    # REVIEW.md T-06: this is `_auto_budget_stop_outcome()`'s own "stop
+    # cleanly, never skip this one and try a later move" policy, applying
+    # just as much to a budget that went stale *during* the lock wait as
+    # to the pre-flight check that function itself makes.
+    assert result.outcomes[0].always_stop is True
+    assert result.stopped_early is True
+    assert result.stop_reason == result.outcomes[0].detail
+
+
+def test_deadline_recheck_after_a_lock_wait_stops_the_whole_run_not_just_this_move() -> None:
+    """REVIEW.md T-06's collateral bug: before the fix, this "skipped"
+    outcome let the loop fall through to the *next* move instead of
+    stopping the run -- contradicting `_auto_budget_stop_outcome()`'s own
+    documented policy. A second, perfectly launchable move must never be
+    attempted once the deadline goes stale for the first. Same lock-clears
+    -after-two-polls setup as
+    `test_deadline_recheck_after_a_lock_wait_refuses_a_move_that_no_longer_fits`,
+    with a second, fully launchable move appended."""
+    calls = {"n": 0}
+
+    def status_current(**kwargs: object) -> dict[str, object]:
+        calls["n"] += 1
+        return {"lock": "backup" if calls["n"] < 3 else None}
+
+    group = Group(
+        name="g",
+        storages=(make_storage("san-a"), make_storage("san-b")),
+        disks=(make_disk("101:scsi0", 1.0, "san-a"), make_disk("102:scsi0", 1.0, "san-a")),
+    )
+    upid2 = "UPID:pve01:00001235:00ABCDEF:qmmove:102:root@pam:"
+    client, api = client_with(
+        {
+            "cluster/resources": [
+                {"vmid": 101, "node": "pve01", "status": "running"},
+                {"vmid": 102, "node": "pve01", "status": "running"},
+            ],
+            "nodes/pve01/qemu/101/config": {
+                "scsi0": "san-a:vm-101-disk-0,size=1024G",
+                "lock": "backup",
+            },
+            "nodes/pve01/qemu/101/status/current": status_current,
+            "nodes/pve01/qemu/102/config": {"scsi0": "san-a:vm-102-disk-0,size=1024G"},
+            "nodes/pve01/qemu/102/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/102/status/current": {"lock": None},
+            "nodes/pve01/qemu/102/move_disk": upid2,
+            f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
+        }
+    )
+    execution = ExecutionConfig(
+        locks=LocksConfig(wait_timeout_seconds=600.0, poll_interval_seconds=200.0)
+    )
+    move_costs = {
+        "101:scsi0": MoveCost("101:scsi0", 60.0, 0.0, 60.0, False, False),
+        "102:scsi0": MoveCost("102:scsi0", 60.0, 0.0, 60.0, False, False),
+    }
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    # Same numbers as the single-move version: fits at t=0 (450s left, 60s
+    # needed), but the 400s lock wait leaves only 50s -- no longer enough.
+    deadline = datetime(2026, 9, 6, 12, 7, 30, tzinfo=timezone.utc)
+    moves = (make_move(), make_move("102:scsi0", 102, "scsi0"))
+    result = run(
+        client,
+        group,
+        moves,
+        execution=execution,
+        clock=fc,
+        deadline=deadline,
+        move_costs_by_key=move_costs,
+    )
+    assert [o.status for o in result.outcomes] == ["skipped"]
+    assert result.stopped_early is True
+    # 102 was never even pre-flighted.
+    assert not any("102" in c[1] for c in api.calls)
+
+
+def test_lock_timeout_skip_does_not_consume_the_max_migrations_per_run_budget() -> None:
+    """REVIEW.md T-06: a lock-timeout `"skipped"` outcome never issued
+    `move_disk`, so it must not consume a slot of
+    `execution.max_migrations_per_run` -- the second, real move must
+    still be allowed to launch against a budget of `1`."""
+    group = Group(
+        name="g",
+        storages=(make_storage("san-a"), make_storage("san-b")),
+        disks=(make_disk("101:scsi0", 1.0, "san-a"), make_disk("102:scsi0", 1.0, "san-a")),
+    )
+    upid2 = "UPID:pve01:00001235:00ABCDEF:qmmove:102:root@pam:"
+    client, api = client_with(
+        {
+            "cluster/resources": [
+                {"vmid": 101, "node": "pve01", "status": "running"},
+                {"vmid": 102, "node": "pve01", "status": "running"},
+            ],
+            "nodes/pve01/qemu/101/config": {
+                "scsi0": "san-a:vm-101-disk-0,size=1024G",
+                "lock": "backup",
+            },
+            "nodes/pve01/qemu/101/status/current": {"lock": "backup"},
+            "nodes/pve01/qemu/102/config": {"scsi0": "san-a:vm-102-disk-0,size=1024G"},
+            "nodes/pve01/qemu/102/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/102/status/current": {"lock": None},
+            "nodes/pve01/qemu/102/move_disk": upid2,
+            f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
+        }
+    )
+    execution = ExecutionConfig(
+        locks=LocksConfig(wait_timeout_seconds=10.0, poll_interval_seconds=30.0, on_timeout="skip")
+    )
+    moves = (make_move(), make_move("102:scsi0", 102, "scsi0"))
+    result = run(client, group, moves, execution=execution, max_migrations=1)
+    assert [o.status for o in result.outcomes] == ["skipped", "moved"]
+    assert result.outcomes[0].upid is None
+    assert result.stopped_early is False
 
 
 def test_deadline_with_no_cost_estimate_assumes_zero_duration() -> None:
@@ -1415,6 +1527,47 @@ def test_concurrent_preflight_mismatch_replans_and_stops() -> None:
     assert [o.disk_key for o in result.outcomes] == ["201:scsi0"]
     assert result.outcomes[0].status == "replan_needed"
     assert "no longer found" in result.outcomes[0].detail
+    assert result.stopped_early is True
+    assert not any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
+
+
+def test_concurrent_replan_mismatch_can_land_before_a_still_inflight_moves_outcome() -> None:
+    """REVIEW.md T-01, reproduced directly: 202 vanished from
+    `cluster/resources` (simulating a live-migration/deletion since the
+    plan was built), but 201 -- already launched and still `"running"` --
+    has not resolved yet when 202's pre-flight is checked one cycle later.
+    The concurrent executor cannot return the moment 202's mismatch is
+    found (201 is still in flight and must be polled to its own
+    conclusion first), so `outcomes` ends up `[202's replan_needed, 201's
+    moved]` -- the mismatch is *not* last. `cli._run_auto_group()`'s own
+    `needs_replan` check must key off membership, not position, for a
+    caller to ever notice this outcome and re-plan (T-01's fix); this test
+    only pins down that the executor really does produce outcomes in this
+    order, independent of that fix."""
+    poll_count = {"n": 0}
+
+    def upid_a_status(**kwargs: object) -> dict[str, object]:
+        poll_count["n"] += 1
+        return (
+            {"status": "running"}
+            if poll_count["n"] == 1
+            else {"status": "stopped", "exitstatus": "OK"}
+        )
+
+    client, api = concurrent_client_with(
+        {
+            # 202 is simply absent -- vanished since this plan was built.
+            "cluster/resources": [{"vmid": 201, "node": "pve01", "status": "running"}],
+            f"nodes/pve01/tasks/{UPID_A}/status": upid_a_status,
+        }
+    )
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+
+    assert [(o.disk_key, o.status) for o in result.outcomes] == [
+        ("202:scsi0", "replan_needed"),
+        ("201:scsi0", "moved"),
+    ]
     assert result.stopped_early is True
     assert not any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
 

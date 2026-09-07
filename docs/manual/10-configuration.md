@@ -267,11 +267,14 @@ nor suppresses a migration.
 
 Fraction in (0, 1), default `0.99`.
 
-The quantile the **optimizer** and the saturation guard actually consume —
-must be `>= window.quantile`. Being wrong in the direction of "busier than
-it looks" costs a slightly suboptimal balance; the other direction risks
-migrating a disk onto a storage that is about to saturate, which is why the
-optimizer sees the more conservative bound rather than the point estimate.
+The quantile the section 7.3 **saturation guard** actually consumes (when a
+storage configures `saturation_load`) — must be `>= window.quantile`. Being
+wrong in the direction of "busier than it looks" costs the guard deferring a
+move that was actually safe; the other direction risks the guard missing a
+mirror that pushes a storage past saturation. The optimizer itself still
+decides placement from `window.quantile`, the point estimate — see
+`IMPLEMENTATION_PLAN.md` §10.1's "As built" note; wiring the upper bound
+into the optimizer's own input remains future work.
 
 ### `window.min_coverage`
 
@@ -927,5 +930,6 @@ The seasonal component passed to the same fit.
 Weight, default `2.0`.
 
 The upper bound is `point_estimate + residual_z * stdev(residuals)` from the
-in-sample fit — this is what the optimizer actually consumes (see
-`window.upper_quantile` for the equivalent under the `quantile` model).
+in-sample fit — this is what the section 7.3 saturation guard actually
+consumes (see `window.upper_quantile` for the equivalent under the
+`quantile` model; the optimizer itself does not consume this).

@@ -82,8 +82,10 @@ window:
   # The DECISION window: the period whose load we balance. This is NOT the same
   # as the history a forecaster needs -- see the forecast: block below.
   lookback: 24h
-  quantile: 0.95        # point estimate: robust reduction of the window per disk
-  upper_quantile: 0.99  # the bound the OPTIMIZER consumes (>= quantile)
+  quantile: 0.95        # point estimate: the actual decision statistic (>= quantile)
+  upper_quantile: 0.99  # bound consumed by the section 7.3 saturation guard only
+                        # (when a storage sets saturation_load) -- not by the
+                        # optimizer; see IMPLEMENTATION_PLAN.md 10.1's "As built" note
   min_coverage: 0.80    # reject a disk's data if fewer than this fraction of
                         # expected samples are present
 

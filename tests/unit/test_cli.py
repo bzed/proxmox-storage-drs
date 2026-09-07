@@ -2233,7 +2233,11 @@ def _one_move(group: Group) -> ScheduledMove:
 
 
 def _moved_outcome(move: ScheduledMove) -> MoveOutcome:
-    return MoveOutcome(move.disk_key, move.from_storage, move.to_storage, "moved", "task OK")
+    # `upid` set, like every real "moved" outcome -- REVIEW.md T-06's
+    # launches-only budget accounting keys off it.
+    return MoveOutcome(
+        move.disk_key, move.from_storage, move.to_storage, "moved", "task OK", upid="UPID:test"
+    )
 
 
 def _replan_needed_outcome(move: ScheduledMove) -> MoveOutcome:
@@ -2269,7 +2273,7 @@ def test_run_auto_group_refuses_outside_every_configured_time_window(
         resolved,
         "fake-prom",  # type: ignore[arg-type]
         0,
-        empty_state(),
+        cli._InflightStateBox(empty_state()),
         group,
         group_plan,
         None,
@@ -2306,7 +2310,7 @@ def test_run_auto_group_allows_execution_inside_a_configured_window(
         resolved,
         "fake-prom",  # type: ignore[arg-type]
         0,
-        empty_state(),
+        cli._InflightStateBox(empty_state()),
         group,
         group_plan,
         None,
@@ -2334,7 +2338,7 @@ def test_run_auto_group_no_time_windows_configured_means_unrestricted(
         resolved,
         "fake-prom",  # type: ignore[arg-type]
         0,
-        empty_state(),
+        cli._InflightStateBox(empty_state()),
         group,
         group_plan,
         None,
@@ -2373,7 +2377,7 @@ def test_run_auto_group_replans_and_succeeds_on_the_second_attempt(
         resolved,
         "fake-prom",  # type: ignore[arg-type]
         0,
-        empty_state(),
+        cli._InflightStateBox(empty_state()),
         group,
         group_plan,
         None,
@@ -2382,6 +2386,137 @@ def test_run_auto_group_replans_and_succeeds_on_the_second_attempt(
     assert [o.status for o in result.outcomes] == ["replan_needed", "moved"]
     assert result.stopped_early is False
     assert result.stop_reason is None
+
+
+def test_run_auto_group_replans_when_the_mismatch_is_not_the_last_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW.md T-01: the concurrent executor cannot return the instant a
+    `replan_needed` mismatch is found -- other moves already in flight
+    keep polling to their own conclusion first
+    (`test_concurrent_replan_mismatch_can_land_before_a_still_inflight_moves_outcome`
+    in `test_execute.py` reproduces this against the real executor), so a
+    single `_apply_payback_gate()` call's own ``ExecutionResult.outcomes``
+    can already contain a `"replan_needed"` outcome that is *not* last.
+    `needs_replan` must key off membership (`any(...)`), not
+    `outcomes[-1]` -- otherwise this run would stop here instead of
+    re-planning, silently narrowing the manual's own auto-mode contract
+    under concurrency."""
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(tmp_path)
+    group = _one_disk_group()
+    move = _one_move(group)
+    other_move = ScheduledMove(
+        disk_key="999:scsi0",
+        vmid=999,
+        device="scsi0",
+        from_storage="san-a",
+        to_storage="san-b",
+        size_bytes=move.size_bytes,
+        imbalance_reduction=1.0,
+        resolves_reserve_violation=False,
+    )
+    group_plan = _make_group_plan(group, resolved, (move, other_move))
+    second_plan = _make_group_plan(group, resolved, (move,))
+
+    calls = {"n": 0}
+
+    def fake_gate(*a: object, **k: object) -> ExecutionResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # The mismatch (`other_move`) lands *first*; the still-inflight
+            # `move` resolves cleanly afterwards -- exactly the ordering
+            # the concurrent executor can produce.
+            return ExecutionResult(
+                (_replan_needed_outcome(other_move), _moved_outcome(move)),
+                True,
+                "no longer matches",
+            )
+        return ExecutionResult((_moved_outcome(move),), False, None)
+
+    monkeypatch.setattr("proxmox_storage_drs.cli._apply_payback_gate", fake_gate)
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        lambda *a, **k: Topology(groups=(group,), warnings=()),
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli._plan_group", lambda *a, **k: second_plan)
+
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        cli._InflightStateBox(empty_state()),
+        group,
+        group_plan,
+        None,
+    )
+    assert calls["n"] == 2
+    assert [o.status for o in result.outcomes] == ["replan_needed", "moved", "moved"]
+    assert result.stopped_early is False
+    assert result.stop_reason is None
+
+
+def test_run_auto_group_records_each_attempts_cooldown_before_replanning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW.md T-02: section 9.2 step 2 ("record the moves already
+    completed ... including their cooldown timestamps") must happen
+    *before* step 3 re-plans, so the re-plan sees the first attempt's own
+    executed move as history -- not the pre-group `state` snapshot. This
+    also covers the crash-window half of T-02: `state_box.value` (what
+    `_handle_apply()`'s `finally` block actually saves) must already
+    carry the first attempt's cooldown by the time the second attempt
+    starts, not only once the whole group's loop returns."""
+    from proxmox_storage_drs.execute import ExecutionResult
+    from proxmox_storage_drs.state import disk_state_key
+
+    resolved = _resolved_config(tmp_path)
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+    second_plan = _make_group_plan(group, resolved, (move,))
+
+    calls = {"n": 0}
+    seen_state_cooldowns: list[dict[str, str]] = []
+
+    def fake_gate(*a: object, **k: object) -> ExecutionResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ExecutionResult((_moved_outcome(move), _replan_needed_outcome(move)), True, "x")
+        return ExecutionResult((_moved_outcome(move),), False, None)
+
+    def fake_build_topology(
+        client: object, config: object, *, state: object, now: object
+    ) -> Topology:
+        seen_state_cooldowns.append(dict(state.cooldowns.disk))  # type: ignore[attr-defined]
+        return Topology(groups=(group,), warnings=())
+
+    box = cli._InflightStateBox(empty_state())
+    monkeypatch.setattr("proxmox_storage_drs.cli._apply_payback_gate", fake_gate)
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", fake_build_topology)
+    monkeypatch.setattr("proxmox_storage_drs.cli._plan_group", lambda *a, **k: second_plan)
+
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        0,
+        box,
+        group,
+        group_plan,
+        None,
+    )
+    assert calls["n"] == 2
+    # The re-plan's own `build_topology()` call must already see the first
+    # attempt's cooldown -- not an empty dict.
+    key = disk_state_key(group.name, move.vmid, move.device)
+    assert seen_state_cooldowns == [{key: seen_state_cooldowns[0][key]}]
+    # And the box the crash-recovery `finally` block would save reflects
+    # it too, independent of whether this function ever returns normally.
+    assert key in box.value.cooldowns.disk
+    assert result.stopped_early is False
 
 
 def test_run_auto_group_stops_cleanly_when_a_replan_concludes_no_action_needed(
@@ -2410,7 +2545,7 @@ def test_run_auto_group_stops_cleanly_when_a_replan_concludes_no_action_needed(
         resolved,
         "fake-prom",  # type: ignore[arg-type]
         0,
-        empty_state(),
+        cli._InflightStateBox(empty_state()),
         group,
         group_plan,
         None,
@@ -2448,7 +2583,7 @@ def test_run_auto_group_stops_after_exhausting_max_replans_per_run(
         resolved,
         "fake-prom",  # type: ignore[arg-type]
         0,
-        empty_state(),
+        cli._InflightStateBox(empty_state()),
         group,
         group_plan,
         None,
@@ -2487,7 +2622,7 @@ def test_run_auto_group_stops_when_the_group_vanishes_after_replanning(
         resolved,
         "fake-prom",  # type: ignore[arg-type]
         0,
-        empty_state(),
+        cli._InflightStateBox(empty_state()),
         group,
         group_plan,
         None,
@@ -2516,7 +2651,7 @@ def test_run_auto_group_decrements_the_shared_migrations_budget(
         resolved,
         "fake-prom",  # type: ignore[arg-type]
         0,
-        empty_state(),
+        cli._InflightStateBox(empty_state()),
         group,
         group_plan,
         3,
@@ -2572,7 +2707,16 @@ def test_apply_auto_mode_shares_max_migrations_per_run_across_groups(
         calls.append((group.name, max_migrations))
         move = schedule_result.order[0]  # type: ignore[attr-defined]
         return ExecutionResult(
-            (MoveOutcome(move.disk_key, move.from_storage, move.to_storage, "moved", "ok"),),
+            (
+                MoveOutcome(
+                    move.disk_key,
+                    move.from_storage,
+                    move.to_storage,
+                    "moved",
+                    "ok",
+                    upid="UPID:test",
+                ),
+            ),
             False,
             None,
         )
