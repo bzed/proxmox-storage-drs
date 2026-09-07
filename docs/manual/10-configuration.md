@@ -859,8 +859,8 @@ Fraction in (0, 1], default `0.25`.
 
 If pinned load (snapshots, locks, exclusions) exceeds this fraction of a
 group's total, the residual imbalance may be structural rather than a
-planning failure, and the report says so alongside the best achievable
-spread given the pins.
+planning failure, and `explain` says so alongside the best achievable
+spread given the pins — see [`29-explain.md`](29-explain.md).
 
 ## `state`
 

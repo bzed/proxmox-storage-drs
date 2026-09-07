@@ -102,7 +102,7 @@ from proxmox_storage_drs.state import (
     without_inflight_upid,
 )
 from proxmox_storage_drs.timewindow import current_deadline
-from proxmox_storage_drs.topology import Group, Storage, Topology, build_topology
+from proxmox_storage_drs.topology import Disk, Group, Storage, Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
 logger = logging.getLogger(__name__)
@@ -264,11 +264,15 @@ def show_manual() -> int:
 
 # -------------------------------------------------------------- subcommands
 #
-# pve.py, topology.py and the solver/scheduler/executor modules do not exist
-# yet (IMPLEMENTATION_PLAN.md section 12 phases 2-9 are still in progress).
-# Each such handler is honest about that rather than pretending to succeed --
-# AGENTS.md section 10 forbids emitting a partial/unvalidated result, and
-# "not implemented yet" is a true statement, not a silent wrong action.
+# Every subcommand in `_SUBCOMMANDS` now has a real handler (`explain` was
+# the last one, section 12). `_make_not_yet_implemented_handler()` is kept
+# as the extension point `docs/internals/40-cli-and-logging.md` describes
+# for the *next* new command this codebase adds -- `_COMMAND_HANDLERS`'
+# dict-comprehension initializer below still runs it for every name before
+# each real handler overwrites its own entry, so a command added to
+# `_SUBCOMMANDS` without a handler assignment fails honestly (AGENTS.md
+# section 10: a partial/unvalidated result is worse than "not implemented
+# yet") instead of a `KeyError` from `main()`'s dispatch.
 
 
 CommandHandler = Callable[[ResolvedConfig, argparse.Namespace, str], int]
@@ -579,15 +583,20 @@ def _spread_fraction(utilization: dict[str, float], average_utilization: float) 
 _BYTES_PER_TIB = 1 << 40
 
 
-def _load_per_tib(load_by_key: dict[str, float], move: ScheduledMove) -> float:
-    """Section 7.3's advisory ``ell/z`` ratio for one move -- ``0.0`` for a
-    zero-size disk rather than a ``ZeroDivisionError`` (PVE does not report
-    these in practice, and ``config_schema.json`` does not forbid
-    ``size_bytes: 0`` since that value comes from the PVE API, not config;
-    defense in depth, not a live bug -- REVIEW.md R-06)."""
-    if move.size_bytes <= 0:
+def _load_per_tib(load_by_key: dict[str, float], key: str, size_bytes: int) -> float:
+    """Section 7.3's advisory ``ell/z`` ratio -- ``0.0`` for a zero-size
+    disk rather than a ``ZeroDivisionError`` (PVE does not report these in
+    practice, and ``config_schema.json`` does not forbid ``size_bytes: 0``
+    since that value comes from the PVE API, not config; defense in depth,
+    not a live bug -- REVIEW.md R-06). Takes a bare ``key``/``size_bytes``
+    pair rather than a :class:`ScheduledMove` so ``explain`` (section
+    3.6/7.3: "worth surfacing... output") can reuse it for a pinned
+    :class:`~proxmox_storage_drs.topology.Disk` too, which never becomes a
+    ``ScheduledMove`` (AGENTS.md section 5 -- one implementation of this
+    ratio, not two identical ones)."""
+    if size_bytes <= 0:
         return 0.0
-    return load_by_key.get(move.disk_key, 0.0) / (move.size_bytes / _BYTES_PER_TIB)
+    return load_by_key.get(key, 0.0) / (size_bytes / _BYTES_PER_TIB)
 
 
 def _render_plan_move_line(
@@ -606,7 +615,7 @@ def _render_plan_move_line(
         if move_cost.exceeds_max_duration:
             flag = "  ⚠ exceeds migration.max_single_move_duration"
     change = -move.imbalance_reduction
-    load_per_tib = _load_per_tib(load_by_key, move)
+    load_per_tib = _load_per_tib(load_by_key, move.disk_key, move.size_bytes)
     line = (
         f"  {index}. {move.disk_key:<14} {move.from_storage} → {move.to_storage}   "
         f"{format_bytes(move.size_bytes):>10}   {duration_str}   "
@@ -853,7 +862,7 @@ def _render_group_plan_json(
                     "size_bytes": move.size_bytes,
                     "imbalance_reduction": move.imbalance_reduction,
                     "resolves_reserve_violation": move.resolves_reserve_violation,
-                    "load_per_tib": _load_per_tib(load_by_key, move),
+                    "load_per_tib": _load_per_tib(load_by_key, move.disk_key, move.size_bytes),
                     "duration_mirror_seconds": (
                         move_cost.duration_mirror_seconds if move_cost else None
                     ),
@@ -930,6 +939,282 @@ def _render_plan_json(
             final_breakdowns.get(group.name),
             load_errors.get(group.name),
         )
+        for group in topology.groups
+    ]
+    return {"groups": groups_out, "warnings": list(topology.warnings)}
+
+
+# ------------------------------------------------------------------ explain
+#
+# `explain` runs the identical gate/solve/schedule/payback pipeline `plan`
+# does (`_plan_group()`, one `_GroupPlan` per group -- AGENTS.md section 5)
+# and renders everything `_render_group_plan_human()`/`_render_group_plan_json()`
+# already show, plus the "why" sections 3.6/7.3/9.5 ask for that nothing else
+# prints: which disks are pinned and why, which VMs that keeps fragmented
+# across more than one storage, and whether the pinned load is large enough
+# that the residual imbalance is structural rather than a planning failure
+# (`report.warn_pinned_load_fraction`).
+
+
+def _pinned_disks(group: Group) -> list[Disk]:
+    """Every disk in ``group`` section 5.3 (C2) pins this run, in the same
+    order ``show-load`` already lists disks (AGENTS.md section 5 -- one
+    canonical ordering)."""
+    return sorted(
+        (d for d in group.disks if d.pinned_reason is not None),
+        key=lambda d: (d.vmid, d.device),
+    )
+
+
+def _fragmented_vms(
+    group: Group, assignment: Assignment | None
+) -> list[tuple[int, str, list[Disk]]]:
+    """Section 3.6: name the actual pinned disk(s) keeping one VM's disks
+    spread across more than one storage, rather than only ever emitting a
+    plan that quietly leaves a stray volume behind. ``assignment`` is the
+    plan's own final placement when one was computed -- section 8's
+    scheduler can leave some moves deadlocked, so this reflects the
+    group's *actual* outcome, not an aspirational one (the same reasoning
+    ``_plan_group()``'s own ``final_breakdown`` already applies, REVIEW.md
+    R-02). With no plan at all (no gate ACT, or a load error upstream)
+    ``assignment`` is ``None`` and each disk's own ``current_storage`` is
+    used instead, so a fragmented VM is still named even on a run that
+    computed nothing.
+
+    A VM only counts as fragmented when at least one of its disks is
+    pinned: a VM merely spread across storages by an ordinary, unpinned
+    plan is not a blocker to report here -- it is the plan working as
+    intended.
+    """
+    by_vmid: dict[int, list[Disk]] = {}
+    for disk in group.disks:
+        by_vmid.setdefault(disk.vmid, []).append(disk)
+    result: list[tuple[int, str, list[Disk]]] = []
+    for vmid, disks in sorted(by_vmid.items()):
+        storages = {(assignment or {}).get(d.key, d.current_storage) for d in disks}
+        if len(storages) <= 1:
+            continue
+        pinned = [d for d in disks if d.pinned_reason is not None]
+        if not pinned:
+            continue
+        result.append((vmid, disks[0].vm_name, sorted(pinned, key=lambda d: d.device)))
+    return result
+
+
+def _pinned_load_fraction(
+    group: Group, load_by_key: dict[str, float]
+) -> tuple[float, float] | None:
+    """``(pinned_load, total_load)`` for ``report.warn_pinned_load_fraction``,
+    or ``None`` when there is no load to divide by -- an idle group, or one
+    ``explain`` never got a load for -- so the caller can skip the line
+    entirely rather than report a meaningless ``0/0``."""
+    total = sum(load_by_key.get(d.key, 0.0) for d in group.disks)
+    if total <= 0:
+        return None
+    pinned = sum(load_by_key.get(d.key, 0.0) for d in group.disks if d.pinned_reason is not None)
+    return pinned, total
+
+
+def _render_pinned_lines(group: Group, load_by_key: dict[str, float]) -> list[str]:
+    pinned = _pinned_disks(group)
+    if not pinned:
+        return []
+    lines = ["  pinned (not movable this run):"]
+    for disk in pinned:
+        load_str = f"  ℓ {load_by_key[disk.key]:.2f}" if disk.key in load_by_key else ""
+        ratio = _load_per_tib(load_by_key, disk.key, disk.size_bytes)
+        lines.append(
+            f"    {disk.key:<14} {format_bytes(disk.size_bytes):>10}  on {disk.current_storage}"
+            f"{load_str}  ℓ/z {ratio:.2f}  -- {disk.pinned_reason}"
+        )
+    return lines
+
+
+def _render_fragmentation_lines(group: Group, assignment: Assignment | None) -> list[str]:
+    fragmented = _fragmented_vms(group, assignment)
+    if not fragmented:
+        return []
+    lines = ["  cannot fully consolidate:"]
+    for vmid, vm_name, pinned in fragmented:
+        blockers = ", ".join(f"{d.device}: {d.pinned_reason}" for d in pinned)
+        lines.append(f"    {vmid} ({vm_name})  {blockers}")
+    return lines
+
+
+def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
+    """The section 5.4 objective's five terms, individually -- the reason
+    :class:`ObjectiveBreakdown` keeps them apart instead of collapsing to
+    only ``.total`` in the first place (that class's own docstring)."""
+    return (
+        "  objective: "
+        f"imbalance {breakdown.imbalance_term:.3g} + "
+        f"moves {breakdown.move_count_term:.3g} + "
+        f"bytes {breakdown.bytes_moved_term:.3g} + "
+        f"fragmentation {breakdown.fragmentation_term:.3g} + "
+        f"reserve {breakdown.reserve_penalty_term:.3g} = {breakdown.total:.3g}"
+    )
+
+
+def _render_pinned_load_lines(
+    group: Group,
+    load_by_key: dict[str, float],
+    warn_fraction: float,
+    achievable_spread: float | None,
+) -> list[str]:
+    fractions = _pinned_load_fraction(group, load_by_key)
+    if fractions is None:
+        return []
+    pinned_load, total_load = fractions
+    fraction = pinned_load / total_load
+    spread_str = (
+        f";  best achievable spread given pins: {achievable_spread:.1%}"
+        if achievable_spread is not None
+        else ""
+    )
+    lines = [
+        f"  pinned load {pinned_load:.2f} of {total_load:.2f} "
+        f"({fraction:.1%}, warn at {warn_fraction:.0%}){spread_str}"
+    ]
+    if fraction > warn_fraction:
+        lines.append(
+            "  ⚠ pinned load exceeds report.warn_pinned_load_fraction -- the residual "
+            "imbalance here may be structural (clear the pins above to improve it "
+            "further), not a planning failure"
+        )
+    return lines
+
+
+def _render_group_explain_human(
+    group: Group, group_plan: "_GroupPlan", payback_ratio: float, warn_fraction: float
+) -> list[str]:
+    if group_plan.load_error is not None:
+        return [f"Group {group.name} — plan unavailable: {group_plan.load_error}", ""]
+    assert group_plan.decision is not None
+    plan_lines = _render_group_plan_human(
+        group,
+        {group.name: group_plan.group_load} if group_plan.group_load else {},
+        {group.name: group_plan.decision},
+        {group.name: group_plan.solve_outcome} if group_plan.solve_outcome else {},
+        {group.name: group_plan.schedule_result} if group_plan.schedule_result else {},
+        {group.name: group_plan.payback_result} if group_plan.payback_result else {},
+        {group.name: group_plan.final_breakdown} if group_plan.final_breakdown else {},
+        {},
+        payback_ratio,
+    )
+
+    load_by_key = group_plan.group_load.load_by_disk_key() if group_plan.group_load else {}
+    assignment = group_plan.schedule_result.final_assignment if group_plan.schedule_result else None
+    extra: list[str] = []
+    if group_plan.final_breakdown is not None:
+        extra.append(_render_objective_breakdown_line(group_plan.final_breakdown))
+    extra.extend(_render_pinned_lines(group, load_by_key))
+    extra.extend(_render_fragmentation_lines(group, assignment))
+    achievable_spread = None
+    if group_plan.decision.act and group_plan.final_breakdown is not None:
+        assert group_plan.group_load is not None
+        achievable_spread = _spread_fraction(
+            group_plan.final_breakdown.utilization, group_plan.group_load.average_utilization
+        )
+    extra.extend(_render_pinned_load_lines(group, load_by_key, warn_fraction, achievable_spread))
+
+    if not extra:
+        return plan_lines
+    # `plan_lines` always ends with one blank separator line
+    # (`_render_group_plan_human()`'s own contract) -- insert before it
+    # rather than after, so groups stay separated by exactly one blank line.
+    return plan_lines[:-1] + extra + [""]
+
+
+def _render_explain_human(
+    topology: Topology,
+    group_plans: dict[str, "_GroupPlan"],
+    payback_ratio: float,
+    warn_fraction: float,
+) -> str:
+    lines: list[str] = []
+    for group in topology.groups:
+        lines.extend(
+            _render_group_explain_human(
+                group, group_plans[group.name], payback_ratio, warn_fraction
+            )
+        )
+    if topology.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in topology.warnings)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_group_explain_json(
+    group: Group, group_plan: "_GroupPlan", warn_fraction: float
+) -> dict[str, object]:
+    out = _render_group_plan_json(
+        group,
+        group_plan.decision,
+        group_plan.solve_outcome,
+        group_plan.schedule_result,
+        group_plan.payback_result,
+        group_plan.group_load,
+        group_plan.final_breakdown,
+        group_plan.load_error,
+    )
+    load_by_key = group_plan.group_load.load_by_disk_key() if group_plan.group_load else {}
+    breakdown = group_plan.final_breakdown
+    out["objective"] = (
+        {
+            "imbalance_term": breakdown.imbalance_term,
+            "move_count_term": breakdown.move_count_term,
+            "bytes_moved_term": breakdown.bytes_moved_term,
+            "fragmentation_term": breakdown.fragmentation_term,
+            "reserve_penalty_term": breakdown.reserve_penalty_term,
+            "total": breakdown.total,
+        }
+        if breakdown is not None
+        else None
+    )
+    out["pinned_disks"] = [
+        {
+            "disk_key": d.key,
+            "vmid": d.vmid,
+            "device": d.device,
+            "current_storage": d.current_storage,
+            "size_bytes": d.size_bytes,
+            "load": load_by_key.get(d.key),
+            "load_per_tib": _load_per_tib(load_by_key, d.key, d.size_bytes),
+            "reason": d.pinned_reason,
+        }
+        for d in _pinned_disks(group)
+    ]
+    assignment = group_plan.schedule_result.final_assignment if group_plan.schedule_result else None
+    out["fragmentation"] = [
+        {
+            "vmid": vmid,
+            "vm_name": vm_name,
+            "blockers": [
+                {"device": d.device, "disk_key": d.key, "reason": d.pinned_reason} for d in pinned
+            ],
+        }
+        for vmid, vm_name, pinned in _fragmented_vms(group, assignment)
+    ]
+    fractions = _pinned_load_fraction(group, load_by_key)
+    pinned_load_out: dict[str, object] | None = None
+    if fractions is not None:
+        pinned_load, total_load = fractions
+        pinned_load_out = {
+            "pinned_load": pinned_load,
+            "total_load": total_load,
+            "fraction": pinned_load / total_load,
+            "warn_fraction": warn_fraction,
+        }
+    out["pinned_load"] = pinned_load_out
+    return out
+
+
+def _render_explain_json(
+    topology: Topology, group_plans: dict[str, "_GroupPlan"], warn_fraction: float
+) -> dict[str, object]:
+    groups_out = [
+        _render_group_explain_json(group, group_plans[group.name], warn_fraction)
         for group in topology.groups
     ]
     return {"groups": groups_out, "warnings": list(topology.warnings)}
@@ -1410,6 +1695,52 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                 final_breakdowns,
                 load_errors,
                 resolved.config.migration.payback_ratio,
+            )
+        )
+    return 0
+
+
+def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+    """``explain`` (section 12): the identical read-only
+    gate/solve/schedule/payback pipeline ``plan`` runs (``_plan_group()``,
+    the shared ``_GroupPlan`` -- AGENTS.md section 5), narrated with the
+    "why" ``plan`` itself never prints: which disks are pinned and why,
+    which VMs that leaves fragmented across more than one storage, and
+    whether the pinned load is large enough that the residual imbalance is
+    structural (``report.warn_pinned_load_fraction``) rather than a
+    planning failure. Never executes anything -- exactly like ``plan``,
+    it never takes ``state.py``'s advisory lock."""
+    del mode
+    client = build_pve_client(resolved.config.proxmox)
+    now = datetime.now(timezone.utc)
+    state = load_state(resolved.config.state.path)
+    topology = _filter_groups(
+        build_topology(client, resolved.config, state=state, now=now), args.group
+    )
+    prom_client = PrometheusClient(resolved.config.prometheus)
+    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
+    last_loads_by_group = _last_loads_by_group(state, topology)
+
+    group_plans = {
+        group.name: _plan_group(
+            group, resolved, prom_client, min_free_bytes, last_loads_by_group, state, now
+        )
+        for group in topology.groups
+    }
+    warn_fraction = resolved.config.report.warn_pinned_load_fraction
+
+    if args.json:
+        print(
+            json.dumps(
+                _render_explain_json(topology, group_plans, warn_fraction),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            _render_explain_human(
+                topology, group_plans, resolved.config.migration.payback_ratio, warn_fraction
             )
         )
     return 0
@@ -2250,6 +2581,7 @@ _COMMAND_HANDLERS["show-load"] = _handle_show_load
 _COMMAND_HANDLERS["verify-storages"] = _handle_verify_storages
 _COMMAND_HANDLERS["plan"] = _handle_plan
 _COMMAND_HANDLERS["apply"] = _handle_apply
+_COMMAND_HANDLERS["explain"] = _handle_explain
 
 
 # ------------------------------------------------------------------- main

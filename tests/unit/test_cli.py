@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import logging
@@ -162,15 +163,19 @@ def test_missing_config_is_reported_and_exits_1(
 # --------------------------------------------------------------------- dispatch
 
 
-def test_valid_config_dispatches_to_the_not_yet_implemented_handler(
+def test_not_yet_implemented_handler_reports_the_command_and_exits_1(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # "explain" (not scoped to any phase yet) is still a stub; "plan" and
-    # "apply" are both real now (phases 4-7).
-    path = write_config(tmp_path)
-    assert cli.main(["-c", str(path), "explain"]) == 1
+    """Every real subcommand now has a real handler (``explain`` was the
+    last one) so ``_make_not_yet_implemented_handler()`` is never reached
+    through dispatch any more -- exercised directly instead, as the
+    extension point it remains for the next new command
+    (``docs/internals/40-cli-and-logging.md``)."""
+    resolved = _resolved_config(tmp_path)
+    handler = cli._make_not_yet_implemented_handler("some-future-command")
+    assert handler(resolved, argparse.Namespace(), "dry-run") == 1
     err = capsys.readouterr().err
-    assert "'explain' is not implemented yet" in err
+    assert "'some-future-command' is not implemented yet" in err
 
 
 def test_drs_error_from_a_handler_is_reported_and_exits_1(
@@ -1242,7 +1247,10 @@ def test_load_per_tib_is_zero_not_a_division_error_for_a_zero_size_disk() -> Non
         imbalance_reduction=0.0,
         resolves_reserve_violation=False,
     )
-    assert cli._load_per_tib({"101:scsi0": 3.0}, zero_size_move) == 0.0
+    assert (
+        cli._load_per_tib({"101:scsi0": 3.0}, zero_size_move.disk_key, zero_size_move.size_bytes)
+        == 0.0
+    )
 
 
 def test_render_plan_payback_lines_separates_economic_and_duration_failures() -> None:
@@ -2261,10 +2269,16 @@ def _make_group_plan(
         rejected_moves=rejected_moves,
         aggregate_ok=aggregate_ok,
     )
+    solve_outcome = cli._SolveOutcome(
+        assignment={d.key: d.current_storage for d in group.disks},
+        initial_breakdown=_fake_breakdown(group, load_by_key, resolved),
+        backend="heuristic",
+        status=None,
+    )
     return cli._GroupPlan(
         group_load=group_load,
         decision=decision,
-        solve_outcome=None,
+        solve_outcome=solve_outcome,
         schedule_result=schedule_result,
         final_breakdown=_fake_breakdown(group, load_by_key, resolved),
         payback_result=payback_result,
@@ -2297,6 +2311,247 @@ def _replan_needed_outcome(move: ScheduledMove) -> MoveOutcome:
     return MoveOutcome(
         move.disk_key, move.from_storage, move.to_storage, "replan_needed", "no longer matches"
     )
+
+
+# --------------------------------------------------------------------- explain
+
+
+def _fragmented_group() -> Group:
+    """VM 101 has one movable disk (``scsi0``, on ``san-a``) and one
+    snapshot-pinned disk (``scsi1``, on ``san-b``) -- section 3.6's
+    "cannot fully consolidate" case. VM 102's one disk is pinned too, but
+    alone on its own storage, so it is *not* fragmented (section 5.4's
+    kappa only fires, and ``explain`` only reports, when a pin actually
+    keeps a VM spread across more than one storage)."""
+    storages = tuple(
+        Storage(
+            id=sid,
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=8 * (1 << 40),
+            used_bytes=0,
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+        )
+        for sid in ("san-a", "san-b")
+    )
+    disks = (
+        Disk(
+            key="101:scsi0",
+            vmid=101,
+            device="scsi0",
+            vm_name="web01",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-a",
+            format="raw",
+            pinned_reason=None,
+        ),
+        Disk(
+            key="101:scsi1",
+            vmid=101,
+            device="scsi1",
+            vm_name="web01",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-b",
+            format="raw",
+            pinned_reason="snapshots present (1)",
+        ),
+        Disk(
+            key="102:scsi0",
+            vmid=102,
+            device="scsi0",
+            vm_name="db01",
+            node="pve01",
+            size_bytes=1 * (1 << 40),
+            current_storage="san-b",
+            format="raw",
+            pinned_reason="locked: backup",
+        ),
+    )
+    return Group(name="fc-tier1", storages=storages, disks=disks)
+
+
+def test_pinned_disks_lists_only_pinned_ones_sorted_by_vmid_and_device() -> None:
+    group = _fragmented_group()
+    pinned = cli._pinned_disks(group)
+    assert [d.key for d in pinned] == ["101:scsi1", "102:scsi0"]
+
+
+def test_fragmented_vms_names_the_vm_with_a_pin_across_two_storages() -> None:
+    group = _fragmented_group()
+    fragmented = cli._fragmented_vms(group, assignment=None)
+    assert len(fragmented) == 1
+    vmid, vm_name, pinned = fragmented[0]
+    assert (vmid, vm_name) == (101, "web01")
+    assert [d.key for d in pinned] == ["101:scsi1"]
+
+
+def test_fragmented_vms_ignores_a_pin_alone_on_one_storage() -> None:
+    # 102 has exactly one disk, pinned or not -- never "spread" at all.
+    group = _fragmented_group()
+    fragmented = cli._fragmented_vms(group, assignment=None)
+    assert 102 not in {vmid for vmid, _, _ in fragmented}
+
+
+def test_fragmented_vms_uses_the_final_assignment_when_one_was_computed() -> None:
+    """A plan that (hypothetically) moved 101:scsi0 onto san-b would
+    reunite VM 101 -- ``explain`` must reflect the plan's own outcome, not
+    just current placement (REVIEW.md R-02's same reasoning)."""
+    group = _fragmented_group()
+    reunited = {"101:scsi0": "san-b", "101:scsi1": "san-b", "102:scsi0": "san-b"}
+    assert cli._fragmented_vms(group, assignment=reunited) == []
+
+
+def test_pinned_load_fraction_divides_pinned_by_total() -> None:
+    group = _fragmented_group()
+    load_by_key = {"101:scsi0": 1.0, "101:scsi1": 2.0, "102:scsi0": 1.0}
+    result = cli._pinned_load_fraction(group, load_by_key)
+    assert result == (3.0, 4.0)
+
+
+def test_pinned_load_fraction_is_none_for_an_idle_group() -> None:
+    group = _fragmented_group()
+    assert cli._pinned_load_fraction(group, {}) is None
+
+
+def test_render_group_explain_human_shows_pins_fragmentation_and_objective(
+    tmp_path: Path,
+) -> None:
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    move = ScheduledMove(
+        disk_key="101:scsi0",
+        vmid=101,
+        device="scsi0",
+        from_storage="san-a",
+        to_storage="san-b",
+        size_bytes=group.disks[0].size_bytes,
+        imbalance_reduction=1.0,
+        resolves_reserve_violation=False,
+    )
+    group_plan = _make_group_plan(group, resolved, (move,))
+    lines = cli._render_group_explain_human(
+        group, group_plan, payback_ratio=10.0, warn_fraction=0.25
+    )
+    text = "\n".join(lines)
+    assert "objective:" in text
+    assert "pinned (not movable this run):" in text
+    assert "101:scsi1" in text and "snapshots present (1)" in text
+    assert "102:scsi0" in text and "locked: backup" in text
+    assert "cannot fully consolidate:" in text
+    assert "101 (web01)" in text
+    assert "pinned load" in text
+    assert lines[-1] == ""  # exactly one trailing blank line, plan's own contract
+    assert lines[-2] != ""  # ... not two
+
+
+def test_render_group_explain_human_no_action_still_shows_pins() -> None:
+    group = _fragmented_group()
+    from proxmox_storage_drs.gates import GateDecision
+
+    group_plan = cli._GroupPlan(
+        group_load=GroupLoad(
+            group_name=group.name, idle=False, average_utilization=1.0, disks=(), storages=()
+        ),
+        decision=GateDecision(
+            act=False,
+            reason="imbalance below threshold",
+            reserve_override=False,
+            drift_fraction=None,
+            imbalance_fraction=0.05,
+        ),
+    )
+    lines = cli._render_group_explain_human(
+        group, group_plan, payback_ratio=10.0, warn_fraction=0.25
+    )
+    text = "\n".join(lines)
+    assert "NO ACTION: imbalance below threshold" in text
+    assert "cannot fully consolidate:" in text
+    assert "101 (web01)" in text
+    assert "objective:" not in text  # nothing was solved this run
+
+
+def test_render_group_explain_human_load_error_is_unchanged_from_plan() -> None:
+    group = _fragmented_group()
+    group_plan = cli._GroupPlan(load_error="Prometheus unreachable")
+    lines = cli._render_group_explain_human(
+        group, group_plan, payback_ratio=10.0, warn_fraction=0.25
+    )
+    assert lines == ["Group fc-tier1 — plan unavailable: Prometheus unreachable", ""]
+
+
+def test_render_group_explain_human_pinned_load_over_threshold_warns(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    group_plan = _make_group_plan(group, resolved, (_one_move(group),))
+    # `_make_group_plan()` gives every disk load 1.0; two of this group's
+    # three disks are pinned, so the fraction (0.667) clears any
+    # reasonable warn threshold.
+    lines = cli._render_group_explain_human(
+        group, group_plan, payback_ratio=10.0, warn_fraction=0.25
+    )
+    text = "\n".join(lines)
+    assert "warn at 25%" in text
+    assert "may be structural" in text
+
+
+def test_render_explain_json_includes_objective_pins_fragmentation_and_pinned_load(
+    tmp_path: Path,
+) -> None:
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    group_plan = _make_group_plan(group, resolved, (_one_move(group),))
+    # Round-tripped through JSON, like every other `--json` test here, so
+    # this is also a check that the payload is actually JSON-serializable,
+    # not just a `dict[str, object]` mypy accepts.
+    out = json.loads(
+        json.dumps(cli._render_group_explain_json(group, group_plan, warn_fraction=0.25))
+    )
+    assert out["objective"] is not None
+    assert {d["disk_key"] for d in out["pinned_disks"]} == {"101:scsi1", "102:scsi0"}
+    assert out["fragmentation"] == [
+        {
+            "vmid": 101,
+            "vm_name": "web01",
+            "blockers": [
+                {"device": "scsi1", "disk_key": "101:scsi1", "reason": "snapshots present (1)"}
+            ],
+        }
+    ]
+    assert out["pinned_load"]["warn_fraction"] == 0.25
+    assert out["pinned_load"]["fraction"] == pytest.approx(2 / 3)
+
+
+def test_explain_handler_human_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "explain"]) == 0
+    out = capsys.readouterr().out
+    assert "Group fc-tier1 → ACT: reserve violated on san-a" in out
+    assert "101:scsi0" in out
+    assert "san-a → san-b" in out
+    assert "pinned (not movable this run):" in out
+    assert "102:scsi0" in out and "locked: backup" in out
+    assert "objective:" in out
+
+
+def test_explain_handler_json_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "explain"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    (group_out,) = payload["groups"]
+    assert group_out["name"] == "fc-tier1"
+    assert group_out["objective"] is not None
+    assert any(d["disk_key"] == "102:scsi0" for d in group_out["pinned_disks"])
 
 
 def test_run_auto_group_refuses_outside_every_configured_time_window(

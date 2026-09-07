@@ -84,9 +84,10 @@ Assignment = dict[str, str]  # topology.Disk.key -> storage id
 class ObjectiveBreakdown:
     """The section 5.4 objective, evaluated for one candidate assignment,
     broken into its five terms -- kept separate rather than collapsed into
-    only ``total`` because ``explain`` (not yet written) needs to show the
-    arithmetic, not just the answer, and because tests cross-checking this
-    against the section 14 worked example need each term individually."""
+    only ``total`` because ``explain`` (``cli._render_group_explain_human()``'s
+    "objective:" line) needs to show the arithmetic, not just the answer,
+    and because tests cross-checking this against the section 14 worked
+    example need each term individually."""
 
     imbalance_term: float  # alpha * (sum(e_s) [l1] or max(u_s) [minmax] -- objective.spread_metric)
     move_count_term: float  # beta * number of disks that moved

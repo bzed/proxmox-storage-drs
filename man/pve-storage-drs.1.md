@@ -46,7 +46,12 @@ the same file on every node.
 : Print every storage in every group with its disks, sizes, measured load and reserve status.
 
 **explain**
-: Not implemented yet -- see IMPLEMENTATION_PLAN.md section 12 for the phase it belongs to.
+: Run the identical gate/solve/schedule/payback pipeline **plan** does, and narrate what its output
+  does not print: every disk pinned this run with its exact reason, any VM a pin leaves with disks
+  spread across more than one storage ("cannot fully consolidate"), the section 5.4 objective's five
+  terms individually, and pinned load as a fraction of the group's total against
+  *report.warn_pinned_load_fraction* -- flagging a residual imbalance likely too structural (too
+  much load pinned) for another run of **plan** to fix by itself.
 
 **verify-metrics**
 : Validate the configured metric and label names against the live Prometheus and print a sample

@@ -217,4 +217,10 @@ consistent.
 `heuristic.py` is wired into `cli.py`'s `plan` command, together with
 `schedule.py` (section 8's move ordering) — see `95-schedule.md` and
 `docs/manual/27-plan.md`. `apply` is fully implemented (see `92-execute.md`);
-`explain` remains a stub (`docs/manual/30-safety-and-status.md`).
+`explain` (section 12) reuses the identical `plan` pipeline
+(`cli._plan_group()`) and narrates `ObjectiveBreakdown`'s five terms
+individually — the reason this dataclass keeps them apart instead of
+collapsing to `.total` in the first place (its own docstring) — alongside
+which disks are pinned and which VMs that leaves fragmented across more
+than one storage. See `40-cli-and-logging.md` and
+`docs/manual/30-safety-and-status.md`.

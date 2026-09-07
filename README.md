@@ -24,9 +24,9 @@ as possible.
 Implemented and dogfooded against a production cluster. `IMPLEMENTATION_PLAN.md` section 12's nine
 phases are all done: reading the cluster and Prometheus, deciding whether a group needs to act,
 solving for a placement (CP-SAT or CBC when installed, a dependency-free heuristic otherwise),
-ordering and executing the moves, and Debian packaging. The one command not yet implemented is
-`explain` (which will narrate the payback arithmetic behind a plan) — every other command,
-including `apply`'s unattended `auto` mode, is implemented and covered by the test suite.
+ordering and executing the moves, and Debian packaging. Every command, including `apply`'s
+unattended `auto` mode and `explain`'s narration of the pins, fragmentation and payback arithmetic
+behind a plan, is implemented and covered by the test suite.
 
 [`docs/manual/30-safety-and-status.md`](docs/manual/30-safety-and-status.md) is the authoritative,
 per-command status table — trust that over any impression given elsewhere. `REVIEW.md` is a
@@ -86,10 +86,12 @@ resolution with stable IDs that the code and commit messages refer back to.
    pve-storage-drs -c /etc/pve/drs.yaml verify-storages
    ```
 
-6. **Compute a plan** (never executes anything — this is always safe to run):
+6. **Compute a plan** (never executes anything — this is always safe to run), and if the result is
+   surprising, ask why:
 
    ```sh
    pve-storage-drs -c /etc/pve/drs.yaml plan
+   pve-storage-drs -c /etc/pve/drs.yaml explain   # same plan, narrated: pins, fragmentation, payback
    ```
 
 7. **Apply it**, once the plan looks right. The default `execution.mode` is `dry-run`; `apply`
