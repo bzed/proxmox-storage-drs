@@ -98,6 +98,7 @@ class MetricsConfig:
     rate_window_seconds: float = 300.0
     step_seconds: float = 300.0
     pvestatd_push_interval_seconds: float = 60.0
+    extra_selector: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +454,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         pvestatd_push_interval_seconds=parse_duration_seconds(
             metrics_raw.get("pvestatd_push_interval", "60s")
         ),
+        extra_selector=metrics_raw.get("extra_selector"),
     )
 
     window_raw = raw.get("window", {})

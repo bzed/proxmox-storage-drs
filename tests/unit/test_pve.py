@@ -50,6 +50,22 @@ def test_storage_definitions() -> None:
     assert api.calls == [("GET", "storage", {})]
 
 
+def test_node_names() -> None:
+    api = fake_api({"nodes": [{"node": "pve02"}, {"node": "pve01"}]})
+    client = PveClient(api)
+    # Sorted, not returned-order -- section 3.4's node selector builds a
+    # deterministic query string from this, not one that reorders itself
+    # depending on the API's own (unspecified) listing order.
+    assert client.node_names() == ["pve01", "pve02"]
+    assert api.calls == [("GET", "nodes", {})]
+
+
+def test_node_names_dedupes_and_skips_a_missing_field() -> None:
+    api = fake_api({"nodes": [{"node": "pve01"}, {"node": "pve01"}, {"status": "online"}]})
+    client = PveClient(api)
+    assert client.node_names() == ["pve01"]
+
+
 def test_vm_config() -> None:
     api = fake_api({"nodes/pve01/qemu/101/config": {"scsi0": "san-a:vm-101-disk-0,size=32G"}})
     client = PveClient(api)

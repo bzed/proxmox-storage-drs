@@ -16,10 +16,11 @@ share.
 
 from __future__ import annotations
 
+import re
 import statistics
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 import requests
 
@@ -89,16 +90,73 @@ def _format_promql_duration(duration_seconds: float) -> str:
 
 
 def build_rate_promql(
-    metric_name: str, vmid_label: str, device_label: str, rate_window_seconds: float
+    metric_name: str,
+    vmid_label: str,
+    device_label: str,
+    rate_window_seconds: float,
+    selector: str | None = None,
 ) -> str:
     """The section 3.4 per-metric rate expression.
 
-    ``sum by (vmid, device) (rate(<metric>[<rate_window>]))`` -- the ``sum
-    by`` deliberately collapses the node/host labels, so a VM that
-    live-migrated between nodes during the window remains one series.
+    ``sum by (vmid, device) (rate(<metric>{<selector>}[<rate_window>]))``
+    -- the ``sum by`` deliberately collapses the node/host labels, so a VM
+    that live-migrated between nodes during the window remains one series.
+    ``selector`` (:func:`resolve_node_selector`) is the section 3.4
+    node-scoping matcher, applied *inside* ``rate()``'s own vector
+    selector, before the labels it names are ever collapsed -- this is
+    what keeps a Prometheus shared by more than this one cluster (or
+    anything else emitting a same-named metric) from silently summing in
+    a same-numbered vmid from somewhere else. ``None`` (the default)
+    means "no restriction", identical to the expression before this
+    parameter existed.
     """
     window = _format_promql_duration(rate_window_seconds)
-    return f"sum by ({vmid_label}, {device_label}) (rate({metric_name}[{window}]))"
+    scope = f"{{{selector}}}" if selector else ""
+    return f"sum by ({vmid_label}, {device_label}) (rate({metric_name}{scope}[{window}]))"
+
+
+_PROMQL_REGEX_SPECIAL = re.compile(r"([.^$|()\[\]{}*+?\\])")
+
+
+def _escape_promql_regex_literal(value: str) -> str:
+    """Escape one literal string for safe use inside a PromQL/RE2 ``=~``
+    alternation. A node name is very often an FQDN (``pve1.example.com``),
+    and ``.`` is a regex metacharacter -- without this, a node selector
+    built from node names would match more than the exact node it names."""
+    return _PROMQL_REGEX_SPECIAL.sub(r"\\\1", value)
+
+
+def build_node_selector(node_label: str, node_names: Sequence[str]) -> str | None:
+    """Section 3.4's auto-derived node-scoping filter:
+    ``<node_label>=~"n1|n2|..."`` from the cluster's own node list
+    (``PveClient.node_names()``) -- every name escaped as a literal, not a
+    sub-pattern, so a node named ``pve-1`` cannot also match a
+    ``pve-10`` that happens to exist too. ``None`` for an empty list: a
+    config/API problem is what should surface that loudly elsewhere, not
+    a query silently scoped to match nothing everywhere it is used."""
+    if not node_names:
+        return None
+    alternation = "|".join(_escape_promql_regex_literal(n) for n in sorted(set(node_names)))
+    return f'{node_label}=~"{alternation}"'
+
+
+def resolve_node_selector(metrics: MetricsConfig, node_names: Sequence[str] | None) -> str | None:
+    """The one selector every query in this module inserts, resolved once
+    per run (section 3.4). ``metrics.extra_selector`` wins outright when
+    the operator set one -- trusted completely, since only the operator
+    knows their own Telegraf/InfluxDB tagging scheme, and it may name
+    something other than a node at all (a ``cluster`` tag, for instance,
+    on a Prometheus shared by more than one). Otherwise the auto-derived
+    :func:`build_node_selector` from ``node_names`` when given, or
+    ``None`` when neither is available -- ``verify-metrics`` passes
+    ``None`` here rather than fetching the cluster's node list itself,
+    since it is otherwise deliberately independent of the PVE API
+    entirely (`docs/manual/20-verifying-metrics.md`)."""
+    if metrics.extra_selector:
+        return metrics.extra_selector
+    if node_names:
+        return build_node_selector(metrics.labels.node, node_names)
+    return None
 
 
 def build_quantile_over_time_promql(
@@ -361,7 +419,10 @@ def _check_device_label_collision(metrics: MetricsConfig) -> Finding | None:
 
 
 def compute_disk_coverage(
-    client: PrometheusClient, metrics: MetricsConfig, window: WindowConfig
+    client: PrometheusClient,
+    metrics: MetricsConfig,
+    window: WindowConfig,
+    selector: str | None = None,
 ) -> dict[DiskKey, float]:
     """Section 3.3 step 5 / section 3.4's ``min_coverage`` rule: per-disk
     sample coverage over the decision window, as a fraction in ``[0, 1]``.
@@ -381,7 +442,11 @@ def compute_disk_coverage(
     """
     metric_name = metrics.read_ops
     expr = build_rate_promql(
-        metric_name, metrics.labels.vmid, metrics.labels.device, metrics.rate_window_seconds
+        metric_name,
+        metrics.labels.vmid,
+        metrics.labels.device,
+        metrics.rate_window_seconds,
+        selector=selector,
     )
     # Prometheus's query_range API takes absolute start/end (Unix time or
     # RFC3339), never an offset relative to "now" -- anchoring to time.time()
@@ -409,11 +474,14 @@ def compute_disk_coverage(
 
 
 def _check_coverage(
-    client: PrometheusClient, metrics: MetricsConfig, window: WindowConfig
+    client: PrometheusClient,
+    metrics: MetricsConfig,
+    window: WindowConfig,
+    selector: str | None = None,
 ) -> tuple[list[Finding], dict[DiskKey, float]]:
     """Section 3.3 step 5: report which disks fall below ``window.min_coverage``."""
     try:
-        coverage = compute_disk_coverage(client, metrics, window)
+        coverage = compute_disk_coverage(client, metrics, window, selector=selector)
     except MetricsError as exc:
         return [Finding("error", f"coverage check failed: {exc}")], {}
 
@@ -433,7 +501,7 @@ def _check_coverage(
 
 
 def _check_observed_spacing(
-    client: PrometheusClient, metrics: MetricsConfig
+    client: PrometheusClient, metrics: MetricsConfig, selector: str | None = None
 ) -> tuple[list[Finding], float | None]:
     """Section 3.3 step 6: observed sample spacing vs. ``pvestatd_push_interval``.
 
@@ -442,6 +510,8 @@ def _check_observed_spacing(
     >= 4x`` rule (section 11.1) is actually protecting.
     """
     metric_name = metrics.read_ops
+    if selector:
+        metric_name = f"{metric_name}{{{selector}}}"
     probe_window_seconds = max(metrics.pvestatd_push_interval_seconds * 20, 600.0)
     end = time.time()
     start = end - probe_window_seconds
@@ -490,6 +560,12 @@ def verify_metrics(
     Must be run before relying on any plan (section 3.3); ``cli.py``'s
     ``verify-metrics`` command is this function plus formatting.
     """
+    # `verify-metrics` never talks to the PVE API (`resolve_node_selector()`'s
+    # own docstring), so only an explicit `metrics.extra_selector` narrows
+    # these checks -- the auto-derived node filter needs a live node list
+    # `plan`/`show-load`/`apply`/`explain` already have from building their
+    # own topology, which this command deliberately does not build.
+    selector = resolve_node_selector(metrics, None)
     findings: list[Finding] = []
     findings.extend(_check_metric_names_exist(client, metrics))
     sample_findings, samples = _check_sample_series(client, metrics)
@@ -497,9 +573,9 @@ def verify_metrics(
     collision = _check_device_label_collision(metrics)
     if collision is not None:
         findings.append(collision)
-    coverage_findings, coverage = _check_coverage(client, metrics, window)
+    coverage_findings, coverage = _check_coverage(client, metrics, window, selector=selector)
     findings.extend(coverage_findings)
-    spacing_findings, spacing = _check_observed_spacing(client, metrics)
+    spacing_findings, spacing = _check_observed_spacing(client, metrics, selector=selector)
     findings.extend(spacing_findings)
 
     return VerifyMetricsReport(

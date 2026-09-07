@@ -10,12 +10,13 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
 from proxmox_storage_drs import __version__, cli
-from proxmox_storage_drs.config import ResolvedConfig
+from proxmox_storage_drs.config import MetricsConfig, ResolvedConfig
 from proxmox_storage_drs.execute import MoveOutcome
 from proxmox_storage_drs.heuristic import ObjectiveBreakdown
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
@@ -38,6 +39,26 @@ def write_config(tmp_path: Path, **overrides: object) -> Path:
     return path
 
 
+class _FakeClient(str):
+    """The ``"fake-client"`` sentinel every ``build_pve_client`` mock in
+    this file returns, subclassed just enough to also answer
+    ``node_names()`` -- ``cli._resolve_node_selector_for_run()`` calls
+    that on whatever ``build_pve_client`` produced. A plain ``str``
+    subclass rather than a new type entirely: every existing
+    ``client == "fake-client"`` assertion (and every direct
+    ``cli._run_auto_group("fake-client", ...)`` call) keeps working
+    unchanged, since this compares and hashes identically to the base
+    string. Empty by default -- no test here relies on a real node list,
+    only on ``resolve_node_selector()`` getting *something* iterable back
+    instead of an ``AttributeError``."""
+
+    def node_names(self) -> list[str]:
+        return []
+
+
+FAKE_CLIENT = _FakeClient("fake-client")
+
+
 def _fake_build_topology(topology: Topology) -> object:
     """A ``cli.build_topology`` stand-in that ignores the ``state``/``now``
     cooldown parameters entirely -- every test that only cares about the
@@ -48,6 +69,45 @@ def _fake_build_topology(topology: Topology) -> object:
         return topology
 
     return build
+
+
+# ------------------------------------------------------- node-scoping selector
+
+
+class _NodeNamesClient:
+    """A ``PveClient`` stand-in exposing only ``node_names()`` -- enough
+    for ``_resolve_node_selector_for_run()``'s two branches. Raises if
+    ``node_names()`` is called when it should not be (an operator
+    override set): that call is a real PVE API round-trip in production,
+    so a test asserting it was skipped needs it to actually blow up, not
+    just go unasserted."""
+
+    def __init__(self, names: list[str] | None = None, forbid_call: bool = False) -> None:
+        self._names = names or []
+        self._forbid_call = forbid_call
+
+    def node_names(self) -> list[str]:
+        if self._forbid_call:
+            raise AssertionError("node_names() must not be called when extra_selector is set")
+        return self._names
+
+
+def test_resolve_node_selector_for_run_skips_the_api_call_when_overridden() -> None:
+    resolved = MetricsConfig(extra_selector='cluster="mycluster"')
+    client: Any = _NodeNamesClient(forbid_call=True)
+    selector = cli._resolve_node_selector_for_run(client, resolved)
+    assert selector == 'cluster="mycluster"'
+
+
+def test_resolve_node_selector_for_run_auto_derives_from_the_live_node_list() -> None:
+    client: Any = _NodeNamesClient(names=["pve02", "pve01"])
+    selector = cli._resolve_node_selector_for_run(client, MetricsConfig())
+    assert selector == 'nodename=~"pve01|pve02"'
+
+
+def test_resolve_node_selector_for_run_is_none_when_the_cluster_has_no_nodes() -> None:
+    client: Any = _NodeNamesClient(names=[])
+    assert cli._resolve_node_selector_for_run(client, MetricsConfig()) is None
 
 
 # --------------------------------------------------------------------- --version
@@ -331,7 +391,7 @@ def _sample_group_load() -> GroupLoad:
 def _patch_show_load_deps(
     monkeypatch: pytest.MonkeyPatch, group_load: GroupLoad | Exception
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology", _fake_build_topology(_sample_topology())
     )
@@ -343,6 +403,7 @@ def _patch_show_load_deps(
         load_weights: object,
         group: object,
         last_known_loads: object = None,
+        node_selector: object = None,
     ) -> GroupLoad:
         if isinstance(group_load, Exception):
             raise group_load
@@ -413,7 +474,7 @@ def test_show_load_reports_a_pve_error(
     ) -> None:
         raise PveApiError("cluster unreachable")
 
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", raise_pve_error)
     path = write_config(tmp_path)
     assert cli.main(["-c", str(path), "show-load"]) == 1
@@ -551,16 +612,14 @@ def test_show_load_acts_on_imbalance_when_there_is_no_state_json_yet(
     """Baseline for the next test: with no `state.json` at all,
     `last_load` is `None`, the drift gate is skipped outright (section 6's
     own first-run rule), and this fixture's 200% imbalance triggers ACT."""
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology",
         _fake_build_topology(_no_reserve_violation_topology()),
     )
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.compute_group_load",
-        lambda prom_client, metrics, window, load_weights, group, last_known_loads=None: (
-            _imbalanced_group_load()
-        ),
+        lambda *a, **k: _imbalanced_group_load(),
     )
     state_path = tmp_path / "state.json"
     path = write_config(tmp_path, state={"path": str(state_path)})
@@ -580,16 +639,14 @@ def test_show_load_gate_reflects_real_drift_history_from_state_json(
     `last_load=None` pretending every run is the first one ever."""
     from proxmox_storage_drs.state import LastBalance, State, save_state_atomic
 
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology",
         _fake_build_topology(_no_reserve_violation_topology()),
     )
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.compute_group_load",
-        lambda prom_client, metrics, window, load_weights, group, last_known_loads=None: (
-            _imbalanced_group_load()
-        ),
+        lambda *a, **k: _imbalanced_group_load(),
     )
     state_path = tmp_path / "state.json"
     save_state_atomic(
@@ -685,7 +742,7 @@ def test_plan_passes_active_storage_cooldowns_to_the_heuristic(
 def test_verify_storages_human_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology", _fake_build_topology(_sample_topology())
     )
@@ -702,7 +759,7 @@ def test_verify_storages_human_output(
 def test_verify_storages_json_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology", _fake_build_topology(_sample_topology())
     )
@@ -729,7 +786,7 @@ def _two_group_topology() -> Topology:
 def test_group_flag_restricts_verify_storages_to_the_named_group(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology", _fake_build_topology(_two_group_topology())
     )
@@ -743,7 +800,7 @@ def test_group_flag_restricts_verify_storages_to_the_named_group(
 def test_group_flag_is_repeatable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology", _fake_build_topology(_two_group_topology())
     )
@@ -771,7 +828,7 @@ def _topology_with_pattern_expansion() -> Topology:
 def test_verify_storages_human_output_shows_pattern_expansions_and_unmanaged_storages(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology",
         _fake_build_topology(_topology_with_pattern_expansion()),
@@ -787,7 +844,7 @@ def test_verify_storages_human_output_shows_pattern_expansions_and_unmanaged_sto
 def test_verify_storages_json_output_includes_pattern_expansions_and_unmanaged_storages(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology",
         _fake_build_topology(_topology_with_pattern_expansion()),
@@ -804,7 +861,7 @@ def test_verify_storages_json_output_includes_pattern_expansions_and_unmanaged_s
 def test_group_flag_with_an_unknown_name_is_a_hard_failure(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology", _fake_build_topology(_sample_topology())
     )
@@ -877,11 +934,11 @@ def test_reconcile_inflight_and_fold_exclusions_is_a_noop_when_nothing_found(
 def _patch_plan_deps(
     monkeypatch: pytest.MonkeyPatch, topology: Topology, group_load: GroupLoad
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", _fake_build_topology(topology))
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.compute_group_load",
-        lambda prom_client, metrics, window, load_weights, group, last_known_loads=None: group_load,
+        lambda *a, **k: group_load,
     )
     monkeypatch.setattr("proxmox_storage_drs.cli.reconcile_inflight", _fake_reconcile_inflight)
 
@@ -1549,7 +1606,7 @@ def _balanced_non_violating_topology() -> Topology:
 def test_plan_no_action_when_balanced_and_no_violation(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology",
         _fake_build_topology(_balanced_non_violating_topology()),
@@ -1569,7 +1626,7 @@ def test_plan_no_action_when_balanced_and_no_violation(
     )
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.compute_group_load",
-        lambda prom_client, metrics, window, load_weights, group, last_known_loads=None: balanced,
+        lambda *a, **k: balanced,
     )
     path = write_config(tmp_path)
     assert cli.main(["-c", str(path), "plan"]) == 0
@@ -1583,7 +1640,7 @@ def test_plan_reports_a_metrics_error_per_group(
 ) -> None:
     from proxmox_storage_drs.exceptions import MetricsError
 
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr(
         "proxmox_storage_drs.cli.build_topology", _fake_build_topology(_sample_topology())
     )
@@ -1595,6 +1652,7 @@ def test_plan_reports_a_metrics_error_per_group(
         load_weights: object,
         group: object,
         last_known_loads: object = None,
+        node_selector: object = None,
     ) -> None:
         raise MetricsError("connection refused")
 
@@ -2010,7 +2068,7 @@ def test_apply_reports_a_metrics_error_and_a_no_action_group_without_executing(
     from proxmox_storage_drs.exceptions import MetricsError
 
     two_groups = _two_group_topology()
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
     monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", _fake_build_topology(two_groups))
     monkeypatch.setattr("proxmox_storage_drs.cli.reconcile_inflight", _fake_reconcile_inflight)
 
@@ -2021,6 +2079,7 @@ def test_apply_reports_a_metrics_error_and_a_no_action_group_without_executing(
         load_weights: object,
         group: Group,
         last_known_loads: object = None,
+        node_selector: object = None,
     ) -> GroupLoad:
         if group.name == "fc-tier1":
             raise MetricsError("connection refused")

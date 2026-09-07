@@ -37,6 +37,7 @@ from proxmox_storage_drs.config import (
     ExcludeConfig,
     ExecutionConfig,
     ForecastConfig,
+    MetricsConfig,
     MigrationConfig,
     ResolvedConfig,
     load_config,
@@ -70,7 +71,12 @@ from proxmox_storage_drs.heuristic import (
 )
 from proxmox_storage_drs.loadmodel import GroupLoad, compute_disk_load_series, compute_group_load
 from proxmox_storage_drs.logging_setup import configure_logging
-from proxmox_storage_drs.metrics import PrometheusClient, VerifyMetricsReport, verify_metrics
+from proxmox_storage_drs.metrics import (
+    PrometheusClient,
+    VerifyMetricsReport,
+    resolve_node_selector,
+    verify_metrics,
+)
 from proxmox_storage_drs.payback import (
     MoveCost,
     PaybackResult,
@@ -322,6 +328,21 @@ def _filter_groups(topology: Topology, names: list[str] | None) -> Topology:
     )
 
 
+def _resolve_node_selector_for_run(client: PveClient, metrics: MetricsConfig) -> str | None:
+    """Section 3.4's node-scoping filter for one command invocation --
+    ``client.node_names()`` is called only when actually needed
+    (``metrics.extra_selector`` unset): every command that reaches here
+    already has a live PVE client from building its own topology, but an
+    operator who has already told the tool exactly what to filter on gets
+    no extra API call for it. See ``metrics.resolve_node_selector()``,
+    which this wraps -- ``verify-metrics`` calls that directly instead,
+    with ``node_names=None``, since it is deliberately independent of the
+    PVE API entirely and never reaches this function at all."""
+    if metrics.extra_selector:
+        return metrics.extra_selector
+    return resolve_node_selector(metrics, client.node_names())
+
+
 def _last_loads_by_group(state: State, topology: Topology) -> dict[str, dict[str, float] | None]:
     """One :func:`state.load_vector_for_group` lookup per group, done once
     up front rather than re-reading ``state`` inside each render function
@@ -533,6 +554,7 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
         build_topology(client, resolved.config, state=state, now=now), args.group
     )
     prom_client = PrometheusClient(resolved.config.prometheus)
+    node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
     last_loads_by_group = _last_loads_by_group(state, topology)
     group_loads: dict[str, GroupLoad] = {}
     load_errors: dict[str, str] = {}
@@ -545,6 +567,7 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
                 resolved.config.load_weights,
                 group,
                 last_known_loads=last_loads_by_group.get(group.name),
+                node_selector=node_selector,
             )
         except MetricsError as exc:
             # Section 4's load numbers are not safety-critical the way (C4)/
@@ -1392,7 +1415,11 @@ class _GroupPlan:
 
 
 def _saturation_forecast_inputs(
-    prom_client: PrometheusClient, resolved: ResolvedConfig, group: Group, now: datetime
+    prom_client: PrometheusClient,
+    resolved: ResolvedConfig,
+    group: Group,
+    now: datetime,
+    node_selector: str | None,
 ) -> tuple[Forecaster, dict[str, TimeSeries]] | None:
     """Section 7.3's saturation guard needs a forecaster and every disk's
     own load history -- but only when at least one storage in ``group``
@@ -1431,6 +1458,7 @@ def _saturation_forecast_inputs(
         range_seconds,
         metrics.step_seconds,
         now_epoch,
+        node_selector=node_selector,
     )
     forecaster = _backtest_gated_forecaster(
         forecaster, forecast_config, resolved, disk_series, now_epoch, window.lookback_seconds
@@ -1518,10 +1546,14 @@ def _plan_group(
     last_loads_by_group: dict[str, dict[str, float] | None],
     state: State,
     now: datetime,
+    node_selector: str | None = None,
 ) -> _GroupPlan:
     """One group's worth of ``_handle_plan``'s former loop body, unchanged
     in behaviour -- see :class:`_GroupPlan` for why this is shared with
-    ``apply`` rather than duplicated."""
+    ``apply`` rather than duplicated. ``node_selector`` is
+    ``_resolve_node_selector_for_run()``'s result, computed once per
+    invocation by the caller (a live PVE client is not otherwise needed
+    here)."""
     try:
         group_load = compute_group_load(
             prom_client,
@@ -1530,6 +1562,7 @@ def _plan_group(
             resolved.config.load_weights,
             group,
             last_known_loads=last_loads_by_group.get(group.name),
+            node_selector=node_selector,
         )
     except MetricsError as exc:
         # Section 6: gating (and so planning) cannot proceed without a
@@ -1590,7 +1623,7 @@ def _plan_group(
     # entirely rather than pay for up to 7 days of history at a 5-minute
     # step and throw the result away unused.
     saturation_inputs = (
-        _saturation_forecast_inputs(prom_client, resolved, group, now)
+        _saturation_forecast_inputs(prom_client, resolved, group, now, node_selector)
         if schedule_result.order
         else None
     )
@@ -1632,6 +1665,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
         build_topology(client, resolved.config, state=state, now=now), args.group
     )
     prom_client = PrometheusClient(resolved.config.prometheus)
+    node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
     min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     last_loads_by_group = _last_loads_by_group(state, topology)
 
@@ -1645,7 +1679,14 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
 
     for group in topology.groups:
         group_plan = _plan_group(
-            group, resolved, prom_client, min_free_bytes, last_loads_by_group, state, now
+            group,
+            resolved,
+            prom_client,
+            min_free_bytes,
+            last_loads_by_group,
+            state,
+            now,
+            node_selector,
         )
         if group_plan.load_error is not None:
             load_errors[group.name] = group_plan.load_error
@@ -1718,12 +1759,20 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
         build_topology(client, resolved.config, state=state, now=now), args.group
     )
     prom_client = PrometheusClient(resolved.config.prometheus)
+    node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
     min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     last_loads_by_group = _last_loads_by_group(state, topology)
 
     group_plans = {
         group.name: _plan_group(
-            group, resolved, prom_client, min_free_bytes, last_loads_by_group, state, now
+            group,
+            resolved,
+            prom_client,
+            min_free_bytes,
+            last_loads_by_group,
+            state,
+            now,
+            node_selector,
         )
         for group in topology.groups
     }
@@ -1976,6 +2025,7 @@ def _run_auto_group(
     group: Group,
     group_plan: _GroupPlan,
     migrations_budget: int | None,
+    node_selector: str | None = None,
     on_inflight_started: InflightCallback | None = None,
     on_inflight_finished: InflightCallback | None = None,
     local_now: Callable[[], datetime] = _real_local_now,
@@ -2136,6 +2186,7 @@ def _run_auto_group(
             fresh_last_loads,
             state_box.value,
             fresh_now,
+            node_selector,
         )
         if (
             new_plan.load_error is not None
@@ -2307,6 +2358,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
             build_topology(client, resolved.config, state=state, now=now), args.group
         )
         prom_client = PrometheusClient(resolved.config.prometheus)
+        node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
         min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
         last_loads_by_group = _last_loads_by_group(state, topology)
         # execution.max_migrations_per_run is a per-*invocation* cap,
@@ -2320,7 +2372,14 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
 
         for group in topology.groups:
             group_plan = _plan_group(
-                group, resolved, prom_client, min_free_bytes, last_loads_by_group, state, now
+                group,
+                resolved,
+                prom_client,
+                min_free_bytes,
+                last_loads_by_group,
+                state,
+                now,
+                node_selector,
             )
             if group_plan.load_error is not None:
                 load_errors[group.name] = group_plan.load_error
@@ -2366,6 +2425,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     group,
                     group_plan,
                     migrations_budget,
+                    node_selector=node_selector,
                     on_inflight_started=on_inflight_started,
                     on_inflight_finished=on_inflight_finished,
                 )

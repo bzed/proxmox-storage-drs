@@ -44,6 +44,37 @@ on a `MetricsConfig`, via `getattr` — this is what lets `verify_metrics()`
 iterate "every configured raw metric" without hand-listing the six field
 names a second time anywhere in this module.
 
+## Node-scoping: `build_node_selector()` / `resolve_node_selector()`
+
+`build_rate_promql()`'s `selector` parameter is what makes a query correct
+on a Prometheus that serves more than one PVE cluster (or anything else
+emitting a same-named metric): without it, `sum by (vmid, device)` happily
+sums across clusters, since `vmid` is only unique *within* one. The
+selector text itself is resolved once per command invocation by
+`resolve_node_selector(metrics, node_names)` — `metrics.extra_selector`
+verbatim when the operator set one (trusted completely; it may not even
+name a node label at all, e.g. a `cluster=".."` matcher), otherwise
+`build_node_selector(metrics.labels.node, node_names)`, which escapes every
+name (`_escape_promql_regex_literal()` — an FQDN's `.` is a regex
+metacharacter otherwise) and joins them into one `=~` alternation.
+`node_names` comes from `PveClient.node_names()` (`GET /nodes`), fetched
+once per run and threaded down through `loadmodel.py`'s functions as a
+plain `str | None` parameter — this module and `loadmodel.py` never call
+the PVE API themselves.
+
+`cli._resolve_node_selector_for_run()` is the one place that decides
+*whether* to make that API call at all: skipped entirely when
+`metrics.extra_selector` is already set, since an operator who told the
+tool exactly what to filter on gets no extra round-trip for it.
+`verify-metrics` never reaches this function — it calls
+`resolve_node_selector(metrics, None)` directly, applying only an explicit
+override, because it is deliberately independent of the PVE API and has no
+node list of its own to build one from (`_check_coverage()`/
+`_check_observed_spacing()` are the only two of its six checks that build a
+`rate()`/range query at all; the others query a raw metric name or sample
+one series directly, where cross-cluster contamination is not a
+correctness question the way a summed rate is).
+
 ## `verify_metrics()`: six checks, six functions
 
 Each `_check_*` function implements exactly one `IMPLEMENTATION_PLAN.md`
