@@ -4,10 +4,12 @@
 does (`docs/manual/27-plan.md`) — same load, same gate, same solver, same
 scheduler, same payback test, byte-for-byte the same numbers — and prints
 everything `plan` already shows, plus the "why" `plan` itself never does:
-which disks are pinned and the exact reason, which VMs a pin leaves spread
-across more than one storage, the section 5.4 objective broken into its
-five terms, and whether the pinned load is large enough that the residual
-imbalance is structural rather than a planning shortfall. It never changes
+the measured load every one of those numbers derives from, which disks are
+pinned and the exact reason, which VMs a pin leaves spread across more than
+one storage, the section 5.4 objective broken into its five terms, and
+whether the pinned load is large enough that the residual imbalance is
+structural rather than a planning shortfall. `-v` additionally names
+exactly which Prometheus query produced all of it. It never changes
 anything, in any `execution.mode` — exactly like `plan`.
 
 This example extends the section 14 worked example `plan`'s own manual
@@ -28,6 +30,18 @@ Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   spread: 257.1% → 17.9%
   payback: benefit 5.2e+06 load·s vs cost 4.72e+04 load·s → ratio 110 (need 10) ✓
   objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 0.5 + reserve 0 = 2.32
+  measured load (section 4):
+  san-a  used 4.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 1.50 TiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
+    101:scsi0        2.00 TiB  raw     ℓ 3.00
+    101:scsi1        1.00 TiB  raw     ℓ 1.00
+    102:scsi0        1.50 TiB  raw     ℓ 2.50
+    106:scsi0        1.00 TiB  raw     ℓ 0.90  [pinned: snapshots present (2)]
+  san-b  used 1.50 TiB/8.00 TiB  L=0.80 u=0.80  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
+    103:scsi0      512.00 GiB  raw     ℓ 0.40
+    104:scsi0        1.00 TiB  raw     ℓ 0.30
+    106:scsi1      512.00 GiB  raw     ℓ 0.10
+  san-c  used 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
+    105:scsi0      512.00 GiB  raw     ℓ 0.20
   pinned (not movable this run):
     106:scsi0        1.00 TiB  on san-a  ℓ 0.90  ℓ/z 0.90  -- snapshots present (2)
   cannot fully consolidate:
@@ -52,6 +66,38 @@ assignments with — the reason that class keeps the five terms apart
 instead of collapsing to only `.total` in the first place. Only printed
 when the gate said `ACT`; a `NO ACTION` group solved nothing this run, so
 there is no objective to show.
+
+## `measured load (section 4):`
+
+The section 4 input every number above derives from — identical to
+`show-load`'s own per-storage, per-disk report (`docs/manual/25-show-load-
+and-verify-storages.md`): each storage's used/capacity, `L_s`/`u_s`,
+reserve status, and every disk on it with its size, format, measured `ℓ_d`
+when one was fetched, and `[pinned: ...]` when section 5.3 (C2) excludes
+it. Always present, printed even for a `NO ACTION` group and even when no
+migration was possible at all — it is the data the rest of `explain`'s
+narrative is *about*, not part of the plan itself.
+
+## `-v`: the `data source:` line
+
+One extra line, printed once for the whole run rather than once per group
+(every group here was computed against the identical selector and window):
+the exact section 3.4 node-scoping filter this run's queries carried
+(`(no node-scoping filter)` if none applied), and the `window.lookback`/
+`quantile`/`metrics.rate_window`/`metrics.step` settings the load above was
+computed from — see `docs/manual/10-configuration.md` for what each
+controls and `IMPLEMENTATION_PLAN.md` section 3.4 for the filter itself.
+This is the one piece of `explain`'s output that is about *how* the data
+was fetched rather than what it is, which is why it is the one thing here
+gated behind `-v` instead of always shown:
+
+```
+$ pve-storage-drs -c /etc/pve/drs.yaml -v explain
+data source: {nodename=~"pve01|pve02|pve03"}  window 1.0d lookback, quantile 0.95, rate_window 5.0m, step 5.0m
+
+Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
+  ...
+```
 
 ## `pinned (not movable this run):`
 
@@ -95,16 +141,22 @@ do better, not a bigger `objective` weight or a longer `solver.time_limit_second
 Omitted entirely for a group with no measured load at all (an idle group,
 or one `explain` could not get a load for).
 
-A `NO ACTION` group still gets the pinned/fragmentation/pinned-load
-sections above — they describe the state of the group's disks, not the
-plan, so there is no reason to withhold them just because the gate found
-nothing to balance this run.
+A `NO ACTION` group still gets the measured-load/pinned/fragmentation/
+pinned-load sections above — they describe the state of the group's disks,
+not the plan, so there is no reason to withhold them just because the gate
+found nothing to balance this run.
 
 `--json` emits everything `plan --json` does (`docs/manual/27-plan.md`'s
 own field list) plus `objective` (the five terms above, `null` when the
-gate said `NO ACTION`), `pinned_disks` (`disk_key`, `vmid`, `device`,
-`current_storage`, `size_bytes`, `load`, `load_per_tib`, `reason`),
-`fragmentation` (a list of `{vmid, vm_name, blockers}`, each blocker an
-object with `device`, `disk_key`, `reason`), and `pinned_load` (`null` for
-an idle group, otherwise `pinned_load`, `total_load`, `fraction` and
-`warn_fraction`).
+gate said `NO ACTION`), `storages`/`disks` (the measured-load section
+above, identical shape to `show-load --json`'s own fields of the same
+name), `pinned_disks` (`disk_key`, `vmid`, `device`, `current_storage`,
+`size_bytes`, `load`, `load_per_tib`, `reason`), `fragmentation` (a list of
+`{vmid, vm_name, blockers}`, each blocker an object with `device`,
+`disk_key`, `reason`), and `pinned_load` (`null` for an idle group,
+otherwise `pinned_load`, `total_load`, `fraction` and `warn_fraction`).
+Unlike the human report, JSON has no notion of `-v`: a top-level `query`
+object (`node_selector`, `window_lookback_seconds`, `quantile`,
+`rate_window_seconds`, `step_seconds`) is always present, once per
+response rather than once per group, the JSON counterpart of the `-v`
+`data source:` line above.

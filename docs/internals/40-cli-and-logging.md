@@ -24,6 +24,17 @@ loading any configuration — printing the version or the manual page must
 never depend on `/etc/pve/drs.yaml` existing. Only once a real subcommand is
 present does it call `config.load_config()`.
 
+**`-v`/`--verbose` is otherwise purely a `logging_setup.py` concern** (see
+below) — every subcommand's own stdout report is identical regardless of
+how many times it was given, with one deliberate exception:
+`_handle_explain()` reads `args.verbose` directly and adds a `data
+source:` line to its own report when set, naming the section 3.4
+node-scoping filter and window/rate settings the run's queries used
+(`docs/manual/29-explain.md`). This is the one place a global option's
+effect is not identical across every command, because `explain`'s entire
+purpose is narrating *how* a result was produced — provenance the other
+commands' reports have no occasion to print.
+
 ## Command handlers: a dict, not a chain of `if`s
 
 `_COMMAND_HANDLERS: dict[str, CommandHandler]` maps each subcommand name to

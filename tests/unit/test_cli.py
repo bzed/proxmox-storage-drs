@@ -2477,6 +2477,38 @@ def test_pinned_load_fraction_is_none_for_an_idle_group() -> None:
     assert cli._pinned_load_fraction(group, {}) is None
 
 
+def test_render_explain_data_source_line_names_the_selector_and_window(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
+    line = cli._render_explain_data_source_line(resolved, 'nodename=~"pve01|pve02"')
+    assert 'nodename=~"pve01|pve02"' in line
+    assert "lookback" in line and "quantile" in line and "rate_window" in line
+
+
+def test_render_explain_data_source_line_names_no_filter_when_unset(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
+    line = cli._render_explain_data_source_line(resolved, None)
+    assert "no node-scoping filter" in line
+
+
+def test_render_explain_human_verbose_adds_the_data_source_line_once(tmp_path: Path) -> None:
+    """One line for the whole run, not once per group -- every group here
+    shares the identical node selector and window settings."""
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    group_plan = _make_group_plan(group, resolved, (_one_move(group),))
+    topology = Topology(groups=(group, dataclasses.replace(group, name="fc-tier2")), warnings=())
+    group_plans = {"fc-tier1": group_plan, "fc-tier2": group_plan}
+
+    quiet = cli._render_explain_human(topology, group_plans, resolved, None, verbose=False)
+    assert "data source:" not in quiet
+
+    loud = cli._render_explain_human(
+        topology, group_plans, resolved, 'nodename=~"pve01"', verbose=True
+    )
+    assert loud.count("data source:") == 1
+    assert 'nodename=~"pve01"' in loud
+
+
 def test_render_group_explain_human_shows_pins_fragmentation_and_objective(
     tmp_path: Path,
 ) -> None:
@@ -2493,11 +2525,11 @@ def test_render_group_explain_human_shows_pins_fragmentation_and_objective(
         resolves_reserve_violation=False,
     )
     group_plan = _make_group_plan(group, resolved, (move,))
-    lines = cli._render_group_explain_human(
-        group, group_plan, payback_ratio=10.0, warn_fraction=0.25
-    )
+    lines = cli._render_group_explain_human(group, group_plan, resolved)
     text = "\n".join(lines)
     assert "objective:" in text
+    assert "measured load (section 4):" in text
+    assert "san-a" in text and "san-b" in text  # the group's own storages, not just pins
     assert "pinned (not movable this run):" in text
     assert "101:scsi1" in text and "snapshots present (1)" in text
     assert "102:scsi0" in text and "locked: backup" in text
@@ -2508,7 +2540,8 @@ def test_render_group_explain_human_shows_pins_fragmentation_and_objective(
     assert lines[-2] != ""  # ... not two
 
 
-def test_render_group_explain_human_no_action_still_shows_pins() -> None:
+def test_render_group_explain_human_no_action_still_shows_pins(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
     group = _fragmented_group()
     from proxmox_storage_drs.gates import GateDecision
 
@@ -2524,9 +2557,7 @@ def test_render_group_explain_human_no_action_still_shows_pins() -> None:
             imbalance_fraction=0.05,
         ),
     )
-    lines = cli._render_group_explain_human(
-        group, group_plan, payback_ratio=10.0, warn_fraction=0.25
-    )
+    lines = cli._render_group_explain_human(group, group_plan, resolved)
     text = "\n".join(lines)
     assert "NO ACTION: imbalance below threshold" in text
     assert "cannot fully consolidate:" in text
@@ -2534,12 +2565,11 @@ def test_render_group_explain_human_no_action_still_shows_pins() -> None:
     assert "objective:" not in text  # nothing was solved this run
 
 
-def test_render_group_explain_human_load_error_is_unchanged_from_plan() -> None:
+def test_render_group_explain_human_load_error_is_unchanged_from_plan(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
     group = _fragmented_group()
     group_plan = cli._GroupPlan(load_error="Prometheus unreachable")
-    lines = cli._render_group_explain_human(
-        group, group_plan, payback_ratio=10.0, warn_fraction=0.25
-    )
+    lines = cli._render_group_explain_human(group, group_plan, resolved)
     assert lines == ["Group fc-tier1 — plan unavailable: Prometheus unreachable", ""]
 
 
@@ -2550,9 +2580,7 @@ def test_render_group_explain_human_pinned_load_over_threshold_warns(tmp_path: P
     # `_make_group_plan()` gives every disk load 1.0; two of this group's
     # three disks are pinned, so the fraction (0.667) clears any
     # reasonable warn threshold.
-    lines = cli._render_group_explain_human(
-        group, group_plan, payback_ratio=10.0, warn_fraction=0.25
-    )
+    lines = cli._render_group_explain_human(group, group_plan, resolved)
     text = "\n".join(lines)
     assert "warn at 25%" in text
     assert "may be structural" in text
@@ -2568,10 +2596,14 @@ def test_render_explain_json_includes_objective_pins_fragmentation_and_pinned_lo
     # this is also a check that the payload is actually JSON-serializable,
     # not just a `dict[str, object]` mypy accepts.
     out = json.loads(
-        json.dumps(cli._render_group_explain_json(group, group_plan, warn_fraction=0.25))
+        json.dumps(
+            cli._render_group_explain_json(group, group_plan, warn_fraction=0.25, min_free_bytes=0)
+        )
     )
     assert out["objective"] is not None
     assert {d["disk_key"] for d in out["pinned_disks"]} == {"101:scsi1", "102:scsi0"}
+    assert {s["id"] for s in out["storages"]} == {"san-a", "san-b"}
+    assert {d["key"] for d in out["disks"]} == {"101:scsi0", "101:scsi1", "102:scsi0"}
     assert out["fragmentation"] == [
         {
             "vmid": 101,
@@ -2583,6 +2615,25 @@ def test_render_explain_json_includes_objective_pins_fragmentation_and_pinned_lo
     ]
     assert out["pinned_load"]["warn_fraction"] == 0.25
     assert out["pinned_load"]["fraction"] == pytest.approx(2 / 3)
+
+
+def test_render_explain_json_always_includes_query_provenance(tmp_path: Path) -> None:
+    """Unlike the human report's `-v`-gated line, JSON has no notion of
+    verbosity -- the query provenance is always present."""
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    group_plan = _make_group_plan(group, resolved, (_one_move(group),))
+    topology = Topology(groups=(group,), warnings=())
+    out = cli._render_explain_json(
+        topology, {"fc-tier1": group_plan}, resolved, 'nodename=~"pve01"'
+    )
+    assert out["query"] == {
+        "node_selector": 'nodename=~"pve01"',
+        "window_lookback_seconds": resolved.config.window.lookback_seconds,
+        "quantile": resolved.config.window.quantile,
+        "rate_window_seconds": resolved.config.metrics.rate_window_seconds,
+        "step_seconds": resolved.config.metrics.step_seconds,
+    }
 
 
 def test_explain_handler_human_output(
@@ -2598,6 +2649,21 @@ def test_explain_handler_human_output(
     assert "pinned (not movable this run):" in out
     assert "102:scsi0" in out and "locked: backup" in out
     assert "objective:" in out
+    assert "measured load (section 4):" in out
+    assert "data source:" not in out  # -v not passed
+
+
+def test_explain_handler_verbose_shows_the_data_source_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "-v", "explain"]) == 0
+    out = capsys.readouterr().out
+    assert "data source:" in out
+    # FAKE_CLIENT.node_names() is empty and no extra_selector is configured
+    # here, so the auto-derived filter has nothing to build from.
+    assert "no node-scoping filter" in out
 
 
 def test_explain_handler_json_output(
@@ -2611,6 +2677,9 @@ def test_explain_handler_json_output(
     assert group_out["name"] == "fc-tier1"
     assert group_out["objective"] is not None
     assert any(d["disk_key"] == "102:scsi0" for d in group_out["pinned_disks"])
+    assert {s["id"] for s in group_out["storages"]} == {"san-a", "san-b"}
+    assert {d["key"] for d in group_out["disks"]} == {"101:scsi0", "102:scsi0"}
+    assert payload["query"]["node_selector"] is None  # FAKE_CLIENT has no nodes configured
 
 
 def test_run_auto_group_refuses_outside_every_configured_time_window(
