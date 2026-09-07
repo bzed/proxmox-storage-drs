@@ -6,6 +6,13 @@
 # dependency policy is that Debian's packaged modules are enough, and a CI that
 # pip-installed its way around a missing package would hide the day that
 # stopped being true.
+#
+# `ca-certificates` is explicit in every apt-get call below, not left to
+# whatever another package happens to pull in transitively: it is only a
+# Recommends of most packages that need it (git included), so
+# --no-install-recommends silently drops it, and `actions/checkout`'s own
+# `git fetch` over https then fails with "Problem with the SSL CA cert" --
+# this container has no trusted root store at all until it is installed.
 name: Tests
 
 on:
@@ -27,7 +34,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            black coinor-cbc flake8 git isort make mypy pandoc \
+            black ca-certificates coinor-cbc flake8 git isort make mypy pandoc \
             python3-jsonschema python3-proxmoxer python3-pulp \
             python3-pytest python3-pytest-cov python3-pytest-xdist \
             python3-requests python3-ruamel.yaml python3-yaml
@@ -76,7 +83,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            fonts-dejavu-core fonts-dejavu-mono fonts-sil-gentiumplus \
+            ca-certificates fonts-dejavu-core fonts-dejavu-mono fonts-sil-gentiumplus \
             fonts-symbola git groff latexmk make pandoc python3 \
             texlive-latex-extra texlive-luatex
 
