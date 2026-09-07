@@ -109,9 +109,11 @@ anything further, exactly as in the sequential case, but does not
 abandon moves already in flight: `apply` keeps polling them to their own
 natural conclusion (`moved`, `failed`, or `draining`) before returning,
 so nothing already running is left unreported. Section 7.3's saturation
-check is not enforced under concurrency any more than it is under the
-sequential executor (`docs/manual/30-safety-and-status.md`'s own note on
-that gap applies here too).
+guard is enforced at planning time under concurrency exactly as under
+the sequential executor (a flagged move never reaches either executor);
+what neither executor does is re-check the ceiling *during* execution
+against the live in-flight set (`docs/manual/30-safety-and-status.md`'s
+own note on that narrower gap applies here too).
 
 ## What "done" means for one move, and why it can take a while
 

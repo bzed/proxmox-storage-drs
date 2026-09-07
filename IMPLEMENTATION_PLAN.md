@@ -1569,6 +1569,15 @@ migrates a disk onto a storage that is about to be saturated. For the default `q
 this makes the distinction concrete rather than vacuous: the point estimate is `window.quantile`
 (p95) and the bound is `window.upper_quantile` (p99), so the optimizer sees p99.
 
+**As built (REVIEW.md T-03):** the decision statistic that actually drives the gates, solver,
+payback and ordering is `window.quantile` (the point estimate), computed once per group by
+`loadmodel.compute_group_load()`. The upper bound described above is real and exercised, but its
+only consumer is §7.3's saturation-ceiling guard, and only for a storage that configures
+`saturation_load` — the guard calls a `Forecaster` (built here, gated by the §10.2 backtest below)
+to get `L̂_s(Δ)`. Wiring the upper bound into the optimizer's own input, as this section describes,
+remains future work; until then, treat every occurrence of "the optimizer consumes the upper bound"
+in this document as the target design, not the current behaviour.
+
 Forecasts are produced **per disk**. Where §7.3 needs a per-*storage* bound `L̂_s(Δ)`, it is the sum
 of the per-disk upper bounds over the disks assigned to `s` in the state being evaluated:
 `L̂_s(Δ) = Σ_{d : x_{d,s}=1} û_d(Δ)`. Summing upper bounds is conservative — it assumes the disks peak
@@ -2028,7 +2037,7 @@ bug waiting to happen; this table is the audit.
 | `load_weights.iotime/ops/bytes` | §4, `ℓ_d` |
 | `load_weights.read_factor/write_factor` | §4, `raw_X(d)`, applied engine-side before normalization |
 | `window.lookback` | §3.4 reduction range |
-| `window.quantile` / `upper_quantile` | §10.1, point estimate vs. the bound the optimizer consumes |
+| `window.quantile` / `upper_quantile` | §10.1, point estimate (the actual decision statistic) vs. the bound (§7.3 saturation guard only — see the "As built" note in §10.1) |
 | `window.min_coverage` | §3.4, disk data rejection |
 | `groups[].storages[].capability_weight` | §4, `u_s = L_s / c_s` |
 | `snapshot_reserve.factor` | §5.3 (C5), `R_s ≥ f_s·Z_s` |

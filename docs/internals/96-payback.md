@@ -12,11 +12,17 @@ source `topology.Storage` — no new fetch, no new state. `duration_mirror`
 is `z_d / migration.bwlimit_bytes_per_sec`; `duration_wipe` is `z_d /
 saferemove_throughput` when `migration.account_saferemove_wipe` and the
 source has `saferemove` on, else zero. `compute_benefit_load_seconds()`
-takes two `heuristic.ObjectiveBreakdown.imbalance_term` values — the
-pre-plan and post-plan `E` — and multiplies their difference by
-`migration.payback_horizon_seconds`; `heuristic.HeuristicResult` already
-carries both (`initial_breakdown`/`breakdown`), so `cli.py`'s `plan`
-handler passes them straight through.
+takes two `heuristic.raw_spread()` values — the pre-plan and post-plan
+*raw*, unweighted section 7.2 spread quantity — and multiplies their
+difference by `migration.payback_horizon_seconds`. **Not**
+`ObjectiveBreakdown.imbalance_term`: that is the same quantity scaled by
+`objective.alpha_spread` for the section 5.4 *solver* objective, and
+passing it here would make the payback ratio depend on that tuning knob
+rather than only on the imbalance reduction and migration cost a plan
+produces (REVIEW.md R-01 — earlier code passed `imbalance_term` directly;
+only invisible while `alpha_spread`'s default of `1.0` made the two
+numerically identical). `cli.py`'s `plan` handler computes `raw_spread()`
+for the pre-plan and post-plan assignments and passes those through.
 
 ## `headroom_src`/`headroom_dst`: a plan formula this project cannot fill in
 

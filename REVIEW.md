@@ -66,6 +66,20 @@ CI installs exactly that version and its CBC tests cannot pass), and `apply` exe
 that failed the section 7.3 payback acceptance test, including moves the hard per-move
 duration rule rejected. **Section 18** records how all nine were resolved.
 
+An **eleventh pass** (section 19) reviews the finalized implementation: everything that landed
+after the S-01..S-09 fixes — phase 8 (`auto` mode, time windows, migration cap, the re-plan
+loop), section 13 crash/two-instance recovery, the section 8.1 generalized transient invariant,
+concurrent execution, per-disk load time series, the section 7.3 saturation guard and its wiring
+into `plan`/`apply`, and phase 9's section 10.2 forecast backtest gate (~5,900 inserted lines,
+two new modules). Seven new findings (T-01..T-07) are identified: three Medium (the re-plan loop
+silently does not trigger under the concurrent executor; re-plans and mid-group crashes lose the
+executed moves' cooldown recording that section 9.2 step 2 mandates; the manual and example
+config claim the optimizer consumes the forecaster's upper bound, which it does not), three Low
+(stale "saturation check not implemented anywhere" claims contradicted by the same range's own
+saturation wiring; a stale `96-payback.md` paragraph that would reintroduce the R-01 bug; three
+divergent semantics for the `max_migrations_per_run` counter), one Info. **Section 20** records
+how all seven were resolved.
+
 ---
 
 ## 0. Overall assessment
@@ -2163,6 +2177,365 @@ own finding was about) and again against a separate venv with `ortools` installe
 CP-SAT venv existed from the ninth-pass review) — all pass under both, not merely under the
 pip-resolved newer pulp the ninth-pass verification used. `make check` clean (fmt, lint,
 typecheck, test, fixtures, docs-check — internals PDF rebuilt to 35 pages, manual PDF to 32).
+
+---
+
+## 19. Eleventh-pass review — phases 8-9, crash recovery, concurrency, saturation guard
+
+Reviewed commit range `d5307f7..HEAD` (the S-01..S-09 fixes themselves are already recorded in
+section 18): `c01c0d7` (auto mode, phase 8: time windows, migration cap, re-plan loop), `6f54308`
+(auto-mode self-review: lock-wait deadline gap, DST), `76f0d2c` (section 13 crash and
+two-instance recovery, new `crashrecovery.py`), `026e9d9` (section 8.1's generalized transient
+invariant extracted into `reserve.transient_charge_ok()`), `a59c613` (concurrent execution),
+`0447940` (per-disk load time series in `loadmodel.py`), `d94807a` (section 7.3's
+saturation-ceiling defer check in `payback.py`), `10a9ead` (wiring the guard into
+`plan`/`apply`), `f2c572e` (phase 9: the section 10.2 forecast backtest gate). Roughly 5,900
+inserted lines across 38 files (~2,700 of them tests), two new modules (`timewindow.py`,
+`crashrecovery.py`), and one new internals page. `IMPLEMENTATION_PLAN.md` itself is unchanged
+across the entire range.
+
+This is the pass that makes the tool an unattended one, and the engineering quality of the
+individual mechanisms continues to be high: the time-window module's local-time-with-IANA-zone
+DST handling (including the honest documentation of the fixed-offset fallback's two-nights-a-year
+residual gap), the write-the-UPID-before-anything-else crash trace with the finally-block that
+deliberately saves the callback's newer state over the loop's older local variable, the shared
+`transient_charge_ok()` that makes the sequential and concurrent executors provably check the
+same arithmetic, the non-blocking `_poll_move_once()`/`_LaunchDecision` decomposition of the
+executor, and the `accepted`-vs-`deferred_moves` split in the payback verdict are all better
+than the plan strictly demands. The three Medium findings are all at the seams between the new
+mechanisms rather than inside any one of them.
+
+### 19.1 Verification run
+
+- Dev venv `python3 -m pytest`: **558 passed, 24 skipped** (ortools, pulp and statsmodels absent
+  from the venv), **91.28% line coverage** — above the 85% floor, and *up* from the tenth
+  pass's 89.57% despite ~2,650 new source lines under test: the new surface is well covered
+  per-module (`execute.py` and `cli.py` both at 99% under their own test files;
+  `crashrecovery.py` and `timewindow.py` have dedicated files with 19 and 16 tests).
+- System Python (pulp **2.7.0**, the exact Debian trixie / CI version): `test_optimize.py`
+  20 passed, 12 skipped — the S-01 fix holds on the packaged path. No CP-SAT-capable
+  environment was available this pass; the ortools-parametrized cases remain skipped here.
+- `tests/fixtures/generate_expected.py --check`: OK. `sha256sum --check` on all three PDF
+  stamps (plan, internals, manual): all OK. `black --check`, `flake8`, `mypy`: clean.
+- **The concurrent re-plan gap (T-01) was reproduced, not inferred**: a scripted scenario
+  driving the real `_execute_concurrent()` (move 201 in flight and slow to resolve, move 202's
+  VM vanished from `cluster/resources`) produces `outcomes == [(202, "replan_needed"),
+  (201, "moved")]` with `stopped_early=True` — the `replan_needed` outcome is *not* last, so
+  `cli.py:1723`'s `outcomes[-1].status == "replan_needed"` check answers False and no re-plan
+  happens. The scenario uses only the existing test doubles (`concurrent_client_with` with
+  201's task-status poll scripted to stay `"running"` for two cycles and 202 removed from
+  `cluster/resources`), so it converts directly into the regression test T-01 asks for.
+- Time-window behaviour spot-checked against the test suite's 16 cases (cross-midnight matching
+  against the *start* day, DST spring-forward non-crash, `current_deadline()`'s
+  "no active window → zero budget" and "no windows at all → unbounded" conventions) — all
+  consistent with section 9.1 and the module's own docstrings.
+- The §14 fixture arithmetic is untouched by this range (no solver or objective changes);
+  fixture freshness re-confirmed above.
+
+### 19.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| T-01 | Medium | `cli.py`, `execute.py` | `auto`'s re-plan loop never triggers under the concurrent executor — a launch-time mismatch resolved while another move is in flight is not the *last* outcome, and `outcomes[-1]` is how the loop detects it; the run stops early instead of re-planning (§9.2 step 3), and the manual's auto-mode "re-plan loop" promise silently does not apply under concurrency |
+| T-02 | Medium | `cli.py` | §9.2 step 2 ("record the moves already completed in state.json, *including their cooldown timestamps*") is honored only after a group's whole auto loop ends — a re-plan inside the loop plans against the pre-group state, without the earlier attempts' cooldown pins or an updated `last_balance`, so a just-moved disk can be re-proposed (and moved back) within the same invocation; and if a later move raises, the finally-block save persists a state that never got those cooldowns at all |
+| T-03 | Medium | `docs/manual/10-configuration.md`, `config/drs.example.yaml`, plan §10.1/§10.2 | The manual and example config claim the *optimizer* consumes `window.upper_quantile` / the forecaster's upper bound; in the finalized code the optimizer consumes the `window.quantile` (p95) decision statistic and only the section 7.3 saturation guard (when `saturation_load` is set) consumes bounds — the P-01/P-02/S-08 pattern again, plus a plan section now contradicted by the code with no annotation |
+| T-04 | Low | `execute.py`, `docs/internals/92-execute.md` | Stale "section 7.3's saturation check … is not implemented anywhere in this codebase yet" claims (module docstring, `_execute_concurrent` docstring, `92-execute.md`) — contradicted by the saturation wiring that landed two commits later in this same range and by sibling docs that describe it |
+| T-05 | Low | `docs/internals/96-payback.md` | The page still says the payback benefit "takes two `ObjectiveBreakdown.imbalance_term` values … passed straight through" — false since the R-01 fix switched to `raw_spread()`; an implementer following this page would reintroduce the R-01 bug |
+| T-06 | Low | `execute.py`, `cli.py` | Three divergent semantics for the `max_migrations_per_run` counter: the sequential executor counts lock-timeout and post-lock-wait-deadline *skips* (moves never issued), the concurrent executor counts launches only, and `_run_auto_group`'s cross-group decrement counts moved/draining/failed — the cap is never exceeded, only under-consumed, but the one-rule discipline is broken; collateral: the post-lock-wait deadline skip continues the loop instead of stopping the run, contradicting `_auto_budget_stop_outcome`'s own documented "stop cleanly, never skip this one" policy |
+| T-07 | Info | `cli.py` | `_plan_group()` computes `_saturation_forecast_inputs()` (six `query_range` calls over up to 7 days at 5-minute step) even when `schedule_result.order` is empty (full deadlock) — the guard's outputs are then unused; performance note only |
+
+### 19.3 T-01 — the re-plan loop does not trigger under concurrent execution
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/cli.py:1723`, `src/proxmox_storage_drs/execute.py:1176-1284`
+
+`_run_auto_group()` decides whether to re-plan with:
+
+```python
+needs_replan = bool(result.outcomes) and result.outcomes[-1].status == "replan_needed"
+```
+
+This is correct for the sequential executor, where a `replan_needed` outcome always ends
+`execute_plan()` immediately and is therefore last. The concurrent executor cannot return
+early: once a stop condition is set it keeps polling the still-in-flight moves to their natural
+conclusion (by design, and correctly — their outcomes and crash-recovery callbacks must still
+be recorded), and those resolutions are appended to `outcomes` *after* the `replan_needed`
+outcome that `_advance_pending()` recorded mid-run. Reproduced against the real executor
+(19.1): outcomes arrive as `[(202, "replan_needed"), (201, "moved")]`, `outcomes[-1]` is the
+`moved`, and the loop breaks without re-planning.
+
+Consequences: under `execution.max_concurrent_migrations > 1` — the exact configuration the
+concurrent executor exists for — a normal mid-run mismatch stops the run instead of triggering
+section 9.2 step 3's "re-invoke the whole pipeline from the new observed state". The behavior
+is conservative (nothing unsafe executes; the next timer invocation re-plans from reality), but
+it contradicts the plan, diverges from the sequential path, and silently narrows the manual's
+own auto-mode contract (`docs/manual/28-apply.md`'s "The re-plan loop" bullet promises the
+re-plan for `auto` with no concurrency qualifier). The suite cannot see it: every re-plan test
+stubs `_apply_payback_gate` with a single `replan_needed` outcome, and every concurrent
+executor test that produces `replan_needed` has nothing else in flight (`test_concurrent_preflight_mismatch_replans_and_stops`).
+
+**Recommendation:** decide re-planning on membership, not position — `any(o.status ==
+"replan_needed" for o in result.outcomes)` over the per-attempt result (safe: `"replan_needed"`
+is only ever produced at launch time, never by polling, so this cannot fire spuriously) — and
+add a regression test that drives the real `_execute_concurrent()` with one move in flight
+while the head of pending fails pre-flight.
+
+### 19.4 T-02 — executed moves' cooldowns are not recorded where section 9.2 step 2 needs them
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/cli.py:1630-1767` (`_run_auto_group`), `cli.py:1770-1822`
+(`_record_executed_moves`), `IMPLEMENTATION_PLAN.md` §9.2 step 2
+
+Section 9.2's re-plan protocol is explicit that recording precedes re-invoking: "Record the
+moves already completed in `state.json` (including their cooldown timestamps) so the next pass
+sees them as history rather than re-deriving them" (step 2), *then* "re-invoke the whole
+pipeline" (step 3). The implementation records `last_balance` and per-disk/per-storage
+cooldowns only in `_handle_apply()`'s loop, after `_run_auto_group()` has returned for the
+whole group. Two consequences:
+
+1. **The re-plan plans against stale state.** The loop's re-plan passes the `state` snapshot
+   from *before the group started* to `build_topology(state=...)` (the (C2) per-disk cooldown
+   pin) and `_plan_group(..., state, ...)` (`active_storage_cooldowns`, and the drift gate's
+   `last_balance`). A move executed in attempt 1 has no cooldown recorded when attempt 2
+   solves, so nothing structurally prevents attempt 2 from proposing the same disk again —
+   including back to where it came from — which is precisely the churn `cooldown_per_disk`
+   exists to prevent. It also means the re-plan's drift gate compares against a baseline that
+   predates the moves this run already executed. The load-model/topology re-fetch limits the
+   damage (the disk's new location is real, and the gate often concludes "no action"), but the
+   protection the plan mandates for exactly this loop is absent.
+2. **The crash window loses them entirely.** If a later move in the same group raises (a
+   network failure mid-poll, say), the `finally` block saves `state_box.value` — which carries
+   the live `inflight_upids` updates (by design) but none of the executed moves' cooldowns or
+   `last_balance`, since `_record_executed_moves` was never reached. The next run then starts
+   with no cooldown for disks that really moved, and no drift baseline. The UPID trace is
+   cleared for tasks that finished, so nothing else marks those moves as recent history.
+
+**Recommendation:** record per *attempt*, not per group: call `_record_executed_moves` (or a
+subset of it, keyed on the attempt's own outcomes and load vector — the docstring already
+notes which statuses count) inside `_run_auto_group()` after each `_apply_payback_gate()` call,
+pushing the result into `state_box`/`state` before the re-plan re-invokes the pipeline; and
+for the crash window, record after each *resolved* outcome (or at minimum wrap the per-group
+call so an exception still records what completed before propagating). Either way the
+`finally`-block comment's own reasoning — never clobber the newest state — extends naturally:
+what is saved should also be the newest *cooldown* state, not just the newest inflight state.
+
+### 19.5 T-03 — "the optimizer consumes the upper bound": manual and config say yes, code says no
+
+**Severity:** Medium
+**Files:** `docs/manual/10-configuration.md` (`window.upper_quantile`, `forecast.holt_winters.residual_z`),
+`config/drs.example.yaml:86`, `IMPLEMENTATION_PLAN.md` §10.1/§10.2, `src/proxmox_storage_drs/loadmodel.py:113`
+
+The finalized implementation has exactly one consumer of a `Forecaster`: the section 7.3
+saturation guard (`cli._saturation_forecast_inputs()` → `forecast.storage_upper_bound()` →
+`payback.compute_move_cost()`), and only when some storage in the group configures
+`saturation_load`. The decision statistic that drives gates, solver, payback and ordering is
+`compute_group_load()`'s PromQL `quantile_over_time` at `window.quantile` (p95, the point
+estimate) — `loadmodel.py:113-114`. `docs/internals/20-forecasting.md` says so honestly:
+"the optimizer does not consume a forecast at all yet."
+
+The operator-facing documentation does not:
+
+- `window.upper_quantile`: "The quantile the **optimizer** and the saturation guard actually
+  consume" — the first half is false.
+- `forecast.holt_winters.residual_z`: "this is what the optimizer actually consumes".
+- `config/drs.example.yaml:86`: "the bound the OPTIMIZER consumes (>= quantile)".
+
+This is the P-01/P-02/S-08 pattern a fourth time: a knob documented as feeding a consumer it
+does not feed. An operator who raises `upper_quantile` (or tunes `residual_z`) expecting a more
+conservative *placement* gets no change in placement at all unless they also set
+`saturation_load`. Additionally, the plan's own §10.1 sentence — "The optimizer consumes the
+**upper bound**, never the point estimate … so the optimizer sees p99" — and §10.2's "Refuse to
+let a model whose backtest error exceeds the imbalance threshold **drive migrations**" are now
+unconditionally contradicted by the finalized code, with no plan-side annotation (AGENTS.md
+§7.6: resolve the disagreement in the same commit; `IMPLEMENTATION_PLAN.md` was not touched
+once in this entire range).
+
+**Recommendation:** either (a) fix the three operator-facing claims to name the only real
+consumer ("the section 7.3 saturation guard, when `saturation_load` is set"), and add the
+plan-side annotation ("as built, the decision statistic is `window.quantile`; the bound is
+consumed by the saturation guard only — wiring forecasts into the optimizer remains future
+work"), or (b) actually wire the bound into the decision statistic (fetch at
+`window.upper_quantile`) if that was always the intent. (a) is the smaller, honest fix; (b)
+changes every fixture cross-check and should not be done silently. The documentation
+cross-reference tests only check knob *existence*, which is why this survived them.
+
+### 19.6 T-04 — stale "saturation check not implemented anywhere" claims
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/execute.py:37-38`, `execute.py:1325-1329`,
+`docs/internals/92-execute.md:169-171`, `docs/manual/28-apply.md` ("Concurrent execution")
+
+`execute.py`'s module docstring and `_execute_concurrent()`'s docstring say section 7.3's
+saturation check "is not enforced anywhere in this codebase yet", and `92-execute.md` repeats
+"**It is not implemented anywhere in this codebase yet** (`docs/internals/96-payback.md`)".
+All three were written in the concurrent-execution commit (`a59c613`) and were true then; the
+saturation wiring landed two commits later (`d94807a`/`10a9ead`, same review range) and they
+were never revisited — `10a9ead` does not touch `execute.py`. They now contradict
+`96-payback.md`'s own saturation section and `30-safety-and-status.md`'s `plan` row ("including
+the section 7.3 saturation-ceiling guard (mirroring phase only)"), so the documentation set
+disagrees with itself. `28-apply.md`'s "Section 7.3's saturation check is not enforced under
+concurrency any more than it is under the sequential executor" is misleading the same way: the
+planning-time defer check gates `apply` in both paths (`_apply_payback_gate` excludes
+`deferred_moves`). What remains true is the narrower statement — there is no *execution-time*
+saturation re-check summing `ω_role` over the in-flight set (§8.1 condition 4), and no
+draining-phase check.
+
+**Recommendation:** reword the three claims to the narrow true statement ("the planning-time
+defer check exists (`96-payback.md`); no execution-time re-check against the live in-flight
+set, mirroring or draining phase, under either executor"). This is R-04's pattern — a doc
+sentence whose truth ended mid-range — and the same-commit rule applies.
+
+### 19.7 T-05 — `96-payback.md` would reintroduce the R-01 bug
+
+**Severity:** Low
+**Files:** `docs/internals/96-payback.md:13-17`
+
+The page opens: "`compute_benefit_load_seconds()` takes two
+`heuristic.ObjectiveBreakdown.imbalance_term` values — the pre-plan and post-plan `E` — and
+multiplies their difference by `migration.payback_horizon_seconds`; `heuristic.HeuristicResult`
+already carries both … so `cli.py`'s `plan` handler passes them straight through." Since the
+R-01 fix (ninth pass, `de7deda`), none of that is true: the handler passes
+`heuristic.raw_spread()` values, precisely because `imbalance_term` is `alpha_spread`-scaled
+and made the payback ratio depend on a solver tuning knob. The paragraph dates from the phase-5
+commit (`f0f955d`) and the R-01 fix updated the docstring and this review but not this page. An
+implementer who reads `docs/internals/` (as AGENTS.md §8.2 tells them to) and trusts it over
+the docstring would wire `imbalance_term` back in — reintroducing a resolved finding with a
+`alpha_spread ≠ 1.0` plan silently getting wrong payback arithmetic.
+
+**Recommendation:** rewrite the paragraph to name `raw_spread()` as the required input and
+`imbalance_term` as the wrong one (mirroring `compute_benefit_load_seconds()`'s own
+already-correct docstring).
+
+### 19.8 T-06 — three semantics for one cap
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/execute.py:894` (sequential), `execute.py:1276`
+(concurrent), `src/proxmox_storage_drs/cli.py:1719-1721` (cross-group budget)
+
+`execution.max_migrations_per_run` is enforced by three counters that count different things:
+
+- the sequential executor increments `migrations_used` after **every** `_execute_one_move()`
+  outcome — including a lock-timeout `"skipped"` (`locks.on_timeout: skip`) and the
+  post-lock-wait deadline `"skipped"`, neither of which issued a `move_disk`;
+- the concurrent executor increments only on an actual **launch**;
+- `_run_auto_group()` decrements the cross-group budget by outcomes with status
+  `moved`/`draining`/`failed` — excluding exactly those skips.
+
+The cap can therefore only ever be under-consumed (the sequential path stops earlier than
+configured when lock-timeout skips occur), never exceeded, so this is not a safety issue — but
+it is three implementations of one rule where AGENTS.md §5 asks for one, and the sequential and
+concurrent executors give different answers to "did that skipped move consume budget?".
+Collateral detail: the post-lock-wait deadline skip *continues* the loop (the next iteration's
+budget check then stops the run), which contradicts `_auto_budget_stop_outcome()`'s own
+documented policy that both budgets mean "stop cleanly, never skip this one and try a later
+move" — the run ends one outcome and one skipped line later than that policy describes, having
+also consumed one unit of the sequential counter for a move that never launched.
+
+**Recommendation:** pick one semantics — launches only (matching the concurrent path and the
+plan's own "how many moves one invocation *executes*") is the natural choice: increment only
+for outcomes that actually issued a `move_disk`, in both executors, and have the cross-group
+decrement match. Then the post-lock-wait deadline skip can stop the run directly instead of
+falling through to the next iteration, matching the documented policy.
+
+### 19.9 T-07 — saturation history fetched for a plan with nothing to check (Info)
+
+`_plan_group()` calls `_saturation_forecast_inputs()` unconditionally after ordering
+(`cli.py:1302`), before knowing whether `schedule_result.order` is empty. A fully-deadlocked
+plan (order empty, `deadlocked` non-empty) still pays six `query_range` calls over the
+configured forecaster's `required_range()` — up to 7 days at a 5-minute step for
+`seasonal_naive` — for a guard whose inputs are then unused. Cheap fix if ever worth it: fetch
+lazily only when `order` is non-empty. Recorded for completeness; no correctness impact.
+
+### 19.10 What this pass confirms
+
+- **The time-window module is right, including its hard parts.** Cross-midnight windows match
+  the day the window *started* on; `current_deadline()`'s three-state convention (no windows →
+  unbounded, none active → zero budget, several active → latest close) is exactly what an
+  executor needs to refuse work without a second activeness check; local-vs-UTC is a
+  deliberate, documented choice; and `_real_local_now()`'s `/etc/localtime` IANA-zone
+  resolution closes the DST hole a bare `astimezone()` would leave in `window_close()`'s
+  "closes tomorrow" case, with the residual fixed-offset fallback gap documented rather than
+  hidden. `start == end` is rejected at config validation.
+- **The crash trace is genuinely written before the crash can happen.** `on_inflight_started`
+  persists through the still-held `flock` immediately after `move_disk()` returns and before
+  any other use of the UPID; `on_inflight_finished` fires when the *task* resolves (including
+  `draining`, correctly — the drain is tracked by the content poll, not the UPID); a raise
+  mid-wait deliberately leaves the UPID recorded; and the `finally` block saves the box's
+  newer state over the loop's older local variable so the trace cannot be clobbered. The
+  startup scan's local half re-checks remembered UPIDs (a failed check assumes still-running,
+  the safe direction), the cluster half scans `/cluster/tasks` for same-user `qmmove` tasks
+  with the confirmed-live field convention, discovered vmids fold into `exclude.vmids` reusing
+  the existing (C2) pin, and nothing is ever force-cancelled.
+- **The generalized transient invariant is the one arithmetic core the plan asked for.**
+  `reserve.transient_charge_ok()` implements `used + Σz_m + f·max(Z, max z_m) ≤ C` with the
+  `min_free_bytes` floor (F-02) folded in; `schedule.transient_invariant_ok()` calls it with
+  one charge, the sequential executor's live check with one charge against a live
+  `storage_status()` read, and `_launch_decision()` with the whole in-flight target-charge set
+  plus `largest_by_storage` updated by `_post_move_bookkeeping` — deliberately conservative
+  about whether a live `used` already reflects an in-flight allocation.
+- **The concurrent executor's decomposition is sound.** Strict FIFO (documented as
+  under-delivering on throughput, never unsafe), non-blocking per-move polling via
+  `_poll_move_once()` (the shared three-condition completion criterion), the two-condition
+  stop-then-drain loop that never abandons an in-flight move, per-storage caps counting both
+  endpoints, the deadline re-checked every cycle (so the sequential path's post-lock-wait
+  re-check has a concurrent equivalent by construction), and the spin-guard break condition
+  once `stop_reason` is set.
+- **The saturation guard and backtest gate are honest about their own scope.** The defer check
+  is per-endpoint, skipped where `saturation_load` is unset, charged with the same
+  `ω_src`/`ω_dst` the cost model already uses, reported separately from hard rejections, and
+  excluded from execution exactly like them; a reserve-resolving plan stays exempt from the
+  economic test but not from the hard rules (documented in `30-safety-and-status.md`); the
+  backtest gate never validates `quantile`, treats missing history as failure, falls back
+  with one warning, and reuses `gates.imbalance_threshold` per the plan's own yardstick.
+- **The S-02 payback gate survives the new modes intact**: `deferred_moves` join
+  `rejected_moves` in `_refused_move_outcomes`, the aggregate failure still refuses the whole
+  group with zero API calls, and the confirm-mode payback preview still prints before the
+  first prompt.
+- **Documentation discipline mostly held**: the S-08 "not yet effective" caveats were properly
+  *removed* from the four phase-8 knobs now that phase 8 is real, `28-apply.md` documents FIFO
+  concurrency and the drain-first behavior accurately, `15-state.md` was updated for the now-
+  live `inflight_upids`, and `95-schedule.md` was rewritten rather than left claiming the
+  generalized invariant was unimplemented. The exceptions are T-04/T-05 — both staleness
+  introduced or left behind inside this same range.
+
+### 19.11 Assessment
+
+The finalized implementation is, mechanism for mechanism, the best-reviewed state of this
+codebase: every phase of the plan now exists, the two High-severity classes of the tenth pass
+(crash-the-packaged-solver, execute-what-was-rejected) stayed fixed, and the new unattended
+machinery carries its own tests (123 new ones across the range: 459 → 582 total) and
+mostly-current documentation. The three Medium findings are all composition bugs at the seams the plan
+explicitly legislates — the re-plan protocol (T-01, T-02) and the forecast-consumption
+contract (T-03) — and none of them makes the tool do something unsafe: T-01 and T-02 err
+conservative (less work, possible churn within a run), T-03 is a documentation lie rather than
+a behavior change. Fixing T-01 is a one-line predicate plus a regression test; T-02 is a
+recording-point move; T-03 is three sentence-level corrections plus a plan annotation. After
+those, the remaining open items in the codebase are the deliberately documented gaps
+(execution-time saturation sums, §7.3's re-solve loop, staging, concurrency-aware ordering),
+each of which the internals pages already name honestly.
+
+---
+
+## 20. Resolution of eleventh-pass findings (T-01..T-07)
+
+All seven findings were real; all seven are fixed, not refuted.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| T-01 | Resolved | `cli._run_auto_group()`'s `needs_replan` now checks `any(o.status == "replan_needed" for o in result.outcomes)` instead of `outcomes[-1].status` — safe because `"replan_needed"` is only ever produced at launch time, never by polling an already-in-flight move to its own conclusion, so this cannot fire for an outcome that was actually a clean completion. New regression test `test_concurrent_replan_mismatch_can_land_before_a_still_inflight_moves_outcome` (`test_execute.py`) reproduces the exact scenario the review found against the real `_execute_concurrent()` (a slow-to-resolve in-flight move plus a vanished-VM mismatch behind it), and `test_run_auto_group_replans_when_the_mismatch_is_not_the_last_outcome` (`test_cli.py`) pins the fixed predicate itself. |
+| T-02 | Resolved | `_run_auto_group()` now threads the caller's `_InflightStateBox` (renamed parameter, `state` → `state_box`) instead of a plain `State`, and calls `_record_executed_moves()` on `state_box.value` immediately after each attempt's own `_apply_payback_gate()` call — using that attempt's own `group_plan.group_load` reading, already computed, no extra fetch — *before* a re-plan's `build_topology()`/`_plan_group()` calls, which now read `state_box.value` rather than the pre-group snapshot. `_handle_apply()`'s own post-loop recording is skipped for `mode == "auto"` (it would otherwise overwrite a later attempt's fresher `last_balance` with the first attempt's stale one) and simply picks up `state_box.value`; the crash-window half is fixed for free, since `_handle_apply()`'s `finally` block already saves `state_box.value`, not the loop's local `state`. New test `test_run_auto_group_records_each_attempts_cooldown_before_replanning` asserts the re-plan's own `build_topology()` call already sees the first attempt's cooldown, and that the box a crash would save reflects it too. |
+| T-03 | Resolved | Added an "As built" paragraph to `IMPLEMENTATION_PLAN.md` §10.1 stating plainly that the decision statistic driving gates/solver/payback/ordering is `window.quantile` (the point estimate), that the upper bound's only real consumer is the §7.3 saturation guard, and that wiring the bound into the optimizer's own input remains future work — the §15.1 knob table row updated to match. `docs/manual/10-configuration.md`'s `window.upper_quantile` and `forecast.holt_winters.residual_z` entries, and `config/drs.example.yaml`'s `upper_quantile` comment, rewritten to name the saturation guard as the actual consumer instead of "the optimizer". Chosen over actually wiring the bound into the optimizer (the review's option (b)) because that would change every fixture cross-check and should not be done as a documentation fix. |
+| T-04 | Resolved | Reworded all three stale claims (`execute.py`'s module docstring, `_execute_concurrent()`'s own docstring, `docs/internals/92-execute.md`) to the narrower true statement: the §7.3 defer check is enforced at planning time (a flagged move never reaches either executor), and what remains unimplemented is only an *execution-time* re-check of the ceiling against the live in-flight set, mirroring or draining phase, under either executor. `docs/manual/28-apply.md`'s equivalent paragraph corrected the same way. |
+| T-05 | Resolved | Rewrote the opening paragraph of `docs/internals/96-payback.md` to name `heuristic.raw_spread()` as `compute_benefit_load_seconds()`'s required input and `ObjectiveBreakdown.imbalance_term` as the wrong one (mirroring the R-01 fix's own already-correct docstring and rationale), replacing the phase-5-era claim that `cli.py` passes `imbalance_term` straight through. |
+| T-06 | Resolved | Picked launches-only semantics everywhere, keyed off `MoveOutcome.upid is not None` (only ever set once `move_disk` actually returned one): `_execute_sequential()` now increments `migrations_used` only for a launched outcome, not a lock-timeout or post-lock-wait-deadline skip; `_run_auto_group()`'s cross-group budget decrement switched from `status in ("moved", "draining", "failed")` to `o.upid is not None` for the same reason (a lock-timeout-abort `"failed"` never launched either); the concurrent executor already counted launches only and needed no change. The collateral bug is fixed too: the post-lock-wait deadline skip now sets `always_stop=True` (extending, not narrowing, that field's existing purpose) and `_post_move_bookkeeping()` stops the run on a `"skipped"` outcome with `always_stop` set, matching `_auto_budget_stop_outcome()`'s own documented "stop cleanly, never skip this one" policy. Three new tests: `test_lock_timeout_skip_does_not_consume_the_max_migrations_per_run_budget` (budget untouched by a skip), `test_deadline_recheck_after_a_lock_wait_stops_the_whole_run_not_just_this_move` (a second, fully launchable move is never attempted), plus new assertions on the pre-existing single-move deadline-recheck test. |
+| T-07 | Resolved | `_plan_group()` now computes `_saturation_forecast_inputs()` only when `schedule_result.order` is non-empty (`None` otherwise) — a fully deadlocked plan no longer pays the guard's `query_range` fetches (up to 7 days at a 5-minute step) for a result nothing will use. |
+
+Verification: dev venv `python3 -m pytest` — **563 passed, 24 skipped** (ortools, pulp and
+statsmodels absent), **91.31% line coverage** (up from the eleventh pass's 91.28% despite the
+new regression tests; `execute.py`/`cli.py` both still at 99% under their own test files).
+`make check` clean (fmt, lint, typecheck, test, fixtures, docs-check — `IMPLEMENTATION_PLAN.pdf`
+rebuilt to 40 pages, internals PDF to 42, manual PDF to 34, all three stamps regenerated in the
+same commit as their Markdown per AGENTS.md §7).
 
 ---
 

@@ -34,10 +34,13 @@ implementing section 8.1's generalized transient invariant
 (`reserve.transient_charge_ok()`) and section 9.2's "poll all in-flight
 UPIDs, launch the next queued move as each slot frees" loop -- see
 `_execute_concurrent()`'s own docstring for exactly what it does and does
-not do (strict-FIFO launching; section 7.3's saturation check remains
-unenforced, exactly as under the sequential executor). `dry-run`/
-`confirm` never use it, matching section 9.1's own per-mode description,
-which discusses concurrency only under `auto`.
+not do (strict-FIFO launching; no *execution-time* re-check of section
+7.3's saturation ceiling against the live in-flight set, mirroring or
+draining phase, under either executor -- the planning-time defer check
+already excludes a flagged move from ever reaching here, see
+`docs/internals/96-payback.md`). `dry-run`/`confirm` never use it,
+matching section 9.1's own per-mode description, which discusses
+concurrency only under `auto`.
 
 A move never gets a second chance to "fix" the plan around it: any
 pre-flight mismatch, or a live transient-invariant check that no longer
@@ -114,12 +117,17 @@ class MoveOutcome:
     pre-flight or live transient-invariant mismatch -- the plan no longer
     matches reality).
 
-    ``always_stop`` is set only for a lock timeout with
+    ``always_stop`` is set for a lock timeout with
     ``execution.locks.on_timeout: abort`` -- the manual's own words for that
     setting are "abort **the run**", a distinct, explicit per-config
     decision from ``execution.abort_on_failure``'s general "stop after any
     failed move" policy, which a plain `move_disk` task failure still goes
-    through unmodified."""
+    through unmodified -- and for a ``"skipped"`` outcome from the
+    post-lock-wait deadline re-check: both of `auto` mode's section 9.1
+    budgets are `_auto_budget_stop_outcome()`'s own "stop cleanly, never
+    skip this one and try a later move" (REVIEW.md T-06), which applies
+    just as much to the budget going stale during a lock wait as to the
+    pre-flight check that function itself makes."""
 
     disk_key: str
     from_storage: str
@@ -498,6 +506,7 @@ def _execute_one_move(
                 "skipped",
                 "insufficient time remaining in execution.time_windows for this move "
                 "after waiting for the VM lock to clear",
+                always_stop=True,
             )
 
     target = storages_by_id[move.to_storage]
@@ -691,6 +700,12 @@ def _post_move_bookkeeping(
         return result.detail
     if result.status == "failed" and (result.always_stop or execution.abort_on_failure):
         return f"{move.disk_key} failed: {result.detail}"
+    if result.status == "skipped" and result.always_stop:
+        # The post-lock-wait deadline re-check (REVIEW.md T-06) -- the
+        # same "stop cleanly" policy `_auto_budget_stop_outcome()` already
+        # documents for both of section 9.1's budgets, now honoured here
+        # too rather than falling through to the next move in `order`.
+        return result.detail
     return None
 
 
@@ -891,7 +906,15 @@ def _execute_sequential(
             on_inflight_finished,
         )
         outcomes.append(result)
-        migrations_used += 1
+        if result.upid is not None:
+            # Launches only (REVIEW.md T-06), matching the concurrent
+            # executor (`_advance_pending()` only ever increments its own
+            # counter at the point it actually issues `move_disk`) -- a
+            # lock-timeout or post-lock-wait-deadline `"skipped"` outcome
+            # (`result.upid` is only ever set once `move_disk` returned)
+            # never issued one, so it must not consume a slot of
+            # `execution.max_migrations_per_run`.
+            migrations_used += 1
 
         stop_reason = _post_move_bookkeeping(
             result, move, disk, largest_by_storage, drained_storages, execution
@@ -1322,11 +1345,14 @@ def _execute_concurrent(
     documented ordering-priority-2/staging gaps, this can only ever
     under-deliver on throughput, never produce an unsafe launch order.
 
-    **Section 7.3's saturation check is not enforced here either** --
-    it is not enforced anywhere in this codebase yet (see
-    `docs/internals/96-payback.md`), so section 8.1 point 4 of
-    `concurrency_ok` stays a documented gap under concurrency exactly as
-    it already is under the sequential executor.
+    **Section 7.3's saturation check is planning-time only, here as under
+    the sequential executor.** The defer check itself is enforced (a
+    flagged move is excluded from `schedule_result.order` before either
+    executor ever sees it, see `docs/internals/96-payback.md`); what
+    neither executor does is re-check the ceiling *during* execution
+    against the live in-flight set, so section 8.1 point 4 of
+    `concurrency_ok` (summing `ω_role` over everything actually in
+    flight right now, mirroring or draining) stays a documented gap.
 
     See `execute_plan()`'s own docstring for every parameter; this
     function implements the identical contract (budgets, drained-storage

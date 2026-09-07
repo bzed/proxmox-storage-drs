@@ -166,11 +166,15 @@ keyboard should not look like a bug report.
   (`cli._run_auto_group()`, `auto` mode only — see below), not something
   this module does itself. `dry-run`/`confirm` never re-plan at all: the
   operator re-runs `apply` by hand once ready.
-- **Section 7.3's saturation check is not enforced, concurrently or
-  sequentially.** It is not implemented anywhere in this codebase yet
-  (`docs/internals/96-payback.md`), so section 8.1 point 4 of
-  `concurrency_ok` stays a documented gap the concurrent executor
-  inherits rather than closes.
+- **Section 7.3's saturation check is planning-time only, not
+  execution-time, concurrently or sequentially.** The defer check itself
+  is enforced before either executor ever sees a flagged move — it is
+  excluded from `schedule_result.order` at planning time
+  (`docs/internals/96-payback.md`) — but neither executor re-checks the
+  ceiling *during* execution against the live in-flight set, so section
+  8.1 point 4 of `concurrency_ok` (summing `ω_role` over everything
+  actually in flight right now, mirroring or draining) stays a
+  documented gap the concurrent executor inherits rather than closes.
 - **Crash recovery is not this module's own job.** `execute_plan()`
   accepts `on_inflight_started`/`on_inflight_finished` callbacks
   (`execute.InflightCallback`) and calls them around each `move_disk` --

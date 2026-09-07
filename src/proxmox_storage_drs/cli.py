@@ -1299,7 +1299,16 @@ def _plan_group(
     )
 
     storages_by_id = {s.id: s for s in group.storages}
-    saturation_inputs = _saturation_forecast_inputs(prom_client, resolved, group, now)
+    # Only when there is a move to cost (REVIEW.md T-07): a fully
+    # deadlocked plan (`order` empty) has no `_compute_one_move_cost()`
+    # call to feed, so skip the guard's own `query_range` fetches
+    # entirely rather than pay for up to 7 days of history at a 5-minute
+    # step and throw the result away unused.
+    saturation_inputs = (
+        _saturation_forecast_inputs(prom_client, resolved, group, now)
+        if schedule_result.order
+        else None
+    )
     move_costs = [
         _compute_one_move_cost(
             move, storages_by_id, group, resolved.config.migration, saturation_inputs
@@ -1632,7 +1641,7 @@ def _run_auto_group(
     resolved: ResolvedConfig,
     prom_client: PrometheusClient,
     min_free_bytes: int,
-    state: State,
+    state_box: _InflightStateBox,
     group: Group,
     group_plan: _GroupPlan,
     migrations_budget: int | None,
@@ -1656,6 +1665,18 @@ def _run_auto_group(
     per-*invocation* cap, shared across every group `_handle_apply()`
     visits, not reset per group or per re-plan).
 
+    ``state_box`` -- the same mutable box `_handle_apply()`'s own
+    crash-recovery callbacks write ``inflight_upids`` through -- is
+    threaded here (rather than a plain ``State``) so this function can
+    record each *attempt's* own executed moves (cooldowns, ``last_balance``)
+    into it immediately, before a re-plan re-invokes the pipeline: section
+    9.2 step 2 requires the recording to precede step 3's re-plan, and a
+    re-plan inside this same loop must see the previous attempt's own
+    moves as history, not re-propose the disk that attempt just moved
+    (REVIEW.md T-02). The same incremental write is also what lets
+    `_handle_apply()`'s `finally` block save a mid-group crash's completed
+    attempts' cooldowns, not just its `inflight_upids`.
+
     ``local_now`` -- real host local time by default -- is injectable for
     the same reason `execute.py`'s own `Clock` is: a test needs a
     deterministic answer to "is now inside this configured window"
@@ -1675,7 +1696,11 @@ def _run_auto_group(
     stop_reason: str | None = None
 
     while True:
-        assert group_plan.schedule_result is not None and group_plan.payback_result is not None
+        assert (
+            group_plan.schedule_result is not None
+            and group_plan.payback_result is not None
+            and group_plan.group_load is not None
+        )
         # Local wall-clock time -- `timewindow.py`'s own module docstring
         # explains why a human-configured HH:MM window is matched against
         # the host's local time, not UTC.
@@ -1717,10 +1742,35 @@ def _run_auto_group(
         stopped_early = result.stopped_early
         stop_reason = result.stop_reason
         if migrations_budget is not None:
-            used = sum(1 for o in result.outcomes if o.status in ("moved", "draining", "failed"))
+            # Launches only (REVIEW.md T-06), matching both executors'
+            # own `migrations_used` counters: `o.upid` is only ever set
+            # once `move_disk` actually returned one, which excludes a
+            # lock-timeout-abort `"failed"` and every `"skipped"` outcome
+            # (neither issued a move) from consuming this cross-group
+            # budget.
+            used = sum(1 for o in result.outcomes if o.upid is not None)
             migrations_budget = max(migrations_budget - used, 0)
+        # Section 9.2 step 2, done *before* step 3 below re-plans (T-02):
+        # record this attempt's own executed moves against `group_plan`'s
+        # own load reading -- already computed, no extra
+        # `compute_group_load()` call -- so a re-plan sees them as
+        # history rather than re-deriving (or re-proposing) them.
+        state_box.value = _record_executed_moves(
+            state_box.value,
+            group.name,
+            group_plan.group_load.load_by_disk_key(),
+            result.outcomes,
+        )
 
-        needs_replan = bool(result.outcomes) and result.outcomes[-1].status == "replan_needed"
+        # Membership, not position (T-01): the concurrent executor cannot
+        # return the moment a `replan_needed` mismatch is found -- it
+        # keeps polling every other already-in-flight move to its own
+        # conclusion first (`_execute_concurrent()`'s own docstring), so
+        # a `replan_needed` outcome can land anywhere in `result.outcomes`,
+        # not only last. `"replan_needed"` is only ever produced at launch
+        # time, never by polling an in-flight move, so this cannot fire
+        # for an outcome that was actually a clean completion.
+        needs_replan = any(o.status == "replan_needed" for o in result.outcomes)
         if not needs_replan:
             break
         if replans_left <= 0:
@@ -1739,14 +1789,22 @@ def _run_auto_group(
         # whatever triggered the mismatch (a VM live-migrated, a storage
         # reconfigured) can mean the group's own membership changed too.
         fresh_now = datetime.now(timezone.utc)
-        fresh_topology = build_topology(client, resolved.config, state=state, now=fresh_now)
+        fresh_topology = build_topology(
+            client, resolved.config, state=state_box.value, now=fresh_now
+        )
         fresh_group = next((g for g in fresh_topology.groups if g.name == group.name), None)
         if fresh_group is None:
             stop_reason = f"group {group.name!r} no longer exists after re-planning"
             break
-        fresh_last_loads = _last_loads_by_group(state, fresh_topology)
+        fresh_last_loads = _last_loads_by_group(state_box.value, fresh_topology)
         new_plan = _plan_group(
-            fresh_group, resolved, prom_client, min_free_bytes, fresh_last_loads, state, fresh_now
+            fresh_group,
+            resolved,
+            prom_client,
+            min_free_bytes,
+            fresh_last_loads,
+            state_box.value,
+            fresh_now,
         )
         if (
             new_plan.load_error is not None
@@ -1973,7 +2031,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     resolved,
                     prom_client,
                     min_free_bytes,
-                    state,
+                    state_box,
                     group,
                     group_plan,
                     migrations_budget,
@@ -1997,18 +2055,27 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     on_inflight_finished=on_inflight_finished,
                 )
             execution_results[group.name] = result
-            # Pick up whatever `on_inflight_started`/`on_inflight_finished`
-            # wrote to `state_box` while this group's moves ran, before
-            # layering this group's own cooldowns/balance on top -- and
-            # push the combined result back into the box so the *next*
-            # group's callbacks build on it rather than reverting these.
-            state = _record_executed_moves(
-                state_box.value,
-                group.name,
-                group_plan.group_load.load_by_disk_key(),
-                result.outcomes,
-            )
-            state_box.value = state
+            if mode == "auto":
+                # `_run_auto_group()` already recorded every attempt's own
+                # executed moves into `state_box` as it went (T-02), each
+                # against that attempt's own load reading -- recording
+                # again here with `group_plan`'s *first*-attempt reading
+                # would silently overwrite a later re-plan attempt's own,
+                # fresher `last_balance` with a stale one.
+                state = state_box.value
+            else:
+                # Pick up whatever `on_inflight_started`/`on_inflight_finished`
+                # wrote to `state_box` while this group's moves ran, before
+                # layering this group's own cooldowns/balance on top -- and
+                # push the combined result back into the box so the *next*
+                # group's callbacks build on it rather than reverting these.
+                state = _record_executed_moves(
+                    state_box.value,
+                    group.name,
+                    group_plan.group_load.load_by_disk_key(),
+                    result.outcomes,
+                )
+                state_box.value = state
 
             if result.stop_reason == "operator quit":
                 # A human asked to stop the whole apply run, not just this
