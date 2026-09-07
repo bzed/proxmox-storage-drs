@@ -338,6 +338,81 @@ def test_apply_ticket_refresh_seconds_is_a_silent_no_op_without_a_backend() -> N
     _apply_ticket_refresh_seconds(object(), config)  # must not raise
 
 
+# ----------------------- connection pool sized to config.proxmox.read_workers
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.mounted: dict[str, Any] = {}
+
+    def mount(self, prefix: str, adapter: Any) -> None:
+        self.mounted[prefix] = adapter
+
+
+class _FakeProxmoxApiWithSession:
+    def __init__(self, session: Any) -> None:
+        self._store = {"session": session}
+
+
+def test_apply_connection_pool_size_mounts_an_adapter_sized_to_read_workers() -> None:
+    """Confirmed live against a real multi-VM cluster: `requests`'s own
+    default `HTTPAdapter` pool (`pool_maxsize=10`) is smaller than
+    `read_workers`'s own default (`12`), so `topology.py`'s concurrent
+    fetch reliably logged urllib3's "Connection pool is full, discarding
+    connection" warning until this was sized to match."""
+    from proxmox_storage_drs.pve import _apply_connection_pool_size
+
+    session = _FakeSession()
+    fake = _FakeProxmoxApiWithSession(session)
+    _apply_connection_pool_size(fake, read_workers=12)
+    assert set(session.mounted) == {"https://", "http://"}
+    for adapter in session.mounted.values():
+        assert adapter._pool_maxsize == 12
+        assert adapter._pool_connections == 12
+
+
+def test_apply_connection_pool_size_never_shrinks_below_the_requests_default() -> None:
+    """A small `read_workers` (or the field's own minimum) must not shrink
+    the pool below `requests`'s own default of 10 -- there is no reason a
+    smaller worker count should make single-threaded reads (`plan`'s own
+    non-concurrent calls, say) worse than they already were."""
+    from proxmox_storage_drs.pve import _apply_connection_pool_size
+
+    session = _FakeSession()
+    fake = _FakeProxmoxApiWithSession(session)
+    _apply_connection_pool_size(fake, read_workers=1)
+    assert session.mounted["https://"]._pool_maxsize == 10
+
+
+def test_apply_connection_pool_size_is_a_silent_no_op_without_a_session() -> None:
+    """A plain string, an object with no ``_store``, or a session-shaped
+    object with no ``mount`` method must never crash -- mirrors
+    `_apply_ticket_refresh_seconds()`'s own defensive contract."""
+    from proxmox_storage_drs.pve import _apply_connection_pool_size
+
+    _apply_connection_pool_size("just-a-string", read_workers=12)  # must not raise
+    _apply_connection_pool_size(object(), read_workers=12)  # must not raise
+
+    class _NoMountSession:
+        pass
+
+    class _ApiWithUnmountableSession:
+        _store = {"session": _NoMountSession()}
+
+    _apply_connection_pool_size(_ApiWithUnmountableSession(), read_workers=12)  # must not raise
+
+
+def test_build_client_sizes_the_connection_pool_for_token_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    fake = _FakeProxmoxApiWithSession(session)
+    monkeypatch.setattr("proxmox_storage_drs.pve.ProxmoxAPI", lambda **kwargs: fake)
+    config = _config(token_id="drs@pve!balancer", token_secret="s3cret")
+    build_client(config)
+    assert session.mounted["https://"]._pool_maxsize == config.read_workers
+
+
 def test_build_client_reauthenticate_callback_rebuilds_a_fresh_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

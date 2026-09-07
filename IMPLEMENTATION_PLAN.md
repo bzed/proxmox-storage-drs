@@ -1014,11 +1014,21 @@ the rounding bound — a cheap guard against a scaling mistake silently producin
 1. **Seed** with the current assignment (not from scratch — we are minimizing *change*).
 2. **Repair**: while any `s` violates (C5), move the disk from `s` that most reduces the violation per
    byte moved, to the feasible storage with the lowest `u_s`.
-3. **Descend**: repeatedly evaluate every single-disk move and every pairwise swap; apply the one
-   that most improves the full objective (including `β`, `γ`, `κ`); stop when no move improves it or
-   `heuristic_iterations` is reached.
+3. **Descend**: repeatedly evaluate every single-disk move, every pairwise swap, **and every
+   whole-VM co-relocation** (every movable disk of one multi-disk VM moved to the same target
+   storage together, in one trial); apply the one that most improves the full objective (including
+   `β`, `γ`, `κ`); stop when no move improves it or `heuristic_iterations` is reached. The third
+   candidate family was added after the first two (confirmed live on a real production cluster,
+   not found by review): whenever `κ` is large enough to make moving one disk of an N-disk VM a
+   net loss on its own (it pays `κ`'s fragmentation penalty before a later move could reunite it),
+   neither a single move nor a swap can ever reach the state where relocating the whole VM together
+   is a clear win — descend found *zero* improving moves at all on a real, 196%-imbalanced cluster
+   without this candidate, which a "the path for very large groups" fallback must not do.
 4. **Polish**: attempt to reunite fragmented VMs where doing so does not worsen imbalance beyond
-   `imbalance_threshold`.
+   `imbalance_threshold`. With step 3's whole-VM co-relocation above, this step's remaining scope is
+   narrower than originally written: only an *N-way rotation* across three or more storages (no
+   disk's own move improving alone, and no two disks sharing a VM) is still outside descend's own
+   reach.
 
 Swaps matter and must not be omitted: when both storages are near their capacity limit, no single
 move is feasible, and only an exchange of two disks can improve the balance.
