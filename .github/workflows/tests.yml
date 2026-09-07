@@ -13,6 +13,12 @@
 # --no-install-recommends silently drops it, and `actions/checkout`'s own
 # `git fetch` over https then fails with "Problem with the SSL CA cert" --
 # this container has no trusted root store at all until it is installed.
+#
+# Same story for `python3-typeshed` in the "test" job: `mypy` (the bare apt
+# package) only Recommends it, but it is what actually provides the
+# third-party stub packages (PyYAML, requests, ...) mypy's own error message
+# points at ("On Debian systems, you can install the python3-typeshed
+# package..."); without it, every untyped-library import fails strict mode.
 name: Tests
 
 on:
@@ -37,7 +43,7 @@ jobs:
             black ca-certificates coinor-cbc flake8 git isort make mypy pandoc \
             python3-jsonschema python3-proxmoxer python3-pulp \
             python3-pytest python3-pytest-cov python3-pytest-xdist \
-            python3-requests python3-ruamel.yaml python3-yaml
+            python3-requests python3-ruamel.yaml python3-typeshed python3-yaml
 
       - uses: actions/checkout@v7
 

@@ -292,6 +292,14 @@ def save_state_atomic(path: str, state: State) -> None:
     documented fallback."""
     directory = os.path.dirname(path) or "."
     tmp_path: str | None = None
+    # A separate flag rather than resetting `tmp_path` to `None` on success:
+    # some mypy versions narrow a `try`-assigned variable's type differently
+    # inside the matching `finally` once it has also been reassigned inside
+    # that same `try` (a real, observed divergence between the mypy this
+    # project develops against and the one Debian trixie packages, flagging
+    # the cleanup below as unreachable) -- `tmp_path` is now assigned exactly
+    # once, from `mkstemp()`, so its type stays simple and unambiguous.
+    replaced = False
     try:
         os.makedirs(directory, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=directory)
@@ -302,9 +310,9 @@ def save_state_atomic(path: str, state: State) -> None:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp_path, path)
-            tmp_path = None
+            replaced = True
         finally:
-            if tmp_path is not None:
+            if tmp_path is not None and not replaced:
                 with contextlib.suppress(OSError):
                     os.remove(tmp_path)
     except OSError as exc:

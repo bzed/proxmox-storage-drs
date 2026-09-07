@@ -193,6 +193,18 @@ def test_save_state_atomic_raises_state_error_when_the_target_is_a_directory(
         save_state_atomic(str(path), empty_state())
 
 
+def test_save_state_atomic_cleans_up_its_temp_file_when_replace_fails(tmp_path: Path) -> None:
+    """The `finally` block's own cleanup, pinned directly rather than only
+    inferred from `StateError` being raised (the test above): a failed
+    `os.replace()` must not leave a `.state-*.tmp` file behind in the
+    target directory."""
+    path = tmp_path / "state.json"
+    path.mkdir()
+    with pytest.raises(StateError):
+        save_state_atomic(str(path), empty_state())
+    assert list(tmp_path.iterdir()) == [path]  # only the pre-existing directory
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
 def test_save_state_atomic_raises_state_error_on_a_permission_failure() -> None:
     with pytest.raises(StateError):
