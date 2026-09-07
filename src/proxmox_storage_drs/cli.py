@@ -385,6 +385,56 @@ def _handle_verify_metrics(resolved: ResolvedConfig, args: argparse.Namespace, m
     return 0 if report.ok else 1
 
 
+def _render_storage_and_disk_load_lines(
+    group: Group,
+    group_load: GroupLoad | None,
+    reserve_statuses: dict[str, ReserveStatus],
+) -> list[str]:
+    """Section 4's per-storage `L_s`/`u_s` and per-disk size/measured-load/
+    pin picture -- ``show-load``'s own per-group body, factored out so
+    ``explain`` can reuse it verbatim as its own "what was actually
+    measured" section (AGENTS.md section 5): both commands report the
+    identical `GroupLoad`, just for a different purpose."""
+    load_by_key = group_load.load_by_disk_key() if group_load else {}
+    storage_loads = {s.storage_id: s for s in group_load.storages} if group_load else {}
+    lines: list[str] = []
+    for storage in group.storages:
+        status = reserve_statuses[storage.id]
+        reserve_str = (
+            f"⚠ reserve short by {format_bytes(status.shortfall_bytes)}"
+            if status.violated
+            else "reserve OK"
+        )
+        load_prefix = ""
+        if storage.id in storage_loads:
+            sl = storage_loads[storage.id]
+            load_prefix = f"L={sl.load:.2f} u={sl.utilization:.2f}  "
+        lines.append(
+            f"  {storage.id}  used {format_bytes(storage.used_bytes)}/"
+            f"{format_bytes(storage.capacity_bytes)}  {load_prefix}{reserve_str}  "
+            f"(largest disk {format_bytes(status.largest_disk_bytes)}, "
+            f"requires {format_bytes(status.required_reserve_bytes)} free)"
+        )
+        disks_here = sorted(
+            (d for d in group.disks if d.current_storage == storage.id),
+            key=lambda d: (d.vmid, d.device),
+        )
+        for disk in disks_here:
+            load_suffix = f"  ℓ {load_by_key[disk.key]:.2f}" if disk.key in load_by_key else ""
+            pin = f"  [pinned: {disk.pinned_reason}]" if disk.pinned_reason else ""
+            lines.append(
+                f"    {disk.key:<14} {format_bytes(disk.size_bytes):>10}  "
+                f"{disk.format:<6}{load_suffix}{pin}"
+            )
+    if group_load is not None:
+        for disk_load in group_load.disks:
+            if disk_load.flagged_reason:
+                lines.append(f"  ⚠ {disk_load.disk_key}: {disk_load.flagged_reason}")
+        if group_load.idle:
+            lines.append("  (idle: no measured I/O for this group this window)")
+    return lines
+
+
 def _render_show_load_human(
     topology: Topology,
     config: Any,
@@ -395,8 +445,6 @@ def _render_show_load_human(
     lines: list[str] = []
     for group in topology.groups:
         group_load = group_loads.get(group.name)
-        load_by_key = group_load.load_by_disk_key() if group_load else {}
-        storage_loads = {s.storage_id: s for s in group_load.storages} if group_load else {}
         reserve_statuses = {
             storage.id: compute_reserve_status(
                 storage, group.disks, config.snapshot_reserve.min_free_bytes
@@ -414,40 +462,7 @@ def _render_show_load_human(
             verdict = "ACT" if decision.act else "NO ACTION"
             header += f" → {verdict}: {decision.reason}"
         lines.append(header)
-        for storage in group.storages:
-            status = reserve_statuses[storage.id]
-            reserve_str = (
-                f"⚠ reserve short by {format_bytes(status.shortfall_bytes)}"
-                if status.violated
-                else "reserve OK"
-            )
-            load_prefix = ""
-            if storage.id in storage_loads:
-                sl = storage_loads[storage.id]
-                load_prefix = f"L={sl.load:.2f} u={sl.utilization:.2f}  "
-            lines.append(
-                f"  {storage.id}  used {format_bytes(storage.used_bytes)}/"
-                f"{format_bytes(storage.capacity_bytes)}  {load_prefix}{reserve_str}  "
-                f"(largest disk {format_bytes(status.largest_disk_bytes)}, "
-                f"requires {format_bytes(status.required_reserve_bytes)} free)"
-            )
-            disks_here = sorted(
-                (d for d in group.disks if d.current_storage == storage.id),
-                key=lambda d: (d.vmid, d.device),
-            )
-            for disk in disks_here:
-                load_suffix = f"  ℓ {load_by_key[disk.key]:.2f}" if disk.key in load_by_key else ""
-                pin = f"  [pinned: {disk.pinned_reason}]" if disk.pinned_reason else ""
-                lines.append(
-                    f"    {disk.key:<14} {format_bytes(disk.size_bytes):>10}  "
-                    f"{disk.format:<6}{load_suffix}{pin}"
-                )
-        if group_load is not None:
-            for disk_load in group_load.disks:
-                if disk_load.flagged_reason:
-                    lines.append(f"  ⚠ {disk_load.disk_key}: {disk_load.flagged_reason}")
-            if group_load.idle:
-                lines.append("  (idle: no measured I/O for this group this window)")
+        lines.extend(_render_storage_and_disk_load_lines(group, group_load, reserve_statuses))
         if group.name in load_errors:
             lines.append(f"  ⚠ per-disk load unavailable: {load_errors[group.name]}")
         lines.append("")
@@ -1107,12 +1122,31 @@ def _render_pinned_load_lines(
     return lines
 
 
+def _render_explain_data_source_line(resolved: ResolvedConfig, node_selector: str | None) -> str:
+    """``-v``'s addition to ``explain`` (section 3.4): exactly which query
+    every number above came from -- the node-scoping selector actually
+    used, and the window/rate settings the whole run was computed against.
+    A single line, not a whole section, since every group in one run
+    shares this -- it is not something to repeat per group."""
+    window = resolved.config.window
+    metrics = resolved.config.metrics
+    scope = f"{{{node_selector}}}" if node_selector else "(no node-scoping filter)"
+    return (
+        f"data source: {scope}  window {format_duration_seconds(window.lookback_seconds)} "
+        f"lookback, quantile {window.quantile:g}, rate_window "
+        f"{format_duration_seconds(metrics.rate_window_seconds)}, step "
+        f"{format_duration_seconds(metrics.step_seconds)}"
+    )
+
+
 def _render_group_explain_human(
-    group: Group, group_plan: "_GroupPlan", payback_ratio: float, warn_fraction: float
+    group: Group, group_plan: "_GroupPlan", resolved: ResolvedConfig
 ) -> list[str]:
     if group_plan.load_error is not None:
         return [f"Group {group.name} — plan unavailable: {group_plan.load_error}", ""]
     assert group_plan.decision is not None
+    payback_ratio = resolved.config.migration.payback_ratio
+    warn_fraction = resolved.config.report.warn_pinned_load_fraction
     plan_lines = _render_group_plan_human(
         group,
         {group.name: group_plan.group_load} if group_plan.group_load else {},
@@ -1130,6 +1164,19 @@ def _render_group_explain_human(
     extra: list[str] = []
     if group_plan.final_breakdown is not None:
         extra.append(_render_objective_breakdown_line(group_plan.final_breakdown))
+    # The measured load every number above derives from -- show-load's own
+    # per-storage/per-disk picture, section 4 (AGENTS.md section 5: one
+    # implementation, reused rather than a second rendering of it).
+    reserve_statuses = {
+        storage.id: compute_reserve_status(
+            storage, group.disks, resolved.config.snapshot_reserve.min_free_bytes
+        )
+        for storage in group.storages
+    }
+    extra.append("  measured load (section 4):")
+    extra.extend(
+        _render_storage_and_disk_load_lines(group, group_plan.group_load, reserve_statuses)
+    )
     extra.extend(_render_pinned_lines(group, load_by_key))
     extra.extend(_render_fragmentation_lines(group, assignment))
     achievable_spread = None
@@ -1140,8 +1187,9 @@ def _render_group_explain_human(
         )
     extra.extend(_render_pinned_load_lines(group, load_by_key, warn_fraction, achievable_spread))
 
-    if not extra:
-        return plan_lines
+    # `extra` is never empty -- the measured-load header above is
+    # unconditional -- so unlike some earlier revisions of this function,
+    # there is no "nothing to add" case left to special-case here.
     # `plan_lines` always ends with one blank separator line
     # (`_render_group_plan_human()`'s own contract) -- insert before it
     # rather than after, so groups stay separated by exactly one blank line.
@@ -1151,16 +1199,23 @@ def _render_group_explain_human(
 def _render_explain_human(
     topology: Topology,
     group_plans: dict[str, "_GroupPlan"],
-    payback_ratio: float,
-    warn_fraction: float,
+    resolved: ResolvedConfig,
+    node_selector: str | None,
+    verbose: bool,
 ) -> str:
     lines: list[str] = []
+    # One line for the whole run, not per group: every group here was
+    # computed against the identical node selector and window/rate
+    # settings, so repeating it per group would say the same thing
+    # `len(topology.groups)` times. `-v` only, per the operator's own
+    # request -- the default report already grew a measured-load section
+    # unconditionally; this is the one piece that is genuinely about
+    # *how* the numbers were fetched, not what they are.
+    if verbose:
+        lines.append(_render_explain_data_source_line(resolved, node_selector))
+        lines.append("")
     for group in topology.groups:
-        lines.extend(
-            _render_group_explain_human(
-                group, group_plans[group.name], payback_ratio, warn_fraction
-            )
-        )
+        lines.extend(_render_group_explain_human(group, group_plans[group.name], resolved))
     if topology.warnings:
         lines.append("Warnings:")
         lines.extend(f"  - {warning}" for warning in topology.warnings)
@@ -1169,7 +1224,7 @@ def _render_explain_human(
 
 
 def _render_group_explain_json(
-    group: Group, group_plan: "_GroupPlan", warn_fraction: float
+    group: Group, group_plan: "_GroupPlan", warn_fraction: float, min_free_bytes: int
 ) -> dict[str, object]:
     out = _render_group_plan_json(
         group,
@@ -1182,6 +1237,57 @@ def _render_group_explain_json(
         group_plan.load_error,
     )
     load_by_key = group_plan.group_load.load_by_disk_key() if group_plan.group_load else {}
+    # The measured load every other field above derives from -- identical
+    # shape to `show-load --json`'s own `storages`/`disks` (AGENTS.md
+    # section 5: one implementation of what a storage/disk entry looks
+    # like, not a second one that happens to agree today).
+    storage_loads = (
+        {s.storage_id: s for s in group_plan.group_load.storages} if group_plan.group_load else {}
+    )
+    flagged_by_key = (
+        {d.disk_key: d.flagged_reason for d in group_plan.group_load.disks}
+        if group_plan.group_load
+        else {}
+    )
+    reserve_statuses = {
+        storage.id: compute_reserve_status(storage, group.disks, min_free_bytes)
+        for storage in group.storages
+    }
+    storages_out = []
+    for storage in group.storages:
+        status = reserve_statuses[storage.id]
+        entry: dict[str, object] = {
+            "id": storage.id,
+            "used_bytes": storage.used_bytes,
+            "capacity_bytes": storage.capacity_bytes,
+            "foreign_used_bytes": storage.foreign_used_bytes,
+            "largest_disk_bytes": status.largest_disk_bytes,
+            "required_reserve_bytes": status.required_reserve_bytes,
+            "reserve_violated": status.violated,
+            "reserve_shortfall_bytes": status.shortfall_bytes,
+        }
+        if storage.id in storage_loads:
+            entry["load"] = storage_loads[storage.id].load
+            entry["utilization"] = storage_loads[storage.id].utilization
+        storages_out.append(entry)
+    out["storages"] = storages_out
+    disks_out = []
+    for d in group.disks:
+        disk_entry: dict[str, object] = {
+            "key": d.key,
+            "vmid": d.vmid,
+            "device": d.device,
+            "vm_name": d.vm_name,
+            "size_bytes": d.size_bytes,
+            "current_storage": d.current_storage,
+            "format": d.format,
+            "pinned_reason": d.pinned_reason,
+        }
+        if d.key in load_by_key:
+            disk_entry["load"] = load_by_key[d.key]
+            disk_entry["load_flagged_reason"] = flagged_by_key.get(d.key)
+        disks_out.append(disk_entry)
+    out["disks"] = disks_out
     breakdown = group_plan.final_breakdown
     out["objective"] = (
         {
@@ -1234,13 +1340,30 @@ def _render_group_explain_json(
 
 
 def _render_explain_json(
-    topology: Topology, group_plans: dict[str, "_GroupPlan"], warn_fraction: float
+    topology: Topology,
+    group_plans: dict[str, "_GroupPlan"],
+    resolved: ResolvedConfig,
+    node_selector: str | None,
 ) -> dict[str, object]:
+    warn_fraction = resolved.config.report.warn_pinned_load_fraction
+    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     groups_out = [
-        _render_group_explain_json(group, group_plans[group.name], warn_fraction)
+        _render_group_explain_json(group, group_plans[group.name], warn_fraction, min_free_bytes)
         for group in topology.groups
     ]
-    return {"groups": groups_out, "warnings": list(topology.warnings)}
+    window = resolved.config.window
+    metrics = resolved.config.metrics
+    # Always present, unlike the human report's `-v`-gated line: JSON has
+    # no notion of verbosity, and a consumer parsing this should not have
+    # to guess whether the query provenance was included this run.
+    query_out = {
+        "node_selector": node_selector,
+        "window_lookback_seconds": window.lookback_seconds,
+        "quantile": window.quantile,
+        "rate_window_seconds": metrics.rate_window_seconds,
+        "step_seconds": metrics.step_seconds,
+    }
+    return {"groups": groups_out, "warnings": list(topology.warnings), "query": query_out}
 
 
 def _render_execution_json(result: ExecutionResult | None) -> dict[str, object] | None:
@@ -1745,12 +1868,18 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
     """``explain`` (section 12): the identical read-only
     gate/solve/schedule/payback pipeline ``plan`` runs (``_plan_group()``,
     the shared ``_GroupPlan`` -- AGENTS.md section 5), narrated with the
-    "why" ``plan`` itself never prints: which disks are pinned and why,
-    which VMs that leaves fragmented across more than one storage, and
-    whether the pinned load is large enough that the residual imbalance is
-    structural (``report.warn_pinned_load_fraction``) rather than a
-    planning failure. Never executes anything -- exactly like ``plan``,
-    it never takes ``state.py``'s advisory lock."""
+    "why" ``plan`` itself never prints: the measured load every number
+    derives from (``show-load``'s own per-storage/per-disk section 4
+    picture, reused verbatim), which disks are pinned and why, which VMs
+    that leaves fragmented across more than one storage, and whether the
+    pinned load is large enough that the residual imbalance is structural
+    (``report.warn_pinned_load_fraction``) rather than a planning failure.
+    ``-v`` additionally names the exact node-scoping selector and window/
+    rate settings the whole run's queries were built from -- the one
+    piece of this that is about *how* the data was fetched, not what it
+    is, and shared by every group in the run rather than repeated per
+    group. Never executes anything -- exactly like ``plan``, it never
+    takes ``state.py``'s advisory lock."""
     del mode
     client = build_pve_client(resolved.config.proxmox)
     now = datetime.now(timezone.utc)
@@ -1776,12 +1905,11 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
         )
         for group in topology.groups
     }
-    warn_fraction = resolved.config.report.warn_pinned_load_fraction
 
     if args.json:
         print(
             json.dumps(
-                _render_explain_json(topology, group_plans, warn_fraction),
+                _render_explain_json(topology, group_plans, resolved, node_selector),
                 indent=2,
                 sort_keys=True,
             )
@@ -1789,7 +1917,7 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
     else:
         print(
             _render_explain_human(
-                topology, group_plans, resolved.config.migration.payback_ratio, warn_fraction
+                topology, group_plans, resolved, node_selector, verbose=args.verbose > 0
             )
         )
     return 0

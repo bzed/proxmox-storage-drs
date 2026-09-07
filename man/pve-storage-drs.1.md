@@ -47,11 +47,14 @@ the same file on every node.
 
 **explain**
 : Run the identical gate/solve/schedule/payback pipeline **plan** does, and narrate what its output
-  does not print: every disk pinned this run with its exact reason, any VM a pin leaves with disks
+  does not print: the measured load every number derives from (**show-load**'s own per-storage/
+  per-disk picture), every disk pinned this run with its exact reason, any VM a pin leaves with disks
   spread across more than one storage ("cannot fully consolidate"), the section 5.4 objective's five
   terms individually, and pinned load as a fraction of the group's total against
   *report.warn_pinned_load_fraction* -- flagging a residual imbalance likely too structural (too
-  much load pinned) for another run of **plan** to fix by itself.
+  much load pinned) for another run of **plan** to fix by itself. **-v** additionally names the
+  exact Prometheus query (node-scoping filter, window and rate settings) the whole run was
+  computed from.
 
 **verify-metrics**
 : Validate the configured metric and label names against the live Prometheus and print a sample
@@ -87,7 +90,9 @@ Global options are accepted before the command.
 : Emit the machine-readable report instead of the human-readable one.
 
 **-v**, **--verbose**
-: More detail on stderr. Repeatable.
+: More detail on stderr. Repeatable. **explain** is the one command where this also adds a line to
+  the report itself, on stdout: the exact query (node-scoping filter, window and rate settings) the
+  run was computed from.
 
 **--quiet**
 : Warnings and errors only. Intended for the systemd timer.
