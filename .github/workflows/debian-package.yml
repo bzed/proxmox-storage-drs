@@ -5,6 +5,11 @@
 # installs it and runs the autopkgtests against the installed package. The
 # build chroot has the Build-Depends available and so cannot detect a missing
 # runtime dependency; only the install-and-run step can.
+#
+# `ca-certificates` is explicit below (see tests.yml's own header for why):
+# --no-install-recommends drops it since it is only a Recommends, not a
+# Depends, of the packages here -- without it `actions/checkout`'s `git
+# fetch` over https has no trusted root store and fails outright.
 name: Debian package
 
 on:
@@ -26,7 +31,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential devscripts equivs git lintian
+            build-essential ca-certificates devscripts equivs git lintian
 
       - uses: actions/checkout@v7
 
