@@ -214,11 +214,7 @@ consistent.
   exposed on `Storage`), so every group storage is currently an eligible
   target for every movable disk. The section 14 fixture is homogeneous
   (three identically-typed storages) and does not exercise this gap either.
-- **CP-SAT/CBC coefficient scaling (section 5.5)** — belongs to
-  `optimize.py`, not yet written. `evaluate_assignment()`'s plain
-  floating-point objective is what the MILP path will need to agree with,
-  not a stand-in for its own separately-scaled integer objective.
 `heuristic.py` is wired into `cli.py`'s `plan` command, together with
 `schedule.py` (section 8's move ordering) — see `95-schedule.md` and
-`docs/manual/27-plan.md`. `explain`/`apply` remain stubs
-(`docs/manual/30-safety-and-status.md`).
+`docs/manual/27-plan.md`. `apply` is fully implemented (see `92-execute.md`);
+`explain` remains a stub (`docs/manual/30-safety-and-status.md`).

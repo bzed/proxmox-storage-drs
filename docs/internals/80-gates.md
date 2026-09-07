@@ -62,9 +62,10 @@ writer that would make it self-sustaining is not built yet.
 for the wording, rather than a second, similarly-but-not-identically
 phrased string living in `cli.py`. Its verdict now reflects real drift
 history whenever `state.json` has one, exactly like `plan`'s does — but
-`show-load` still isn't what `apply` (not yet written) will actually gate
-an execution on; it is `plan`/`apply`'s own gate evaluation, run at the
-moment a plan is built or applied, that is authoritative.
+`show-load`'s printed verdict is still not what `apply` actually gates an
+execution on; it is `plan`/`apply`'s own gate evaluation, run fresh at the
+moment a plan is built or applied, that is authoritative, not the possibly
+stale line `show-load` printed a moment (or a run) earlier.
 
 ## Cooldowns are not this module's job
 
