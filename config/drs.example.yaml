@@ -115,6 +115,22 @@ load_weights:
 
 # --------------------------------------------------------------------- groups
 # A disk may only ever move between storages listed in the SAME group.
+#
+# storages[].id may also be a `/regex/` pattern instead of a literal id --
+# both delimiters required. Every storage in the cluster whose id
+# `re.fullmatch`es it joins the group, present and future, with no config
+# edit needed when a new one shows up, and that entry's own options apply
+# to every storage it matches:
+#
+#   - id: /san-.*/            # every san-* LUN, present and future
+#     capability_weight: 1.0
+#
+# A literal entry always overrides a pattern that also matches its storage,
+# so one exception can still be pinned to different options within a
+# pattern-matched family. See IMPLEMENTATION_PLAN.md section 11.4 for the
+# full semantics (matching, precedence, validation) and
+# `pve-storage-drs verify-storages`, which prints what every pattern
+# actually matched.
 groups:
   # NOTE: this group intentionally mirrors the plan's section 14 worked example and
   # tests/fixtures/fc-tier1.yaml -- same storage names, same capability weights (all

@@ -10,6 +10,7 @@ it exactly as it would wrap the real thing.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -707,3 +708,150 @@ def test_topology_is_a_plain_container() -> None:
     topology = Topology(groups=(), warnings=("w",))
     assert topology.groups == ()
     assert topology.warnings == ("w",)
+    assert topology.pattern_expansions == ()
+    assert topology.unmanaged_storage_ids == ()
+
+
+# ------------------------------------------------------- section 11.4 patterns
+
+
+def _cluster_client(storage_defs: list[dict[str, Any]]) -> PveClient:
+    """A fake client wired for exactly the storages in `storage_defs`, one
+    node ("node1") reporting each available, empty content everywhere --
+    the section 11.4 pattern-expansion tests below only care about
+    `GET /storage` and the join, never about actual disk content."""
+    resources = [
+        {"storage": d["storage"], "node": "node1", "status": "available"} for d in storage_defs
+    ]
+    responses: dict[str, Any] = {
+        "cluster/resources": lambda type: ([] if type == "vm" else resources),
+        "storage": storage_defs,
+    }
+    for d in storage_defs:
+        sid = d["storage"]
+        responses[f"nodes/node1/storage/{sid}/status"] = {
+            "total": 10 * (1 << 40),
+            "used": 1 * (1 << 40),
+        }
+        responses[f"nodes/node1/storage/{sid}/content"] = []
+    return PveClient(fake_api(responses))
+
+
+def _rbd_def(storage: str, content: str = "images,rootdir") -> dict[str, Any]:
+    return {"storage": storage, "type": "rbd", "shared": 1, "content": content}
+
+
+def test_pattern_expands_to_every_matching_storage(tmp_path: Path) -> None:
+    config = make_config(tmp_path, groups=[{"name": "g1", "storages": [{"id": "/san-.*/"}]}])
+    client = _cluster_client([_rbd_def("san-a"), _rbd_def("san-b"), _rbd_def("san-c")])
+    topology = build_topology(client, config)
+    assert {s.id for s in topology.groups[0].storages} == {"san-a", "san-b", "san-c"}
+    assert len(topology.pattern_expansions) == 1
+    expansion = topology.pattern_expansions[0]
+    assert expansion.group_name == "g1"
+    assert expansion.pattern == "/san-.*/"
+    assert expansion.matched_ids == ("san-a", "san-b", "san-c")
+
+
+def test_pattern_matching_is_fullmatch_not_substring(tmp_path: Path) -> None:
+    # section 11.4: "/prod/" names exactly the storage `prod`; under
+    # substring semantics it would also capture `preprod`.
+    config = make_config(
+        tmp_path, groups=[{"name": "g1", "storages": [{"id": "/prod/"}, {"id": "preprod"}]}]
+    )
+    client = _cluster_client([_rbd_def("prod"), _rbd_def("preprod")])
+    topology = build_topology(client, config)
+    storages_by_id = {s.id: s for s in topology.groups[0].storages}
+    assert set(storages_by_id) == {"prod", "preprod"}
+    assert topology.pattern_expansions[0].matched_ids == ("prod",)
+
+
+def test_literal_entry_overrides_a_matching_pattern(tmp_path: Path) -> None:
+    config = make_config(
+        tmp_path,
+        groups=[
+            {
+                "name": "g1",
+                "storages": [
+                    {"id": "/san-.*/", "capability_weight": 1.0},
+                    {"id": "san-b", "capability_weight": 0.5},
+                ],
+            }
+        ],
+    )
+    client = _cluster_client([_rbd_def("san-a"), _rbd_def("san-b")])
+    topology = build_topology(client, config)
+    storages_by_id = {s.id: s for s in topology.groups[0].storages}
+    assert storages_by_id["san-a"].capability_weight == 1.0  # from the pattern
+    assert storages_by_id["san-b"].capability_weight == 0.5  # literal wins over the pattern
+
+
+def test_two_patterns_matching_the_same_storage_is_a_hard_error(tmp_path: Path) -> None:
+    config = make_config(
+        tmp_path,
+        groups=[{"name": "g1", "storages": [{"id": "/san-.*/"}, {"id": "/.*-a/"}]}],
+    )
+    client = _cluster_client([_rbd_def("san-a"), _rbd_def("san-b")])
+    with pytest.raises(TopologyError, match="matched by two patterns"):
+        build_topology(client, config)
+
+
+def test_pattern_matching_nothing_raises(tmp_path: Path) -> None:
+    config = make_config(
+        tmp_path, groups=[{"name": "g1", "storages": [{"id": "/nope-.*/"}, {"id": "san-b"}]}]
+    )
+    client = _cluster_client([_rbd_def("san-a"), _rbd_def("san-b")])
+    with pytest.raises(TopologyError, match="matches no storage"):
+        build_topology(client, config)
+
+
+def test_group_with_fewer_than_two_storages_after_expansion_raises(tmp_path: Path) -> None:
+    config = make_config(tmp_path, groups=[{"name": "g1", "storages": [{"id": "/only-.*/"}]}])
+    client = _cluster_client([_rbd_def("only-a"), _rbd_def("san-b")])
+    with pytest.raises(TopologyError, match="at least 2"):
+        build_topology(client, config)
+
+
+def test_cross_group_pattern_and_literal_collision_raises(tmp_path: Path) -> None:
+    config = make_config(
+        tmp_path,
+        groups=[
+            {"name": "g1", "storages": [{"id": "/san-.*/"}]},
+            {"name": "g2", "storages": [{"id": "san-a"}, {"id": "san-c"}]},
+        ],
+    )
+    client = _cluster_client([_rbd_def("san-a"), _rbd_def("san-b"), _rbd_def("san-c")])
+    with pytest.raises(TopologyError, match="san-a.*matched by both group"):
+        build_topology(client, config)
+
+
+def test_unmanaged_storage_ids_lists_storages_matched_by_no_group(tmp_path: Path) -> None:
+    config = make_config(tmp_path)  # g1: literal san-a, san-b
+    client = _cluster_client([_rbd_def("san-a"), _rbd_def("san-b"), _rbd_def("san-c")])
+    topology = build_topology(client, config)
+    assert topology.unmanaged_storage_ids == ("san-c",)
+
+
+def test_pattern_matched_storage_skips_the_images_content_check(tmp_path: Path) -> None:
+    # section 11.4's closing note: unlike a literal entry, a pattern match
+    # is not required to carry "images" -- a balance-quality concern the
+    # operator is warned about in the plan, not a hard error here.
+    config = make_config(tmp_path, groups=[{"name": "g1", "storages": [{"id": "/san-.*/"}]}])
+    client = _cluster_client(
+        [_rbd_def("san-a"), _rbd_def("san-b"), _rbd_def("san-iso", content="iso")]
+    )
+    topology = build_topology(client, config)
+    assert {s.id for s in topology.groups[0].storages} == {"san-a", "san-b", "san-iso"}
+
+
+def test_pattern_expansion_is_logged_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = make_config(tmp_path, groups=[{"name": "g1", "storages": [{"id": "/san-.*/"}]}])
+    client = _cluster_client([_rbd_def("san-a"), _rbd_def("san-b")])
+    with caplog.at_level(logging.INFO):
+        build_topology(client, config)
+    assert any(
+        r.levelno == logging.INFO and "san-a" in r.message and "san-b" in r.message
+        for r in caplog.records
+    )

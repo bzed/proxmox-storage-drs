@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Build the disk/storage/group model. See IMPLEMENTATION_PLAN.md section 3.5/3.6/3.7/5.1/5.3 (C2).
+"""Build the disk/storage/group model. See IMPLEMENTATION_PLAN.md sections
+3.5/3.6/3.7/5.1/5.3 (C2)/11.4.
 
 This module joins ``pve.py``'s API responses with the configured
 ``groups`` into the per-group `D`/`S` sets the rest of the engine (the load
@@ -9,6 +10,13 @@ itself and never touches Prometheus -- it takes a already-constructed
 :class:`~proxmox_storage_drs.pve.PveClient` and reads through it, once, per
 section 3.5's "a per-run topology cache" (this whole module's output *is*
 that cache; nothing here fetches twice).
+
+It is also where every ``groups[].storages[].id`` written as a ``/…/``
+pattern (section 11.4) gets expanded into the real storage ids it matches
+in this cluster -- ``_expand_and_validate_groups`` and friends, below.
+Nothing past that point (``D``/``S``, cooldown keys, `state.json`) ever
+sees a pattern; every one of them is a real, expanded storage id by
+construction.
 
 Terminology, matching the plan exactly: ``D`` is *every* disk this module
 places into a group, pinned or not (section 5.1's own definition: "movable
@@ -21,17 +29,26 @@ or a disk whose current storage is not in any configured group) is what
 
 from __future__ import annotations
 
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from proxmox_storage_drs.config import Config, GroupConfig, StorageConfig
+from proxmox_storage_drs.config import (
+    Config,
+    GroupConfig,
+    StorageConfig,
+    is_storage_pattern,
+    storage_pattern_text,
+)
 from proxmox_storage_drs.exceptions import TopologyError
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.state import State, active_disk_cooldowns, empty_state
 from proxmox_storage_drs.units import format_duration_seconds
+
+logger = logging.getLogger(__name__)
 
 # Section 3.5's disk-key regex, verbatim. Every bus counts (AGENTS.md section
 # 6 domain rule 8) -- a regex that only matched scsi* would silently
@@ -148,11 +165,33 @@ class Group:
 
 
 @dataclass(frozen=True, slots=True)
+class PatternExpansion:
+    """One ``/…/`` storage pattern entry and what it matched this run
+    (section 11.4). Carried on :class:`Topology` for ``verify-storages``
+    (section 3.5) to print, and logged at INFO as it is computed --
+    "which storages a pattern matches is a property of the cluster, not of
+    the file", so the expansion is always visible, never silent.
+    """
+
+    group_name: str
+    pattern: str  # the raw ``/…/`` entry, e.g. ``"/san-.*/"``
+    matched_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Topology:
-    """The whole cluster's worth of groups, as seen by this run."""
+    """The whole cluster's worth of groups, as seen by this run.
+
+    By the time anything reaches ``groups``, every ``/…/`` storage pattern
+    (section 11.4) has already been expanded into real storage ids --
+    ``pattern_expansions`` is the record of that expansion, kept only for
+    logging/display, never consulted by any later stage.
+    """
 
     groups: tuple[Group, ...]
     warnings: tuple[str, ...]
+    pattern_expansions: tuple[PatternExpansion, ...] = ()
+    unmanaged_storage_ids: tuple[str, ...] = ()
 
 
 def _resolve_reserve_factor(storage_cfg: StorageConfig, config: Config) -> float:
@@ -179,35 +218,163 @@ def _pick_active_node(storage_id: str, storage_resources: list[dict[str, Any]]) 
     raise TopologyError(f"storage {storage_id!r} is not reported active on any node")
 
 
-def _validate_group_storages(
+def _match_pattern_entries(
+    group: GroupConfig, sorted_storage_ids: list[str]
+) -> tuple[dict[str, StorageConfig], list[PatternExpansion]]:
+    """Match every ``/…/`` entry in ``group`` against the cluster's storage
+    ids (section 11.4: ``re.fullmatch``, case-sensitive -- the pattern must
+    match the *entire* id).
+
+    Returns ``by_id``: storage id -> the pattern's effective
+    :class:`StorageConfig` (``id`` rewritten to the real storage id) for
+    every storage some pattern in this group matched, and one
+    :class:`PatternExpansion` per pattern entry. Raises
+    :class:`TopologyError` if a pattern matches zero storages -- handled
+    exactly like a literal id that does not exist, since a typo is the
+    likelier cause -- or if two patterns in the same group match the same
+    storage, where which entry's options should apply would be arbitrary.
+    """
+    by_id: dict[str, StorageConfig] = {}
+    claimed_by: dict[str, str] = {}
+    expansions: list[PatternExpansion] = []
+    for storage_cfg in group.storages:
+        if not is_storage_pattern(storage_cfg.id):
+            continue
+        matcher = re.compile(storage_pattern_text(storage_cfg.id))
+        matched = [sid for sid in sorted_storage_ids if matcher.fullmatch(sid)]
+        expansions.append(
+            PatternExpansion(
+                group_name=group.name, pattern=storage_cfg.id, matched_ids=tuple(matched)
+            )
+        )
+        if not matched:
+            raise TopologyError(
+                f"group {group.name!r} storage pattern {storage_cfg.id!r} matches no "
+                "storage in this cluster"
+            )
+        for sid in matched:
+            other = claimed_by.get(sid)
+            if other is not None and other != storage_cfg.id:
+                raise TopologyError(
+                    f"group {group.name!r}: storage {sid!r} is matched by two patterns, "
+                    f"{other!r} and {storage_cfg.id!r} -- which entry's options should "
+                    "apply would be arbitrary"
+                )
+            claimed_by[sid] = storage_cfg.id
+            by_id[sid] = StorageConfig(
+                id=sid,
+                capability_weight=storage_cfg.capability_weight,
+                reserve_factor=storage_cfg.reserve_factor,
+                saturation_load=storage_cfg.saturation_load,
+            )
+    return by_id, expansions
+
+
+def _expand_group(
+    group: GroupConfig, definitions_by_id: dict[str, dict[str, Any]]
+) -> tuple[tuple[StorageConfig, ...], list[PatternExpansion], list[str]]:
+    """Expand one group's ``storages[]`` into the real storages it names
+    (section 11.4).
+
+    Literal entries are validated exactly as before patterns existed --
+    must exist, must have ``images`` in their content list (section 11.1:
+    fatal, not a warning, since a typo should not silently exclude a
+    storage), not-``shared`` is a warning only. A literal entry always wins
+    over a pattern that also matches its storage: pattern as the default,
+    literal as the documented exception. Pattern-matched storages do *not*
+    get that same content-type check -- an operator who names a storage
+    explicitly gets a hard error for a typo, but a pattern that happens to
+    pick up an unusable LUN is a balance-quality concern, not a safety one
+    ((C2) still keeps any disk from ever landing there); see section 11.4's
+    closing note.
+    """
+    sorted_ids = sorted(definitions_by_id)
+    by_id, expansions = _match_pattern_entries(group, sorted_ids)
+    warnings: list[str] = []
+    for storage_cfg in group.storages:
+        if is_storage_pattern(storage_cfg.id):
+            continue
+        definition = definitions_by_id.get(storage_cfg.id)
+        if definition is None:
+            raise TopologyError(
+                f"group {group.name!r} references storage {storage_cfg.id!r}, "
+                "which does not exist in this cluster"
+            )
+        content_types = {c.strip() for c in definition.get("content", "").split(",")}
+        if "images" not in content_types:
+            raise TopologyError(
+                f"group {group.name!r} storage {storage_cfg.id!r} does not have "
+                f"'images' in its content list ({sorted(content_types)}); "
+                "it can never hold a VM disk"
+            )
+        if not definition.get("shared"):
+            warnings.append(
+                f"group {group.name!r} storage {storage_cfg.id!r} is not marked "
+                "shared; migrations may only work for VMs already on its node"
+            )
+        by_id[storage_cfg.id] = storage_cfg  # a literal entry always overrides a pattern match
+
+    if len(by_id) < 2:
+        raise TopologyError(
+            f"group {group.name!r} matches only {len(by_id)} storage(s) after pattern "
+            "expansion; a group needs at least 2 to balance"
+        )
+    expanded = tuple(by_id[sid] for sid in sorted(by_id))
+    return expanded, expansions, warnings
+
+
+def _check_cross_group_uniqueness(expanded_by_group: dict[str, tuple[StorageConfig, ...]]) -> None:
+    """No storage may end up in two groups after expansion (section 11.4 --
+    the same rule section 11.1 already applies to literal ids). A disk's
+    group would otherwise be ambiguous. Literal-vs-literal collisions are
+    already caught at config load time (``config._check_group_storage_membership``);
+    this is what additionally catches a pattern in one group and a literal
+    -- or another pattern -- in another matching the very same real
+    storage, which config.py cannot see without the cluster's inventory.
+    """
+    owner: dict[str, str] = {}
+    for group_name, storages in expanded_by_group.items():
+        for storage_cfg in storages:
+            other = owner.get(storage_cfg.id)
+            if other is not None and other != group_name:
+                raise TopologyError(
+                    f"storage {storage_cfg.id!r} is matched by both group {other!r} "
+                    f"and group {group_name!r} after pattern expansion"
+                )
+            owner[storage_cfg.id] = group_name
+
+
+def _expand_and_validate_groups(
     groups: tuple[GroupConfig, ...], definitions_by_id: dict[str, dict[str, Any]]
-) -> list[str]:
-    """Section 11.1: "storage ids exist in the cluster" -- fatal, not a
-    warning, per that rule's own rationale (a typo silently excludes a
-    storage rather than erroring). Returns non-fatal warnings for storages
-    that exist but look questionable (not shared)."""
+) -> tuple[dict[str, tuple[StorageConfig, ...]], tuple[PatternExpansion, ...], list[str]]:
+    """Section 11.4: expand every group's ``storages[]`` against the live
+    cluster and validate the result. Returns the expanded storages per
+    group, every pattern's expansion (for logging and ``verify-storages``),
+    and non-fatal warnings.
+    """
+    expanded_by_group: dict[str, tuple[StorageConfig, ...]] = {}
+    all_expansions: list[PatternExpansion] = []
     warnings: list[str] = []
     for group in groups:
-        for storage_cfg in group.storages:
-            definition = definitions_by_id.get(storage_cfg.id)
-            if definition is None:
-                raise TopologyError(
-                    f"group {group.name!r} references storage {storage_cfg.id!r}, "
-                    "which does not exist in this cluster"
-                )
-            content_types = {c.strip() for c in definition.get("content", "").split(",")}
-            if "images" not in content_types:
-                raise TopologyError(
-                    f"group {group.name!r} storage {storage_cfg.id!r} does not have "
-                    f"'images' in its content list ({sorted(content_types)}); "
-                    "it can never hold a VM disk"
-                )
-            if not definition.get("shared"):
-                warnings.append(
-                    f"group {group.name!r} storage {storage_cfg.id!r} is not marked "
-                    "shared; migrations may only work for VMs already on its node"
-                )
-    return warnings
+        expanded, expansions, group_warnings = _expand_group(group, definitions_by_id)
+        expanded_by_group[group.name] = expanded
+        all_expansions.extend(expansions)
+        warnings.extend(group_warnings)
+    _check_cross_group_uniqueness(expanded_by_group)
+    for expansion in all_expansions:
+        logger.info(
+            "group %s: storage pattern %s matched %s",
+            expansion.group_name,
+            expansion.pattern,
+            ", ".join(expansion.matched_ids),
+            extra={
+                "event": "storage_pattern_expanded",
+                "group": expansion.group_name,
+                "pattern": expansion.pattern,
+                "matched_ids": list(expansion.matched_ids),
+            },
+        )
+    return expanded_by_group, tuple(all_expansions), warnings
 
 
 def _default_format(storage_type: str) -> str:
@@ -246,14 +413,21 @@ class _ClusterData:
     definitions_by_id: dict[str, dict[str, Any]]
     content_by_id: dict[str, list[dict[str, Any]]]
     status_by_id: dict[str, dict[str, Any]]
+    expanded_by_group: dict[str, tuple[StorageConfig, ...]]
 
 
-def _fetch_cluster_data(client: PveClient, config: Config) -> tuple[_ClusterData, list[str]]:
-    storage_group_of = {
-        storage_cfg.id: group.name for group in config.groups for storage_cfg in group.storages
-    }
+def _fetch_cluster_data(
+    client: PveClient, config: Config
+) -> tuple[_ClusterData, list[str], tuple[PatternExpansion, ...]]:
     definitions_by_id = {d["storage"]: d for d in client.storage_definitions()}
-    warnings = _validate_group_storages(config.groups, definitions_by_id)
+    expanded_by_group, pattern_expansions, warnings = _expand_and_validate_groups(
+        config.groups, definitions_by_id
+    )
+    storage_group_of = {
+        storage_cfg.id: group_name
+        for group_name, storages in expanded_by_group.items()
+        for storage_cfg in storages
+    }
 
     # storage_resources() is fetched exactly once here, never per-storage --
     # section 3.5's whole point in specifying a per-run cache.
@@ -270,8 +444,9 @@ def _fetch_cluster_data(client: PveClient, config: Config) -> tuple[_ClusterData
         definitions_by_id=definitions_by_id,
         content_by_id=content_by_id,
         status_by_id=status_by_id,
+        expanded_by_group=expanded_by_group,
     )
-    return data, warnings
+    return data, warnings, pattern_expansions
 
 
 def _pin_reason(
@@ -451,7 +626,7 @@ def _build_storages(
     referenced_volids: dict[str, set[str]],
 ) -> tuple[Storage, ...]:
     storages: list[Storage] = []
-    for storage_cfg in group_cfg.storages:
+    for storage_cfg in data.expanded_by_group[group_cfg.name]:
         sid = storage_cfg.id
         definition = data.definitions_by_id[sid]
         status = data.status_by_id[sid]
@@ -507,7 +682,7 @@ def build_topology(
         state = empty_state()
     if now is None:
         now = datetime.now(timezone.utc)
-    data, warnings = _fetch_cluster_data(client, config)
+    data, warnings, pattern_expansions = _fetch_cluster_data(client, config)
 
     disks_by_group: dict[str, list[Disk]] = {group.name: [] for group in config.groups}
     referenced_volids: dict[str, set[str]] = {sid: set() for sid in data.storage_group_of}
@@ -553,4 +728,13 @@ def build_topology(
         )
         for group_cfg in config.groups
     )
-    return Topology(groups=groups, warnings=tuple(warnings))
+    # Section 11.4: the same "ungrouped, not managed" visibility (C2) gives
+    # per-disk warnings above, but at the storage level and independent of
+    # whether any disk currently happens to be on it.
+    unmanaged_storage_ids = tuple(sorted(set(data.definitions_by_id) - set(data.storage_group_of)))
+    return Topology(
+        groups=groups,
+        warnings=tuple(warnings),
+        pattern_expansions=pattern_expansions,
+        unmanaged_storage_ids=unmanaged_storage_ids,
+    )

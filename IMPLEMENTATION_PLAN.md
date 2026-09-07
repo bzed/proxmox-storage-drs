@@ -102,10 +102,10 @@ The join between them is the disk identity `(vmid, device)`, which both sides ex
 
 | Module | Responsibility |
 |---|---|
-| `config.py` | Load/validate YAML, defaults, unit parsing (`24h`, `200MiB`) |
+| `config.py` | Load/validate YAML, defaults, unit parsing (`24h`, `200MiB`), `/…/` storage patterns (§11.4) |
 | `metrics.py` | Prometheus client, PromQL construction, `verify-metrics` |
 | `pve.py` | API client: auth, topology, storage status, `move_disk`, task polling |
-| `topology.py` | Build the disk/storage/group model, eligibility rules |
+| `topology.py` | Build the disk/storage/group model, eligibility rules, storage-pattern expansion (§11.4) |
 | `loadmodel.py` | Reduce raw series to the scalar load vector `ℓ` |
 | `forecast.py` | Pluggable forecaster (quantile, seasonal-naive, Holt-Winters) |
 | `optimize.py` | MILP formulation (CP-SAT / CBC) |
@@ -468,7 +468,10 @@ silently.
 relying on any plan. For every storage in every group it reports `type`, `shared`, `content`,
 `saferemove`, `saferemove_throughput`, total/used, and the largest disk currently on it; then it
 derives the implied wipe time `z_max / saferemove_throughput` and warns when that exceeds
-`migration.max_single_move_duration` or `gates.cooldown_per_storage` (§9.3). This is the command that
+`migration.max_single_move_duration` or `gates.cooldown_per_storage` (§9.3). It also prints the
+expansion of every `/…/` storage pattern (§11.4) — the entry and the storages it matched — and
+lists cluster storages matched by no group, so an over-broad or dead pattern is visible before any
+plan relies on it. This is the command that
 turns "why has this balancer been stuck for two days" into a line of output before the first move.
 
 **Read-path cost and concurrency.** The topology read is `O(number of VMs)`: PVE has no batch
@@ -1663,7 +1666,7 @@ requirement-to-setting mapping:
 
 | Requirement | Setting |
 |---|---|
-| Storage groups VMs may not leave | `groups[].storages[]` |
+| Storage groups VMs may not leave | `groups[].storages[]` — literal ids or `/regex/` patterns (§11.4) |
 | 2× largest disk free for snapshots | `snapshot_reserve.factor` (default `2.0`), per-storage override |
 | Min % changed traffic before migrating | `gates.drift_threshold` (default `0.10`) |
 | % I/O difference across the group | `gates.imbalance_threshold` |
@@ -1687,9 +1690,11 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | Rule | Rationale |
 |---|---|
 | `schema_version` major matches | Forward compatibility |
-| Every group non-empty, ≥ 2 storages | A one-storage group has nothing to balance |
-| **No storage appears in two groups** | A disk's group would be ambiguous |
-| Storage ids exist in the cluster | Catches typos before they silently exclude disks |
+| Every group non-empty, ≥ 2 storages **after pattern expansion** (§11.4) | A one-storage group has nothing to balance; with patterns the count that matters is storages matched, not entries written |
+| **No storage appears in two groups**, after pattern expansion | A disk's group would be ambiguous; a pattern matching a storage another group also names is the same defect |
+| Storage ids exist in the cluster; every `/…/` pattern matches at least one storage (§11.4) | Catches typos before they silently exclude disks or silently shrink a group |
+| Every `/…/` pattern compiles as a Python regular expression, checked at load time | A malformed pattern must fail with the compiler's own message, not crash at match time (§11.4) |
+| Within a group, no storage is matched by two pattern entries | Which entry's options apply would be arbitrary; a literal entry overriding a pattern is allowed and is not this error (§11.4) |
 | `capability_weight > 0` | Appears in a denominator |
 | `reserve_factor ≥ 0`, `min_free_bytes ≥ 0` | Negative reserve is meaningless |
 | `0 ≤ drift_threshold ≤ 1`, `0 ≤ imbalance_threshold ≤ 1` | They are ratios |
@@ -1773,6 +1778,75 @@ must be answerable from it.
 goes through the same validation (§11.1), because a knob that is only checked on one of its two
 paths is a knob that is not checked.
 
+### 11.4 Storage name patterns in `groups[].storages[]`
+
+A `storages[]` entry may name storages by regular expression rather than by literal id: an `id`
+value that both begins and ends with `/` is a pattern, and the text between the slashes must
+compile as a Python `re` expression. `/san-.*/` is a pattern; `san-a` stays a literal id and
+behaves exactly as before. The form is additive — no `schema_version` bump — and it cannot collide
+with a literal one: PVE storage IDs never contain `/`, so a value wrapped in slashes can only
+have been meant as a pattern.
+
+```yaml
+groups:
+  - name: fc-tier1
+    storages:
+      - id: /san-.*/            # pattern: every san-* LUN, present and future
+        capability_weight: 1.0   # the entry's options apply to EVERY storage it matches
+      - id: san-b               # literal: takes precedence over the pattern above
+        capability_weight: 0.5  # the documented exception for one slower array
+```
+
+Four rules, each shaped so that the one new failure mode — a pattern that matches too much or
+nothing at all — stays checkable instead of silent:
+
+- **Matching is `re.fullmatch`, case-sensitive.** The pattern must match the *entire* storage id.
+  `/prod/` names exactly the storage `prod`; under substring semantics it would also capture
+  `preprod`, which is the classic too-greedy pattern and the reason whole-id matching is the
+  rule. Python `re` syntax throughout: inline flags such as `(?i)` work, and there is no flag
+  suffix after the closing slash.
+- **The entry's options apply to every storage it matches.** A pattern entry accepts the same
+  per-storage options as a literal one (`capability_weight`, `reserve_factor`,
+  `saturation_load`), and every matched storage inherits them. This is the point of the feature:
+  one entry weights or reserves a whole LUN family.
+- **A literal entry beats a pattern.** Within one group, a storage named by a literal entry uses
+  the literal's options even when a pattern also matches it — pattern as the default, literal as
+  the exception, and deliberately not an error, because without this rule a catch-all pattern
+  would make it impossible to single out one member of its own group. Two *patterns* matching
+  the same storage in one group are a hard error (§11.1): which entry's options should apply
+  would be arbitrary, and the config refuses to guess. Precedence is semantic, not positional —
+  entry order never matters.
+- **Across groups, disjointness is checked on the expanded set.** A storage matched — literally
+  or by pattern — by entries of two different groups is a hard error naming the storage and both
+  entries. A disk's group must stay unambiguous, exactly as §11.1 already demands for literals.
+
+**Expansion happens at run start, against the live cluster.** Every pattern is matched once per
+run against the storage inventory (`GET /cluster/resources?type=storage`, §3.5), in the same step
+that checks literal ids for existence, and the result is part of the per-run topology cache.
+Which storages a pattern matches is a property of the cluster, not of the file: a LUN added to
+the cluster joins its group on the next run with no config edit — half the reason to use a
+pattern — and a pattern that matches nothing is handled exactly like a literal id that does not
+exist, a hard error before anything is planned, because a typo is the likelier cause and a
+silently shrunken group the likelier consequence. Nothing downstream ever sees a pattern: `S`
+(§5.1), the (C2) eligibility pass, cooldown keys and the `state.json` keys of §11.2 all carry
+real, expanded storage ids. Those keys embed the group name, so a later config change that moves
+a storage into a different group leaves its old cooldown keys as stale entries that simply stop
+matching — harmless. Group names themselves, `--group` (§11.3) and the `exclude.*` lists stay
+literal; only `storages[]` entries accept the `/…/` form.
+
+**Validation and visibility.** `config.py` compiles every pattern at load time and reports a
+malformed one with the compiler's own message; the zero-match and overlap rules run every run
+once the inventory is loaded, because they compare the file against the cluster. Because an
+over-broad pattern is the one new way to misconfigure a group, the expansion is always visible:
+every run logs `entry → matched ids` at INFO, and `pve-storage-drs verify-storages` (§3.5) prints
+the expansion next to each storage's properties and lists cluster storages matched by no group —
+the same "ungrouped, not managed" visibility (C2) gives `show-load`. One consequence to keep in
+mind when writing a pattern: a matched storage becomes a full member of the group, exactly as a
+literal entry, and `u*` (§5.3 C6) divides by every member's `c_s` — so a pattern that captures an
+ISO-only or otherwise unusable LUN skews the balance target even though (C2) keeps any disk from
+ever landing there. Eligibility is unchanged and still per storage; safety never depends on the
+pattern being precise, but the quality of the balance does.
+
 ---
 
 ## 12. Implementation phases
@@ -1782,7 +1856,7 @@ Each phase is independently testable and useful on its own.
 | # | Phase | Done when |
 |---|---|---|
 | 1 | `config.py`, `metrics.py`, `pve-storage-drs verify-metrics` | Real metric/label names confirmed against the live Prometheus; per-disk load printed |
-| 2 | `pve.py`, `topology.py` | `pve-storage-drs show-load` prints every storage with its disks (all buses), sizes, loads and reserve status; pinned disks flagged with their reason; `pve-storage-drs verify-storages` reports saferemove and implied wipe times |
+| 2 | `pve.py`, `topology.py` | `pve-storage-drs show-load` prints every storage with its disks (all buses), sizes, loads and reserve status; pinned disks flagged with their reason; `pve-storage-drs verify-storages` reports saferemove, implied wipe times and the expansion of every `/…/` storage pattern (§11.4) |
 | 3 | `loadmodel.py` + gates | Correct act/no-act decision per group, with the reasoning shown |
 | 4 | `heuristic.py` + `schedule.py` | End-to-end plan in `dry-run`, ordered and transient-feasible; reproduces `expected_order` and `expected_final_reserve` in the §14 fixture |
 | 5 | `payback.py` | Plans rejected/trimmed on cost grounds, arithmetic shown |
@@ -1817,6 +1891,8 @@ production fallback for large groups. Do not start with the solver.
 | Storage already violating the reserve | Soft slack `r_s` keeps the model feasible; violation bypasses gates and is scheduled first |
 | Two DRS instances running | Advisory lock in `state.json` plus a startup scan for in-flight `move_disk` UPIDs owned by the DRS user. The lock is node-local; only the UPID scan crosses the cluster (§11) |
 | Config edited mid-run, cluster-wide | The config is read once at startup and never re-read; the resolved path and its SHA-256 are logged, so a plan can be traced to the exact file that produced it |
+| Storage `/…/` pattern matches nothing in the cluster | Hard error before planning, exactly like a literal id that does not exist: the likelier cause is a typo, and the alternative is a silently shrunken group (§11.4) |
+| Cluster storage set changes after the config is written | Patterns are re-expanded against the live inventory every run, so a new LUN joins its group with no config edit; the expansion is logged and shown by `verify-storages` (§11.4) |
 | Solver infeasible or timing out | Fall back to the heuristic; never emit a partial/unvalidated assignment |
 | `bwlimit` misunderstood | It is **KiB/s** in the API; config is bytes/s and must be converted |
 | PVE Dynamic Load Balancer moves a VM mid-plan | Node re-fetched before every move (§9.2); mismatch triggers a bounded re-plan |
@@ -2049,6 +2125,7 @@ bug waiting to happen; this table is the audit.
 | `window.lookback` | §3.4 reduction range |
 | `window.quantile` / `upper_quantile` | §10.1, point estimate (the actual decision statistic) vs. the bound (§7.3 saturation guard only — see the "As built" note in §10.1) |
 | `window.min_coverage` | §3.4, disk data rejection |
+| `groups[].storages[].id` in pattern form (`/…/`) | §11.4 expansion into group membership; the entry's options apply to every matched storage |
 | `groups[].storages[].capability_weight` | §4, `u_s = L_s / c_s` |
 | `snapshot_reserve.factor` | §5.3 (C5), `R_s ≥ f_s·Z_s` |
 | `snapshot_reserve.min_free_bytes` | §5.3 (C5), `R_s ≥ min_free_bytes_s` |
