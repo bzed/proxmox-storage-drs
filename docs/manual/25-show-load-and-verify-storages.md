@@ -58,9 +58,12 @@ as if this were the very first run — the drift gate is skipped outright
 (section 6's own degenerate-case rule), not "treated as zero drift" — so
 its verdict falls straight through to a reserve override or an imbalance
 check, exactly as before this was wired up. `docs/internals/80-gates.md`
-and `docs/internals/15-state.md` have the detail; nothing yet *writes*
-`last_balance` (that needs `execute.py`, not yet written), so this stays
-the common case until a migration has actually run.
+and `docs/internals/15-state.md` have the detail; `apply` writes
+`last_balance` once a run actually executes at least one move (`confirm`
+or `auto` mode -- `dry-run` only simulates, so it never triggers this), so
+this first-run behaviour is only the common case for a group before its
+first successful migration -- after that, `show-load`'s drift line
+reflects real history.
 
 A pinned disk carries `[pinned: <reason>]` after its size and format —
 `snapshots present (N)`, `locked: <lock>`, `excluded by config`,

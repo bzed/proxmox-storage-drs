@@ -715,13 +715,24 @@ def test_topology_is_a_plain_container() -> None:
 # ------------------------------------------------------- section 11.4 patterns
 
 
-def _cluster_client(storage_defs: list[dict[str, Any]]) -> PveClient:
+def _cluster_client(
+    storage_defs: list[dict[str, Any]], inactive: frozenset[str] = frozenset()
+) -> PveClient:
     """A fake client wired for exactly the storages in `storage_defs`, one
     node ("node1") reporting each available, empty content everywhere --
     the section 11.4 pattern-expansion tests below only care about
-    `GET /storage` and the join, never about actual disk content."""
+    `GET /storage` and the join, never about actual disk content.
+
+    `inactive` names storages with a definition but no entry in
+    `GET /cluster/resources?type=storage` at all -- the shape of a
+    disabled storage (REVIEW.md U-01), still validated for content/status
+    below since `_pick_active_node`/`_build_storages` are never reached for
+    a storage this module's own expansion checks reject first.
+    """
     resources = [
-        {"storage": d["storage"], "node": "node1", "status": "available"} for d in storage_defs
+        {"storage": d["storage"], "node": "node1", "status": "available"}
+        for d in storage_defs
+        if d["storage"] not in inactive
     ]
     responses: dict[str, Any] = {
         "cluster/resources": lambda type: ([] if type == "vm" else resources),
@@ -803,6 +814,32 @@ def test_pattern_matching_nothing_raises(tmp_path: Path) -> None:
     client = _cluster_client([_rbd_def("san-a"), _rbd_def("san-b")])
     with pytest.raises(TopologyError, match="matches no storage"):
         build_topology(client, config)
+
+
+def test_pattern_matching_a_disabled_storage_raises_naming_the_pattern(tmp_path: Path) -> None:
+    # REVIEW.md U-01: a storage with a `GET /storage` definition but no
+    # entry in the resource inventory (disabled) must not silently join a
+    # group, and the error must name the pattern that pulled it in, not
+    # `_pick_active_node`'s generic "not reported active" three steps
+    # later.
+    config = make_config(tmp_path, groups=[{"name": "g1", "storages": [{"id": "/san-.*/"}]}])
+    client = _cluster_client(
+        [_rbd_def("san-a"), _rbd_def("san-b"), _rbd_def("san-z")], inactive=frozenset({"san-z"})
+    )
+    with pytest.raises(TopologyError, match=r"pattern '/san-\.\*/' matched storage 'san-z'"):
+        build_topology(client, config)
+
+
+def test_pattern_matching_an_unshared_storage_still_warns(tmp_path: Path) -> None:
+    # REVIEW.md U-03: the not-shared warning is a balance-quality signal,
+    # not a typo-safety one, so unlike the `images` content check it
+    # applies uniformly whether a literal or a pattern named the storage.
+    config = make_config(tmp_path, groups=[{"name": "g1", "storages": [{"id": "/san-.*/"}]}])
+    client = _cluster_client(
+        [{"storage": "san-a", "type": "rbd", "shared": 0, "content": "images"}, _rbd_def("san-b")]
+    )
+    topology = build_topology(client, config)
+    assert any("san-a" in w and "not marked shared" in w for w in topology.warnings)
 
 
 def test_group_with_fewer_than_two_storages_after_expansion_raises(tmp_path: Path) -> None:

@@ -1821,13 +1821,18 @@ nothing at all — stays checkable instead of silent:
   entries. A disk's group must stay unambiguous, exactly as §11.1 already demands for literals.
 
 **Expansion happens at run start, against the live cluster.** Every pattern is matched once per
-run against the storage inventory (`GET /cluster/resources?type=storage`, §3.5), in the same step
-that checks literal ids for existence, and the result is part of the per-run topology cache.
-Which storages a pattern matches is a property of the cluster, not of the file: a LUN added to
-the cluster joins its group on the next run with no config edit — half the reason to use a
-pattern — and a pattern that matches nothing is handled exactly like a literal id that does not
-exist, a hard error before anything is planned, because a typo is the likelier cause and a
-silently shrunken group the likelier consequence. Nothing downstream ever sees a pattern: `S`
+run against the storage definitions (`GET /storage`, §3.5 — the same call that already validates
+a literal id's existence and content type, so pattern and literal ids are checked against one
+consistent source), in the same step that checks literal ids for existence, and the result is
+part of the per-run topology cache. A storage a pattern matches that has a definition but is
+reported active by no node (disabled) is also a hard error, naming the pattern and the storage —
+the same fail-safe outcome a literal reference to it would hit, but with a message that does not
+require the operator to already know a pattern was involved. Which storages a pattern matches is
+a property of the cluster, not of the file: a LUN added to the cluster joins its group on the
+next run with no config edit — half the reason to use a pattern — and a pattern that matches
+nothing is handled exactly like a literal id that does not exist, a hard error before anything is
+planned, because a typo is the likelier cause and a silently shrunken group the likelier
+consequence. Nothing downstream ever sees a pattern: `S`
 (§5.1), the (C2) eligibility pass, cooldown keys and the `state.json` keys of §11.2 all carry
 real, expanded storage ids. Those keys embed the group name, so a later config change that moves
 a storage into a different group leaves its old cooldown keys as stale entries that simply stop

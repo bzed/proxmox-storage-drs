@@ -80,6 +80,18 @@ saturation wiring; a stale `96-payback.md` paragraph that would reintroduce the 
 divergent semantics for the `max_migrations_per_run` counter), one Info. **Section 20** records
 how all seven were resolved.
 
+A **twelfth pass** (section 21) reviews everything after the T-fixes: two real bugs found
+dogfooding against a production cluster (the heuristic's missing whole-VM co-relocation
+candidate, and the `requests` connection pool smaller than `read_workers`), five CI repairs
+found the first time the pipelines actually ran, and the section 11.4 `/regex/` storage-pattern
+feature (the first new plan section added since the implementation was finished). Three new
+findings (U-01..U-03) are identified: one Medium (the plan's section 11.4 names a different
+pattern-matching endpoint than the code implements, and the untested matched-but-unavailable
+edge aborts the run with an error that does not name the pattern), one Low (a six-location
+cluster of stale "not yet written" documentation claims), one Info (an undocumented second
+pattern asymmetry: matched storages skip the not-`shared` warning). **Section 22** records how
+all three were resolved.
+
 ---
 
 ## 0. Overall assessment
@@ -2536,6 +2548,258 @@ new regression tests; `execute.py`/`cli.py` both still at 99% under their own te
 `make check` clean (fmt, lint, typecheck, test, fixtures, docs-check — `IMPLEMENTATION_PLAN.pdf`
 rebuilt to 40 pages, internals PDF to 42, manual PDF to 34, all three stamps regenerated in the
 same commit as their Markdown per AGENTS.md §7).
+
+---
+
+## 21. Twelfth-pass review — dogfooding fixes, CI repairs, section 11.4 storage patterns
+
+Reviewed commit range `deeae75..HEAD` (the T-01..T-07 fixes themselves are already recorded in
+section 20). Seven commits: `bc7df89` (two real bugs found dogfooding against the
+`pve.bzed.at` production cluster — the heuristic's missing whole-VM co-relocation candidate,
+and the `requests` connection pool being smaller than `read_workers`'s default), then five CI
+repairs found the first time the pipelines actually ran (`bfccabb` python3-flake8-bugbear does
+not exist in Debian; `22973b2` three tests assumed `solver.backend: auto` resolves to heuristic;
+`8921bf7` ca-certificates dropped by `--no-install-recommends`; `f5f8830` mypy needs
+python3-typeshed plus a state.py flow-narrowing refactor; `3c1000a` codecov's missing curl/gpg
+and its deprecated test-results action), then `1bdb010` — the section 11.4 `/regex/`
+storage-pattern feature, the first new plan section added since the implementation was
+finished (bc7df89's §5.5 change above amended existing text rather than adding a section).
+Roughly 1,200 inserted lines, of which ~500 are tests.
+
+The range's quality bar stays high. The dogfooding fix is the right kind: found on a real
+cluster, minimized into a hand-verified regression test whose arithmetic checks out to the
+digit, scored exclusively through the shared `evaluate_assignment()` so the new candidate
+family cannot regress the objective, with the plan's own §5.5 step 3/4 text updated in the
+same commit (the whole-VM candidate documented, polish's remaining scope narrowed to the
+N-way rotation). The §14 fixture totals are unaffected (the new family is a strict superset of
+what descend could already reach, and the fixture tests still assert 2.533333/3.158333). The
+pattern feature's expansion design is clean: expansion happens exactly once, in topology,
+against the live cluster; nothing downstream — `D`/`S`, (C2), cooldown keys, `state.json` —
+ever sees a pattern; literal-over-pattern precedence is a dict overwrite, so file order cannot
+matter; both hard-error cases (zero matches, two patterns claiming one storage) plus the
+cross-group collision get the same treatment section 11.1 already gives an unknown literal id;
+and the schema change (structural `minItems` 2→1 vs. the semantic ≥2-after-expansion rule
+deferred to topology) is a sensible factoring. The five CI repairs each document their root
+cause in the workflow header and stay inside the §9.3 "apt, never pip" policy.
+
+### 21.1 Verification run
+
+- Dev venv `python3 -m pytest`: **586 passed, 24 skipped** (ortools, pulp, statsmodels absent),
+  **91.65% line coverage** — above the 85% floor and up from the eleventh pass's 91.31%.
+- System Python (pulp **2.7.0**, the exact Debian trixie / CI version): **597 passed,
+  13 skipped** — the CBC backend exercised for real (the S-01 fix holds), and the `22973b2`
+  test pinning means the environment-dependence is gone: with pulp importable, `auto` picks
+  cbc and the heuristic-specific tests still pass because they now name their backend.
+- `tests/fixtures/generate_expected.py --check`: OK. `sha256sum --check` on all three PDF
+  stamps (plan, internals, manual): all OK. `make docs-check` exits 0. `black --check`,
+  `flake8`, `mypy`: clean.
+- **U-01's failure mode was reproduced, not inferred**: with a fake client carrying `san-z`
+  in `GET /storage` definitions but absent from `GET /cluster/resources?type=storage` (the
+  shape of a disabled storage), a group written as `/san-.*/` aborts the whole run with
+  `TopologyError: storage 'san-z' is not reported active on any node` — a message naming a
+  storage the operator never wrote, with no hint that a pattern pulled it in.
+- **U-03's asymmetry was reproduced the same way**: the same not-`shared` storage produces
+  the "not marked shared" warning when named literally and no warning at all when matched by
+  a pattern.
+- The new heuristic test's arithmetic hand-verified: initial `E = |1.26−0.63| + |0−0.63| =
+  1.26` ✓; one disk moved alone `0.89 + 0.25 + 0.05 + 0.5(κ) = 1.69` — worse, exactly as the
+  test asserts ✓; both disks together `0.52 + 0.5 + 0.1 = 1.12`, an improvement of 0.14 ✓
+  (matching the docstring's −0.14).
+
+### 21.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| U-01 | Medium | plan §11.4 vs `topology.py` | The plan says patterns are matched against `GET /cluster/resources?type=storage`; the code matches against `GET /storage` (definitions) — and the untested matched-but-unavailable edge aborts the run with `_pick_active_node`'s generic error, which does not name the pattern that pulled the storage in |
+| U-02 | Low | `docs/internals/*.md`, `docs/manual/25-*.md` | Six stale "not yet written"/"remain stubs" claims (`execute.py`, `optimize.py`, `heuristic.py`, `apply`), all false since phases 4-7; one is operator-facing manual text about `last_balance` never being written |
+| U-03 | Info | `topology.py`, plan §11.4 | Second, undocumented pattern asymmetry: a matched storage skips the not-`shared` warning a literal entry gets — §11.4 documents only the `images` asymmetry |
+
+### 21.3 U-01 — plan names one endpoint for pattern matching, code matches another; the unmatched edge aborts unhelpfully
+
+**Severity:** Medium
+**Files:** `IMPLEMENTATION_PLAN.md` §11.4, `src/proxmox_storage_drs/topology.py:419-449`
+(`_fetch_cluster_data`), `topology.py:203-215` (`_pick_active_node`)
+
+Plan §11.4: "Every pattern is matched once per run against the storage inventory
+(`GET /cluster/resources?type=storage`, §3.5)". The code matches against
+`definitions_by_id`, built from `client.storage_definitions()` = `GET /storage` — storage
+*definitions*, which §3.5's own table distinguishes from the *inventory*. The internals doc
+(`60-topology.md`) describes the definitions endpoint, so the plan is the outlier; per
+AGENTS.md §7.6, one of them is wrong and they should have agreed in the same commit. This is
+the T-03 pattern (plan text contradicted by the built code with no annotation) applied to a
+mechanism rather than a consumer.
+
+The two sets are not identical: definitions include storages the resource inventory does not
+report (a disabled storage still has a definition). That difference has a concrete, reproduced
+failure mode (21.1): a pattern that matches such a storage passes expansion cleanly, becomes
+a group member, and then dies in `_pick_active_node` with "storage 'san-z' is not reported
+active on any node" — an error that names neither the group's pattern nor the fact that a
+pattern matched the storage at all. The operator never wrote `san-z`; they wrote `/san-.*/`,
+and the one piece of context that would explain the failure is absent. No test covers the
+case. It also undercuts §11.4's own framing of over-broad matches ("a pattern that captures
+an ISO-only or otherwise unusable LUN skews the balance target even though (C2) keeps any
+disk from ever landing there"): for the not-active LUN that story is wrong — the run does not
+degrade to a balance-quality concern, it aborts outright.
+
+Two mitigating facts, for fairness: the behavior is fail-safe (hard error, nothing executes),
+and a *literal* reference to a disabled storage hits the same wall today, so the crash itself
+is pre-existing — what the pattern adds is a new, quieter route into it (you no longer have
+to name the storage to pull it in) plus the plan/code text disagreement.
+
+**Recommendation:** (a) fix the plan's §11.4 sentence to name `GET /storage` (definitions) —
+which is also what literal-id validation uses, so plan and code then tell one story; (b) add
+a test for the matched-but-unavailable storage; (c) make the error name the cause: during
+expansion, check each matched id against the resource inventory and raise a pattern-specific
+`TopologyError` there ("group 'g1' pattern '/san-.*/' matched storage 'san-z', which no node
+reports active — disable-safe patterns must exclude it"), rather than letting
+`_pick_active_node`'s storage-only message surface three steps later. Deciding *which* set is
+semantically right is the author's call — matching definitions makes `unmanaged_storage_ids`
+complete, matching the inventory would exclude disabled storages naturally — but the plan,
+the code, and the error message must agree, and the case must be tested either way.
+
+### 21.4 U-02 — six stale "not yet written" claims across the internals and manual
+
+**Severity:** Low
+**Files:** `docs/internals/60-topology.md:78,198`, `docs/internals/80-gates.md:65`,
+`docs/internals/90-heuristic.md:218,223`, `docs/manual/25-show-load-and-verify-storages.md:62`
+
+A sweep for "not yet written"/"remain stubs" found six claims that later phases falsified and
+nobody revisited:
+
+| Location | Claim | False since |
+|---|---|---|
+| `60-topology.md:78` | "`execute.py`, not yet written" | phase 7 (`c6760c9`) |
+| `60-topology.md:198` | "the solver (`optimize.py`/`heuristic.py`, not yet written)" | phase 4 (heuristic) / phase 6 (optimize) |
+| `80-gates.md:65` | "`apply` (not yet written)" | phase 7 (`c6760c9`) |
+| `90-heuristic.md:218` | "`optimize.py`, not yet written" | phase 6 (`375d3a9`) |
+| `90-heuristic.md:223` | "`explain`/`apply` remain stubs" | phase 7 — the `explain` half is still true, the `apply` half is not |
+| `25-show-load-and-verify-storages.md:62` | "nothing yet *writes* `last_balance` (that needs `execute.py`, not yet written)" | phase 7, and the T-02 fix now records it per auto-mode attempt |
+
+This is the R-04/T-04/T-05 class at cluster scale: each phase landed without sweeping the
+*older* internals pages for claims its own landing invalidated — the per-command status table
+(`30-safety-and-status.md`) and the newer pages were kept honest, but the prose in the
+foundational pages was not. The manual entry is the worst of the six because it is
+operator-facing and asserts something false about state writes ("this stays the common case
+until a migration has actually run" is now wrong in both directions: `apply` writes
+`last_balance`, and after any executed move the drift gate has real history). The
+documentation cross-reference tests check knob existence and CLI-option coverage, not prose
+truth — already noted in T-03 — which is how six of these survived three review passes that
+each fixed one instance of the same disease.
+
+**Recommendation:** one sweep commit fixing all six, in the same commit-style as T-04/T-05.
+Mechanical guard worth considering: a documentation test that greps the docs for module-name
+mentions in "not yet written"/"not yet implemented" phrasings and fails when the named module
+exists and is wired — cheap, and it turns this whole class from "found by reviewer" into
+"found by `make check`".
+
+### 21.5 U-03 — matched storages silently skip the not-`shared` warning (Info)
+
+**Severity:** Info
+**Files:** `src/proxmox_storage_drs/topology.py` (`_expand_group`), plan §11.4
+
+`_expand_group`'s "not marked shared" warning lives inside the literal-entry loop only, so a
+storage matched by a pattern gets no warning even though the manual and `60-topology.md`
+describe the warning as a property of the storage, not of how it was named. Reproduced
+(21.1): the same not-`shared` storage warns when written literally, is silent when matched by
+`/san-.*/`. §11.4 documents exactly one asymmetry (the `images` content check) and grounds it
+in the typo-vs-overreach distinction; the `shared` warning is the same kind of
+quality-not-safety signal and almost certainly intends the same treatment, but nothing says
+so — an operator reading §11.4's "a matched storage becomes a full member of the group,
+exactly as a literal entry" could reasonably expect the warning.
+
+**Recommendation:** one sentence in §11.4's closing paragraph (and `60-topology.md`'s
+asymmetry paragraph) extending the documented asymmetry to the not-`shared` warning — or,
+simpler and arguably better, emit the warning for pattern matches too (the definition is in
+hand; there is no typo-exemption reason to stay quiet about a non-shared match). Either way,
+the plan's claim "exactly as a literal entry" should stop over-promising.
+
+### 21.6 What this pass confirms
+
+- **The heuristic fix is the model dogfooding outcome.** The production failure (196%
+  imbalance, zero improving moves, two-disk VM pinned in place by `κ`'s fragmentation penalty)
+  is minimized into a test whose every number hand-checks; the new `_vm_relocation_trials()`
+  family is scored by the same `evaluate_assignment()` as the other two (AGENTS.md §5's
+  one-implementation rule), respects `cooldown_storages` as a destination exclusion exactly
+  like them, and is restricted to VMs with more than one *movable* disk — the single-movable-
+  disk case already being the plain single-move candidate, so nothing is tried twice. The
+  `_best_of()` extraction preserves the incumbent comparison semantics exactly (strict `<`,
+  deterministic family order); §5.5's step 3 was amended and step 4's remaining scope
+  narrowed in the same commit, per AGENTS.md §7.6.
+- **The connection-pool fix follows the house pattern for proxmoxer internals.**
+  `_apply_connection_pool_size()` reaches into `_store["session"]` exactly the documented,
+  best-effort way `_apply_ticket_refresh_seconds()` does; it never shrinks below `requests`'
+  own default of 10; it is a guarded no-op for every wrong-shaped future; it is applied in
+  `_build_api()` so reauthenticate-rebuilt sessions get it too; and the no-op shapes are
+  tested. Mounting one adapter instance on both scheme prefixes is sound (urllib3 keys an
+  adapter's pools by scheme+host, so sharing one adapter is standard practice).
+- **Pattern expansion leaves no pattern-shaped holes downstream.** Every consumer of group
+  storages — `D`/`S`, gates, load model, heuristic, MILP, scheduler, executor, cooldown keys,
+  `verify-storages` — reads the topology `Group.storages` built from the expanded list;
+  nothing past topology ever reads raw `config.groups[*].storages` (the only remaining
+  consumers are `config.py`'s own load-time validators, which must see the raw entries to
+  check them). Expansion ordering is deterministic (sorted ids),
+  `matched_ids` is stable across runs for `verify-storages` and the INFO log, and the
+  `state.json` cooldown-key story (group-name-embedded keys, stale entries harmless) is
+  carried through §11.4 correctly.
+- **The schema/semantic validation split is right.** `minItems: 1` is the structural floor;
+  "≥ 2 after expansion" is enforced where the count is knowable — immediately for
+  pure-literal groups (`_check_group_size`), at topology time for pattern groups — with the
+  zero-match, same-group double-claim, and cross-group collision cases each tested, and
+  `test_pattern_matching_is_fullmatch_not_substring` pinning the `preprod` hazard §11.4
+  itself calls out.
+- **The `22973b2` test pinning is the correct fix for a real environment dependence**: three
+  tests were asserting dispatch outcomes that legitimately differ between the dev venv (no
+  solvers → heuristic) and CI/the Debian build (pulp+cbc installed → cbc). Pinning
+  `backend: heuristic` in tests *about* the heuristic, while backend dispatch keeps its own
+  monkeypatch-based tests, is the honest split; my pulp-installed run (597 passed) confirms
+  it end to end.
+- **The CI repairs stay inside the project's own policy.** ca-certificates/typeshed/curl+gpg
+  are explicit apt additions with root causes documented in the workflow headers (the
+  `--no-install-recommends` trap each of them hit); python3-flake8-bugbear's removal is
+  verified against Debian and changes nothing CI enforces; the codecov move to
+  `codecov-action@v7` with `report_type: test_results` follows the deprecation. None of them
+  pip-installs around a missing Debian package. `debian/control` correctly needs no change:
+  the range adds no dependency (`re` is stdlib, `requests` is already `Depends`), and mypy is
+  not part of the package build, so typeshed is a tests.yml-only concern.
+- **The state.py mkstemp refactor removes the ambiguity at its source** (`tmp_path` assigned
+  once, a `replaced` flag instead of a mid-`try` `None` reassignment) and — better than the
+  fix itself — adds the direct regression test for temp-file cleanup that previously existed
+  only by inference from `StateError`.
+
+### 21.7 Assessment
+
+This is the smallest and healthiest range since the implementation was declared finished: one
+production bug class found by actually running the tool (and fixed with the plan, not just
+the code), five CI repairs that each make the "Debian-packaged toolchain is enough" claim
+more literally true, and one clean, well-fenced feature addition that extends configuration
+without touching any engine arithmetic. All three findings are at the boundaries the previous
+eleven passes consistently found: U-01 is a plan/code text disagreement plus an untested edge
+(the T-03/S-08 family), U-02 is documentation prose whose truth ended mid-history (the
+R-04/T-04/T-05 family, now with a mechanical-guard recommendation), and U-03 is an
+over-promising sentence in an otherwise careful amendment. None touches a safety invariant:
+dry-run default, reserve-never-traded, transient invariant, no-auto-delete, and the payback
+gate are all untouched by the range and re-verified green by the suite. Fixing U-01 should
+come first — the plan/code endpoint disagreement is one sentence, but the error-message and
+test gaps are the part an operator would actually hit.
+
+---
+
+## 22. Resolution of twelfth-pass findings (U-01..U-03)
+
+All three findings were real; all three are fixed, not refuted.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| U-01 | Resolved | Plan §11.4 now names `GET /storage` (definitions) as what a pattern is matched against, agreeing with `topology.py` and with the same call literal-id validation already uses. `storage_resources()`'s fetch moved ahead of expansion in `_fetch_cluster_data()` specifically so `_match_pattern_entries()` can check every matched id against it: a pattern-matched storage with a definition but reported active by no node (disabled) is now a `TopologyError` naming the pattern and the storage, raised during expansion rather than surfacing three steps later as `_pick_active_node()`'s generic message. New test `test_pattern_matching_a_disabled_storage_raises_naming_the_pattern` reproduces the exact scenario the review found (a `_cluster_client(..., inactive=...)` storage present in `GET /storage` but absent from the resource inventory) and asserts the message names both the pattern and the storage. A literal reference to the same disabled storage is intentionally left on its existing path (`_pick_active_node`) — its message already names a storage the operator wrote themselves, so there was no opacity to fix there. |
+| U-02 | Resolved | All six stale claims fixed in one sweep: `60-topology.md`'s two "not yet written" mentions now name `execute.py`'s `_preflight()` and correct the `reserve.py` paragraph to say `heuristic.py` calls `compute_reserve_status()` directly while `optimize.py`'s MILP path encodes the equivalent bound as a scaled linear constraint instead (it cannot call a Python function from inside a solver's constraint system); `80-gates.md`'s `apply (not yet written)` parenthetical dropped, reworded to contrast `show-load`'s possibly-stale printed line against `plan`/`apply`'s fresh evaluation; `90-heuristic.md`'s "CP-SAT/CBC coefficient scaling ... not yet written" bullet removed outright from "what this pass deliberately does not do" (`optimize.py` implements section 5.5's scaling in full, including the `_assert_nonzero_when_weighted` regression guard the plan's own gamma-trap finding required) and its `explain`/`apply` stubs sentence corrected to `apply` is fully implemented, only `explain` remains a stub; the manual's `last_balance` paragraph rewritten to state that `apply` writes it once a run actually executes a move (`confirm`/`auto`, never `dry-run`), so the first-run behaviour is only the common case before a group's first successful migration. The mechanical-guard idea (a documentation test grepping for stale "not yet written" mentions of modules that now exist) is noted but not built in this pass — a follow-up, not a defect. |
+| U-03 | Resolved | The not-`shared` warning is no longer computed inside the literal-only loop: `_expand_group()` now emits it once, after expansion, uniformly over every final member of the group's storages — literal or pattern-matched alike — reading straight from `definitions_by_id`. Plan §11.4 needed no change (it never claimed the asymmetry; the code did), but `60-topology.md`'s asymmetry paragraph was extended to say so explicitly, so a future reader does not have to rediscover it by reading the diff. New test `test_pattern_matching_an_unshared_storage_still_warns` reproduces the review's scenario (a not-`shared` storage matched only by a pattern) and asserts the warning now appears. |
+
+Verification: dev venv `python3 -m pytest` — **588 passed, 24 skipped** (ortools, pulp,
+statsmodels absent), **91.65% line coverage**, unchanged from the twelfth pass's own run since
+the two new tests exercise lines the existing suite already reached from other angles.
+`make check` clean (fmt, lint, typecheck, test, fixtures, docs-check — `IMPLEMENTATION_PLAN.pdf`
+rebuilt to 42 pages, internals PDF to 44, manual PDF unchanged at 34 pages, all three stamps
+regenerated in the same commit as their Markdown per AGENTS.md §7).
 
 ---
 

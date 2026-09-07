@@ -75,7 +75,8 @@ Section 9.3's own pseudocode says `lock` is readable from either
 from the config response already being fetched for the disk join, so
 planning-time lock detection costs no extra API call. `/status/current` is
 still needed later, but only immediately before a specific move (section
-9.2's pre-move re-validation, `execute.py`, not yet written) — never here.
+9.2's pre-move re-validation, `execute.py`'s `_preflight()` — see
+`92-execute.md`) — never here.
 
 ## Pin priority: `_pin_reason()`
 
@@ -142,22 +143,32 @@ exactly section 5.1.1's definition read literally.
 
 `groups[].storages[].id` may be a `/…/` pattern instead of a literal id.
 Expansion happens inside `_fetch_cluster_data`, right after
-`storage_definitions()` returns, and is the one thing that runs *before*
-the ordinary literal-id validation described above -- `_expand_group()`
-matches every pattern entry in a group against the sorted list of the
-cluster's storage ids with `re.fullmatch` (whole-id, case-sensitive: `/prod/`
-must not also catch `preprod`), then folds in the group's literal entries
-on top, a literal always overwriting whatever a pattern matched for that
-same id in a plain `dict` assignment -- precedence is a dict overwrite, not
-a positional rule, so entry order in the file never matters.
+`storage_definitions()` *and* `storage_resources()` both return -- the
+latter's fetch was moved ahead of everything else that used to follow it
+(REVIEW.md U-01) specifically so expansion can check a pattern match
+against it -- and is the one thing that runs *before* the ordinary
+literal-id validation described above. `_expand_group()` matches every
+pattern entry in a group against the sorted list of the cluster's storage
+ids with `re.fullmatch` (whole-id, case-sensitive: `/prod/` must not also
+catch `preprod`), then folds in the group's literal entries on top, a
+literal always overwriting whatever a pattern matched for that same id in
+a plain `dict` assignment -- precedence is a dict overwrite, not a
+positional rule, so entry order in the file never matters.
 
-Two things a pattern can get wrong are checked right there, before
-anything downstream sees the result: a pattern matching zero storages is a
-`TopologyError` (`_match_pattern_entries`, same treatment section 11.1
-already gives a literal id that doesn't exist -- a typo is the likelier
-cause), and two *different* patterns in the same group matching the same
-storage is also fatal (`claimed_by` in `_match_pattern_entries`) -- which
-entry's options should apply would be arbitrary. A third check,
+Three things a pattern can get wrong are checked right there, before
+anything downstream sees the result, all in `_match_pattern_entries`: a
+pattern matching zero storages is a `TopologyError` (same treatment
+section 11.1 already gives a literal id that doesn't exist -- a typo is
+the likelier cause); a matched storage that has a `GET /storage`
+definition but is reported active by no node -- the shape of a disabled
+storage -- is also fatal, naming the pattern and the storage (REVIEW.md
+U-01: a literal reference to such a storage already hit the same wall in
+`_pick_active_node`, just with a worse message, since that call is three
+steps downstream of expansion and has no way to know a pattern was ever
+involved; catching it here instead means the operator is told which
+pattern is responsible); and two *different* patterns in the same group
+matching the same storage is fatal too (`claimed_by`) -- which entry's
+options should apply would be arbitrary. A fourth check,
 `_check_cross_group_uniqueness`, runs once every group has been expanded:
 it is what catches a pattern in one group and a literal (or another
 pattern) in a different group matching the same real storage --
@@ -166,14 +177,19 @@ because it only ever compares two groups' raw entry *text*, and `"san-a"`
 and `"/san-.*/"` are different text even when they'd resolve to the same
 storage.
 
-One deliberate asymmetry: a pattern-matched storage does **not** get the
+One deliberate asymmetry remains, called out explicitly in section 11.4's
+own closing paragraph: a pattern-matched storage does **not** get the
 literal path's "must have `images` in its content list" check. An operator
 who names a storage explicitly gets a hard error for a typo; a pattern that
 happens to pick up an ISO-only or otherwise unusable LUN is a
 balance-quality concern, not a safety one -- (C2) still keeps any disk from
 ever landing there, and `u* = L_s / c_s` (section 4) simply divides by one
-more `c_s` than intended. This is called out explicitly in section 11.4's
-own closing paragraph, not an oversight here.
+more `c_s` than intended. The not-`shared` warning is *not* a second such
+asymmetry (an earlier draft left it literal-only, REVIEW.md U-03): it is
+computed once, after expansion, uniformly over every final member of the
+group regardless of whether a literal or a pattern named it -- a warning
+carries no typo-safety rationale for staying quiet, unlike the content
+check.
 
 Every pattern's expansion -- the raw entry and the ids it matched -- is
 logged at INFO (`logger.info(..., extra={"event": "storage_pattern_expanded", ...})`)
@@ -195,12 +211,16 @@ of it, needs to know a pattern was ever involved.
 ## `reserve.py`: one (C4)/(C5) evaluator, shared
 
 `compute_reserve_status()` is deliberately its own module, not a method on
-`Storage`: the solver (`optimize.py`/`heuristic.py`, not yet written) will
-need to evaluate the identical formula against a *candidate* assignment,
-not only the current one, and `pve-storage-drs show-load`'s reporting needs
-it against the current assignment today. Both call the same function
-(AGENTS.md section 5) — `show-load`'s use of it is already exercised
-end-to-end (see `cli.py`'s `_render_show_load_human`/`_json`). The section
-14 worked example's initial state (`tests/unit/test_reserve.py`) is the
-proof this reproduces the plan's own arithmetic exactly, not merely a
-self-consistent unit test.
+`Storage`: `heuristic.py` needs to evaluate the identical formula against a
+*candidate* assignment, not only the current one (`storage_of=` overrides
+which storage each disk is treated as sitting on), and `pve-storage-drs
+show-load`'s reporting needs it against the current assignment today. Both
+call the same function (AGENTS.md section 5) — `show-load`'s use of it is
+already exercised end-to-end (see `cli.py`'s
+`_render_show_load_human`/`_json`). `optimize.py`'s MILP path needs the
+same (C4)/(C5) invariant but cannot call a Python function from inside a
+solver's constraint system — see `91-optimize.md` for how it encodes the
+equivalent bound directly as a scaled linear constraint instead. The
+section 14 worked example's initial state (`tests/unit/test_reserve.py`)
+is the proof this reproduces the plan's own arithmetic exactly, not merely
+a self-consistent unit test.
