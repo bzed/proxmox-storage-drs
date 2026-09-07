@@ -36,16 +36,17 @@ the same file on every node.
 : Compute and print a migration plan. Does not execute it.
 
 **apply**
-: Execute a plan, subject to *execution.mode*. *dry-run* and *confirm* are implemented; *auto*
-  (unattended execution subject to the concurrency caps and the time windows) is refused with an
-  explicit message in this version -- see the operator manual.
+: Execute a plan, subject to *execution.mode*. *dry-run* and *confirm* run the plan/schedule/payback
+  pipeline once and either print or execute it. *auto* additionally honours
+  *execution.time_windows* and *execution.max_migrations_per_run*, and re-plans from freshly
+  observed cluster state (bounded by *execution.max_replans_per_run*) if a move mismatches what a
+  concurrent change to the cluster expected -- see the operator manual.
 
 **show-load**
 : Print every storage in every group with its disks, sizes, measured load and reserve status.
 
 **explain**
-: Say why the tool did what it did: which gate stopped it, why a disk is pinned, why a move was
-  deferred, and the payback arithmetic behind an accepted or rejected plan.
+: Not implemented yet -- see IMPLEMENTATION_PLAN.md section 12 for the phase it belongs to.
 
 **verify-metrics**
 : Validate the configured metric and label names against the live Prometheus and print a sample

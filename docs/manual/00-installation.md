@@ -58,12 +58,11 @@ storage's `/storage/<id>` path for the datastore privileges.
 **Two further, VM-level privileges are needed once `apply` executes a
 move** — `VM.Config.Disk` and `VM.Migrate`, both cluster-wide (`/`) or at
 least on every VM whose disks live in a managed group, granted to both the
-user and the token exactly as above. Neither is needed for anything this
-build actually runs today: `verify-metrics`, `show-load` and
-`verify-storages` only read, and only `move_disk` (called by `apply`, not
-yet implemented — `30-safety-and-status.md`) needs them. Grant them now
-alongside the privileges above so the credential does not need revisiting
-later; if you set up the credential read-only for now, add
+user and the token exactly as above. Not needed for `verify-metrics`,
+`show-load` or `verify-storages`, which only read; `apply` needs them for
+`move_disk` itself, in every `execution.mode` (`30-safety-and-status.md`).
+Grant them now alongside the privileges above so the credential does not
+need revisiting later; if you set up the credential read-only for now, add
 `VM.Config.Disk,VM.Migrate` to the role before you first run `apply`.
 
 ## Installing the package
