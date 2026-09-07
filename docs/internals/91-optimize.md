@@ -255,3 +255,12 @@ two-phase solve — a real, separately-scoped piece of work.
   against pulp 2.7.0 too, verified directly against a throwaway venv
   pinned to that exact version — the packaged path, not just the newer
   one pip happens to resolve.
+
+  That first verification pass was a one-off, done by hand. It no longer
+  is: `.github/workflows/tests.yml`'s "test" job now `pip install`s
+  `ortools` itself, specifically so `test_optimize.py`'s cpsat-marked
+  cases run on every push rather than only in whichever developer's venv
+  happens to have it — `coinor-cbc`/`python3-pulp` were already apt
+  packages the container installs regardless, so CBC's cases needed no
+  such step. The numpy/mypy footprint above is exactly why that install
+  happens *after* `make typecheck`, never before it, in that job.
