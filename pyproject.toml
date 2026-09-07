@@ -100,13 +100,17 @@ ignore_missing_imports = true
 # never type-checks the inside of). It does not fully insulate against
 # `ortools`'s own numpy dependency: numpy ships its stubs using syntax newer
 # than `python_version` above (a hard parse error, not a type error, so no
-# per-module mypy option rescues it), and pytest's own optional numpy-aware
-# assertion rewriting reaches numpy directly, bypassing this override
-# entirely, whenever numpy happens to be installed in the checking venv --
-# e.g. after `pip install -e .[solver]` or `.[forecast]`. `make check`'s own
-# venv (`.[dev]` only, see `make install`) never installs either extra, so
-# this never affects the project's actual gate; see
-# `docs/internals/91-optimize.md` for what this looks like when it does.
+# per-module mypy option rescues it -- verified directly, extending this
+# very override to `pulp.*`/`statsmodels.*`/`numpy.*` itself still crashes
+# identically), and pytest's own optional numpy-aware assertion rewriting
+# reaches numpy directly, bypassing this override entirely, whenever numpy
+# happens to be installed in the checking venv -- e.g. after `pip install
+# -e .[solver]` or `.[forecast]`. This is why `make typecheck` runs mypy
+# against its own dedicated `.venv-typecheck` (`.[dev]` only, never
+# `solver`/`forecast`), not the same venv `make test` installs those extras
+# into -- see the `Makefile`'s own comment on `TCVENV` and
+# `docs/internals/91-optimize.md` for what this looks like when a numpy
+# with incompatible stubs does end up in the venv mypy runs against.
 [[tool.mypy.overrides]]
 module = ["ortools.*"]
 follow_imports = "skip"

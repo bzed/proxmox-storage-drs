@@ -9,8 +9,10 @@
 # project's dependency policy is that Debian's packaged modules are enough, and
 # a `pip install` in CI would hide the day the policy stopped being true.
 ifeq ($(SYSTEM_TOOLS),1)
-VENV    :=
-VENVDEP :=
+VENV       :=
+VENVDEP    :=
+TCVENV     :=
+TCVENVDEP  :=
 PY      := python3
 PIP     := :
 BLACK   := black
@@ -19,23 +21,38 @@ FLAKE8  := flake8
 MYPY    := mypy
 PYTEST  := python3 -m pytest
 else
-VENV    := .venv
-VENVDEP := venv
+VENV       := .venv
+VENVDEP    := venv
+# mypy runs against its own, separate venv -- never $(VENV) -- because
+# `ortools`/`statsmodels` (the `solver`/`forecast` extras `test`/`cov`
+# install into $(VENV), see below) pull in a numpy whose bundled stubs use
+# syntax mypy's `python_version = "3.11"` target cannot parse, a hard
+# stub-parse error no per-module mypy override can rescue (verified
+# directly; see pyproject.toml's own comment on the `mypy.overrides`
+# entry and docs/internals/91-optimize.md). Reinstalling/uninstalling
+# those extras around every `typecheck` run would dodge the crash but
+# make `$(VENV)` unreliable for actually running the tool with a real
+# solver backend in between -- a dedicated, permanently `.[dev]`-only
+# venv has no such churn and never needs to care what $(VENV) currently
+# has installed.
+TCVENV     := .venv-typecheck
+TCVENVDEP  := venv-typecheck
 PY      := $(VENV)/bin/python
 PIP     := $(VENV)/bin/pip
 BLACK   := $(VENV)/bin/black
 ISORT   := $(VENV)/bin/isort
 FLAKE8  := $(VENV)/bin/flake8
-MYPY    := $(VENV)/bin/mypy
+MYPY    := $(TCVENV)/bin/mypy
 PYTEST  := $(VENV)/bin/pytest
 endif
 
 SOURCES := src tests tools
 
-.PHONY: help venv install fmt fmt-check lint typecheck test cov fixtures check clean
+.PHONY: help venv venv-typecheck install fmt fmt-check lint typecheck test cov fixtures check clean
 
 help:
-	@echo "venv       create $(VENV) and install dev dependencies"
+	@echo "venv       create $(VENV) and install dev+solver+forecast dependencies"
+	@echo "venv-typecheck  create $(TCVENV), dev deps only -- what 'typecheck' runs against"
 	@echo "install    editable install of the package into $(VENV)"
 	@echo "fmt        isort + black (rewrites files)"
 	@echo "fmt-check  isort + black in --check mode"
@@ -56,9 +73,31 @@ help:
 $(VENV)/bin/activate:
 	python3 -m venv $(VENV)
 	$(PIP) install --upgrade pip
-	$(PIP) install -e ".[dev,solver,forecast]" || $(PIP) install black flake8 flake8-bugbear isort mypy pytest pytest-cov pytest-xdist PyYAML
+	$(PIP) install -e ".[dev,solver,forecast]" || { \
+		echo ""; \
+		echo "WARNING: 'pip install -e .[dev,solver,forecast]' failed (see the actual error"; \
+		echo "WARNING: above -- network access, disk space, a wheel missing for this Python,"; \
+		echo "WARNING: ...). Falling back to dev tools only: this venv will NOT have"; \
+		echo "WARNING: ortools/pulp (plan/apply silently use the dependency-free heuristic,"; \
+		echo "WARNING: never CP-SAT/CBC) or statsmodels (forecast.model beyond 'quantile' is"; \
+		echo "WARNING: unavailable). Fix the error above and re-run 'make venv' to get them --"; \
+		echo "WARNING: 'rm -rf $(VENV)' first, since this target does not retry once its"; \
+		echo "WARNING: output file already exists."; \
+		echo ""; \
+		$(PIP) install black flake8 flake8-bugbear isort mypy pytest pytest-cov pytest-xdist PyYAML; \
+	}
 
 venv: $(VENV)/bin/activate
+
+# `.[dev]` only, deliberately -- see the `TCVENV` comment above. Not a
+# subset of $(VENV) reused in place: a *separate* venv is the whole point,
+# so nothing `test`/`cov` later installs into $(VENV) can ever reach it.
+$(TCVENV)/bin/activate:
+	python3 -m venv $(TCVENV)
+	$(TCVENV)/bin/pip install --upgrade pip
+	$(TCVENV)/bin/pip install -e ".[dev]"
+
+venv-typecheck: $(TCVENV)/bin/activate
 
 install: $(VENVDEP)
 	$(PIP) install -e ".[dev]"
@@ -74,13 +113,32 @@ fmt-check: $(VENVDEP)
 lint: $(VENVDEP)
 	$(FLAKE8) $(SOURCES)
 
-typecheck: $(VENVDEP)
+typecheck: $(TCVENVDEP)
 	$(MYPY) $(SOURCES)
 
+# `solver`/`forecast` are optional at runtime (`solver.backend: auto` falls
+# back to `cbc`, then the heuristic; `forecast.model: quantile` needs
+# neither) and stay that way here: a failed install is loud, never fatal,
+# and never fails the target -- the packaged/heuristic-only path this
+# project explicitly supports is still fully tested either way, just not
+# the CP-SAT/Holt-Winters cases `test_optimize.py`/`test_forecast.py`
+# parametrize or skip over.
+SOLVER_EXTRAS := $(PIP) install -e ".[solver,forecast]" || { \
+	echo ""; \
+	echo "WARNING: 'pip install -e .[solver,forecast]' failed (see the actual error above --"; \
+	echo "WARNING: network access, disk space, a wheel missing for this Python, ...)."; \
+	echo "WARNING: Continuing without them: this run exercises the CBC/heuristic and quantile"; \
+	echo "WARNING: forecast paths only, skipping every cpsat-parametrized/statsmodels test --"; \
+	echo "WARNING: fix the error above and re-run to get full coverage."; \
+	echo ""; \
+	}
+
 test: $(VENVDEP)
+	$(SOLVER_EXTRAS)
 	$(PYTEST)
 
 cov: $(VENVDEP)
+	$(SOLVER_EXTRAS)
 	$(PYTEST) --cov-report=html
 	@echo "open htmlcov/index.html"
 

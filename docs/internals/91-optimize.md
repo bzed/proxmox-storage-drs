@@ -228,11 +228,18 @@ two-phase solve — a real, separately-scoped piece of work.
   project's `python_version = "3.11"` mypy target, which `mypy`'s
   `follow_imports = "skip"` (used for `ortools.*` itself) cannot rescue,
   because a stub-level *parse* error happens before mypy ever gets to
-  apply a per-module setting to it. This surfaces only if `ortools` (via
+  apply a per-module setting to it. This surfaces whenever `ortools` (via
   `pip install -e .[solver]`) or `statsmodels`'s own `[forecast]` extra
   happens to pull in an affected numpy version into the *same* venv
-  `make typecheck` runs against — `make install`'s own `.[dev]` never
-  does, so it does not affect this project's actual gate. Both MILP
+  `mypy` runs against -- verified directly (extending the `follow_imports
+  = "skip"` override to `pulp.*`/`statsmodels.*`/`numpy.*` itself does not
+  rescue it either, it is that hard a parse error). `make typecheck` does
+  not risk this at all: it runs mypy against its own dedicated
+  `.venv-typecheck` (`make venv-typecheck`, `.[dev]` only), never the
+  `.venv` that `make test`/`make cov` install `solver`/`forecast` into for
+  full backend coverage -- a *separate* venv, not a reused one later
+  cleaned up, so nothing either target does to `.venv` can ever reach it.
+  See the `Makefile`'s own comment on `TCVENV`. Both MILP
   backends were verified for real during development (`pip install
   -e .[solver]`, all of `test_optimize.py` passing and reproducing the
   section 14 and `reserve-tradeoff.yaml` fixtures' exact numbers for both
@@ -257,10 +264,19 @@ two-phase solve — a real, separately-scoped piece of work.
   one pip happens to resolve.
 
   That first verification pass was a one-off, done by hand. It no longer
-  is: `.github/workflows/tests.yml`'s "test" job now `pip install`s
-  `ortools` itself, specifically so `test_optimize.py`'s cpsat-marked
-  cases run on every push rather than only in whichever developer's venv
-  happens to have it — `coinor-cbc`/`python3-pulp` were already apt
-  packages the container installs regardless, so CBC's cases needed no
-  such step. The numpy/mypy footprint above is exactly why that install
-  happens *after* `make typecheck`, never before it, in that job.
+  is, in either place this project runs tests, though the two get there
+  differently. CI (`.github/workflows/tests.yml`'s "test" job) has one
+  container, no separate venvs: `coinor-cbc`/`python3-pulp` are apt
+  packages installed up front (CBC's cases need nothing else), and
+  `ortools` is `pip install`ed as its own step, placed *after*
+  `make SYSTEM_TOOLS=1 typecheck` runs, never before it — the numpy/mypy
+  footprint above is exactly why that ordering matters there, since
+  `SYSTEM_TOOLS=1` points every tool straight at the one system Python,
+  with nothing to isolate `mypy` from what that `pip install` just added.
+  Locally, `make test`/`make cov` install `solver`/`forecast` into
+  `.venv` themselves (loudly, never fatally, if that install fails —
+  `Makefile`'s own `SOLVER_EXTRAS`), so `test_optimize.py`'s cpsat cases
+  run there too without a developer needing to know to do it by hand;
+  `make typecheck` never touches that venv at all, using its own
+  `.venv-typecheck` instead, so there is no ordering to get right the way
+  CI's single environment needs.
