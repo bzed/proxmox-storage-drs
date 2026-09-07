@@ -150,3 +150,22 @@ Group fc-tier1
 
 Storage types without `saferemove` at all (Ceph RBD, ZFS) always report
 `saferemove=off` and skip the check — there is nothing to wipe.
+
+If any `groups[].storages[].id` is written as a `/regex/` pattern
+(`IMPLEMENTATION_PLAN.md` section 11.4), `verify-storages` also prints what
+each one matched this run, and lists any cluster storage matched by no
+group at all — the same "ungrouped, not managed" visibility `show-load`
+gives per disk, but at the storage level and independent of whether a disk
+currently happens to be on it:
+
+```
+Pattern expansions (section 11.4):
+  [fc-tier1] /san-.*/ → san-a, san-b, san-c
+
+Cluster storages matched by no group:
+  - local-only
+```
+
+An over-broad or dead pattern is the one new way to misconfigure a group
+this feature adds, so this expansion is never silent: every run also logs
+it at INFO, whether or not `verify-storages` is the command being run.

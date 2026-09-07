@@ -221,6 +221,51 @@ def test_duplicate_storage_within_one_group_is_rejected(tmp_path: Path) -> None:
         config.load_config(str(path), env={})
 
 
+# ------------------------------------------------------ section 11.4 patterns
+
+
+def test_is_storage_pattern() -> None:
+    assert config.is_storage_pattern("/san-.*/") is True
+    assert config.is_storage_pattern("//") is True  # empty pattern text, still a pattern
+    assert config.is_storage_pattern("san-a") is False
+    assert config.is_storage_pattern("/san-a") is False  # only one delimiter
+    assert config.is_storage_pattern("/") is False  # too short to have two delimiters
+
+
+def test_storage_pattern_text() -> None:
+    assert config.storage_pattern_text("/san-.*/") == "san-.*"
+    assert config.storage_pattern_text("//") == ""
+
+
+def test_a_single_pattern_entry_is_not_rejected_for_group_size(tmp_path: Path) -> None:
+    # config.py cannot know how many storages "/san-.*/" will match without
+    # the cluster's inventory (section 11.4) -- that check is deferred to
+    # topology.py, so a lone pattern entry must load cleanly here.
+    data = minimal_config_dict()
+    data["groups"][0]["storages"] = [{"id": "/san-.*/"}]
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.groups[0].storages[0].id == "/san-.*/"
+
+
+def test_a_single_literal_storage_is_still_rejected_immediately(tmp_path: Path) -> None:
+    # No pattern in the group -- the post-expansion count is already known
+    # here, with no cluster access needed (section 11.4).
+    data = minimal_config_dict()
+    data["groups"][0]["storages"] = [{"id": "san-a"}]
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match="at least 2"):
+        config.load_config(str(path), env={})
+
+
+def test_malformed_storage_pattern_is_rejected_at_load_time(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["groups"][0]["storages"] = [{"id": "/san-[/"}, {"id": "san-b"}]
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match="does not compile as a regular expression"):
+        config.load_config(str(path), env={})
+
+
 def test_upper_quantile_below_quantile_is_rejected(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["window"] = {"quantile": 0.95, "upper_quantile": 0.90}

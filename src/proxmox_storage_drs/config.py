@@ -21,6 +21,7 @@ import hashlib
 import importlib.resources
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -122,6 +123,23 @@ class StorageConfig:
     capability_weight: float = 1.0
     reserve_factor: float | None = None
     saturation_load: float | None = None
+
+
+def is_storage_pattern(storage_id: str) -> bool:
+    """A ``storages[].id`` value is a pattern iff it both begins and ends
+    with ``/`` (section 11.4). PVE storage ids never contain ``/``, so a
+    value wrapped in slashes cannot collide with a literal one -- it can
+    only have been meant as a pattern.
+    """
+    return len(storage_id) >= 2 and storage_id.startswith("/") and storage_id.endswith("/")
+
+
+def storage_pattern_text(storage_id: str) -> str:
+    """The regular expression text of a pattern entry, its two ``/``
+    delimiters stripped. Only meaningful when :func:`is_storage_pattern` is
+    True for ``storage_id``.
+    """
+    return storage_id[1:-1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,7 +641,13 @@ def _check_schema_version(config: Config, errors: list[str]) -> None:
 def _check_group_storage_membership(config: Config, errors: list[str]) -> None:
     """No storage twice in one group, and no storage in two groups.
 
-    A disk's group would otherwise be ambiguous (section 11.1).
+    A disk's group would otherwise be ambiguous (section 11.1). This check
+    compares raw entry text only -- it catches the same literal id (or the
+    same pattern, character for character) written twice, but it cannot
+    know which real storages two *different* ``/…/`` patterns match: that
+    comparison needs the cluster's storage inventory, so it is done again,
+    on the expanded result, once that inventory is available (section 11.4,
+    ``topology._expand_and_validate_groups``).
     """
     seen_storages: dict[str, str] = {}
     for group in config.groups:
@@ -638,6 +662,46 @@ def _check_group_storage_membership(config: Config, errors: list[str]) -> None:
                     f"and group {group.name!r}"
                 )
             seen_storages[storage_id] = group.name
+
+
+def _check_storage_patterns_compile(config: Config, errors: list[str]) -> None:
+    """Section 11.4: every ``/…/`` pattern must compile as a Python regular
+    expression, checked here at load time so a malformed one fails with the
+    compiler's own message rather than surfacing later, once a cluster is
+    involved, as an opaque "matches nothing".
+    """
+    for group in config.groups:
+        for storage in group.storages:
+            if not is_storage_pattern(storage.id):
+                continue
+            try:
+                re.compile(storage_pattern_text(storage.id))
+            except re.error as exc:
+                errors.append(
+                    f"group {group.name!r} storage pattern {storage.id!r} does not "
+                    f"compile as a regular expression: {exc}"
+                )
+
+
+def _check_group_size(config: Config, errors: list[str]) -> None:
+    """A one-storage group has nothing to balance (section 11.1).
+
+    Pattern expansion can only add storages, never remove them, so a group
+    with no ``/…/`` entry at all has its post-expansion count already known
+    here, with no cluster access needed: entries written *is* storages
+    matched. A group that does have a pattern is instead checked once the
+    cluster inventory is available (section 11.4,
+    ``topology._expand_and_validate_groups``), since it is not yet known
+    here how many storages the pattern will match.
+    """
+    for group in config.groups:
+        if any(is_storage_pattern(s.id) for s in group.storages):
+            continue
+        if len(group.storages) < 2:
+            errors.append(
+                f"group {group.name!r} has only {len(group.storages)} storage(s); "
+                "a group needs at least 2 to balance"
+            )
 
 
 def _check_window(config: Config, errors: list[str]) -> None:
@@ -719,6 +783,8 @@ def _validate_semantics(config: Config) -> list[str]:
 
     _check_schema_version(config, errors)
     _check_group_storage_membership(config, errors)
+    _check_storage_patterns_compile(config, errors)
+    _check_group_size(config, errors)
     _check_window(config, errors)
     _check_metrics(config, errors)
     _check_forecast_window(config, errors)

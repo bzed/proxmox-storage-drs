@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ from proxmox_storage_drs.heuristic import ObjectiveBreakdown
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
 from proxmox_storage_drs.schedule import ScheduledMove
 from proxmox_storage_drs.state import empty_state, load_state
-from proxmox_storage_drs.topology import Disk, Group, Storage, Topology
+from proxmox_storage_drs.topology import Disk, Group, PatternExpansion, Storage, Topology
 
 MINIMAL_CONFIG = {
     "schema_version": 1,
@@ -747,6 +748,52 @@ def test_group_flag_is_repeatable(
     out = capsys.readouterr().out
     assert "Group fc-tier1" in out
     assert "Group fc-tier2" in out
+
+
+def _topology_with_pattern_expansion() -> Topology:
+    """`_sample_topology()` plus a section 11.4 pattern expansion and one
+    cluster storage matched by no group."""
+    base = _sample_topology()
+    return dataclasses.replace(
+        base,
+        pattern_expansions=(
+            PatternExpansion(group_name="fc-tier1", pattern="/san-.*/", matched_ids=("san-a",)),
+        ),
+        unmanaged_storage_ids=("san-z",),
+    )
+
+
+def test_verify_storages_human_output_shows_pattern_expansions_and_unmanaged_storages(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        _fake_build_topology(_topology_with_pattern_expansion()),
+    )
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "verify-storages"]) == 0
+    out = capsys.readouterr().out
+    assert "[fc-tier1] /san-.*/ → san-a" in out
+    assert "Cluster storages matched by no group:" in out
+    assert "  - san-z" in out
+
+
+def test_verify_storages_json_output_includes_pattern_expansions_and_unmanaged_storages(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: "fake-client")
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        _fake_build_topology(_topology_with_pattern_expansion()),
+    )
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "--json", "verify-storages"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pattern_expansions"] == [
+        {"group": "fc-tier1", "pattern": "/san-.*/", "matched_ids": ["san-a"]}
+    ]
+    assert payload["unmanaged_storage_ids"] == ["san-z"]
 
 
 def test_group_flag_with_an_unknown_name_is_a_hard_failure(

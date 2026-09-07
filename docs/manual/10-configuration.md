@@ -346,9 +346,19 @@ group; there is no cross-group balancing (`IMPLEMENTATION_PLAN.md` section
 
 String, required.
 
-A PVE storage id. A storage may belong to **at most one** group — belonging
-to two would make a disk's eligible destinations ambiguous, and config
-validation rejects it.
+A PVE storage id, or a `/regex/` pattern — a value that both begins and
+ends with `/` — matching one or more storage ids (`IMPLEMENTATION_PLAN.md`
+section 11.4). A pattern is matched with `re.fullmatch` (case-sensitive)
+against the live cluster's storage inventory on every run, so `/san-.*/`
+picks up a LUN added after the config was written with no edit needed; its
+own entry's `capability_weight`/`reserve_factor`/`saturation_load` apply to
+every storage it matches. A literal entry always overrides a pattern that
+also matches its storage, so one member of a pattern-matched family can
+still be pinned to different options. A storage may belong to **at most
+one** group (after pattern expansion) — belonging to two would make a
+disk's eligible destinations ambiguous, and config/cluster validation
+rejects it, as does a pattern matching zero storages or two patterns in one
+group claiming the same storage.
 
 ### `groups[].storages[].capability_weight`
 

@@ -28,12 +28,14 @@ see that section's note if you need the history.
 stages (`_fetch_cluster_data`, then a loop over `client.vm_resources()`
 calling `_collect_vm_disks` per VM, then `_build_storages`):
 
-1. `storage_definitions()` (the list form — see `50-pve-api.md`), validated
-   against the configured `groups` (`_validate_group_storages`): a storage
-   that does not exist, or that lacks `images` in its content types, is a
-   fatal `TopologyError` (section 11.1: "storage ids exist in the cluster").
-   A storage that exists but is not marked `shared` is a warning, not a
-   fatal error — plausible, if unusual, for a single-node group.
+1. `storage_definitions()` (the list form — see `50-pve-api.md`), which is
+   also what every `/…/` storage pattern (section 11.4, below) is matched
+   against, then the configured `groups` are expanded and validated against
+   it (`_expand_and_validate_groups`): a literal storage that does not
+   exist, or that lacks `images` in its content types, is a fatal
+   `TopologyError` (section 11.1: "storage ids exist in the cluster"). A
+   storage that exists but is not marked `shared` is a warning, not a fatal
+   error — plausible, if unusual, for a single-node group.
 2. `storage_resources()` once, to pick one active node per storage
    (`_pick_active_node`, preferring one reporting `status: "available"`).
 3. `storage_content()` and `storage_status()` per group storage.
@@ -135,6 +137,60 @@ referenced — orphans, templates, other groups' foreign volumes, and disks
 of VMs this run never fetched (stopped-and-excluded, or ungrouped) all fall
 out of this one computation with no special-casing per category, which is
 exactly section 5.1.1's definition read literally.
+
+## Section 11.4: `/…/` storage patterns are expanded here, once
+
+`groups[].storages[].id` may be a `/…/` pattern instead of a literal id.
+Expansion happens inside `_fetch_cluster_data`, right after
+`storage_definitions()` returns, and is the one thing that runs *before*
+the ordinary literal-id validation described above -- `_expand_group()`
+matches every pattern entry in a group against the sorted list of the
+cluster's storage ids with `re.fullmatch` (whole-id, case-sensitive: `/prod/`
+must not also catch `preprod`), then folds in the group's literal entries
+on top, a literal always overwriting whatever a pattern matched for that
+same id in a plain `dict` assignment -- precedence is a dict overwrite, not
+a positional rule, so entry order in the file never matters.
+
+Two things a pattern can get wrong are checked right there, before
+anything downstream sees the result: a pattern matching zero storages is a
+`TopologyError` (`_match_pattern_entries`, same treatment section 11.1
+already gives a literal id that doesn't exist -- a typo is the likelier
+cause), and two *different* patterns in the same group matching the same
+storage is also fatal (`claimed_by` in `_match_pattern_entries`) -- which
+entry's options should apply would be arbitrary. A third check,
+`_check_cross_group_uniqueness`, runs once every group has been expanded:
+it is what catches a pattern in one group and a literal (or another
+pattern) in a different group matching the same real storage --
+`config._check_group_storage_membership` cannot see that case at load time
+because it only ever compares two groups' raw entry *text*, and `"san-a"`
+and `"/san-.*/"` are different text even when they'd resolve to the same
+storage.
+
+One deliberate asymmetry: a pattern-matched storage does **not** get the
+literal path's "must have `images` in its content list" check. An operator
+who names a storage explicitly gets a hard error for a typo; a pattern that
+happens to pick up an ISO-only or otherwise unusable LUN is a
+balance-quality concern, not a safety one -- (C2) still keeps any disk from
+ever landing there, and `u* = L_s / c_s` (section 4) simply divides by one
+more `c_s` than intended. This is called out explicitly in section 11.4's
+own closing paragraph, not an oversight here.
+
+Every pattern's expansion -- the raw entry and the ids it matched -- is
+logged at INFO (`logger.info(..., extra={"event": "storage_pattern_expanded", ...})`)
+and carried on `Topology.pattern_expansions` for `cli.py`'s
+`verify-storages` to print (section 3.5). `Topology.unmanaged_storage_ids`
+is computed once, right after `groups` -- every cluster storage id
+`storage_definitions()` returned minus every id `storage_group_of` resolved
+to -- and is the storage-level twin of the per-disk "ungrouped, not
+managed" warning `_join_vm_disks` already emits: it does not need a disk to
+actually be sitting on the storage to be visible.
+
+By the time `_build_storages` runs, `data.expanded_by_group[group.name]`
+holds real storage ids only -- it iterates that, not `group_cfg.storages`,
+so `Storage.id` and everything keyed off it (`storage_group_of`, cooldown
+keys, `state.json`) never carries pattern text. Nothing past
+`_expand_and_validate_groups` in this module, or in any module downstream
+of it, needs to know a pattern was ever involved.
 
 ## `reserve.py`: one (C4)/(C5) evaluator, shared
 

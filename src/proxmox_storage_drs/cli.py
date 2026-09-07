@@ -2171,6 +2171,16 @@ def _render_verify_storages_human(topology: Topology, config: Any) -> str:
                     "be rejected outright (section 7.3)"
                 )
         lines.append("")
+    if topology.pattern_expansions:
+        lines.append("Pattern expansions (section 11.4):")
+        for expansion in topology.pattern_expansions:
+            matched = ", ".join(expansion.matched_ids) if expansion.matched_ids else "(none)"
+            lines.append(f"  [{expansion.group_name}] {expansion.pattern} → {matched}")
+        lines.append("")
+    if topology.unmanaged_storage_ids:
+        lines.append("Cluster storages matched by no group:")
+        lines.extend(f"  - {sid}" for sid in topology.unmanaged_storage_ids)
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -2203,7 +2213,18 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
                 }
             )
         groups_out.append({"name": group.name, "storages": storages_out})
-    return {"groups": groups_out}
+    return {
+        "groups": groups_out,
+        "pattern_expansions": [
+            {
+                "group": e.group_name,
+                "pattern": e.pattern,
+                "matched_ids": list(e.matched_ids),
+            }
+            for e in topology.pattern_expansions
+        ],
+        "unmanaged_storage_ids": list(topology.unmanaged_storage_ids),
+    }
 
 
 def _handle_verify_storages(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
