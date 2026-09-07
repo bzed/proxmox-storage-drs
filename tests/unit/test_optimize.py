@@ -13,14 +13,18 @@ solver that fell for the single-stage big-M trap the plan warns against.
 Every test that runs a real solve is parametrized over both backends
 (`cpsat`, `cbc`) and skips whichever one's library is not importable --
 `solver = ["ortools>=9.8", "pulp>=2.7"]` is an *optional* extra
-(pyproject.toml), and `make install`'s own `.[dev]` never pulls it in, so
-neither is present in this project's ordinary dev/CI venv. This mirrors
-`test_forecast.py`'s `pytest.importorskip("statsmodels")` for the same
-reason: a real, useful test suite for an optional dependency must still
-pass cleanly without it. Developing this module, both backends *were*
-installed and exercised for real (`pip install -e .[solver]`) -- every
-test here passed and reproduced the fixtures' exact numbers; see
-`docs/internals/91-optimize.md`.
+(pyproject.toml), and `make install`'s own `.[dev]` venv never pulls it
+in, so neither is present there. This mirrors `test_forecast.py`'s
+`pytest.importorskip("statsmodels")` for the same reason: a real, useful
+test suite for an optional dependency must still pass cleanly without it.
+Developing this module, both backends *were* installed and exercised for
+real (`pip install -e .[solver]`) -- every test here passed and
+reproduced the fixtures' exact numbers; see `docs/internals/91-optimize.md`.
+CI's own "test" job (`.github/workflows/tests.yml`) installs `ortools`
+(there is no Debian package for it) specifically so these cpsat-marked
+cases run there too, alongside `python3-pulp`/`coinor-cbc` from apt for
+the cbc ones -- both backends are exercised on every push, this project's
+own dev venv is just not one of the places that happens.
 """
 
 from __future__ import annotations
@@ -118,6 +122,28 @@ def _solve(
 
 
 # --------------------------------------------------------------- availability
+
+
+def test_cpsat_available_is_false_when_ortools_is_not_importable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`cpsat_available()`'s own ``except ImportError: return False`` --
+    distinct from `test_solve_returns_none_when_the_library_is_unavailable`
+    below, which exercises `_solve_cpsat()`'s independent import attempt,
+    never this function. A plain ``import a.b.c`` statement raises
+    ``ImportError`` on its own once ``sys.modules["a.b.c"]`` is the ``None``
+    sentinel (no need for the ``delattr`` gymnastics the ``from ... import``
+    case below requires), so this is coverable in any environment,
+    `ortools` installed or not."""
+    monkeypatch.setitem(sys.modules, "ortools.sat.python.cp_model", None)
+    assert cpsat_available() is False
+
+
+def test_cbc_available_is_false_when_pulp_is_not_importable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "pulp", None)
+    assert cbc_available() is False
 
 
 @pytest.mark.parametrize("backend", ["cpsat", "cbc"])

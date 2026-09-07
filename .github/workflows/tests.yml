@@ -23,6 +23,22 @@
 # `curl` and `gpg` are there for the Codecov actions: they shell out to fetch
 # and verify the `codecov` uploader binary themselves, and neither is pulled
 # in by anything else installed in this container.
+#
+# `ortools` (CP-SAT, `optimize.py`'s preferred MILP backend) is the one
+# exception to "Debian's packaged modules are enough": it has no Debian
+# package at all (`docs/internals/91-optimize.md`), so it is `pip install`ed
+# here purely to give `test_optimize.py`'s cpsat-parametrized cases something
+# to run against -- without it, roughly half of optimize.py (every
+# `_cpsat_*`/`_solve_cpsat` function) is structurally unreachable and shows
+# up as a coverage gap that no amount of new tests against the packaged
+# toolchain alone could close. This does not weaken "packaged is enough" for
+# anything the tool actually depends on: `ortools` stays optional at runtime
+# (`solver.backend: auto` falls back to `cbc`, then the heuristic, if it is
+# missing) and the package build/install never needs it. Installed *after*
+# "Format, lint and types" runs, not before: a recent `ortools`-pulled numpy
+# ships type stubs `mypy`'s `python_version = "3.11"` target cannot parse
+# (same doc, "A live cluster's numpy/pandas footprint"), and this ordering
+# is what keeps that from ever reaching the typecheck step.
 name: Tests
 
 on:
@@ -45,8 +61,8 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             black ca-certificates coinor-cbc curl flake8 git gpg isort make \
-            mypy pandoc python3-jsonschema python3-proxmoxer python3-pulp \
-            python3-pytest python3-pytest-cov python3-pytest-xdist \
+            mypy pandoc python3-jsonschema python3-pip python3-proxmoxer \
+            python3-pulp python3-pytest python3-pytest-cov python3-pytest-xdist \
             python3-requests python3-ruamel.yaml python3-typeshed python3-yaml
 
       - uses: actions/checkout@v7
@@ -59,6 +75,9 @@ jobs:
 
       - name: Format, lint and types
         run: make SYSTEM_TOOLS=1 fmt-check lint typecheck
+
+      - name: Install ortools for CP-SAT test coverage
+        run: pip install --break-system-packages 'ortools>=9.8'
 
       - name: Tests with coverage
         run: |
