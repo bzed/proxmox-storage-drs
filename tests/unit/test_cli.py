@@ -661,7 +661,13 @@ def test_plan_passes_active_storage_cooldowns_to_the_heuristic(
         str(state_path),
         State(cooldowns=Cooldowns(storage={storage_state_key("fc-tier1", "san-b"): recent})),
     )
-    path = write_config(tmp_path, state={"path": str(state_path)})
+    # Pin the heuristic explicitly: this test is about cooldown plumbing
+    # into `run_heuristic()`, not about `solver.backend: auto`'s own
+    # dispatch -- when ortools/pulp genuinely are importable (the Debian
+    # package build and CI's own apt-installed toolchain both install
+    # coinor-cbc/python3-pulp deliberately, unlike the plain dev venv),
+    # "auto" picks cbc and `run_heuristic()` is never called at all.
+    path = write_config(tmp_path, state={"path": str(state_path)}, solver={"backend": "heuristic"})
 
     assert cli.main(["-c", str(path), "plan"]) == 0
     assert captured["cooldown_storages"] == frozenset({"san-b"})
@@ -2891,17 +2897,25 @@ def test_plan_human_output_shows_the_solver_line(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
-    path = write_config(tmp_path)
+    # Pinned explicitly, not left at the default `auto`: CI's own
+    # apt-installed toolchain and the Debian package build both install
+    # coinor-cbc/python3-pulp deliberately (to exercise `optimize.py` for
+    # real), so "auto" would pick cbc there instead of falling back to
+    # heuristic -- this test is about the human report's own solver line,
+    # not about backend dispatch.
+    path = write_config(tmp_path, solver={"backend": "heuristic"})
     assert cli.main(["-c", str(path), "plan"]) == 0
     out = capsys.readouterr().out
-    assert "solver: heuristic" in out  # no solver extras installed in the test venv
+    assert "solver: heuristic" in out
 
 
 def test_plan_json_output_includes_the_solver_backend_and_status(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
-    path = write_config(tmp_path)
+    # See test_plan_human_output_shows_the_solver_line's own comment on
+    # why this is pinned rather than left at `auto`.
+    path = write_config(tmp_path, solver={"backend": "heuristic"})
     assert cli.main(["-c", str(path), "--json", "plan"]) == 0
     payload = json.loads(capsys.readouterr().out)
     group_payload = payload["groups"][0]
