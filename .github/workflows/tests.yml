@@ -19,6 +19,10 @@
 # third-party stub packages (PyYAML, requests, ...) mypy's own error message
 # points at ("On Debian systems, you can install the python3-typeshed
 # package..."); without it, every untyped-library import fails strict mode.
+#
+# `curl` and `gpg` are there for the Codecov actions: they shell out to fetch
+# and verify the `codecov` uploader binary themselves, and neither is pulled
+# in by anything else installed in this container.
 name: Tests
 
 on:
@@ -40,8 +44,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            black ca-certificates coinor-cbc flake8 git isort make mypy pandoc \
-            python3-jsonschema python3-proxmoxer python3-pulp \
+            black ca-certificates coinor-cbc curl flake8 git gpg isort make \
+            mypy pandoc python3-jsonschema python3-proxmoxer python3-pulp \
             python3-pytest python3-pytest-cov python3-pytest-xdist \
             python3-requests python3-ruamel.yaml python3-typeshed python3-yaml
 
@@ -70,12 +74,17 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: true
 
+      # codecov/test-results-action is deprecated in favour of running
+      # codecov-action itself a second time with report_type: test_results
+      # (the same action already runs once above, for coverage).
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/test-results-action@v1
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: junit.xml
+          report_type: test_results
+          fail_ci_if_error: true
 
   docs:
     name: Documentation
