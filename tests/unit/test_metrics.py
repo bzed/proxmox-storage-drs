@@ -8,7 +8,7 @@ is exercised through a fake session with the same get(url, params=...) shape.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pytest
@@ -18,11 +18,13 @@ from proxmox_storage_drs.exceptions import MetricsError
 from proxmox_storage_drs.metrics import (
     DiskKey,
     PrometheusClient,
+    build_node_selector,
     build_quantile_over_time_promql,
     build_rate_promql,
     parse_disk_range_series,
     parse_disk_series,
     raw_metric_name,
+    resolve_node_selector,
     verify_metrics,
 )
 
@@ -75,6 +77,63 @@ PROM_CONFIG = PrometheusConfig(url="http://prom.example.com:9090")
 def test_build_rate_promql() -> None:
     expr = build_rate_promql("blockstat_rd_operations", "vmid", "instance", 300)
     assert expr == "sum by (vmid, instance) (rate(blockstat_rd_operations[300s]))"
+
+
+def test_build_rate_promql_with_a_selector_scopes_the_metric_itself() -> None:
+    """Section 3.4: the selector goes *inside* `rate()`'s own vector
+    selector, before `sum by` ever collapses the labels it names --
+    verified by exact string, since a matcher outside the wrong pair of
+    parens would silently apply to nothing."""
+    expr = build_rate_promql(
+        "blockstat_rd_operations", "vmid", "instance", 300, selector='nodename=~"pve01|pve02"'
+    )
+    assert expr == (
+        'sum by (vmid, instance) (rate(blockstat_rd_operations{nodename=~"pve01|pve02"}[300s]))'
+    )
+
+
+def test_build_rate_promql_selector_none_is_unchanged_from_before() -> None:
+    assert build_rate_promql(
+        "blockstat_rd_operations", "vmid", "instance", 300, selector=None
+    ) == build_rate_promql("blockstat_rd_operations", "vmid", "instance", 300)
+
+
+def test_build_node_selector_escapes_dots_in_an_fqdn() -> None:
+    """A node named `pve1.example.com` must match only that exact string
+    in RE2 -- an unescaped `.` would match any character there, so
+    e.g. `pve1xexample.com` would wrongly match too."""
+    selector = build_node_selector("nodename", ["pve1.example.com"])
+    assert selector == r'nodename=~"pve1\.example\.com"'
+
+
+def test_build_node_selector_sorts_and_dedupes() -> None:
+    selector = build_node_selector("nodename", ["pve02", "pve01", "pve02"])
+    assert selector == 'nodename=~"pve01|pve02"'
+
+
+def test_build_node_selector_empty_list_is_none() -> None:
+    assert build_node_selector("nodename", []) is None
+
+
+def test_resolve_node_selector_prefers_the_operator_override() -> None:
+    """`metrics.extra_selector` wins outright, even over a real node list --
+    the operator's own tagging scheme, not necessarily node names at all."""
+    metrics = MetricsConfig(extra_selector='cluster="mycluster"')
+    assert resolve_node_selector(metrics, ["pve01", "pve02"]) == 'cluster="mycluster"'
+    assert resolve_node_selector(metrics, []) == 'cluster="mycluster"'
+    assert resolve_node_selector(metrics, None) == 'cluster="mycluster"'
+
+
+def test_resolve_node_selector_auto_derives_without_an_override() -> None:
+    metrics = MetricsConfig()
+    assert resolve_node_selector(metrics, ["pve01", "pve02"]) == 'nodename=~"pve01|pve02"'
+
+
+def test_resolve_node_selector_is_none_with_neither_override_nor_node_names() -> None:
+    """The ``verify-metrics`` case: no ``extra_selector`` configured, and
+    ``node_names=None`` since that command never talks to the PVE API."""
+    assert resolve_node_selector(MetricsConfig(), None) is None
+    assert resolve_node_selector(MetricsConfig(), []) is None
 
 
 def test_build_quantile_over_time_promql() -> None:
@@ -291,6 +350,34 @@ def test_verify_metrics_all_green() -> None:
     assert report.ok, [f.message for f in report.findings if f.level == "error"]
     assert report.observed_spacing_seconds == pytest.approx(60.0)
     assert DiskKey(101, "scsi0") in report.coverage_by_disk
+
+
+def test_verify_metrics_applies_extra_selector_to_coverage_and_spacing_queries() -> None:
+    """``metrics.extra_selector``, when set, is what ``verify-metrics``
+    applies too (`resolve_node_selector(metrics, None)`'s own contract:
+    the operator override, never an auto-derived one this command has no
+    PVE client to build) -- verified by inspecting the actual query text
+    sent, the same regression class `test_coverage_and_spacing_use_
+    absolute_not_relative_start_end` guards against for the timestamps."""
+    from proxmox_storage_drs.metrics import _check_coverage, _check_observed_spacing
+
+    metrics = replace(_full_metrics_config(), extra_selector='cluster="mycluster"')
+    window = WindowConfig(lookback_seconds=600)
+    session = FakeSession(
+        {
+            "/api/v1/query_range": success(
+                {"result": [{"metric": {"vmid": "1", "instance": "scsi0"}, "values": []}]}
+            )
+        }
+    )
+    client = PrometheusClient(PROM_CONFIG, session=session)
+
+    _check_coverage(client, metrics, window, selector=metrics.extra_selector)
+    _check_observed_spacing(client, metrics, selector=metrics.extra_selector)
+
+    assert len(session.calls) == 2
+    for _, params in session.calls:
+        assert 'cluster="mycluster"' in params["query"]
 
 
 def test_verify_metrics_missing_metric_name_is_an_error() -> None:

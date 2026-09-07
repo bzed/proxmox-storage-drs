@@ -359,6 +359,19 @@ Notes for the implementer:
 - Reject a disk whose sample coverage over `W` is below `window.min_coverage` and fall back to its
   last known load from `state.json`, flagging it in the plan output. Never treat missing data as zero
   load — that would silently invite migrations *onto* a busy storage.
+- **Scope every query to this cluster's own nodes.** None of the expressions above restrict which
+  series they match beyond the metric name itself, which is fine when one Prometheus serves exactly
+  one PVE cluster but silently wrong the moment it serves more than one (or anything else emitting a
+  same-named metric): `vmid` is only unique *within* a cluster, so an unscoped query would sum a
+  same-numbered vmid from somewhere else into this one's load without any error or warning. Add a
+  matcher inside the vector selector, before `rate()`: `<metric>{nodename=~"pve01|pve02|..."}`, built
+  from the cluster's own node list (`GET /nodes`, §3.5) every run rather than hand-maintained, so a
+  node added to the cluster is covered with no config edit. `metrics.extra_selector` lets the operator
+  override this outright with a raw PromQL matcher of their own — needed when Telegraf's tagging
+  doesn't carry PVE's own node name verbatim, or the restriction needed is something else entirely
+  (a `cluster` tag, say, distinguishing which of several PVE clusters a series belongs to).
+  `pve-storage-drs verify-metrics` applies only the override, never the auto-derived filter: it is
+  deliberately independent of the PVE API, so it has no node list to build one from.
 
 ### 3.5 PVE API
 
@@ -395,6 +408,7 @@ Read path:
 | `GET /cluster/resources?type=vm` | VM inventory: vmid, node, status, name, tags |
 | `GET /cluster/resources?type=storage` | Storage inventory, `shared` flag, used/total per node |
 | `GET /storage` | Storage definitions: type, `content`, `shared`, `nodes` restriction, **and** per-storage `saferemove` / `saferemove_throughput` — see §7.1 and §9.3 |
+| `GET /nodes` | Every node in the cluster, by name — §3.4's PromQL node-scoping filter, independent of which nodes currently host a VM or shared storage |
 | `GET /nodes/{node}/qemu/{vmid}/config` | **disk → storage mapping and size** |
 | `GET /nodes/{node}/storage/{storage}/status` | authoritative `total`/`used`/`avail` |
 | `GET /nodes/{node}/storage/{storage}/content` | per-volume real allocated sizes, owner vmid |

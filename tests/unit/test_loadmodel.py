@@ -83,23 +83,31 @@ METRICS = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=Me
 PROM_CONFIG = PrometheusConfig(url="http://prom.example.com:9090")
 
 
-def _quantile_promql(field_name: str) -> str:
+def _quantile_promql(field_name: str, node_selector: str | None = None) -> str:
     """The exact PromQL `_fetch_raw_quantity` builds for one raw field --
     computed with the same public builders loadmodel.py uses, not
     hand-copied, so this stays correct if either changes shape."""
     metric_name = raw_metric_name(METRICS, field_name)
     rate_expr = build_rate_promql(
-        metric_name, METRICS.labels.vmid, METRICS.labels.device, METRICS.rate_window_seconds
+        metric_name,
+        METRICS.labels.vmid,
+        METRICS.labels.device,
+        METRICS.rate_window_seconds,
+        selector=node_selector,
     )
     return build_quantile_over_time_promql(
         rate_expr, WINDOW.quantile, WINDOW.lookback_seconds, METRICS.step_seconds
     )
 
 
-def _coverage_promql() -> str:
+def _coverage_promql(node_selector: str | None = None) -> str:
     """The exact PromQL `compute_disk_coverage` builds for its range query."""
     return build_rate_promql(
-        METRICS.read_ops, METRICS.labels.vmid, METRICS.labels.device, METRICS.rate_window_seconds
+        METRICS.read_ops,
+        METRICS.labels.vmid,
+        METRICS.labels.device,
+        METRICS.rate_window_seconds,
+        selector=node_selector,
     )
 
 
@@ -172,20 +180,25 @@ def _client(
     read_bytes: list[dict[str, Any]] | None = None,
     write_bytes: list[dict[str, Any]] | None = None,
     coverage: list[dict[str, Any]] | None = None,
+    node_selector: str | None = None,
 ) -> tuple[PrometheusClient, FakeSession]:
     """Build a `PrometheusClient` over a `FakeSession` answering every one of
     loadmodel.py's six raw-quantity queries plus the coverage range query.
     Every argument defaults to "no series at all" -- exactly what an idle or
-    genuinely-absent (tpmstate0/unusedN) disk looks like."""
+    genuinely-absent (tpmstate0/unusedN) disk looks like. ``node_selector``
+    must match what the caller passes to `compute_group_load()`/
+    `compute_disk_load_series()` exactly: `FakeSession` looks answers up by
+    the literal query string, so a mismatch here is a `KeyError`, not a
+    silently-wrong result."""
     query_data = {
-        _quantile_promql("read_time_ns"): read_time or [],
-        _quantile_promql("write_time_ns"): write_time or [],
-        _quantile_promql("read_ops"): read_ops or [],
-        _quantile_promql("write_ops"): write_ops or [],
-        _quantile_promql("read_bytes"): read_bytes or [],
-        _quantile_promql("write_bytes"): write_bytes or [],
+        _quantile_promql("read_time_ns", node_selector): read_time or [],
+        _quantile_promql("write_time_ns", node_selector): write_time or [],
+        _quantile_promql("read_ops", node_selector): read_ops or [],
+        _quantile_promql("write_ops", node_selector): write_ops or [],
+        _quantile_promql("read_bytes", node_selector): read_bytes or [],
+        _quantile_promql("write_bytes", node_selector): write_bytes or [],
     }
-    range_data = {_coverage_promql(): coverage or []}
+    range_data = {_coverage_promql(node_selector): coverage or []}
     session = FakeSession(query_data=query_data, range_data=range_data)
     return PrometheusClient(PROM_CONFIG, session=session), session
 
@@ -379,6 +392,45 @@ def test_empty_group_is_idle_with_no_disks_or_storages_and_makes_no_calls() -> N
     assert session.calls == []  # nothing to fetch for a group with no disks
 
 
+# -------------------------------------------------------- node-scoping selector
+
+
+def test_compute_group_load_applies_the_node_selector_to_every_query() -> None:
+    """`node_selector` must reach every one of the six raw-quantity queries
+    *and* the coverage query -- `_client()`'s `FakeSession` only has
+    answers keyed by the query string embedding this selector, so a
+    single query missing it is a `KeyError`, not a silently-passing test."""
+    group = Group(
+        name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
+    )
+    selector = 'nodename=~"pve01|pve02"'
+    coverage = [full_coverage(101, "scsi0")]
+    client, session = _client(
+        read_time=[series(101, "scsi0", 2.0e9)], coverage=coverage, node_selector=selector
+    )
+
+    result = compute_group_load(
+        client, METRICS, WINDOW, LoadWeights(), group, node_selector=selector
+    )
+
+    assert result.load_by_disk_key()["101:scsi0"] == pytest.approx(2.0)
+    assert session.calls  # every call above resolved against the selector-scoped keys
+    for _kind, query in session.calls:
+        assert selector in query
+
+
+def test_compute_group_load_node_selector_none_is_unchanged_from_before() -> None:
+    """The default -- no behaviour change for a caller that never passes
+    `node_selector` at all (every pre-existing test in this file)."""
+    group = Group(
+        name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
+    )
+    coverage = [full_coverage(101, "scsi0")]
+    client, _session = _client(read_time=[series(101, "scsi0", 2.0e9)], coverage=coverage)
+    result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
+    assert result.load_by_disk_key()["101:scsi0"] == pytest.approx(2.0)
+
+
 # ---------------------------------------------------------------- coverage rejection
 
 
@@ -471,13 +523,17 @@ def test_efidisk0_is_held_to_the_normal_coverage_bar() -> None:
 # ------------------------------------------------------------- GroupLoad helper
 
 
-def _rate_promql(field_name: str) -> str:
+def _rate_promql(field_name: str, node_selector: str | None = None) -> str:
     """The exact PromQL `_fetch_raw_quantity_series` builds for one raw
     field -- the bare `rate(...)` expression, unlike `_quantile_promql`'s
     `quantile_over_time`-wrapped instant-query form."""
     metric_name = raw_metric_name(METRICS, field_name)
     return build_rate_promql(
-        metric_name, METRICS.labels.vmid, METRICS.labels.device, METRICS.rate_window_seconds
+        metric_name,
+        METRICS.labels.vmid,
+        METRICS.labels.device,
+        METRICS.rate_window_seconds,
+        selector=node_selector,
     )
 
 
@@ -498,6 +554,7 @@ def _series_client(
     write_ops: list[dict[str, Any]] | None = None,
     read_bytes: list[dict[str, Any]] | None = None,
     write_bytes: list[dict[str, Any]] | None = None,
+    node_selector: str | None = None,
 ) -> tuple[PrometheusClient, FakeSession]:
     """Build a `PrometheusClient` over a `FakeSession` answering
     `compute_disk_load_series()`'s own six raw-quantity range queries --
@@ -505,18 +562,43 @@ def _series_client(
     `rate(...)` expression rather than the quantile-wrapped instant-query
     form. Every argument defaults to no series at all."""
     range_data = {
-        _rate_promql("read_time_ns"): read_time or [],
-        _rate_promql("write_time_ns"): write_time or [],
-        _rate_promql("read_ops"): read_ops or [],
-        _rate_promql("write_ops"): write_ops or [],
-        _rate_promql("read_bytes"): read_bytes or [],
-        _rate_promql("write_bytes"): write_bytes or [],
+        _rate_promql("read_time_ns", node_selector): read_time or [],
+        _rate_promql("write_time_ns", node_selector): write_time or [],
+        _rate_promql("read_ops", node_selector): read_ops or [],
+        _rate_promql("write_ops", node_selector): write_ops or [],
+        _rate_promql("read_bytes", node_selector): read_bytes or [],
+        _rate_promql("write_bytes", node_selector): write_bytes or [],
     }
     session = FakeSession(query_data={}, range_data=range_data)
     return PrometheusClient(PROM_CONFIG, session=session), session
 
 
 # ------------------------------------------------------------- compute_disk_load_series
+
+
+def test_compute_disk_load_series_applies_the_node_selector_to_every_query() -> None:
+    group = Group(
+        name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
+    )
+    selector = 'nodename=~"pve01|pve02"'
+    read_time = [range_series(101, "scsi0", [(0.0, 2.0e9), (300.0, 2.0e9)])]
+    client, session = _series_client(read_time=read_time, node_selector=selector)
+
+    result = compute_disk_load_series(
+        client,
+        METRICS,
+        LoadWeights(),
+        group,
+        range_seconds=300.0,
+        step_seconds=300.0,
+        now_epoch_seconds=300.0,
+        node_selector=selector,
+    )
+
+    assert result["101:scsi0"][0][1] == pytest.approx(2.0)
+    assert session.calls
+    for _kind, query in session.calls:
+        assert selector in query
 
 
 def test_compute_disk_load_series_matches_section_14_2_at_every_timestamp() -> None:

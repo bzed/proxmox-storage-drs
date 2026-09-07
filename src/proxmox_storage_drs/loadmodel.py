@@ -99,16 +99,26 @@ class GroupLoad:
 
 
 def _fetch_raw_quantity(
-    client: PrometheusClient, metrics: MetricsConfig, window: WindowConfig, field: str
+    client: PrometheusClient,
+    metrics: MetricsConfig,
+    window: WindowConfig,
+    field: str,
+    node_selector: str | None,
 ) -> dict[DiskKey, float]:
     """One of the six section 3.4 raw quantities, quantile-reduced over the
     decision window, for every disk Prometheus currently reports -- not
     filtered to one group, since a single query covering everything is one
     call instead of one per group and Python-side filtering by `DiskKey` is
-    free."""
+    free. ``node_selector`` (:func:`~proxmox_storage_drs.metrics.resolve_node_selector`)
+    is a *cluster*-wide restriction, not a per-group one, so this stays
+    correct even though it is not group-filtered."""
     metric_name = raw_metric_name(metrics, field)
     rate_expr = build_rate_promql(
-        metric_name, metrics.labels.vmid, metrics.labels.device, metrics.rate_window_seconds
+        metric_name,
+        metrics.labels.vmid,
+        metrics.labels.device,
+        metrics.rate_window_seconds,
+        selector=node_selector,
     )
     promql = build_quantile_over_time_promql(
         rate_expr, window.quantile, window.lookback_seconds, metrics.step_seconds
@@ -130,10 +140,14 @@ class _RawQuantities:
 
 
 def _fetch_all_raw_quantities(
-    client: PrometheusClient, metrics: MetricsConfig, window: WindowConfig
+    client: PrometheusClient,
+    metrics: MetricsConfig,
+    window: WindowConfig,
+    node_selector: str | None,
 ) -> _RawQuantities:
     fetched = {
-        field: _fetch_raw_quantity(client, metrics, window, field) for field in RAW_METRIC_FIELDS
+        field: _fetch_raw_quantity(client, metrics, window, field, node_selector)
+        for field in RAW_METRIC_FIELDS
     }
     return _RawQuantities(**fetched)
 
@@ -153,6 +167,7 @@ def _fetch_raw_quantity_series(
     start_epoch_seconds: float,
     end_epoch_seconds: float,
     step_seconds: float,
+    node_selector: str | None,
 ) -> dict[DiskKey, _RawTimeSeries]:
     """One of the six section 3.4 raw quantities as a raw time series over
     ``[start, end]`` at ``step`` -- section 10's own material for a
@@ -164,7 +179,11 @@ def _fetch_raw_quantity_series(
     formula, only a different query type against the same expression."""
     metric_name = raw_metric_name(metrics, field)
     rate_expr = build_rate_promql(
-        metric_name, metrics.labels.vmid, metrics.labels.device, metrics.rate_window_seconds
+        metric_name,
+        metrics.labels.vmid,
+        metrics.labels.device,
+        metrics.rate_window_seconds,
+        selector=node_selector,
     )
     result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, step_seconds)
     return parse_disk_range_series(result, metrics.labels.vmid, metrics.labels.device)
@@ -189,10 +208,17 @@ def _fetch_all_raw_quantity_series(
     start_epoch_seconds: float,
     end_epoch_seconds: float,
     step_seconds: float,
+    node_selector: str | None,
 ) -> _RawSeriesQuantities:
     fetched = {
         field: _fetch_raw_quantity_series(
-            client, metrics, field, start_epoch_seconds, end_epoch_seconds, step_seconds
+            client,
+            metrics,
+            field,
+            start_epoch_seconds,
+            end_epoch_seconds,
+            step_seconds,
+            node_selector,
         )
         for field in RAW_METRIC_FIELDS
     }
@@ -287,6 +313,7 @@ def compute_group_load(
     load_weights: LoadWeights,
     group: Group,
     last_known_loads: Mapping[str, float] | None = None,
+    node_selector: str | None = None,
 ) -> GroupLoad:
     """Compute one group's :class:`GroupLoad` for this run. Section 4.
 
@@ -300,6 +327,14 @@ def compute_group_load(
     load is zero, not about refusing to run before ``state.json`` exists;
     callers must check ``DiskLoad.flagged_reason``, not just filter it out.
 
+    ``node_selector`` (:func:`~proxmox_storage_drs.metrics.resolve_node_selector`,
+    computed once per run by the caller -- this module never talks to the
+    PVE API to get it itself) scopes every query below to this cluster's
+    own nodes, so a Prometheus shared by more than one PVE cluster cannot
+    silently sum in a same-numbered vmid from somewhere else. ``None``
+    (the default) applies no restriction, identical to this function's
+    behaviour before the parameter existed.
+
     Coverage rejection excludes a disk's raw contribution from its group's
     normalization totals entirely, so one noisy or half-missing series
     cannot bias every other disk's normalized share -- the rejected disk's
@@ -311,8 +346,8 @@ def compute_group_load(
             group_name=group.name, idle=True, average_utilization=0.0, disks=(), storages=()
         )
 
-    coverage = compute_disk_coverage(client, metrics, window)
-    raw = _fetch_all_raw_quantities(client, metrics, window)
+    coverage = compute_disk_coverage(client, metrics, window, selector=node_selector)
+    raw = _fetch_all_raw_quantities(client, metrics, window, node_selector)
     fallback = last_known_loads or {}
 
     accepted_raw: dict[str, tuple[float, float, float]] = {}
@@ -405,6 +440,7 @@ def compute_disk_load_series(
     range_seconds: float,
     step_seconds: float,
     now_epoch_seconds: float,
+    node_selector: str | None = None,
 ) -> dict[str, TimeSeries]:
     """Section 4's `ℓ_d` blend, as a time series per disk over
     ``[now - range_seconds, now]`` at ``step_seconds`` -- the raw material
@@ -417,6 +453,8 @@ def compute_disk_load_series(
     not fixed to ``window.lookback`` the way :func:`compute_group_load`
     is: section 10.1 is explicit that a forecaster's own history
     requirement and the decision window are "genuinely different things."
+    ``node_selector`` is :func:`compute_group_load`'s own parameter of the
+    same name and meaning.
 
     Every disk in ``group`` gets an entry, even one with no samples at all
     (an empty series -- every :class:`~proxmox_storage_drs.forecast.Forecaster`
@@ -436,7 +474,7 @@ def compute_disk_load_series(
 
     end = now_epoch_seconds
     start = end - range_seconds
-    raw = _fetch_all_raw_quantity_series(client, metrics, start, end, step_seconds)
+    raw = _fetch_all_raw_quantity_series(client, metrics, start, end, step_seconds, node_selector)
 
     timestamps: set[float] = set()
     for field_series in (

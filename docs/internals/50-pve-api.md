@@ -119,6 +119,17 @@ each `/storage/{id}` rather than only at the parent `/storage` path, so that
 is what the manual instructs, rather than relying on propagation that was
 not cleanly isolated as working or not.
 
+**`node_names()` uses `GET /nodes`, not the `node` fields already visible on
+`vm_resources()`/`storage_resources()`.** Section 3.4's PromQL node-scoping
+filter (`metrics.build_node_selector()`) is built from this list, and it
+needs *every* cluster node, not only the ones currently hosting a VM or a
+shared storage — an idle node would silently be missing from either of
+those, and dropping a real node out of the filter is exactly the kind of
+quiet under-count section 3.4 exists to avoid (a VM that migrated onto the
+missing node partway through the window would look like it has less
+history than it really does). Called once per command invocation
+(`cli._resolve_node_selector_for_run()`), not per group.
+
 ## `move_disk()`: the one and only bytes/s -> KiB/s conversion
 
 Section 9.2 is explicit that `bwlimit`'s bytes/s-to-KiB/s conversion happens

@@ -77,6 +77,15 @@ metrics:
   # live series and errors if this value is wrong by more than 20%.
   pvestatd_push_interval: 60s
 
+  # Every query is scoped to labels.node =~ "<this cluster's own node names>"
+  # automatically (fetched from the PVE API), so a Prometheus shared by more
+  # than one PVE cluster cannot silently sum in a same-numbered vmid from
+  # somewhere else. Set extra_selector to override that with a raw PromQL
+  # label matcher of your own -- e.g. if your Telegraf tagging doesn't use
+  # PVE's own node names, or you need to restrict by something else entirely:
+  # extra_selector: 'cluster="mycluster"'
+  extra_selector: null
+
 # ------------------------------------------------------------ decision window
 window:
   # The DECISION window: the period whose load we balance. This is NOT the same

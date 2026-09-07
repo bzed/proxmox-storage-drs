@@ -62,7 +62,8 @@
         },
         "rate_window": { "type": ["string", "number"] },
         "step": { "type": ["string", "number"] },
-        "pvestatd_push_interval": { "type": ["string", "number"] }
+        "pvestatd_push_interval": { "type": ["string", "number"] },
+        "extra_selector": { "type": ["string", "null"], "minLength": 1 }
       }
     },
     "window": {

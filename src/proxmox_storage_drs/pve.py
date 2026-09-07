@@ -275,6 +275,24 @@ class PveClient:
         )
         return result
 
+    def node_names(self) -> list[str]:
+        """``GET /nodes``: every node in the cluster, by name.
+
+        Section 3.4's node-scoping filter (`metrics.build_node_selector()`)
+        is built from this, not from the ``node`` fields already visible on
+        `vm_resources()`/`storage_resources()`: an idle node currently
+        hosting no VM (or no shared storage) would silently be missing from
+        either of those, and dropping a real cluster node out of the
+        filter is exactly the kind of quiet under-count section 3.4 exists
+        to avoid -- a query scoped to fewer nodes than the cluster actually
+        has would treat a VM that migrated onto the missing one as if it
+        had less history than it really does.
+        """
+        result: list[dict[str, Any]] = self._call(
+            "fetching cluster node list", lambda: self._api.nodes.get()
+        )
+        return sorted({str(n["node"]) for n in result if n.get("node")})
+
     def storage_definitions(self) -> list[dict[str, Any]]:
         """``GET /storage``: every storage's full config, including ``saferemove``.
 
