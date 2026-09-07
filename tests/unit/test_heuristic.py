@@ -453,3 +453,46 @@ def test_descend_uses_a_swap_when_no_single_move_is_feasible() -> None:
     assert result.breakdown.moves == 2  # exactly one disk from each side, swapped
     assert result.assignment["201:scsi0"] != result.assignment["202:scsi0"]
     assert result.assignment["203:scsi0"] != result.assignment["204:scsi0"]
+
+
+def test_descend_relocates_a_whole_multi_disk_vm_neither_single_moves_nor_swaps_can_reach() -> None:
+    """Confirmed live against a real, heavily-imbalanced production
+    cluster (REVIEW.md-style finding, found by dogfooding rather than
+    review): a multi-disk VM entirely on one overloaded storage, with
+    enough other, *pinned* (immovable) load on that same storage that no
+    *single* one of the VM's own disks is worth moving alone once
+    `kappa_vm_affinity`'s fragmentation penalty is paid for the resulting
+    split -- but relocating every one of the VM's disks *together* is a
+    clear win (no fragmentation, and the combined load shift easily clears
+    both moves' `beta_move_count` cost). Hand-verified: moving `200:scsi0`
+    alone raises the objective by +0.43 (rejected); moving both of
+    200's disks together lowers it by -0.14 (the only improving move that
+    exists at all, before this candidate: `_descend()` found none)."""
+    pinned = make_disk("300:scsi0", 1.0, 0.89, "san-a", pinned="locked: test")
+    vm_a = make_disk("200:scsi0", 1.0, 0.185, "san-a")
+    vm_b = make_disk("200:scsi1", 1.0, 0.185, "san-a")
+    idle = make_disk("400:scsi0", 1.0, 0.0, "san-b")
+    storages = (make_storage("san-a", capacity_tib=10.0), make_storage("san-b", capacity_tib=10.0))
+    group = Group(name="g", storages=storages, disks=(pinned, vm_a, vm_b, idle))
+    loads = {"300:scsi0": 0.89, "200:scsi0": 0.185, "200:scsi1": 0.185, "400:scsi0": 0.0}
+
+    initial = seed_assignment(group)
+    before = evaluate_assignment(group, initial, loads, DEFAULT_OBJECTIVE, 0, 0.63)
+    assert before.imbalance_term == pytest.approx(1.26, abs=1e-6)
+
+    # A single one of 200's disks moved alone: fragmentation makes it a
+    # net loss, exactly as it was on the real cluster before this fix.
+    one_moved = dict(initial)
+    one_moved["200:scsi0"] = "san-b"
+    one_moved_total = evaluate_assignment(group, one_moved, loads, DEFAULT_OBJECTIVE, 0, 0.63).total
+    before_total = before.total
+    assert one_moved_total > before_total  # worse, not better
+
+    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE, min_free_bytes=0)
+
+    assert result.assignment["200:scsi0"] == "san-b"
+    assert result.assignment["200:scsi1"] == "san-b"
+    assert result.assignment["300:scsi0"] == "san-a"  # pinned, untouched
+    assert result.breakdown.moves == 2
+    assert result.breakdown.fragmentation_term == pytest.approx(0.0)  # never split
+    assert result.breakdown.total < before_total  # the whole run improved

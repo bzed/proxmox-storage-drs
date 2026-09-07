@@ -28,18 +28,27 @@ that function's own docstring for why a live (C5) violation is never
 deferred for a storage cooldown, mirroring the reserve-override exemption
 already established in `gates.py`/`payback.py`.
 
+**Descend's neighbourhood is single-disk moves, pairwise swaps, and
+whole-VM co-relocation** (a multi-disk VM's every movable disk moved to
+one target storage together, in the same step -- see `_descend()`'s own
+docstring for why this had to be added beyond the plan's own step 3
+wording: without it, a multi-disk VM entirely on one overloaded storage
+can leave descend with *zero* improving moves at all, confirmed live on a
+real production cluster).
+
 **Not implemented in this pass:** heuristic step 4, "polish" (reuniting a
 fragmented VM when doing so does not worsen imbalance beyond
-``imbalance_threshold``). The section 14 acceptance fixture's exact
-three-move and two-move solutions are both reachable by repair+descend
-alone (verified in ``tests/unit/test_heuristic.py``): the objective's own
-``kappa`` term already makes descend prefer co-location whenever it does
-not cost more than it is worth, which covers everything the fixture
-exercises. Polish exists for a case descend's single-move/pairwise-swap
-neighbourhood cannot reach on its own (an affinity fix needing three or
-more disks to move in a coordinated rotation) — a real gap, not forgotten,
-just not yet needed to pass the one fixture that exists to prove this
-module correct. **Also not implemented:** (C2)'s *format-compatibility*
+``imbalance_threshold``) for the *N-way rotation* case whole-VM
+co-relocation above does not cover -- e.g. disk A needs S1→S2, disk B
+needs S2→S3, and disk C needs S3→S1 in a cycle, no single disk's own move
+improving on its own and no two disks belonging to the same VM. The
+section 14 acceptance fixture's exact three-move and two-move solutions
+are both reachable by repair+descend alone (verified in
+``tests/unit/test_heuristic.py``): the objective's own ``kappa`` term
+already makes descend prefer co-location whenever it does not cost more
+than it is worth, which covers everything the fixture exercises. A real
+gap, not forgotten, just not yet needed to pass the one fixture that
+exists to prove this module correct. **Also not implemented:** (C2)'s *format-compatibility*
 eligibility rule -- a different target-exclusion rule from the storage
 cooldown above, not yet subsumed by it -- (a storage that cannot hold a
 disk's format is fixed `x_{d,s}=0`) — ``topology.Storage`` does not yet
@@ -54,11 +63,11 @@ accept the same format) and does not exercise this gap.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status
-from proxmox_storage_drs.topology import Disk, Group
+from proxmox_storage_drs.topology import Disk, Group, Storage
 
 # Every byte-valued objective term (`gamma`, and `r_s` for reporting) is
 # expressed in TiB here, matching `objective.gamma_move_bytes_per_tib` and
@@ -368,6 +377,94 @@ def _repair(
     return assignment, repairs
 
 
+def _vm_relocation_candidates(movable: tuple[Disk, ...]) -> dict[int, tuple[Disk, ...]]:
+    """Movable disks grouped by ``vmid``, for the "co-relocate this whole
+    VM" candidate in :func:`_descend` -- restricted to a vmid with **more
+    than one** movable disk, since a single-disk VM's co-relocation is
+    already exactly the plain single-disk-move candidate. Computed once,
+    outside `_descend()`'s own iteration loop: it depends only on `group`,
+    never on the current trial assignment."""
+    by_vmid: dict[int, list[Disk]] = {}
+    for disk in movable:
+        by_vmid.setdefault(disk.vmid, []).append(disk)
+    return {vmid: tuple(disks) for vmid, disks in by_vmid.items() if len(disks) > 1}
+
+
+def _best_of(
+    trials: Iterable[Assignment],
+    group: Group,
+    load_by_key: Mapping[str, float],
+    objective: ObjectiveConfig,
+    min_free_bytes: int,
+    average_utilization: float,
+    best_value: float,
+    best_assignment: Assignment | None,
+) -> tuple[float, Assignment | None]:
+    """Evaluates every candidate in ``trials`` against the shared
+    section 5.4 objective, keeping whichever (including the incumbent
+    ``best_value``/``best_assignment`` passed in) scores lowest --
+    factored out of `_descend()`'s three candidate-generating helpers
+    below purely to stay within this project's flake8 complexity limit,
+    and so all three score candidates through the exact same comparison."""
+    for trial in trials:
+        value = evaluate_assignment(
+            group, trial, load_by_key, objective, min_free_bytes, average_utilization
+        ).total
+        if value < best_value:
+            best_value = value
+            best_assignment = trial
+    return best_value, best_assignment
+
+
+def _single_move_trials(
+    assignment: Assignment,
+    movable: tuple[Disk, ...],
+    storages: tuple[Storage, ...],
+    cooldown_storages: frozenset[str],
+) -> Iterable[Assignment]:
+    for disk in movable:
+        here = assignment[disk.key]
+        for target in storages:
+            if target.id == here or target.id in cooldown_storages:
+                continue
+            trial = dict(assignment)
+            trial[disk.key] = target.id
+            yield trial
+
+
+def _swap_trials(
+    assignment: Assignment, movable: tuple[Disk, ...], cooldown_storages: frozenset[str]
+) -> Iterable[Assignment]:
+    for i, disk_a in enumerate(movable):
+        for disk_b in movable[i + 1 :]:
+            here_a = assignment[disk_a.key]
+            here_b = assignment[disk_b.key]
+            if here_a == here_b:
+                continue  # no-op swap
+            if here_a in cooldown_storages or here_b in cooldown_storages:
+                continue  # the swap would send a disk to each of these
+            trial = dict(assignment)
+            trial[disk_a.key], trial[disk_b.key] = here_b, here_a
+            yield trial
+
+
+def _vm_relocation_trials(
+    assignment: Assignment,
+    vm_relocation_candidates: dict[int, tuple[Disk, ...]],
+    storages: tuple[Storage, ...],
+    cooldown_storages: frozenset[str],
+) -> Iterable[Assignment]:
+    for disks in vm_relocation_candidates.values():
+        here = {assignment[d.key] for d in disks}
+        for target in storages:
+            if here == {target.id} or target.id in cooldown_storages:
+                continue
+            trial = dict(assignment)
+            for disk in disks:
+                trial[disk.key] = target.id
+            yield trial
+
+
 def _descend(
     group: Group,
     assignment: Assignment,
@@ -378,60 +475,73 @@ def _descend(
     max_iterations: int,
     cooldown_storages: frozenset[str] = frozenset(),
 ) -> Assignment:
-    """Section 5.5 step 3: repeatedly apply whichever single-disk move or
-    pairwise swap most improves the full objective; stop when nothing does,
-    or after ``heuristic_iterations``. Swaps matter (the plan is explicit):
-    when every storage is near its cap, no single move is feasible-and-
-    improving, and only an exchange of two disks can help.
+    """Section 5.5 step 3: repeatedly apply whichever single-disk move,
+    pairwise swap, or whole-VM co-relocation (below) most improves the
+    full objective; stop when nothing does, or after
+    ``heuristic_iterations``. Swaps matter (the plan is explicit): when
+    every storage is near its cap, no single move is feasible-and
+    -improving, and only an exchange of two disks can help.
+
+    **Whole-VM co-relocation, beyond what the plan's own step 3 names.**
+    Moving every one of a multi-disk VM's movable disks to the same target
+    storage together is *not* reachable by single-disk moves or pairwise
+    swaps alone whenever the objective's own ``kappa`` (VM affinity) term
+    is large enough to make every individual disk's move a net loss on its
+    own -- moving one disk of an N-disk VM temporarily *fragments* it
+    (paying `kappa`) before a second, third, ... move could reunite it
+    elsewhere, and `_descend()` only ever accepts a single step that is
+    *itself* improving. A swap does not help either: it exchanges two
+    disks' positions with *each other*, never relocates a whole group of
+    disks to a third storage together. Confirmed live on a real,
+    heavily-imbalanced production cluster (two-disk VM entirely on one
+    storage, `kappa_vm_affinity` at its default `0.50`): without this
+    candidate, `_descend()` found *zero* improving moves at all and left
+    the cluster at its full initial imbalance, even though relocating that
+    one VM's disks together is a large, unambiguous improvement CP-SAT
+    finds immediately -- the "dependency-free ... path for very large
+    groups" the plan describes this heuristic as must not be able to get
+    stuck this badly. Tried in the same "evaluate every candidate, apply
+    the best one" step as single-disk moves and swaps, so it is scored by
+    exactly the same objective and cannot itself ever choose a worse
+    assignment.
 
     ``cooldown_storages`` (section 6: "a storage involved in a migration
     within `cooldown_per_storage` accepts no new incoming moves") excludes
     a storage as a *destination* only -- a disk already on one is free to
-    move away, and a swap involving one is skipped only because a swap
-    always sends a disk *to* both storages it touches. Deliberately not
-    consulted by ``_repair()`` -- see that function's own docstring for
-    why a (C5) repair move ignores this the same way it ignores every
-    other form of hysteresis (section 13)."""
+    move away, a swap involving one is skipped only because a swap always
+    sends a disk *to* both storages it touches, and a whole-VM
+    co-relocation is skipped as a target the same way for the same
+    reason. Deliberately not consulted by ``_repair()`` -- see that
+    function's own docstring for why a (C5) repair move ignores this the
+    same way it ignores every other form of hysteresis (section 13)."""
     assignment = dict(assignment)
     movable = _movable_disks(group)
+    vm_relocation_candidates = _vm_relocation_candidates(movable)
     current = evaluate_assignment(
         group, assignment, load_by_key, objective, min_free_bytes, average_utilization
     ).total
 
     for _ in range(max_iterations):
-        best_value = current
+        best_value: float = current
         best_assignment: Assignment | None = None
 
-        for disk in movable:
-            here = assignment[disk.key]
-            for target in group.storages:
-                if target.id == here or target.id in cooldown_storages:
-                    continue
-                trial = dict(assignment)
-                trial[disk.key] = target.id
-                value = evaluate_assignment(
-                    group, trial, load_by_key, objective, min_free_bytes, average_utilization
-                ).total
-                if value < best_value:
-                    best_value = value
-                    best_assignment = trial
-
-        for i, disk_a in enumerate(movable):
-            for disk_b in movable[i + 1 :]:
-                here_a = assignment[disk_a.key]
-                here_b = assignment[disk_b.key]
-                if here_a == here_b:
-                    continue  # no-op swap
-                if here_a in cooldown_storages or here_b in cooldown_storages:
-                    continue  # the swap would send a disk to each of these
-                trial = dict(assignment)
-                trial[disk_a.key], trial[disk_b.key] = here_b, here_a
-                value = evaluate_assignment(
-                    group, trial, load_by_key, objective, min_free_bytes, average_utilization
-                ).total
-                if value < best_value:
-                    best_value = value
-                    best_assignment = trial
+        for trials in (
+            _single_move_trials(assignment, movable, group.storages, cooldown_storages),
+            _swap_trials(assignment, movable, cooldown_storages),
+            _vm_relocation_trials(
+                assignment, vm_relocation_candidates, group.storages, cooldown_storages
+            ),
+        ):
+            best_value, best_assignment = _best_of(
+                trials,
+                group,
+                load_by_key,
+                objective,
+                min_free_bytes,
+                average_utilization,
+                best_value,
+                best_assignment,
+            )
 
         if best_assignment is None:
             break

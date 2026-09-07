@@ -89,7 +89,38 @@ def _build_api(config: ProxmoxConfig) -> Any:
 
     api = ProxmoxAPI(**kwargs)
     _apply_ticket_refresh_seconds(api, config)
+    _apply_connection_pool_size(api, config.read_workers)
     return api
+
+
+def _apply_connection_pool_size(api: Any, read_workers: int) -> None:
+    """Size the underlying ``requests`` session's connection pool to fit
+    ``config.proxmox.read_workers`` (REVIEW.md P-02's concurrent fetch),
+    confirmed live against a real cluster: ``requests``'s own default
+    ``HTTPAdapter`` pool (``pool_maxsize=10``, sized for a single
+    interactive client, not a worker pool) is smaller than the default
+    ``read_workers=12``, so ``topology.py``'s per-run fetch reliably logs
+    urllib3's own "Connection pool is full, discarding connection" warning
+    on every real multi-VM cluster -- and each discarded connection pays a
+    fresh TCP+TLS handshake instead of reusing one, not just log noise.
+
+    Reaches into ``proxmoxer``'s internal ``_store["session"]`` the same
+    documented, best-effort way :func:`_apply_ticket_refresh_seconds`
+    reaches ``_backend.auth`` -- no supported, public way to size this
+    through ``ProxmoxAPI(...)``'s own constructor, so this mounts a
+    larger-pooled ``HTTPAdapter`` onto the already-built session
+    afterwards. Silently a no-op if this shape doesn't match (a future
+    ``proxmoxer`` version, or a non-``https`` backend whose session isn't
+    a plain ``requests.Session``) -- this only ever removes a warning and
+    recovers some connection reuse, never something correctness depends
+    on."""
+    session = getattr(api, "_store", {}).get("session")
+    if session is None or not hasattr(session, "mount"):
+        return
+    pool_size = max(read_workers, 10)
+    adapter = requests.adapters.HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
 
 
 def _apply_ticket_refresh_seconds(api: Any, config: ProxmoxConfig) -> None:

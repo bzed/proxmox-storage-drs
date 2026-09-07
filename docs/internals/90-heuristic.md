@@ -80,6 +80,49 @@ exactly the capacity-locked scenario the plan describes (two storages each
 with headroom smaller than any single disk) and checks the only reachable
 improvement — a swap — is the one found.
 
+## Descend also tries relocating a whole VM at once — a real gap, found by dogfooding
+
+Neither of the two candidates above can reach a third kind of improving
+move: relocating *every* one of a multi-disk VM's movable disks to one
+new storage, together. A single-disk move can't get there when the
+objective's `kappa` (VM affinity) term is large enough to make moving
+just one of the VM's disks a net loss on its own — it temporarily
+*fragments* the VM (paying `kappa`) before a second move could reunite it
+elsewhere, and `_descend()` only ever takes a step that is itself
+improving. A swap can't either: it exchanges two disks' positions with
+*each other*, never relocates a whole disk set to a third storage
+together.
+
+This was not a theoretical gap — it was found by testing against a real
+production cluster (not by review): a two-disk VM sat entirely on one
+storage that also carried a large amount of *pinned* (immovable) load,
+with `kappa_vm_affinity` at its default `0.50`. Every individual disk
+move `_descend()` tried was a net loss once fragmentation was paid for,
+so it found *zero* improving moves at all and left the cluster at its
+full, 196%-imbalance starting point — even though CP-SAT, given the exact
+same data, found the two-disk relocation immediately. A dependency-free
+heuristic that can get stuck this badly on a real, unremarkable cluster
+undermines the one thing section 5.5 asks it to be: "the path for very
+large groups," reliable with no optional solver installed at all.
+
+The fix adds a third candidate family, tried in the same
+"evaluate everything, apply whichever wins" step as the other two:
+`_vm_relocation_candidates()` groups movable disks by `vmid` (skipping
+any VM with only one movable disk — that case is already the plain
+single-move candidate), and for each such VM, `_descend()` tries moving
+*all* of its disks to each other storage in one trial. Scored by the
+exact same `evaluate_assignment()` call as everything else, so it can
+never itself choose a worse assignment, and it respects
+`cooldown_storages` as a destination exclusion the same way the other two
+candidates do. `test_descend_relocates_a_whole_multi_disk_vm_neither_single_moves_nor_swaps_can_reach`
+reproduces the production scenario's numbers by hand (a single move
+raises the objective by +0.43; the joint move lowers it by -0.14) and
+confirms `_descend()` only finds the improvement once this candidate
+exists. `_best_of()`/`_single_move_trials()`/`_swap_trials()`/
+`_vm_relocation_trials()` are the flake8-complexity-driven extraction
+that let all three candidate families share one "keep whichever trial
+scores lowest" loop rather than three copies of it.
+
 ## The storage cooldown excludes a destination, never a source
 
 Section 6: "a storage involved in a migration within
@@ -156,11 +199,15 @@ consistent.
   implemented: the section 14 fixture's exact three-move and two-move
   solutions are both reachable by repair+descend alone (proven by the
   tests above), because the objective's own `kappa` term already makes
-  descend prefer co-location whenever it is not too costly. Polish would
-  matter for an affinity fix that needs three or more disks to rotate
-  simultaneously — outside single-move/pairwise-swap reach — which the one
-  fixture that exists to validate this module does not exercise. A real
-  gap, tracked here rather than silently absent.
+  descend prefer co-location whenever it is not too costly, and (since the
+  fix above) descend's own whole-VM co-relocation candidate now reaches
+  the two-or-fewer-disk case directly. What's left for polish is strictly
+  narrower than it once was: an *N-way rotation* across three or more
+  storages (disk A needs S1→S2, disk B needs S2→S3, disk C needs S3→S1 in
+  a cycle) where no disk's own move improves alone and no two disks share
+  a VM — outside every candidate `_descend()` tries today. The one fixture
+  that exists to validate this module does not exercise it. A real gap,
+  tracked here rather than silently absent.
 - **(C2) format-compatibility eligibility** — `topology.Storage` does not
   yet carry the storage type/format information that rule needs (it is
   resolved internally in `topology.py`'s `_default_format` but never
