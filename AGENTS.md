@@ -84,7 +84,12 @@ branch with the failure described in the commit message, and keep going.
 Individual targets: `make fmt`, `make lint`, `make typecheck`, `make test`, `make cov`,
 `make fixtures`, `make pdf`, `make pdf-check`. `make venv` bootstraps `.venv/` with the dev
 dependencies; the Python tools are **not** installed system-wide on this host, so start there.
-The paper toolchain (`pandoc`, `lualatex`) *is* system-wide and is not part of `.venv`.
+`make typecheck` runs against a second, separate `.venv-typecheck/` (`make venv-typecheck`),
+not `.venv/` — `test`/`cov` install the optional `solver`/`forecast` extras into `.venv/` for
+full backend coverage, and a numpy those pull in ships stubs `mypy` cannot parse
+(`docs/internals/91-optimize.md`); both `make check` and plain `make typecheck` create
+whichever venv they need on their own, so this is usually invisible. The paper toolchain
+(`pandoc`, `lualatex`) *is* system-wide and is not part of either venv.
 
 ---
 
