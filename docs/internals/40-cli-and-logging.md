@@ -28,16 +28,19 @@ present does it call `config.load_config()`.
 
 `_COMMAND_HANDLERS: dict[str, CommandHandler]` maps each subcommand name to
 a function of `(ResolvedConfig, argparse.Namespace, effective_mode) -> int`.
-Every subcommand not yet implemented (`apply`, `explain` — see
+Every subcommand not yet implemented (currently just `explain` — see
 [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md) for
-which ones that currently is) gets a handler from
+which one that currently is) gets a handler from
 `_make_not_yet_implemented_handler(name)`, a closure factory rather than a
 `lambda` with a default-argument trick, because mypy's strict mode cannot
 infer a bare lambda's parameter types cleanly here — see the comment at that
 function if you are tempted to simplify it back to a one-liner.
 `_COMMAND_HANDLERS["verify-metrics"]` is overwritten with the real
-`_handle_verify_metrics` once `metrics.py` exists to back it. Adding a new
-implemented command is exactly this: write the handler, assign it into the
+`_handle_verify_metrics` once `metrics.py` exists to back it, and likewise
+for every other command as its own module landed — `apply`'s the most
+recent, backed by `_handle_apply` (`execute.py`/`crashrecovery.py`).
+Adding a new implemented command is exactly this: write the handler,
+assign it into the
 dict, done — `main()`'s dispatch does not change.
 
 ## `--group`: filtered once, right after `build_topology()`
