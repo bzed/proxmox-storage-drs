@@ -910,6 +910,17 @@ effectively hard:
 not depend on `T_g`, and both backends support it by re-solving. Option 2 exists for a backend that
 cannot re-solve cheaply.
 
+**As built (REVIEW.md V-01):** option 2's `P_min` computation and `max(configured, P_min)` floor
+above were never implemented — there is no build-time computation of a provably-dominant `P`
+anywhere in `src/`. Both MILP backends (`optimize.py`) implement option 1 only, and never consult
+`objective.reserve_violation_penalty` at all. The heuristic backend (`heuristic.py`) is the key's
+one live consumer: it multiplies the *configured* value straight into its objective as
+`reserve_penalty_term = objective.reserve_violation_penalty * reserve_shortfall_tib`, with no
+floor and no warning if it is too small to be provably dominant for a given group. Until option 2
+is implemented, read this section's `P = max(configured, P_min)` machinery as the target design
+for the single-stage path, not current behaviour — see `docs/manual/10-configuration.md`'s
+`objective.reserve_violation_penalty` entry for what the key does today.
+
 `tests/fixtures/reserve-tradeoff.yaml` (§14.6) is the fixture for this rule: a two-storage group in
 which the two options provably disagree, with the exact `P` at which big-M flips recorded alongside
 the computed `P_min`. Test both paths against it. The §14 fixture cannot do this job — there, every
@@ -1555,6 +1566,14 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
 
 The pinned block is not optional decoration — it is the "complain" half of the skip-and-complain
 policy of §3.7, and it is the only place an operator learns which snapshots to clear.
+
+**As built (REVIEW.md V-02):** `plan`/`apply` print none of the above beyond the move list and
+payback verdict — neither renderer carries a pinned field, a fragmentation line, or a pinned-load
+line. That narration lives in `pve-storage-drs explain` instead (`docs/manual/29-explain.md`'s
+`pinned (not movable this run):`/`cannot fully consolidate:`/`pinned load ...` sections, including
+the per-pin `→` action hints shown above); `show-load` also names each pin inline, per disk, as
+`[pinned: <reason>]`. Read every "pinned block"/"plan output" reference above as `explain`'s
+output, not `plan`'s or `apply`'s.
 
 ---
 

@@ -1053,6 +1053,26 @@ def _pinned_load_fraction(
     return pinned, total
 
 
+def _pin_action_hint(reason: str | None) -> str | None:
+    """Section 9.5's per-pin action hint: what to actually do about a
+    pin, distinct from the reason text (which only says why). ``None``
+    for a standing policy exclusion (``exclude.*``, or a deliberately
+    skipped ``unusedN`` disk) -- there is nothing to "unblock", the
+    operator chose this, matching section 9.5's own example (its
+    "excluded by tag" pin carries no hint either)."""
+    if reason is None:
+        return None
+    if reason.startswith("snapshots present ("):
+        return "clear snapshots to unblock"
+    if reason.startswith("unreferenced companion volume"):
+        return "remove the stale reference to unblock"
+    if reason.startswith("cooldown:"):
+        return "re-check next run"
+    if reason.startswith("locked:"):
+        return "re-check next run once the lock releases"
+    return None
+
+
 def _render_pinned_lines(group: Group, load_by_key: dict[str, float]) -> list[str]:
     pinned = _pinned_disks(group)
     if not pinned:
@@ -1061,9 +1081,11 @@ def _render_pinned_lines(group: Group, load_by_key: dict[str, float]) -> list[st
     for disk in pinned:
         load_str = f"  ℓ {load_by_key[disk.key]:.2f}" if disk.key in load_by_key else ""
         ratio = _load_per_tib(load_by_key, disk.key, disk.size_bytes)
+        hint = _pin_action_hint(disk.pinned_reason)
+        hint_str = f"  → {hint}" if hint else ""
         lines.append(
             f"    {disk.key:<14} {format_bytes(disk.size_bytes):>10}  on {disk.current_storage}"
-            f"{load_str}  ℓ/z {ratio:.2f}  -- {disk.pinned_reason}"
+            f"{load_str}  ℓ/z {ratio:.2f}  -- {disk.pinned_reason}{hint_str}"
         )
     return lines
 
@@ -1311,6 +1333,7 @@ def _render_group_explain_json(
             "load": load_by_key.get(d.key),
             "load_per_tib": _load_per_tib(load_by_key, d.key, d.size_bytes),
             "reason": d.pinned_reason,
+            "action_hint": _pin_action_hint(d.pinned_reason),
         }
         for d in _pinned_disks(group)
     ]

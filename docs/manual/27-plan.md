@@ -145,6 +145,12 @@ and left for you to review, not silently adjusted. See
 
 ## What `plan` does not yet do
 
+- **No pinned block, fragmentation naming, or pinned-load line.** Unlike
+  `IMPLEMENTATION_PLAN.md` section 9.5's own example, `plan`/`apply` print
+  only the move list and payback verdict — that narration (including the
+  per-pin `→` action hint) lives in `pve-storage-drs explain` instead
+  (`docs/manual/29-explain.md`); `show-load` also shows each pin inline,
+  per disk.
 - **No automatic re-solve-and-shrink on a failing payback test** (see
   above) — reported, not fixed for you.
 - **The section 7.3 saturation-ceiling defer check only covers the
@@ -167,10 +173,12 @@ and left for you to review, not silently adjusted. See
   with no `state.json` yet, or one `apply` has never touched, still
   evaluates as a first run (drift gate skipped).
 - **Cooldowns.** A disk moved within `gates.cooldown_per_disk` is pinned
-  (`show-load`/`plan` both show it as `[pinned: cooldown: ...]`), and a
-  storage that was a migration's *destination* within
-  `gates.cooldown_per_storage` accepts no new incoming moves from the
-  heuristic. See `docs/internals/15-state.md`, `docs/internals/60-topology.md`
+  and excluded from this run's solve — `plan` itself does not print pins
+  at all (see above); `show-load`/`explain` both show it as
+  `[pinned: cooldown: ...]`. A storage that was a migration's
+  *destination* within `gates.cooldown_per_storage` accepts no new
+  incoming moves from the heuristic. See `docs/internals/15-state.md`,
+  `docs/internals/60-topology.md`
   and `docs/internals/90-heuristic.md`.
 - **No staging, no concurrent scheduling.** Documented as deliberate, not
   forgotten, in `docs/internals/95-schedule.md`.
