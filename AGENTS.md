@@ -363,6 +363,11 @@ a missing Debian package would hide the day §9.1 stopped being true, which is t
 there to detect. `make SYSTEM_TOOLS=1 <target>` is the switch that runs the ordinary targets against
 the system toolchain.
 
+One deliberate, reviewable exception: GitHub Actions `pip install`s `ortools` (no Debian package
+exists) purely so `test_optimize.py`'s CP-SAT cases run in CI, after typecheck, never touching the
+packaged install/build path. See the `tests.yml` header comment and `.agents/packaging.md`'s
+`ortools` row for the reasoning.
+
 The Salsa build has no network on purpose: that is what proves the package builds from trixie alone.
 If a module genuinely has to be fetched during a build, vendor it (§9.1 rule 2). Setting
 `SALSA_CI_SBUILD_ARGS: '--enable-network'` is the fallback, and it is a deliberate, reviewable edit

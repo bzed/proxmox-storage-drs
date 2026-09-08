@@ -24,13 +24,24 @@ What we depend on today, all confirmed present in trixie:
 | `jsonschema` | `python3-jsonschema` | Config validation |
 | `pulp` | `python3-pulp` + `coinor-cbc` | The MILP path that Debian can actually install |
 | `statsmodels` | `python3-statsmodels` | Holt-Winters, optional |
-| `ortools` | — | **Not in Debian.** CP-SAT is a pip-only bonus |
+| `ortools` | — | **Not in Debian.** CP-SAT is a pip-only bonus; GitHub Actions `pip install`s it as the one documented exception to §9.3's "apt, never pip" rule, purely for CP-SAT test coverage — see below |
 
 `ortools` is the interesting case and the reason rule 3 exists. It is a large C++ extension, so
 vendoring it is not on the table, and Debian does not carry it. Rather than let that dictate the
 architecture, the design already required a solver-independent path: CBC through PuLP, and below
 that a dependency-free heuristic. On a Debian install, **CBC is the solver**, and §5.5 of the plan
 should be read that way.
+
+**The one pip exception, and where it lives.** GitHub Actions `pip install --break-system-packages
+'ortools>=9.8'` in a step run after `make SYSTEM_TOOLS=1 fmt-check lint typecheck`, purely so
+`test_optimize.py`'s CP-SAT-parametrized cases have something to run against — without it, every
+`_cpsat_*`/`_solve_cpsat` function in `optimize.py` is structurally unreachable in CI. It changes
+nothing about what the package build, the autopkgtest, or a real install needs: `ortools` stays
+optional at runtime and `solver.backend: auto` still falls back to CBC, then the heuristic, without
+it. The full reasoning (including why it runs *after* typecheck, not before) is in the `tests.yml`
+header comment; AGENTS.md §9.3 points here for it. This is the one place §9.3's absolute "apt,
+never pip" applies with a named, reviewed exception — do not read it as a precedent for pip-ing
+around a missing Debian package anywhere else.
 
 If you must add something Debian does not have and it *is* pure Python and small: vendor it under
 `src/proxmox_storage_drs/_vendor/`, record the upstream name, version, URL and licence both in
@@ -113,8 +124,10 @@ tidy-up that unified them would be wrong in one direction or the other.
 **GitHub Actions**, in `debian:trixie` containers:
 
 - `tests.yml` — the toolchain comes from apt, not pip. `make SYSTEM_TOOLS=1 …` runs the ordinary
-  targets against the system tools. Coverage goes to Codecov with `codecov/codecov-action`, test
-  results with `codecov/test-results-action`; both need `CODECOV_TOKEN` in the repository secrets.
+  targets against the system tools; `./run-with-system-python.sh` does the same for running the
+  CLI itself (no venv, straight out of the checkout) rather than a make target. Coverage goes to
+  Codecov with `codecov/codecov-action`, test results with `codecov/test-results-action`; both need
+  `CODECOV_TOKEN` in the repository secrets.
 - `tests.yml`'s `docs` job builds every document against **trixie's pandoc**, which is older than
   the one you are probably developing against. That job is the reason `make pdf` uses
   `--highlight-style` rather than the newer `--syntax-highlighting`: the option that works on both.

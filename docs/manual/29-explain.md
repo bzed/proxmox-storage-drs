@@ -31,19 +31,19 @@ Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   payback: benefit 5.2e+06 load·s vs cost 4.72e+04 load·s → ratio 110 (need 10) ✓
   objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 0.5 + reserve 0 = 2.32
   measured load:
-  san-a  used 4.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 1.50 TiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
+  san-a  used 5.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 1.50 TiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
     101:scsi0        2.00 TiB  raw     ℓ 3.00
     101:scsi1        1.00 TiB  raw     ℓ 1.00
     102:scsi0        1.50 TiB  raw     ℓ 2.50
     106:scsi0        1.00 TiB  raw     ℓ 0.90  [pinned: snapshots present (2)]
-  san-b  used 1.50 TiB/8.00 TiB  L=0.80 u=0.80  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
+  san-b  used 2.00 TiB/8.00 TiB  L=0.80 u=0.80  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
     103:scsi0      512.00 GiB  raw     ℓ 0.40
     104:scsi0        1.00 TiB  raw     ℓ 0.30
     106:scsi1      512.00 GiB  raw     ℓ 0.10
   san-c  used 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
     105:scsi0      512.00 GiB  raw     ℓ 0.20
   pinned (not movable this run):
-    106:scsi0        1.00 TiB  on san-a  ℓ 0.90  ℓ/z 0.90  -- snapshots present (2)
+    106:scsi0        1.00 TiB  on san-a  ℓ 0.90  ℓ/z 0.90  -- snapshots present (2)  → clear snapshots to unblock
   cannot fully consolidate:
     106 (archive01)  scsi0: snapshots present (2)
   pinned load 0.90 of 8.40 (10.7%, warn at 25%);  best achievable spread given pins: 17.9%
@@ -111,6 +111,14 @@ its exact reason — a real snapshot or an unreferenced companion volume
 one block instead of interleaved with movable disks, because pins are
 `explain`'s subject, not an aside.
 
+A pin with something to actually act on or wait for gets a trailing
+`→ <hint>` — "clear snapshots to unblock" for a real snapshot, "remove the
+stale reference to unblock" for an orphaned volume, "re-check next run"
+for a cooldown, "re-check next run once the lock releases" for a VM
+lock. A standing policy exclusion (`exclude.*`, or a deliberately skipped
+`unusedN` disk) carries no hint — that pin is not something to unblock,
+it is a choice already made in the config.
+
 ## `cannot fully consolidate:`
 
 Names a VM whose disks — after everything this run's plan actually
@@ -151,7 +159,9 @@ own field list) plus `objective` (the five terms above, `null` when the
 gate said `NO ACTION`), `storages`/`disks` (the measured-load section
 above, identical shape to `show-load --json`'s own fields of the same
 name), `pinned_disks` (`disk_key`, `vmid`, `device`, `current_storage`,
-`size_bytes`, `load`, `load_per_tib`, `reason`), `fragmentation` (a list of
+`size_bytes`, `load`, `load_per_tib`, `reason`, `action_hint` — `null` for
+a standing policy exclusion, same rule as the human report's `→` line),
+`fragmentation` (a list of
 `{vmid, vm_name, blockers}`, each blocker an object with `device`,
 `disk_key`, `reason`), and `pinned_load` (`null` for an idle group,
 otherwise `pinned_load`, `total_load`, `fraction` and `warn_fraction`).

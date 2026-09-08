@@ -634,12 +634,22 @@ they move online.
 
 Weight, default `1000.0`.
 
-A **floor**, not the value actually used, for the single-stage big-M
-fallback solve path (`IMPLEMENTATION_PLAN.md` section 5.3, option 2): the
-engine computes a provably-dominant `P` from the group's own load and disk
-sizes at solve time and uses `max(configured, computed)`, warning when it
-had to raise it. The default lexicographic two-stage solve (option 1, and
-the default) needs no penalty at all and is unaffected by this key.
+The reserve-violation weight in the **heuristic backend**'s objective
+(`solver.backend: heuristic`, or `auto` falling back to it when neither a
+MILP backend is installed): multiplied straight into
+`reserve_penalty_term = objective.reserve_violation_penalty *
+reserve_shortfall_tib`, one of the five terms `explain`'s `objective:`
+line prints and the section 14 fixture's totals carry. It is used exactly
+as configured — no floor, no automatic raise, no warning.
+
+The MILP backends (`solver.backend: cpsat`/`cbc`, and `auto` when either
+is available) solve the reserve **lexicographically** instead
+(`IMPLEMENTATION_PLAN.md` section 5.3, option 1): it is fixed as a hard
+constraint before the section 5.4 objective is even considered, so no
+weight — this one included — can trade it away. Section 5.3 also
+describes a single-stage big-M alternative (option 2) with a
+`max(configured, computed)` floor for this key; that alternative is not
+implemented, so this key never gets raised automatically for any backend.
 
 ## `solver` — which backend plans
 

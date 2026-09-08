@@ -92,6 +92,21 @@ cluster of stale "not yet written" documentation claims), one Info (an undocumen
 pattern asymmetry: matched storages skip the not-`shared` warning). **Section 22** records how
 all three were resolved.
 
+A **thirteenth pass** (section 23) reviews the finalized tool's next seven commits: the `explain`
+command (the last unimplemented subcommand), section 3.4's node-scoping of every PromQL query
+(with the `metrics.extra_selector` override), CI installing `ortools` so the CP-SAT path is
+finally exercised, a dedicated mypy venv with a loud-not-swallowed solver install, the README
+rewrite, and a sweep replacing bare "section N.M" citations in operator-facing messages with
+plain language. Five new findings (V-01..V-05) are identified: two Medium (the manual's
+`objective.reserve_violation_penalty` entry describes a provably-dominant-P computation that has
+never existed anywhere in the code, and the §9.5 pinned block the plan calls "not optional
+decoration" lives only in `explain`, without its action hints, while `27-plan.md` falsely claims
+`plan` shows pins too), one Low (two internally inconsistent "used" figures in the new
+`29-explain.md` worked example — every other number in it verifies by hand), one Low (the CI
+pip-installs `ortools` as a documented-in-workflow-only exception to AGENTS.md §9.3's absolute
+"apt, never pip" rule), one Info (an untracked, referenced-nowhere helper script in the working
+tree). **Section 24** records how all five were resolved.
+
 ---
 
 ## 0. Overall assessment
@@ -2800,6 +2815,305 @@ the two new tests exercise lines the existing suite already reached from other a
 `make check` clean (fmt, lint, typecheck, test, fixtures, docs-check — `IMPLEMENTATION_PLAN.pdf`
 rebuilt to 42 pages, internals PDF to 44, manual PDF unchanged at 34 pages, all three stamps
 regenerated in the same commit as their Markdown per AGENTS.md §7).
+
+---
+
+## 23. Thirteenth-pass review — `explain`, node-scoped queries, CI solver coverage, plain-language messages
+
+Reviewed commit range `66aacc1..HEAD` (the U-01..U-03 fixes themselves are already recorded in
+section 22). Seven commits: `5680d58` (README rewritten as a quickstart, six stale claims fixed
+— U-02's sweep), `54ec527` (`explain`, the last unimplemented subcommand, plus
+`docs/manual/29-explain.md` and the manpage entry), `a605391` (CI pip-installs `ortools` so
+`test_optimize.py`'s CP-SAT cases actually run), `0c4485b` (a dedicated `.venv-typecheck/` for
+mypy, and `make venv`/`test`/`cov` stop swallowing a failed solver-extras install), `981adce`
+(section 3.4's node-scoping of every PromQL query, auto-derived from `GET /nodes`, with the new
+`metrics.extra_selector` override — the second new plan section ever), `84ea838` (`explain`
+grows the measured-load section and `-v` provenance), `73fc0aa` (every bare "section N.M"
+citation in operator-facing strings replaced with plain language naming the config knob to act
+on). Roughly 2,070 inserted lines across 48 files, ~1,000 of them tests.
+
+The range's quality stays high. `explain` is built the right way — it runs the *identical*
+`_plan_group()` pipeline (`plan` and `apply` share, so it cannot drift) and adds only rendering:
+the pinned block with exact per-disk reasons, §3.6's "cannot fully consolidate" naming with the
+blocker per device, the five-term objective breakdown (`ObjectiveBreakdown`'s own stated reason
+for existing), pinned-load-as-structural-imbalance warning, show-load's measured-load picture
+reused verbatim, and JSON that always carries query provenance. Node scoping is correct where it
+is easy to get wrong: the matcher sits *inside* `rate()`'s vector selector before `sum by`
+collapses labels; every node name is escaped as a regex literal (an FQDN's `.` otherwise matches
+more than the node); the list comes from `GET /nodes` rather than the VM/storage inventories (an
+idle node would silently drop out of either); `extra_selector` wins outright; `verify-metrics`
+stays deliberately unscoped-and-independent-of-PVE; and the whole thing is threaded as one
+resolved `str | None` per run. The plain-language sweep is genuine, not cosmetic — each reworded
+message names the config knob to act on, and the manual's worked examples were updated to match
+the new strings in the same commit. Both new findings of substance are documentation-accuracy
+issues the mechanical cross-reference tests structurally cannot catch, in the same family as
+P-01/T-03.
+
+### 23.1 Verification run
+
+- Dev venv `python3 -m pytest`: **649 passed, 1 warning** (a statsmodels `ConvergenceWarning`
+  from one Holt-Winters fit test — benign, unasserted test noise), **98.66% line coverage**.
+  For the first time in this review's history the dev venv carries all optional backends
+  (`ortools` 9.x, `pulp` 3.3.2, `statsmodels` 0.15 — the `0c4485b` solver-extras install), so
+  nothing skips and the CP-SAT path is covered locally too.
+- System Python (pulp **2.7.0**, the exact Debian trixie/CI version, no ortools): **636 passed,
+  13 skipped** — only the cpsat-parametrized cases skip; the CBC and heuristic paths are green
+  on the packaged toolchain.
+- `tests/fixtures/generate_expected.py --check`: OK. `sha256sum --check` on all three PDF stamps
+  (plan, internals, manual): OK. `black --check`, `flake8`, and `mypy` (in its own
+  `.venv-typecheck/`, per the new Makefile split): all clean.
+- **Node-selector construction verified empirically**:
+  `build_node_selector('nodename', ['pve01.example.com', 'pve02.example.com', 'pve02.example.com', 'pve-1'])`
+  → `nodename=~"pve-1|pve01\.example\.com|pve02\.example\.com"` (escaped dots, deduplicated,
+  sorted); `extra_selector` wins verbatim; both-unset degrades to `None` (no filter).
+- **The new `29-explain.md` worked example was re-derived by hand** (the reviewer tradition for
+  §14 applies to this one too). With VM 106 added (scsi0 1.0 TiB/ℓ 0.9 pinned on san-a, scsi1
+  0.5 TiB/ℓ 0.1 on san-b): Σℓ = 8.40 ✓, u* = 2.80 ✓, L_san-a = 7.40 ✓, L_san-b = 0.80 ✓,
+  spread 257.1% → 17.9% ✓, all four Δimbalance values (−4.00, −3.40, −0.80, −0.40) ✓, objective
+  terms 0.6 + 1 + 0.225 + 0.5 + 0 = 2.32 ✓ (VM 101's split κ-charged, VM 106's not — consistent
+  with the implemented `affinity_counts_pinned_disks` rule), benefit 8.6 × 604800 = 5.20e6 ✓,
+  cost 4.72e4 ✓, ratio 110 ✓, all three reserve "requires" lines ✓. **Two "used" figures are
+  wrong** — see V-03.
+- The `reserve-tradeoff`/`fc-tier1` fixtures are untouched by this range (no solver or objective
+  change); `--check` confirms both expected files current.
+- CI workflow review: `ortools` is installed *after* `make SYSTEM_TOOLS=1 fmt-check lint
+  typecheck` runs, so the stub-parse problem that motivated the mypy venv can never reach the
+  typecheck step; the packaged-path story (cbc + heuristic from apt) is unchanged by the pip
+  exception (see V-04).
+
+### 23.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| V-01 | Medium | `docs/manual/10-configuration.md`, `heuristic.py`, plan §5.3 | The `objective.reserve_violation_penalty` entry describes a computation that has never existed anywhere in the code ("the engine computes a provably-dominant P … and uses `max(configured, computed)`, warning when it had to raise it" — no `P_min` exists in `src/`), while denying the key's one live consumer: the heuristic backend's objective — which `explain`'s new `objective:` line prints, and the §14 fixture totals carry — multiplies this key by any remaining (C5) shortfall |
+| V-02 | Medium | plan §9.5, `cli.py`, `docs/manual/27-plan.md` | §9.5 specifies the pinned block ("not optional decoration … the only place an operator learns which snapshots to clear", with per-pin action hints) as part of **every mode's** plan output; the implementation prints it in `explain` only, with no action hints ("→ clear snapshots to unblock", "→ waited 0s, re-check next run" exist nowhere), and `27-plan.md` claims "`show-load`/`plan` both show it as `[pinned: …]`" — false for `plan` (neither renderer has any pinned field) |
+| V-03 | Low | `docs/manual/29-explain.md` | The new worked example's `used` figures are internally inconsistent with its own disk listings and its own reserve lines: san-a prints `used 4.50 TiB` but its disks sum to 5.50 TiB and its "short by 1.50 TiB" is only correct for 5.50; san-b prints `1.50 TiB` vs a listed 2.00 TiB — both stale by exactly VM 106's disks, the example's own extension |
+| V-04 | Low | `.github/workflows/tests.yml`, AGENTS.md §9.3, `.agents/packaging.md` | CI pip-installs `ortools` (`--break-system-packages`) as an exception to §9.3's absolute "CI installs its Python tooling from apt, never from pip" — the reasoning is sound and stated in the workflow's own header comment, but neither AGENTS.md nor `.agents/packaging.md` references it, so the policy documents and the pipeline they govern now disagree on paper |
+| V-05 | Info | working tree | `run-with-system-python.sh` sits untracked in the checkout: a complete, SPDX-headed helper (runs the CLI against the system toolchain, no venv — the `SYSTEM_TOOLS=1` story made convenient) referenced nowhere in Makefile, AGENTS.md, `.agents/` or `docs/`; invisible to review, CI and the package alike, it will bitrot silently |
+
+### 23.3 V-01 — the manual describes a penalty computation that has never existed
+
+**Severity:** Medium
+**Files:** `docs/manual/10-configuration.md:633-642`, `src/proxmox_storage_drs/heuristic.py:241`,
+`IMPLEMENTATION_PLAN.md` §5.3
+
+The manual entry for `objective.reserve_violation_penalty` (untouched since the phase-1/2 docs
+commit `f484a6a` — verified with `git log -L`) says:
+
+> A **floor**, not the value actually used, for the single-stage big-M fallback solve path (…):
+> the engine computes a provably-dominant `P` from the group's own load and disk sizes at solve
+> time and uses `max(configured, computed)`, warning when it had to raise it. The default
+> lexicographic two-stage solve (option 1, and the default) needs no penalty at all and is
+> unaffected by this key.
+
+Three claims, two of them wrong:
+
+1. **No provably-dominant `P` computation exists anywhere in `src/`** — `grep` for `P_min`/
+   `p_min`/`computed_p`/`dominant` returns nothing. The M-06 resolution added the requirement
+   to the *plan* (§5.3: "the model uses `P = max(configured, P_min)` and logs a warning … and
+   repeat them in `pve-storage-drs explain`"), but the code that would compute it was never
+   written: `91-optimize.md` documents that the MILP is lexicographic-only by design, and the
+   heuristic multiplies the *configured* value straight into its objective
+   (`reserve_penalty_term = objective.reserve_violation_penalty * reserve_shortfall_tib`).
+   The §5.3 requirement to repeat the numbers in `explain` is therefore dormant — no big-M
+   path exists to raise `P` — but the manual describes the dormant machinery as the key's
+   *actual behaviour*.
+2. **"Unaffected by this key" is false in a fully reachable configuration.** The heuristic
+   backend (`solver.backend: heuristic`, or `auto` with neither solver installed — exactly the
+   packaged-without-Recommends install the autopkgtest tests) uses this key directly: it scores
+   every candidate assignment with the `P × shortfall` term, so whenever a group's (C5)
+   violation is physically unresolvable, the configured value influences which assignment the
+   descent settles on and what the objective totals report. The §14 fixture's own expected
+   files carry `big_m_p` for exactly this arithmetic. And as of this range, `explain`'s new
+   `objective:` line prints the term — an operator can now *see* the key doing something the
+   manual says nothing in the default path does.
+
+This is the P-01/P-02/S-08/T-03 family a fifth time over, and it survived U-02's stale-claim
+sweep because that sweep grepped for "not yet written"/"remain stubs" phrasing, not for
+confident descriptions of never-implemented computations.
+
+**Recommendation:** rewrite the entry to describe what the key actually does today: it is the
+reserve-violation weight in the heuristic backend's objective (and the `reserve` term
+`explain` prints and the §14 fixture totals carry), it exists so the heuristic's candidate
+comparisons stay commensurable with the big-M objective the plan describes, the MILP backends
+are lexicographic and never consult it, and the §5.3 `max(configured, P_min)` floor applies to
+the unimplemented single-stage alternative only. Either that, or implement the floor where the
+heuristic consults the key — but a documentation fix is the honest minimum, and per AGENTS.md
+§7.6 the plan's §5.3 sentence should gain the same "as built" annotation §10.1 got for T-03.
+
+### 23.4 V-02 — §9.5's pinned block: specified for every mode, implemented for `explain` only
+
+**Severity:** Medium
+**Files:** `IMPLEMENTATION_PLAN.md` §9.5 (lines 1549-1557, unchanged since the original spec),
+`src/proxmox_storage_drs/cli.py` (`_render_group_plan_human`/`_render_group_plan_json`),
+`docs/manual/27-plan.md:169-170`
+
+§9.5's output example — explicitly "Every mode emits the same machine-readable plan (JSON) plus
+a human summary" — ends with the pinned block and its closing paragraph: "The pinned block is
+not optional decoration — it is the 'complain' half of the skip-and-complain policy of §3.7,
+and it is the only place an operator learns which snapshots to clear." The spec's block carries
+per-pin action hints ("`→ clear snapshots to unblock`", "`→ waited 0s, re-check next run`") and
+the pinned-load/best-achievable-spread line.
+
+The implementation: `plan` and `apply` print none of it — neither human nor JSON renderers have
+a single pinned field (verified by inspection of both). `explain`, as of this range, prints the
+block (exact reasons, sizes, loads, ℓ/z), the "cannot fully consolidate" naming, and the
+pinned-load line — good, and clearly the right home for the narration. But (a) the per-pin
+action hints exist nowhere in any command's output, including `explain`; (b) the plan's §9.5
+example still shows the block as part of the plan output with no "as built" annotation, eleven
+passes after `plan` first shipped without it; and (c) `27-plan.md` asserts "`show-load`/`plan`
+both show it as `[pinned: cooldown: ...]`" — true for `show-load`'s per-disk lines and
+`explain`, flatly false for `plan`.
+
+An operator following the manual's own reading would run `plan`, see three moves and no pins,
+and never learn the fourth VM is pinned by snapshots — the exact §3.7 complaint obligation,
+deferred to a command the manual's plan page never points them at for it.
+
+**Recommendation:** the cheapest coherent resolution is documentation, not code: add the "as
+built" note to §9.5 (the pinned block, fragmentation naming and pinned-load line live in
+`explain` — and inline per-disk pins in `show-load`; `plan`/`apply` deliberately print only
+what they will act on), fix the `27-plan.md` sentence to name `show-load`/`explain`, and have
+`27-plan.md`'s "What `plan` does not yet do" list say plainly that pins are not shown here.
+The per-pin action hints are worth restoring inside `explain`'s pinned block — they are one
+format string each, and §9.5's own justification for the block is teaching the operator *what
+to do* about each pin, not merely that it exists.
+
+### 23.5 V-03 — two stale "used" figures in the new `explain` example
+
+**Severity:** Low
+**Files:** `docs/manual/29-explain.md:34,39`
+
+Hand re-derivation (23.1) found every computed number in the new worked example correct except
+the two per-storage `used` figures, both stale by exactly the added VM 106's disks — the
+example was extended from `plan`'s §14-based one by adding VM 106 without updating the used
+totals:
+
+- san-a lists 101:scsi0 (2.00) + 101:scsi1 (1.00) + 102:scsi0 (1.50) + 106:scsi0 (1.00) =
+  **5.50 TiB**, prints `used 4.50 TiB` — and its own `⚠ reserve short by 1.50 TiB` line is
+  only correct for 5.50 (5.5 + 4.0 required − 8.0 capacity = 1.5; with 4.5 it would be 0.5),
+  so the example contradicts *itself* one line apart;
+- san-b lists 0.50 + 1.00 + 0.50 = **2.00 TiB**, prints `used 1.50 TiB` (reserve OK either
+  way, so only the listing-vs-total inconsistency shows).
+
+Everything else — loads, spreads, all four Δimbalance values, the objective's five terms,
+benefit/cost/ratio, all three "requires" lines — verifies to the digit. This is the first
+worked example in the manual set that no fixture or test asserts against, which is how a
+stale number survived a range that otherwise updated its examples meticulously (the
+plain-language commit updated gate-reason strings in three manual pages in lockstep).
+
+**Recommendation:** fix the two values (5.50, 2.00). Worth considering alongside: the §14
+tradition in this project is that worked examples are *executable* — a test that builds this
+exact group (the §14 fixture plus VM 106) and asserts the rendered `explain` output's numbers
+would have caught both figures and keeps the page honest the way the fixture tests keep §14
+honest.
+
+### 23.6 V-04 — the CI pip exception is documented everywhere except the policy documents
+
+**Severity:** Low
+**Files:** `.github/workflows/tests.yml` (header + `Install ortools` step), `AGENTS.md` §9.3,
+`.agents/packaging.md`
+
+AGENTS.md §9.3 states an absolute rule: "CI installs its Python tooling **from apt, never from
+pip**. A CI that pip-installed its way around a missing Debian package would hide the day
+§9.1 stopped being true." As of `a605391`, `tests.yml` runs
+`pip install --break-system-packages 'ortools>=9.8'` — with a workflow-header comment that
+argues the exception properly (ortools has no Debian package at all; it is optional at runtime;
+the packaged path is unchanged; installation is ordered after typecheck so the numpy-stubs
+problem cannot reach mypy). The argument is sound. The problem is only *where* it lives: a
+reader of AGENTS.md §9.3 or `.agents/packaging.md` (whose ortools row still says only "pip-only
+bonus", with no mention of CI) has no pointer to it, and by the documents' own absolutist
+wording the pipeline is in violation. Policy documents that silently contradict the pipeline
+they govern train readers to ignore both.
+
+**Recommendation:** one sentence in `.agents/packaging.md`'s ortools discussion (and/or a
+parenthetical in AGENTS.md §9.3) naming the exception, its reason, and pointing at the workflow
+header — the same treatment the Salsa `--enable-network` fallback gets ("a deliberate,
+reviewable edit — never a default").
+
+### 23.7 V-05 — an untracked helper script (Info)
+
+`run-with-system-python.sh` sits untracked in the checkout: ~35 lines, SPDX-headed, runs the
+CLI straight out of the tree against the system python and its Debian-packaged modules — a
+convenience wrapper for exactly the `SYSTEM_TOOLS=1`/CI toolchain story, with an accurate
+header comment (including that `solver.backend: auto` degrades to CBC there, by design).
+Referenced nowhere: not the Makefile, not AGENTS.md, not `.agents/`, not the docs. Untracked
+means it is invisible to this review's usual checks, to CI, and to anyone cloning the repo —
+it will bitrot silently the next time the CLI's invocation changes. Either commit it (it is a
+legitimate developer convenience and would want a `.agents/packaging.md` mention) or delete
+it; the only state that is wrong is the current one.
+
+### 23.8 What this pass confirms
+
+- **`explain` reuses rather than reimplements.** The gate/solve/schedule/payback pipeline is
+  the same `_plan_group()` `plan` and `apply` call (so its numbers are byte-identical by
+  construction, not by discipline); the measured-load section is `show-load`'s own renderer;
+  the objective terms are the breakdown class's own five fields; `_fragmented_vms()` uses the
+  *final* assignment (the R-02 lesson applied unprompted), counts a VM as blocked only when a
+  pin is what keeps it spread, and works even for a `NO ACTION` group with no plan at all.
+  The JSON always carries query provenance (no verbosity notion to guess about), the human
+  `-v` line is documented as the one deliberate global-option exception, and the status
+  table's `explain` row plus the manpage entry match the implementation.
+- **Node scoping is the right shape end to end.** One resolved selector per run; `GET /nodes`
+  (not the VM/storage inventories, whose idle-node blind spot the `node_names()` docstring
+  names); regex-literal escaping (empirically verified); `extra_selector` verbatim override
+  with its own schema/manual/example-config documentation; `verify-metrics` deliberately
+  unscoped with the reasoning written down in `30-metrics.md`; the plan gained the §3.4 note
+  and the `GET /nodes` read-path row in the same commit; and every load path (decision
+  statistic, coverage, and the saturation guard's per-disk series) threads the same selector
+  so no query family can drift unscoped.
+- **The plain-language sweep is complete and consistent.** Grep finds no remaining bare
+  "(section N.M)" in any user-facing string (the two matches left are docstrings, where the
+  citation scheme belongs); the reworded messages name actionable config keys
+  (`saturation_load`, the time-window/deadline knobs); and the manual's three worked examples
+  that quote gate/output strings were updated in the same commit — the discipline V-03's two
+  stale numbers fell just outside of.
+- **The mypy-venv split solves a real problem without weakening anything.** The
+  numpy-stubs-vs-`python_version=3.11` parse failure is verified and documented in three
+  places (Makefile comment, pyproject comment, `91-optimize.md`); `SYSTEM_TOOLS=1` still runs
+  system mypy; and the loud-not-swallowed solver-extras install means a broken `ortools`
+  install now prints an explicit warning about exactly which test cases will be skipped
+  instead of silently degrading — which is also why this pass could report 649/649 with zero
+  skips for the first time.
+- **T-01..T-07 and U-01..U-03 stay fixed.** The re-plan membership predicate, per-attempt
+  cooldown recording (`state_box` threading visible in `_run_auto_group`'s new signature),
+  the upper-quantile "as built" annotations (retained verbatim through this range's manual
+  edits), the saturation-claim rewordings, `raw_spread()` as the benefit input, the unified
+  migration-cap counter, and the §11.4 pattern validation are all still in place and green.
+
+### 23.9 Assessment
+
+This range closes the tool's last functional gap (`explain` was the final stub), hardens its
+data path against a real multi-cluster-Prometheus failure mode, and gets its CI to exercise
+the CP-SAT path it ships as `solver.backend: auto`'s first choice — all without touching the
+solver, the safety machinery, or a single fixture number, and with the plan amended in the
+same commits for both new behaviours. The five findings are all documentation-accuracy or
+working-tree hygiene: none changes behaviour, and the two Mediums (V-01, V-02) are precisely
+the residue the mechanical cross-reference tests cannot catch — confident prose describing
+machinery that was never built (V-01), and a spec's output contract that drifted from every
+renderer eleven passes ago without an annotation (V-02). Both are fixable with an afternoon of
+writing; V-03 is two digits. After those, the documentation set would finally meet the
+standard the code has held since the tenth pass.
+
+---
+
+## 24. Resolution of thirteenth-pass findings (V-01..V-05)
+
+All five findings were real; all five are fixed, not refuted.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| V-01 | Resolved | `IMPLEMENTATION_PLAN.md` §5.3 gained an "As built" note (matching T-03's own, §10.1) stating plainly that option 2's `P_min`/`max(configured, P_min)` machinery was never implemented, that both MILP backends never consult `objective.reserve_violation_penalty` at all (option 1 only), and that the heuristic backend is the key's one live consumer, using it exactly as configured. `docs/manual/10-configuration.md`'s entry for the key was rewritten to describe that heuristic-objective behaviour as the primary fact, with the MILP lexicographic solve and the unimplemented option 2 floor named as the reason the key does *not* apply there. |
+| V-02 | Resolved | `IMPLEMENTATION_PLAN.md` §9.5 gained an "As built" note: the pinned block, fragmentation naming and pinned-load line live in `explain` (with `show-load` also naming individual pins inline), not in `plan`/`apply`. `docs/manual/27-plan.md`'s false "`show-load`/`plan` both show it" sentence now names `show-load`/`explain`, and a new bullet in "What `plan` does not yet do" states outright that no pinned block exists there. The per-pin action hints the spec's own example shows (`→ clear snapshots to unblock`, etc.) were restored where the review recommended — inside `explain`'s pinned block, via a new `_pin_action_hint()` (human report's `→ <hint>` suffix and JSON's `pinned_disks[].action_hint`, `null` for a standing policy exclusion, same as the spec's own "excluded by tag" pin carrying none). New test `test_pin_action_hint_names_something_to_do_only_when_there_is_something` plus updated assertions in the existing pinned-block/JSON tests. |
+| V-03 | Resolved | `docs/manual/29-explain.md`'s worked example's two stale `used` figures fixed to match their own disk listings: san-a 4.50→5.50 TiB (now consistent with its own "short by 1.50 TiB" line), san-b 1.50→2.00 TiB. |
+| V-04 | Resolved | AGENTS.md §9.3 and `.agents/packaging.md` (the `ortools` row and a new paragraph) now name the CI pip exception explicitly — what it installs, why, and that it is the one place the "apt, never pip" rule has a reviewed exception — pointing at `tests.yml`'s own header comment for the full reasoning, so the policy documents and the pipeline agree on paper. |
+| V-05 | Resolved | `run-with-system-python.sh` committed (it is a legitimate, accurate developer convenience, not dead weight) and referenced from `Makefile` (a comment next to `SYSTEM_TOOLS=1`) and `.agents/packaging.md` (both the CI section and the `ortools`-adjacent `SYSTEM_TOOLS` mention), so it is no longer invisible to review, CI, or a future reader. |
+
+Verification: dev venv `python3 -m pytest` — **650 passed, 1 warning** (the same benign
+`ConvergenceWarning` V-05's predecessor pass noted), **98.67% line coverage** (one line up from
+the thirteenth pass's 98.66%: the new `_pin_action_hint()` branch). `make check` clean (fmt,
+lint, typecheck, test, fixtures, docs-check — `IMPLEMENTATION_PLAN.pdf` rebuilt to 42 pages,
+internals PDF to 46, manual PDF to 37, all three stamps regenerated in the same commit as their
+Markdown per AGENTS.md §7).
 
 ---
 

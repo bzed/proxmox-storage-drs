@@ -2463,6 +2463,23 @@ def test_fragmented_vms_uses_the_final_assignment_when_one_was_computed() -> Non
     assert cli._fragmented_vms(group, assignment=reunited) == []
 
 
+def test_pin_action_hint_names_something_to_do_only_when_there_is_something() -> None:
+    """Section 9.5's own example: a standing policy exclusion carries no
+    hint (there is nothing to "unblock"), everything else does."""
+    assert cli._pin_action_hint("snapshots present (2)") == "clear snapshots to unblock"
+    assert (
+        cli._pin_action_hint("unreferenced companion volume (snapshot chain or orphan)")
+        == "remove the stale reference to unblock"
+    )
+    assert cli._pin_action_hint("cooldown: moved recently, 5.0m left") == "re-check next run"
+    assert cli._pin_action_hint("locked: backup") == "re-check next run once the lock releases"
+    assert cli._pin_action_hint("excluded by config") is None
+    assert (
+        cli._pin_action_hint("excluded: unused disk (exclude.include_unused_disks=false)") is None
+    )
+    assert cli._pin_action_hint(None) is None
+
+
 def test_pinned_load_fraction_divides_pinned_by_total() -> None:
     group = _fragmented_group()
     load_by_key = {"101:scsi0": 1.0, "101:scsi1": 2.0, "102:scsi0": 1.0}
@@ -2530,7 +2547,9 @@ def test_render_group_explain_human_shows_pins_fragmentation_and_objective(
     assert "san-a" in text and "san-b" in text  # the group's own storages, not just pins
     assert "pinned (not movable this run):" in text
     assert "101:scsi1" in text and "snapshots present (1)" in text
+    assert "clear snapshots to unblock" in text
     assert "102:scsi0" in text and "locked: backup" in text
+    assert "re-check next run once the lock releases" in text
     assert "cannot fully consolidate:" in text
     assert "101 (web01)" in text
     assert "pinned load" in text
@@ -2613,6 +2632,9 @@ def test_render_explain_json_includes_objective_pins_fragmentation_and_pinned_lo
     ]
     assert out["pinned_load"]["warn_fraction"] == 0.25
     assert out["pinned_load"]["fraction"] == pytest.approx(2 / 3)
+    pinned_by_key = {d["disk_key"]: d for d in out["pinned_disks"]}
+    assert pinned_by_key["101:scsi1"]["action_hint"] == "clear snapshots to unblock"
+    assert pinned_by_key["102:scsi0"]["action_hint"] == "re-check next run once the lock releases"
 
 
 def test_render_explain_json_always_includes_query_provenance(tmp_path: Path) -> None:

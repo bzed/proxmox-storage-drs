@@ -8,6 +8,8 @@
 # virtualenv. That is how CI and the Debian build run: the point of this
 # project's dependency policy is that Debian's packaged modules are enough, and
 # a `pip install` in CI would hide the day the policy stopped being true.
+# To run the CLI itself (not the test suite) against that same system
+# toolchain, use ./run-with-system-python.sh instead of a make target.
 ifeq ($(SYSTEM_TOOLS),1)
 VENV       :=
 VENVDEP    :=
