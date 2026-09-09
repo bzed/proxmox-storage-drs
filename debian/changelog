@@ -1,4 +1,4 @@
-pve-storage-drs (0.1.0) UNRELEASED; urgency=medium
+pve-storage-drs (0.1.0) trixie; urgency=medium
 
   * First functional implementation: all nine IMPLEMENTATION_PLAN.md phases
     are now built and wired into the CLI, closing out the "not yet
