@@ -128,12 +128,21 @@ raises a `DeprecationWarning` recommending `add_variable`, which
 `_lp_variable()` suppresses explicitly with a `warnings.catch_warnings()`
 block — the warning is real, but the alternative it recommends is the one
 that cannot run on the deployment target, so silencing it is the correct
-fix, not a workaround. `_pulp_solve()` similarly turns a `PulpSolverError`
-(Debian splits the `coinor-cbc` binary into a separate `Recommends`, not a
-`Depends`, of `python3-pulp` — the library can import with no working
-solver behind it) into this module's usual `None`, matching `solve()`'s
-"never raises, `cli.py`'s fallback cascade handles it" contract instead of
-a bare traceback.
+fix, not a workaround. `_pulp_solve()` similarly turns a `PulpSolverError` —
+raised when `pulp` is importable but the `cbc` binary either is not on
+`PATH` or fails to execute — into this module's usual `None`, matching
+`solve()`'s "never raises, `cli.py`'s fallback cascade handles it" contract
+instead of a bare traceback. That scenario is not the Debian package split
+an earlier version of this page claimed: `python3-pulp`'s own control file
+already `Depends: coinor-cbc` (confirmed by `rmadison`/`apt-cache show`
+against trixie, not just assumed), and `debian/control` here now makes
+both `Depends` of `pve-storage-drs` itself too, so a Debian install cannot
+end up with one and not the other short of a deliberately broken one. The
+catch earns its keep from the two cases that remain: a non-Debian
+`pip install pulp` with no system `cbc` at all, and a `cbc` invocation
+that fails for some other reason (a malformed model, a killed subprocess)
+— either way, still "this backend cannot produce a plan", never a bare
+traceback.
 
 ## `(C1)`/`(C3)`/`(C4)`/`(C5)` are shared code, factored once per backend
 
@@ -254,11 +263,11 @@ two-phase solve — a real, separately-scoped piece of work.
   (works unchanged on every pulp release from 2.7.0 through 3.3.2,
   bisected by wheel inspection) and suppressing the resulting v4-migration
   `DeprecationWarning` on 3.3+ explicitly, plus catching `PulpSolverError`
-  around `prob.solve()` (the `coinor-cbc` binary is a separate Debian
-  `Recommends`, not a `Depends`, of `python3-pulp` — the library can
-  import with no working solver behind it) so a missing solver returns
-  `None` like every other "this backend cannot produce a plan" case,
-  rather than a bare traceback. `test_optimize.py`'s CBC cases now pass
+  around `prob.solve()` (`pulp` can still import with no working `cbc`
+  binary behind it — a non-Debian `pip install pulp`, say — even though
+  `python3-pulp` itself `Depends: coinor-cbc` on Debian) so a missing
+  solver returns `None` like every other "this backend cannot produce a
+  plan" case, rather than a bare traceback. `test_optimize.py`'s CBC cases now pass
   against pulp 2.7.0 too, verified directly against a throwaway venv
   pinned to that exact version — the packaged path, not just the newer
   one pip happens to resolve.

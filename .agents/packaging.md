@@ -22,7 +22,7 @@ What we depend on today, all confirmed present in trixie:
 | `proxmoxer` | `python3-proxmoxer` | PVE API client (`pve.py`) — chosen over a hand-rolled ticket/CSRF client specifically for its backend abstraction: the same calls work over https today and over ssh (`openssh`/`ssh_paramiko`) later, with no change to `pve.py` |
 | `ruamel.yaml` | `python3-ruamel.yaml` | Config, round-trips comments |
 | `jsonschema` | `python3-jsonschema` | Config validation |
-| `pulp` | `python3-pulp` + `coinor-cbc` | The MILP path that Debian can actually install |
+| `pulp` | `python3-pulp` + `coinor-cbc` (`Depends`) | The default MILP path; the heuristic is the fallback when it's genuinely unavailable |
 | `statsmodels` | `python3-statsmodels` | Holt-Winters, optional |
 | `ortools` | — | **Not in Debian.** CP-SAT is a pip-only bonus; GitHub Actions `pip install`s it as the one documented exception to §9.3's "apt, never pip" rule, purely for CP-SAT test coverage — see below |
 
@@ -101,14 +101,19 @@ level. `debian/tests` installs the package on a system with only its `Depends` a
 When you add a module that uses an optional dependency, this test is what tells you that you put
 the import in the wrong place.
 
-**The autopkgtest deliberately runs without `python3-pulp`.** `Depends: @` installs the package's
-`Depends` and not its `Recommends`, which is exactly the configuration the test exists to
-exercise: the tool must plan with the heuristic alone. The *build-time* suite is the opposite —
-`coinor-cbc` and `python3-pulp` are `Build-Depends` under `<!nocheck>` and are in the GitHub
-Actions install list, so `dh_auto_test` and CI do exercise the MILP path, which is the primary
-solver on a Debian install. Keep both halves: a solver test that quietly `importorskip`s in every
-pipeline would leave the packaged solver path untested, and an autopkgtest that had pulp available
-would stop proving the tool runs without it.
+**`coinor-cbc` and `python3-pulp` are `Depends`, not `Recommends`.** CBC-through-`pulp` is the
+default, always-present MILP path on a Debian install — the tool should not need a separate step
+to get a real solver. This means the autopkgtest can no longer prove the heuristic runs with *no*
+solver installed at all: `Depends: @` now includes both, so `debian/tests` verifies the tool's
+real, default path (and still catches a missing `Depends` or a module that imports an optional
+dependency — `ortools`, `statsmodels` — at the top level), not a heuristic-only configuration. That
+narrower guarantee — does the code genuinely still work with no MILP library importable — is the
+unit test suite's job now (`test_heuristic.py`, and `test_optimize.py`'s mocked
+"backend unavailable" branches), not the packaging level's, since a normal Debian install cannot be
+configured without a solver any more. `coinor-cbc` and `python3-pulp` are also `Build-Depends`
+under `<!nocheck>` and in the GitHub Actions install list, so `dh_auto_test` and CI exercise the
+MILP path too — build-time and install-time now agree, rather than deliberately covering opposite
+configurations.
 
 ## Two identities, and which goes where
 

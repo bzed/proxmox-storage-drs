@@ -27,15 +27,14 @@ Vcs-Browser: https://github.com/bzed/proxmox-storage-drs
 Package: pve-storage-drs
 Architecture: all
 Depends:
+ coinor-cbc,
  python3-jsonschema,
  python3-proxmoxer,
+ python3-pulp,
  python3-requests,
  python3-ruamel.yaml,
  ${misc:Depends},
  ${python3:Depends},
-Recommends:
- coinor-cbc,
- python3-pulp,
 Suggests:
  python3-statsmodels,
 Description: storage I/O load balancer for Proxmox VE

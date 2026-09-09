@@ -204,10 +204,12 @@ def _lp_variable(pulp: Any, name: str, **kwargs: Any) -> Any:
 
 def _pulp_solve(pulp: Any, prob: Any, solver_cmd: Any) -> int | None:
     """``prob.solve(solver_cmd)``, returning ``None`` instead of raising
-    when the CBC binary itself cannot be executed -- Debian splits it
-    into `coinor-cbc`, a `Recommends`, not a `Depends`, of `python3-pulp`,
-    so the library can be importable with no working solver behind it
-    (REVIEW.md S-01). Matches this module's own contract (see the module
+    when the CBC binary itself cannot be executed -- `pulp` can still be
+    importable with no working `cbc` on `PATH` behind it (a non-Debian
+    `pip install pulp`, or a broken install; `python3-pulp` itself
+    `Depends: coinor-cbc` on Debian, and so does this package's own
+    `debian/control`, so this is not the normal case there) (REVIEW.md
+    S-01). Matches this module's own contract (see the module
     docstring): a backend that cannot produce a plan returns ``None``,
     never an exception, so `cli.py`'s fallback cascade -- not a
     traceback -- is what an operator sees."""

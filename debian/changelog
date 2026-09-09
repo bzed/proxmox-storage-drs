@@ -34,10 +34,15 @@ pve-storage-drs (0.1.0) trixie; urgency=medium
     disk-bus/snapshot/lock handling, payback and scheduling fixes, cooldown
     and state-tracking corrections, and plain-language runtime messages.
   * Packaging: debian/control, debian/rules, debian/tests and the
-    autopkgtest (installed-package smoke test plus the no-pulp
-    heuristic-only path) now match a real, importable package; both
-    GitHub Actions and the GitLab/Salsa pipeline (sbuild, lintian,
-    piuparts, reprotest, autopkgtest) exercise it.
+    autopkgtest (installed-package smoke test) now match a real,
+    importable package; both GitHub Actions and the GitLab/Salsa pipeline
+    (sbuild, lintian, piuparts, reprotest, autopkgtest) exercise it.
+  * python3-pulp and coinor-cbc moved from Recommends to Depends: a real
+    MILP solver (CBC) is now installed by default, rather than left to the
+    operator to add. The dependency-free heuristic (IMPLEMENTATION_PLAN.md
+    section 5.5) remains a genuine fallback for a non-Debian install with
+    no solver, or when a solve fails or times out; CP-SAT (ortools) stays
+    an optional pip-only extra, unpackaged for Debian.
   * Dogfooded against a real Proxmox VE 9.2 cluster and Prometheus
     instance; no known outstanding correctness findings.
 
