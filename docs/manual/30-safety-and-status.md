@@ -60,12 +60,10 @@ around for its own sake.
 ## Optional dependencies
 
 `pve-storage-drs` runs, plans and executes (`dry-run`/`confirm`; `auto` not
-yet) with only `requests`, `ruamel.yaml` and `jsonschema` installed. Three
-dependencies are
-optional and are imported only where they are used, never at module level:
+yet) with only `requests`, `ruamel.yaml` and `jsonschema` installed. Two
+dependencies are still optional and are imported only where they are used,
+never at module level:
 
-- **`pulp` + `coinor-cbc`** (Debian `Recommends`) — the packaged MILP solver
-  path (`solver.backend: cbc`, or `auto` when CP-SAT is unavailable).
 - **`ortools`** (`pip install proxmox-storage-drs[solver]`, **not** packaged
   for Debian — CP-SAT has no Debian package at all) — the preferred MILP
   backend (`solver.backend: cpsat`, or `auto`'s first choice) when installed
@@ -74,6 +72,12 @@ optional and are imported only where they are used, never at module level:
   `forecast.model: holt_winters`. Without it, that model logs a warning and
   falls back to `quantile` automatically rather than failing.
 
-Without either MILP library, `solver.backend: auto` (the default) falls back
-to the dependency-free heuristic; nothing in `pve-storage-drs` requires a
-MILP solver to be installed at all — see `docs/internals/91-optimize.md`.
+**`pulp` + `coinor-cbc`** are a Debian `Depends`, not a `Recommends`: on a
+Debian install a real MILP solver — CBC through `pulp` — is always present,
+and `solver.backend: auto` (the default) uses it unless CP-SAT is also
+available. The dependency-free heuristic of `IMPLEMENTATION_PLAN.md` section
+5.5 is still a genuine fallback, not dead code — it runs when a non-Debian
+install has no solver extra, when a solve fails or times out, or when
+`solver.backend: heuristic` is configured explicitly — but it is no longer
+what a plain `apt install pve-storage-drs` lands on by default. See
+`docs/internals/91-optimize.md`.

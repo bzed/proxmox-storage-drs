@@ -77,10 +77,12 @@ This installs the `pve-storage-drs` executable, its manpage, the example
 configuration at `/usr/share/doc/pve-storage-drs/examples/drs.example.yaml`, and this
 manual and the specification as PDFs under `/usr/share/doc/pve-storage-drs/`.
 
-`coinor-cbc` and `python3-pulp` are `Recommends`, not `Depends`: without them
-the tool still plans, using the dependency-free heuristic of
-`IMPLEMENTATION_PLAN.md` section 5.5, but a Debian install should have them —
-`apt install pve-storage-drs` pulls them in by default.
+`coinor-cbc` and `python3-pulp` are `Depends`: `apt install pve-storage-drs`
+always gets a real MILP solver, no separate step needed. The tool still
+plans without one — using the dependency-free heuristic of
+`IMPLEMENTATION_PLAN.md` section 5.5 — but that is no longer what a Debian
+install lands on by default; it is what a non-Debian `pip install` with no
+solver extra, or a solve that fails or times out, falls back to.
 
 ## Where the configuration lives
 

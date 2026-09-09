@@ -144,7 +144,7 @@ without it.
 | `proxmoxer` | PVE API client (§3.5) | `python3-proxmoxer` 2.2 |
 | `ruamel.yaml` | Config (round-trips comments) | `python3-ruamel.yaml` 0.18 |
 | `jsonschema` | Config validation (§11.1) | `python3-jsonschema` 4.19 |
-| `pulp` | MILP via CBC — **the packaged solver path**, optional | `python3-pulp` 2.7 + `coinor-cbc` 2.10 |
+| `pulp` | MILP via CBC — **the default, packaged solver path** | `python3-pulp` 2.7 + `coinor-cbc` 2.10 (both `Depends`) |
 | `statsmodels` | Holt-Winters, optional | `python3-statsmodels` 0.14 |
 | `ortools` | CP-SAT, optional and unpackaged | **not in Debian** |
 | `pytest`, `pytest-cov`, `pytest-xdist` | Tests; groups are independent so they parallelize | `python3-pytest*` |
@@ -155,16 +155,23 @@ extra**, and CP-SAT is a bonus for whoever installs it rather than the assumed b
 be read accordingly: on a Debian install the MILP is solved by **CBC through `python3-pulp`**, with
 the dependency-free heuristic below that.
 
-Make `ortools`, `pulp` and `statsmodels` **optional extras**. The tool must run, plan and execute
-with only `requests` + `ruamel.yaml` + `jsonschema` installed, falling back to the heuristic solver
-and the quantile forecaster. `pulp` is the odd one: it is *in* Debian and it is the solver an
-operator should have, so it is `Recommends` in `debian/control` and an extra rather than a
-dependency in `pyproject.toml` — "the packaged solver path" describes which MILP backend a Debian
-install gets, not that the MILP is mandatory. Without any solver the tool still plans, using the
-heuristic of §5.5; that is the whole point of specifying two of them. This keeps it deployable on a locked-down management host — and it is enforced
-rather than hoped for: the autopkgtest in §2.2 imports every module of the installed package with
-only the binary package's `Depends` present, so an optional dependency imported at module level
-fails the build.
+Make `ortools` and `statsmodels` **optional extras** in `pyproject.toml`; `pulp` stays one there
+too, for a plain `pip install` outside Debian, but `debian/control` treats it differently: `pulp`
+and `coinor-cbc` are `Depends`, not `Recommends`, so `apt install pve-storage-drs` always gets a
+real MILP solver by default — CBC-through-`pulp` is the primary solver on the deployment target,
+not a bonus for whoever remembers to add it. This is a packaging default, not a claim that the
+*code* needs a solver to run: the heuristic of §5.5 remains a genuine, exercised fallback —
+used whenever `pulp`/CBC genuinely are not importable or executable (a non-Debian install with no
+solver extra, or a broken one), whenever a solve fails or times out, or whenever
+`solver.backend: heuristic` is configured explicitly — and the code path that reaches it is
+still tested (`test_heuristic.py`, and `test_optimize.py`'s own "solver unavailable" branches),
+just no longer by installing the Debian package without its `Depends`, since that configuration no
+longer exists. `ortools` (CP-SAT) is the one solver that stays a true opt-in extra: not in Debian
+at all, `solver.backend: auto` prefers it over CBC only when a motivated admin has `pip install`ed
+it by hand. The autopkgtest in §2.2 still imports every module of the installed package with only
+the binary package's `Depends` present — now including `pulp`/`coinor-cbc` — so it verifies the
+tool's real, default solver path rather than proving heuristic-only operation; an optional
+dependency (`ortools`, `statsmodels`) imported at module level still fails it.
 
 **Licence and contribution rules.** The project is **AGPL-3.0-or-later**, copyright
 Bernd Zeimetz <bernd@bzed.de>; every source file carries the two-line SPDX header. `AGENTS.md` and
