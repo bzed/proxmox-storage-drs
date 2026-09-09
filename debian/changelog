@@ -1,3 +1,48 @@
+pve-storage-drs (0.1.0) UNRELEASED; urgency=medium
+
+  * First functional implementation: all nine IMPLEMENTATION_PLAN.md phases
+    are now built and wired into the CLI, closing out the "not yet
+    buildable" state of 0.0.1.
+    - config.py, units.py, forecast.py, logging_setup.py (phase 1): config
+      loading/validation, duration/size parsing, and quantile/
+      seasonal_naive/holt_winters forecasting.
+    - metrics.py (phase 1) and pve.py (phase 2): the Prometheus client and
+      PromQL, and the Proxmox VE API client (proxmoxer-based).
+    - topology.py (phase 2): the disk/storage/group join driving
+      show-load and verify-storages.
+    - gates.py (phase 3): the act/no-act decision (reserve override,
+      drift, imbalance).
+    - heuristic.py (phase 4, dependency-free) and optimize.py (phase 6,
+      CP-SAT/CBC MILP backends): two interchangeable solvers behind
+      solver.backend: auto/heuristic/cpsat/cbc.
+    - schedule.py and payback.py (phase 5): move ordering/pacing and the
+      benefit-vs-cost gate a plan must clear before it is offered.
+    - state.py (phase 7, section 11.2): drift history and
+      gates.cooldown_per_disk/cooldown_per_storage tracking.
+    - explain (phase 8): the diagnostic subcommand -- measured load,
+      pinned disks with per-pin action hints, fragmentation, the
+      objective's five terms, and the pinned-load-fraction warning.
+  * All six subcommands (show-load, verify-metrics, verify-storages, plan,
+    apply, explain) are implemented and documented; none report "not
+    implemented yet" any longer.
+  * Full documentation set: docs/manual (operator reference) and
+    docs/internals (implementation reference) now cover every module and
+    CLI subcommand, alongside IMPLEMENTATION_PLAN.md itself; all three are
+    built to PDF and committed with sha256 freshness stamps.
+  * Hardened through REVIEW.md passes 1-13 (findings F-01 through V-05):
+    config edge cases, PromQL correctness, PVE API privilege requirements,
+    disk-bus/snapshot/lock handling, payback and scheduling fixes, cooldown
+    and state-tracking corrections, and plain-language runtime messages.
+  * Packaging: debian/control, debian/rules, debian/tests and the
+    autopkgtest (installed-package smoke test plus the no-pulp
+    heuristic-only path) now match a real, importable package; both
+    GitHub Actions and the GitLab/Salsa pipeline (sbuild, lintian,
+    piuparts, reprotest, autopkgtest) exercise it.
+  * Dogfooded against a real Proxmox VE 9.2 cluster and Prometheus
+    instance; no known outstanding correctness findings.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Wed, 09 Sep 2026 09:49:56 +0200
+
 pve-storage-drs (0.0.1) UNRELEASED; urgency=medium
 
   * Initial packaging: binary package pve-storage-drs, the documentation, the example
