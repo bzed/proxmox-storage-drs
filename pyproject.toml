@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proxmox-storage-drs"
-version = "0.0.1"
+version = "0.1.0"
 description = "Storage DRS for Proxmox VE 9.2 — balances disk I/O across shared storage groups"
 readme = "README.md"
 requires-python = ">=3.11"
