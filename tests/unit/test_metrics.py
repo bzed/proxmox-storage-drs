@@ -18,6 +18,7 @@ from proxmox_storage_drs.exceptions import MetricsError
 from proxmox_storage_drs.metrics import (
     DiskKey,
     PrometheusClient,
+    build_cluster_selector,
     build_node_selector,
     build_quantile_over_time_promql,
     build_rate_promql,
@@ -134,6 +135,48 @@ def test_resolve_node_selector_is_none_with_neither_override_nor_node_names() ->
     ``node_names=None`` since that command never talks to the PVE API."""
     assert resolve_node_selector(MetricsConfig(), None) is None
     assert resolve_node_selector(MetricsConfig(), []) is None
+
+
+def test_build_cluster_selector_is_an_exact_match_not_an_alternation() -> None:
+    assert build_cluster_selector("cluster", "abn") == 'cluster="abn"'
+
+
+def test_build_cluster_selector_escapes_quotes_and_backslashes() -> None:
+    assert build_cluster_selector("cluster", 'a"b\\c') == 'cluster="a\\"b\\\\c"'
+
+
+def test_resolve_node_selector_prefers_cluster_over_node_names_once_configured() -> None:
+    """``metrics.labels.cluster`` being set at all is the opt-in signal
+    (section 3.4): once it is, the cluster name -- not the node list --
+    becomes the default, even though both are available."""
+    metrics = MetricsConfig(labels=MetricLabels(cluster="cluster"))
+    assert resolve_node_selector(metrics, ["pve01", "pve02"], cluster_name="abn") == 'cluster="abn"'
+
+
+def test_resolve_node_selector_falls_back_to_node_names_without_a_cluster_name() -> None:
+    """``metrics.labels.cluster`` configured but no name resolved (the PVE
+    API call failed to find one) falls back to the node list, not to
+    nothing -- the long-standing default stays available."""
+    metrics = MetricsConfig(labels=MetricLabels(cluster="cluster"))
+    assert (
+        resolve_node_selector(metrics, ["pve01", "pve02"], cluster_name=None)
+        == 'nodename=~"pve01|pve02"'
+    )
+
+
+def test_resolve_node_selector_extra_selector_still_wins_over_cluster() -> None:
+    metrics = MetricsConfig(
+        extra_selector='cluster="mycluster"', labels=MetricLabels(cluster="cluster")
+    )
+    assert resolve_node_selector(metrics, None, cluster_name="abn") == 'cluster="mycluster"'
+
+
+def test_resolve_node_selector_cluster_name_alone_does_nothing_when_unconfigured() -> None:
+    """A ``cluster_name`` argument is inert unless ``metrics.labels.cluster``
+    is also set -- callers (``verify-metrics``) that never fetch one can
+    also never accidentally activate this by passing a stray value."""
+    metrics = MetricsConfig()
+    assert resolve_node_selector(metrics, ["pve01"], cluster_name="abn") == 'nodename=~"pve01"'
 
 
 def test_build_quantile_over_time_promql() -> None:
@@ -415,6 +458,75 @@ def test_verify_metrics_device_label_not_instance_is_fine() -> None:
     from proxmox_storage_drs.metrics import _check_device_label_collision
 
     assert _check_device_label_collision(metrics) is None
+
+
+def test_check_sample_series_reports_clusters_seen_across_all_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unconfigured discovery probe: metrics.labels.cluster is unset,
+    so it looks for the literal 'cluster' label, across *every* series
+    each metric query returns -- not just the one sample reported per
+    metric -- and lists every distinct value found, from any metric."""
+    from proxmox_storage_drs.metrics import _check_sample_series
+
+    metrics = _full_metrics_config()
+
+    def fake_instant_query(name: str) -> list[dict[str, Any]]:
+        if name == metrics.read_ops:
+            return [
+                {"metric": {"vmid": "101", "instance": "scsi0", "cluster": "abn"}},
+                {"metric": {"vmid": "102", "instance": "scsi0", "cluster": "other"}},
+            ]
+        return [{"metric": {"vmid": "101", "instance": "scsi0", "cluster": "abn"}}]
+
+    client = PrometheusClient(PROM_CONFIG, session=FakeSession({}))
+    monkeypatch.setattr(client, "instant_query", fake_instant_query)
+
+    findings, _samples = _check_sample_series(client, metrics)
+    info = [f.message for f in findings if f.level == "info"]
+    assert any(m == "'cluster' label values seen across these metrics: abn, other" for m in info)
+
+
+def test_check_sample_series_uses_configured_cluster_label_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once metrics.labels.cluster is set, the discovery probe looks for
+    that label name instead of the literal 'cluster' default."""
+    from proxmox_storage_drs.metrics import _check_sample_series
+
+    metrics = replace(_full_metrics_config(), labels=MetricLabels(cluster="site"))
+
+    def fake_instant_query(name: str) -> list[dict[str, Any]]:
+        del name
+        return [{"metric": {"vmid": "101", "instance": "scsi0", "site": "dc6"}}]
+
+    client = PrometheusClient(PROM_CONFIG, session=FakeSession({}))
+    monkeypatch.setattr(client, "instant_query", fake_instant_query)
+
+    findings, _samples = _check_sample_series(client, metrics)
+    info = [f.message for f in findings if f.level == "info"]
+    assert any(m == "'site' label values seen across these metrics: dc6" for m in info)
+
+
+def test_check_sample_series_silent_when_no_cluster_label_anywhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No finding at all when nothing carries the (default or configured)
+    cluster label -- most deployments have no such tag and never will, so
+    this must not become routine noise."""
+    from proxmox_storage_drs.metrics import _check_sample_series
+
+    metrics = _full_metrics_config()
+
+    def fake_instant_query(name: str) -> list[dict[str, Any]]:
+        del name
+        return [{"metric": {"vmid": "101", "instance": "scsi0"}}]
+
+    client = PrometheusClient(PROM_CONFIG, session=FakeSession({}))
+    monkeypatch.setattr(client, "instant_query", fake_instant_query)
+
+    findings, _samples = _check_sample_series(client, metrics)
+    assert not any("label values seen" in f.message for f in findings)
 
 
 def test_verify_metrics_query_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:

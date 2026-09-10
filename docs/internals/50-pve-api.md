@@ -130,6 +130,20 @@ missing node partway through the window would look like it has less
 history than it really does). Called once per command invocation
 (`cli._resolve_node_selector_for_run()`), not per group.
 
+**`cluster_name()` uses `GET /cluster/status`, filtered to the one entry
+whose `type` is `"cluster"`** (every other entry is `type: "node"`) --
+confirmed live against a real PVE 9.2 cluster, `{"type": "cluster", "name":
+"pvezebe", "nodes": 3, "quorate": 1, ...}`. Needs `Sys.Audit` at `/`, the
+one privilege none of this project's other read calls require --
+`docs/manual/00-installation.md` only asks for it when
+`metrics.labels.cluster` is actually configured, since that is the only
+caller. Returns `None` rather than raising when the entry is missing or
+unnamed, the same "let the caller decide" contract `node_names()` already
+has -- `metrics.resolve_node_selector()` treats that `None` as "fall back
+to the node list," not fatal. Called at most once per command invocation
+(`cli._resolve_node_selector_for_run()`), and only when
+`metrics.labels.cluster` is set at all.
+
 ## `move_disk()`: the one and only bytes/s -> KiB/s conversion
 
 Section 9.2 is explicit that `bwlimit`'s bytes/s-to-KiB/s conversion happens

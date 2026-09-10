@@ -282,6 +282,31 @@ def test_duplicate_labels_are_rejected(tmp_path: Path) -> None:
         config.load_config(str(path), env={})
 
 
+def test_cluster_label_defaults_to_unconfigured(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.metrics.labels.cluster is None
+
+
+def test_cluster_label_is_parsed_when_set(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["metrics"] = {"labels": {"cluster": "site"}}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.metrics.labels.cluster == "site"
+
+
+def test_cluster_label_colliding_with_another_is_rejected(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["metrics"] = {
+        "labels": {"vmid": "vmid", "device": "instance", "node": "cluster", "cluster": "cluster"}
+    }
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match="pairwise distinct"):
+        config.load_config(str(path), env={})
+
+
 def test_rate_window_too_short_is_rejected(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["metrics"] = {"rate_window": "1m", "pvestatd_push_interval": "60s"}
