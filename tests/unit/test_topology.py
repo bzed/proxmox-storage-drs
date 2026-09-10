@@ -451,6 +451,67 @@ def test_build_topology_foreign_volume_without_size_is_skipped_not_crashed(
     assert any("base-9999-disk-0" in w and "has no size=" in w for w in topology.warnings)
 
 
+def test_build_topology_content_item_uses_approximate_size_before_config(
+    tmp_path: Path,
+) -> None:
+    """A `size`-less content item can still carry `approximate-size` --
+    PVE's own estimate for storage plugins where an exact size is
+    expensive -- which is still a live figure from the storage plugin and
+    is preferred ahead of the VM config's own, possibly-stale size=."""
+    config = make_config(tmp_path)
+    vm_resources = [_vm(201, "node1")]
+    vm_configs = {201: {"name": "vm201", "scsi0": "san-a:vm-201-disk-0,size=7G"}}
+    content = [
+        {
+            "volid": "san-a:vm-201-disk-0",
+            "vmid": 201,
+            "format": "qcow2",
+            "content": "images",
+            "approximate-size": 9 * (1 << 30),
+            # deliberately no "size" key
+        }
+    ]
+    client = build_fake_client(
+        vm_resources, vm_configs, {201: [{"name": "current"}]}, {"san-a": content, "san-b": []}
+    )
+    topology = build_topology(client, config)
+    disk = topology.groups[0].disks[0]
+    assert disk.size_bytes == 9 * (1 << 30)
+    assert disk.format == "qcow2"
+    assert any(
+        "approximate-size" in w and "vm-201-disk-0" in w and "VM config" not in w
+        for w in topology.warnings
+    )
+
+
+def test_build_topology_foreign_volume_uses_approximate_size_before_dropping(
+    tmp_path: Path,
+) -> None:
+    """Same fallback tier as above, for a foreign (unreferenced) volume
+    counted toward the snapshot reserve -- approximate-size still counts
+    rather than being skipped."""
+    config = make_config(tmp_path)
+    vm_resources = [_vm(201, "node1")]
+    vm_configs = {201: {"name": "vm201", "scsi0": "san-a:vm-201-disk-0,size=7G"}}
+    content = [
+        _content("san-a", 201, "disk-0", 7 * (1 << 30)),
+        {
+            "volid": "san-a:base-9999-disk-0",
+            "vmid": None,
+            "format": "raw",
+            "content": "images",
+            "approximate-size": 3 * (1 << 30),
+            # deliberately no "size" key
+        },
+    ]
+    client = build_fake_client(
+        vm_resources, vm_configs, {201: [{"name": "current"}]}, {"san-a": content, "san-b": []}
+    )
+    topology = build_topology(client, config)
+    storages_by_id = {s.id: s for s in topology.groups[0].storages}
+    assert storages_by_id["san-a"].foreign_used_bytes == 3 * (1 << 30)
+
+
 def test_build_topology_stopped_vm_included_when_running_only_false(tmp_path: Path) -> None:
     config = make_config(tmp_path, exclude={"running_only": False})
     vm_resources = [_vm(202, "node1", status="stopped")]
