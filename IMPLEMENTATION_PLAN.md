@@ -627,11 +627,27 @@ the case above, for lack of any better number) and warns just as loudly.
 content item can still carry `approximate-size` — PVE's own field for storage plugins where an exact
 size is expensive to determine — and both call sites above check for it before falling further back:
 still a live number from the storage plugin itself, not a static one recorded at disk-attach time and
-never revisited, so it is the better of the two imperfect answers. Confirmed against a live cluster's
-own `GET /storage/{s}/content` response (not assumed from documentation) — a `dir`/NFS-backed storage
-holding a raw `.qcow2` filename directly, one further reason exact size can be expensive there. Only
-when *neither* `size` nor `approximate-size` is present does either function fall all the way back to
-the VM config (managed disk) or skip the volume (foreign one).
+never revisited, so it is the better of the two imperfect answers. Only when *neither* `size` nor
+`approximate-size` is present does either function fall all the way back to the VM config (managed
+disk) or skip the volume (foreign one).
+
+**The actual mechanism, per the operator who hit this live: `approximate-size` is a PVE 9.2+ feature
+for qcow2 volumes on shared LVM storage specifically.** PVE 9.2 added snapshot support on ordinary
+(non-thin) LVM by formatting the LV itself as a qcow2 image rather than using it raw. Reading a qcow2
+image's own logical size means opening it, which needs its LV *active* — cheap on the node already
+running the owning VM (PVE keeps that LV active there), expensive or outright impossible on a shared
+LVM storage's other nodes, which may have no reason to have activated it at all and can collide with
+whichever node already has. `approximate-size` is PVE's way of answering the content listing anyway,
+from LVM's own metadata, without activating anything. This means `_pick_active_node()`'s one pick per
+*storage* (used for every other section 3.5 call) is the wrong node for *this* value specifically:
+`size` on a `GET /storage/{s}/content` response is only reliable from the one node guaranteed to have
+the LV active, which is the node the volume's own VM is running on, not an arbitrary node that merely
+reports the storage as available. `_needed_content_node_pairs()`/`build_topology()` now fetch a
+managed disk's content listing from *its own VM's node* specifically, not `_pick_active_node()`'s
+pick, precisely so `size` (not `approximate-size`) is what gets used whenever it can be. The tier
+above still matters: a foreign (unreferenced) volume has no owning VM to pick a node from, and a
+managed disk's own node can itself report `approximate-size` if PVE has not (yet) activated the LV
+there either.
 
 **Evacuating a storage completely is therefore possible online** — every disk type in the table above
 except CD-ROM-media entries can be relocated with the guest running, and CD-ROM entries hold no

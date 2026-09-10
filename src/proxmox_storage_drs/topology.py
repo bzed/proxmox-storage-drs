@@ -203,11 +203,13 @@ def _resolve_reserve_factor(storage_cfg: StorageConfig, config: Config) -> float
 def _pick_active_node(storage_id: str, storage_resources: list[dict[str, Any]]) -> str:
     """Any node reporting this (shared) storage as available. Section 3.5's
     node-scoped status/content calls need one concrete node even for a
-    cluster-wide shared storage; every node reports the same data for it
-    (verified against a live cluster). Prefers a node reporting `status:
-    "available"` over one that merely lists the storage, so a node that
-    happens to have it configured but currently unreachable is not picked
-    first when a working one exists.
+    cluster-wide shared storage; capacity (`status`) and the *set* of
+    volids (`content`) are the same from any node (verified against a live
+    cluster), but a content item's own `size` is not always -- see
+    `_needed_content_node_pairs()` below for the case that finds. Prefers a
+    node reporting `status: "available"` over one that merely lists the
+    storage, so a node that happens to have it configured but currently
+    unreachable is not picked first when a working one exists.
     """
     candidates = [r for r in storage_resources if r.get("storage") == storage_id]
     candidates.sort(key=lambda r: r.get("status") != "available")
@@ -441,6 +443,7 @@ class _ClusterData:
     content_by_id: dict[str, list[dict[str, Any]]]
     status_by_id: dict[str, dict[str, Any]]
     expanded_by_group: dict[str, tuple[StorageConfig, ...]]
+    active_node_of: dict[str, str]
 
 
 def _fetch_cluster_data(
@@ -474,6 +477,7 @@ def _fetch_cluster_data(
         content_by_id=content_by_id,
         status_by_id=status_by_id,
         expanded_by_group=expanded_by_group,
+        active_node_of=active_node_of,
     )
     return data, warnings, pattern_expansions
 
@@ -515,7 +519,12 @@ def _pin_reason(
 
 
 def _resolve_disk_size_and_format(
-    key: str, volid: str, storage_id: str, params: dict[str, str], data: _ClusterData
+    key: str,
+    volid: str,
+    storage_id: str,
+    params: dict[str, str],
+    content_items: list[dict[str, Any]],
+    data: _ClusterData,
 ) -> tuple[int, str, str | None]:
     """Section 3.5: content listing is authoritative; the config's own
     `size=` is only a last-resort fallback, flagged with a warning when
@@ -530,10 +539,20 @@ def _resolve_disk_size_and_format(
     revisited. Format is trusted from the content item whenever one exists,
     regardless of which size field (if any) it carries -- format is an
     independent field, and there is no VM-config fallback for it the way
-    there is for size."""
-    content_item = next(
-        (c for c in data.content_by_id[storage_id] if c.get("volid") == volid), None
-    )
+    there is for size.
+
+    ``content_items`` is the caller's job to pick, not this function's: for
+    a VM's own disk it is that VM's own node's content listing
+    (`_needed_content_node_pairs()`), never the storage's single
+    `_pick_active_node()` pick, which is the one this function used before
+    -- confirmed against a live cluster (a PVE 9.2+ feature): an inactive
+    qcow2-on-shared-LVM volume reports only `approximate-size` from a node
+    that has not activated its LV, while the node actually running the VM
+    -- which PVE always activates the LV on -- reports the real `size`.
+    Querying any other node's view for this VM's own disk would silently
+    settle for the approximate figure when the exact one was available one
+    call away."""
+    content_item = next((c for c in content_items if c.get("volid") == volid), None)
     storage_type = data.definitions_by_id[storage_id].get("type", "")
     disk_format = (content_item.get("format") if content_item else None) or _default_format(
         storage_type
@@ -555,6 +574,27 @@ def _resolve_disk_size_and_format(
         "resized outside Proxmox"
     )
     return size_bytes, disk_format, warning
+
+
+def _disk_specs_from_config(
+    raw_config: dict[str, Any],
+) -> dict[str, tuple[str, str, dict[str, str]]]:
+    """Every disk device key in one VM's raw config, parsed into
+    ``(storage_id, volume_name, params)`` -- section 3.5's bus
+    enumeration, with CD-ROM media excluded (never a real disk). Shared
+    between the join itself (`_join_vm_disks`) and the pre-pass
+    (`_needed_content_node_pairs`) that figures out which ``(node,
+    storage)`` content listings are worth fetching before the join runs,
+    so the two never risk parsing a VM's disks two different ways."""
+    disk_specs: dict[str, tuple[str, str, dict[str, str]]] = {}
+    for device, value in raw_config.items():
+        if not DISK_KEY_RE.match(device):
+            continue
+        storage_id, volume_name, params = parse_disk_spec(value)
+        if params.get("media") == "cdrom":
+            continue  # section 3.5: ISO/empty/cloudinit media -- never in D
+        disk_specs[device] = (storage_id, volume_name, params)
+    return disk_specs
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,10 +620,31 @@ def _fetch_vm(client: PveClient, resource: dict[str, Any]) -> _VmFetch:
     return _VmFetch(resource=resource, raw_config=raw_config, real_snapshots=real_snapshots)
 
 
+def _needed_content_node_pairs(
+    fetched: list[_VmFetch], storage_group_of: dict[str, str]
+) -> set[tuple[str, str]]:
+    """``(node, storage_id)`` pairs worth their own dedicated content
+    listing fetch: every managed storage a VM has a disk on, paired with
+    *that VM's own node* -- not `_pick_active_node()`'s pick for the
+    storage as a whole. Ungrouped storages are excluded: their content is
+    never used (`_join_vm_disks` warns and skips those disks before ever
+    resolving a size)."""
+    pairs: set[tuple[str, str]] = set()
+    for fetch in fetched:
+        node = fetch.resource.get("node")
+        if not isinstance(node, str):
+            continue
+        for storage_id, _volume_name, _params in _disk_specs_from_config(fetch.raw_config).values():
+            if storage_id in storage_group_of:
+                pairs.add((node, storage_id))
+    return pairs
+
+
 def _join_vm_disks(
     config: Config,
     fetch: _VmFetch,
     data: _ClusterData,
+    content_by_node: dict[tuple[str, str], list[dict[str, Any]]],
     disks_by_group: dict[str, list[Disk]],
     referenced_volids: dict[str, set[str]],
     warnings: list[str],
@@ -595,6 +656,13 @@ def _join_vm_disks(
     cluster-resource order, right after the concurrent fetch phase --
     keeping `disks_by_group`/`warnings` ordering identical to a fully
     sequential run regardless of `config.proxmox.read_workers`.
+
+    ``content_by_node`` is ``build_topology()``'s pre-fetched ``(node,
+    storage_id) -> content listing`` map (`_needed_content_node_pairs()`):
+    every storage this VM's own disks reference is guaranteed a listing
+    keyed by *this VM's own node* in there, not just the storage's single
+    `_pick_active_node()` pick -- see `_resolve_disk_size_and_format()` for
+    why that distinction matters.
 
     ``cooldowns_by_group`` is ``build_topology()``'s one-time-per-group
     ``state.active_disk_cooldowns()`` result (bare ``vmid:device`` ->
@@ -609,14 +677,7 @@ def _join_vm_disks(
     tags = _split_tags(resource.get("tags", ""))
     vm_excluded = vmid in set(config.exclude.vmids) or bool(tags & set(config.exclude.tags))
 
-    disk_specs: dict[str, tuple[str, str, dict[str, str]]] = {}
-    for device, value in raw_config.items():
-        if not DISK_KEY_RE.match(device):
-            continue
-        storage_id, volume_name, params = parse_disk_spec(value)
-        if params.get("media") == "cdrom":
-            continue  # section 3.5: ISO/empty/cloudinit media -- never in D
-        disk_specs[device] = (storage_id, volume_name, params)
+    disk_specs = _disk_specs_from_config(raw_config)
 
     snapshot_reason = _disk_snapshot_or_orphan_reason(
         vmid, disk_specs, fetch.real_snapshots, data.content_by_id
@@ -637,8 +698,9 @@ def _join_vm_disks(
 
         volid = f"{storage_id}:{volume_name}"
         referenced_volids[storage_id].add(volid)
+        content_items = content_by_node.get((node, storage_id), data.content_by_id[storage_id])
         size_bytes, disk_format, size_warning = _resolve_disk_size_and_format(
-            key, volid, storage_id, params, data
+            key, volid, storage_id, params, content_items, data
         )
         if size_warning:
             warnings.append(size_warning)
@@ -783,9 +845,37 @@ def build_topology(
     else:
         fetched = []
 
+    # A content listing's own `size` for a given volume is only reliable
+    # from the node actually running that volume's VM (section 3.5: PVE
+    # activates a qcow2-on-shared-LVM volume's LV on that node, and only
+    # an active LV's exact size is cheap to read back) -- `_pick_active_node`'s
+    # single pick above is not guaranteed to be that node. Fetch every
+    # `(node, storage)` pair this run's VMs actually need beyond what that
+    # pick already covers, concurrently, the same way the per-VM fetch
+    # above is.
+    content_by_node: dict[tuple[str, str], list[dict[str, Any]]] = {
+        (data.active_node_of[sid], sid): data.content_by_id[sid] for sid in data.storage_group_of
+    }
+    extra_pairs = sorted(
+        _needed_content_node_pairs(fetched, data.storage_group_of) - set(content_by_node)
+    )
+    if extra_pairs:
+        with ThreadPoolExecutor(max_workers=max(1, config.proxmox.read_workers)) as pool:
+            fetched_content = list(
+                pool.map(lambda pair: client.storage_content(pair[0], pair[1]), extra_pairs)
+            )
+        content_by_node.update(zip(extra_pairs, fetched_content))
+
     for fetch in fetched:
         _join_vm_disks(
-            config, fetch, data, disks_by_group, referenced_volids, warnings, cooldowns_by_group
+            config,
+            fetch,
+            data,
+            content_by_node,
+            disks_by_group,
+            referenced_volids,
+            warnings,
+            cooldowns_by_group,
         )
 
     groups = tuple(
