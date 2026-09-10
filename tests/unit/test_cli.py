@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 from proxmox_storage_drs import __version__, cli
-from proxmox_storage_drs.config import MetricsConfig, ResolvedConfig
+from proxmox_storage_drs.config import MetricLabels, MetricsConfig, ResolvedConfig
 from proxmox_storage_drs.execute import MoveOutcome
 from proxmox_storage_drs.heuristic import ObjectiveBreakdown
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
@@ -75,26 +75,39 @@ def _fake_build_topology(topology: Topology) -> object:
 
 
 class _NodeNamesClient:
-    """A ``PveClient`` stand-in exposing only ``node_names()`` -- enough
-    for ``_resolve_node_selector_for_run()``'s two branches. Raises if
-    ``node_names()`` is called when it should not be (an operator
-    override set): that call is a real PVE API round-trip in production,
-    so a test asserting it was skipped needs it to actually blow up, not
-    just go unasserted."""
+    """A ``PveClient`` stand-in exposing ``node_names()``/``cluster_name()``
+    -- enough for ``_resolve_node_selector_for_run()``'s branches. Raises if
+    either is called when it should not be (an operator override set, or a
+    cluster name that already settled it): each is a real PVE API
+    round-trip in production, so a test asserting one was skipped needs it
+    to actually blow up, not just go unasserted."""
 
-    def __init__(self, names: list[str] | None = None, forbid_call: bool = False) -> None:
+    def __init__(
+        self,
+        names: list[str] | None = None,
+        forbid_call: bool = False,
+        cluster_name: str | None = None,
+        forbid_cluster_call: bool = False,
+    ) -> None:
         self._names = names or []
         self._forbid_call = forbid_call
+        self._cluster_name = cluster_name
+        self._forbid_cluster_call = forbid_cluster_call
 
     def node_names(self) -> list[str]:
         if self._forbid_call:
-            raise AssertionError("node_names() must not be called when extra_selector is set")
+            raise AssertionError("node_names() must not be called when already settled")
         return self._names
+
+    def cluster_name(self) -> str | None:
+        if self._forbid_cluster_call:
+            raise AssertionError("cluster_name() must not be called when extra_selector is set")
+        return self._cluster_name
 
 
 def test_resolve_node_selector_for_run_skips_the_api_call_when_overridden() -> None:
     resolved = MetricsConfig(extra_selector='cluster="mycluster"')
-    client: Any = _NodeNamesClient(forbid_call=True)
+    client: Any = _NodeNamesClient(forbid_call=True, forbid_cluster_call=True)
     selector = cli._resolve_node_selector_for_run(client, resolved)
     assert selector == 'cluster="mycluster"'
 
@@ -108,6 +121,34 @@ def test_resolve_node_selector_for_run_auto_derives_from_the_live_node_list() ->
 def test_resolve_node_selector_for_run_is_none_when_the_cluster_has_no_nodes() -> None:
     client: Any = _NodeNamesClient(names=[])
     assert cli._resolve_node_selector_for_run(client, MetricsConfig()) is None
+
+
+def test_resolve_node_selector_for_run_prefers_cluster_name_once_configured() -> None:
+    """metrics.labels.cluster set is the opt-in signal: the live cluster
+    name wins over the node list, and node_names() is never even called
+    since the cluster name alone already settles it."""
+    metrics = MetricsConfig(labels=MetricLabels(cluster="cluster"))
+    client: Any = _NodeNamesClient(cluster_name="abn", forbid_call=True)
+    selector = cli._resolve_node_selector_for_run(client, metrics)
+    assert selector == 'cluster="abn"'
+
+
+def test_resolve_node_selector_for_run_falls_back_to_nodes_without_a_cluster_name() -> None:
+    """metrics.labels.cluster configured but the API call found no name:
+    falls back to the node list rather than giving up."""
+    metrics = MetricsConfig(labels=MetricLabels(cluster="cluster"))
+    client: Any = _NodeNamesClient(names=["pve01"], cluster_name=None)
+    selector = cli._resolve_node_selector_for_run(client, metrics)
+    assert selector == 'nodename=~"pve01"'
+
+
+def test_resolve_node_selector_for_run_never_calls_cluster_name_when_unconfigured() -> None:
+    """metrics.labels.cluster unset (the default): cluster_name() is never
+    called at all, not even to check -- the existing node-list behaviour
+    is completely unaffected by this feature until an operator opts in."""
+    client: Any = _NodeNamesClient(names=["pve01"], forbid_cluster_call=True)
+    selector = cli._resolve_node_selector_for_run(client, MetricsConfig())
+    assert selector == 'nodename=~"pve01"'
 
 
 # --------------------------------------------------------------------- --version

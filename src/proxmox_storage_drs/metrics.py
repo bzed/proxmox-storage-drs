@@ -140,20 +140,50 @@ def build_node_selector(node_label: str, node_names: Sequence[str]) -> str | Non
     return f'{node_label}=~"{alternation}"'
 
 
-def resolve_node_selector(metrics: MetricsConfig, node_names: Sequence[str] | None) -> str | None:
+def build_cluster_selector(cluster_label: str, cluster_name: str) -> str:
+    """A single-value equality matcher naming this cluster, once its name
+    is known (``PveClient.cluster_name()``): ``<cluster_label>="<name>"``.
+    Exact match, not ``=~``/alternation like :func:`build_node_selector` --
+    there is exactly one cluster name to match, not a list of nodes.
+    Minimal escaping for the PromQL string literal, in case a cluster name
+    ever contains a quote or backslash (node names get the same care in
+    :func:`_escape_promql_regex_literal`, for the same reason)."""
+    escaped = cluster_name.replace("\\", "\\\\").replace('"', '\\"')
+    return f'{cluster_label}="{escaped}"'
+
+
+def resolve_node_selector(
+    metrics: MetricsConfig,
+    node_names: Sequence[str] | None,
+    cluster_name: str | None = None,
+) -> str | None:
     """The one selector every query in this module inserts, resolved once
-    per run (section 3.4). ``metrics.extra_selector`` wins outright when
-    the operator set one -- trusted completely, since only the operator
-    knows their own Telegraf/InfluxDB tagging scheme, and it may name
-    something other than a node at all (a ``cluster`` tag, for instance,
-    on a Prometheus shared by more than one). Otherwise the auto-derived
-    :func:`build_node_selector` from ``node_names`` when given, or
-    ``None`` when neither is available -- ``verify-metrics`` passes
-    ``None`` here rather than fetching the cluster's node list itself,
-    since it is otherwise deliberately independent of the PVE API
-    entirely (`docs/manual/20-verifying-metrics.md`)."""
+    per run (section 3.4), in this precedence:
+
+    1. ``metrics.extra_selector`` wins outright when the operator set one
+       -- trusted completely, since only the operator knows their own
+       Telegraf/InfluxDB tagging scheme, and it may name something other
+       than a node or cluster at all.
+    2. ``metrics.labels.cluster``, once configured, becomes the default:
+       :func:`build_cluster_selector` from ``cluster_name``
+       (``PveClient.cluster_name()``, the live PVE cluster's own name) --
+       an operator only sees this once they have told the tool their
+       Prometheus actually carries that label (``verify-metrics``'s own
+       "label values seen" report is how they find out what to set it
+       to), so this never silently activates for a deployment with no
+       such label.
+    3. The auto-derived :func:`build_node_selector` from ``node_names``
+       otherwise -- the long-standing default, unchanged for anyone who
+       has not set ``metrics.labels.cluster``.
+    4. ``None`` when nothing above applies -- ``verify-metrics`` passes
+       ``node_names=None`` and ``cluster_name=None`` here rather than
+       fetching either from the PVE API itself, since it is otherwise
+       deliberately independent of the PVE API entirely
+       (`docs/manual/20-verifying-metrics.md`)."""
     if metrics.extra_selector:
         return metrics.extra_selector
+    if metrics.labels.cluster and cluster_name:
+        return build_cluster_selector(metrics.labels.cluster, cluster_name)
     if node_names:
         return build_node_selector(metrics.labels.node, node_names)
     return None
@@ -366,13 +396,29 @@ def _check_metric_names_exist(client: PrometheusClient, metrics: MetricsConfig) 
     return findings
 
 
+_CLUSTER_LABEL_DISCOVERY_DEFAULT = "cluster"
+
+
 def _check_sample_series(
     client: PrometheusClient, metrics: MetricsConfig
 ) -> tuple[list[Finding], dict[str, dict[str, str]]]:
-    """Section 3.3 step 2/3/4: one sample series per metric, with its labels."""
+    """Section 3.3 step 2/3/4: one sample series per metric, with its labels.
+
+    Also scans *every* series each metric query returns (not just the one
+    sample reported above) for a cluster-naming label -- ``metrics.labels.cluster``
+    once configured, else the literal ``"cluster"`` as an unconditional
+    discovery probe, since the whole point is helping an operator on a
+    Prometheus shared by more than one PVE cluster find out what to set
+    ``metrics.labels.cluster``/``metrics.extra_selector`` to *before* they
+    have configured either. Reports the distinct values found across all
+    of them, once, or nothing at all when none carry it -- silent rather
+    than a warning, since most deployments have no such label and never
+    will."""
     findings: list[Finding] = []
     samples: dict[str, dict[str, str]] = {}
     labels = metrics.labels
+    cluster_label = labels.cluster or _CLUSTER_LABEL_DISCOVERY_DEFAULT
+    clusters_seen: set[str] = set()
     for field in RAW_METRIC_FIELDS:
         name = raw_metric_name(metrics, field)
         try:
@@ -399,6 +445,18 @@ def _check_sample_series(
                         "empty on the sample series",
                     )
                 )
+        for series in result:
+            value = series.get("metric", {}).get(cluster_label)
+            if value:
+                clusters_seen.add(value)
+    if clusters_seen:
+        findings.append(
+            Finding(
+                "info",
+                f"{cluster_label!r} label values seen across these metrics: "
+                + ", ".join(sorted(clusters_seen)),
+            )
+        )
     return findings, samples
 
 

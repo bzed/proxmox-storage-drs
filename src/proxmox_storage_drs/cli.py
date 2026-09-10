@@ -329,18 +329,27 @@ def _filter_groups(topology: Topology, names: list[str] | None) -> Topology:
 
 
 def _resolve_node_selector_for_run(client: PveClient, metrics: MetricsConfig) -> str | None:
-    """Section 3.4's node-scoping filter for one command invocation --
-    ``client.node_names()`` is called only when actually needed
-    (``metrics.extra_selector`` unset): every command that reaches here
-    already has a live PVE client from building its own topology, but an
-    operator who has already told the tool exactly what to filter on gets
-    no extra API call for it. See ``metrics.resolve_node_selector()``,
-    which this wraps -- ``verify-metrics`` calls that directly instead,
-    with ``node_names=None``, since it is deliberately independent of the
-    PVE API entirely and never reaches this function at all."""
+    """Section 3.4's node/cluster-scoping filter for one command invocation.
+
+    ``metrics.extra_selector`` short-circuits before any extra API call, as
+    before. Otherwise ``client.cluster_name()`` is called only when
+    ``metrics.labels.cluster`` is actually configured -- that field's
+    presence is the opt-in signal (see ``metrics.resolve_node_selector()``'s
+    own docstring for the full precedence) -- and ``client.node_names()``
+    only when the cluster name does not already settle it, so an operator
+    who has told the tool exactly what to filter on never pays for a call
+    that would have found the answer a different way. Every command that
+    reaches here already has a live PVE client from building its own
+    topology. ``verify-metrics`` calls ``metrics.resolve_node_selector()``
+    directly instead, with both ``node_names`` and ``cluster_name`` left
+    ``None``, since it is deliberately independent of the PVE API entirely
+    and never reaches this function at all."""
     if metrics.extra_selector:
         return metrics.extra_selector
-    return resolve_node_selector(metrics, client.node_names())
+    cluster_name = client.cluster_name() if metrics.labels.cluster else None
+    if metrics.labels.cluster and cluster_name:
+        return resolve_node_selector(metrics, None, cluster_name)
+    return resolve_node_selector(metrics, client.node_names(), cluster_name)
 
 
 def _last_loads_by_group(state: State, topology: Topology) -> dict[str, dict[str, float] | None]:

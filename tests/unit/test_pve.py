@@ -66,6 +66,35 @@ def test_node_names_dedupes_and_skips_a_missing_field() -> None:
     assert client.node_names() == ["pve01"]
 
 
+def test_cluster_name() -> None:
+    # Shape confirmed live against a real PVE 9.2 cluster: one "cluster"
+    # entry alongside one "node" entry per member.
+    api = fake_api(
+        {
+            "cluster/status": [
+                {"id": "cluster", "type": "cluster", "name": "pvezebe", "nodes": 3, "quorate": 1},
+                {"type": "node", "id": "node/pve01", "name": "pve01", "online": 1},
+                {"type": "node", "id": "node/pve02", "name": "pve02", "online": 1},
+            ]
+        }
+    )
+    client = PveClient(api)
+    assert client.cluster_name() == "pvezebe"
+    assert api.calls == [("GET", "cluster/status", {})]
+
+
+def test_cluster_name_is_none_without_a_cluster_type_entry() -> None:
+    api = fake_api({"cluster/status": [{"type": "node", "name": "pve01"}]})
+    client = PveClient(api)
+    assert client.cluster_name() is None
+
+
+def test_cluster_name_is_none_when_unnamed() -> None:
+    api = fake_api({"cluster/status": [{"type": "cluster", "id": "cluster"}]})
+    client = PveClient(api)
+    assert client.cluster_name() is None
+
+
 def test_vm_config() -> None:
     api = fake_api({"nodes/pve01/qemu/101/config": {"scsi0": "san-a:vm-101-disk-0,size=32G"}})
     client = PveClient(api)

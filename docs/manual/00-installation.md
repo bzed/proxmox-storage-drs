@@ -39,6 +39,11 @@ storages in your `groups`, not backup targets):
   parent `/storage` — that is the grant confirmed to work.
 - Also add `VM.Audit` cluster-wide (`/`) for VM inventory and config, which
   `PVEAuditor` already includes if you use that built-in role as a base.
+- **Only if you set `metrics.labels.cluster`:** also add `Sys.Audit`
+  cluster-wide (`/`), needed for `GET /cluster/status`, which is how the
+  tool learns this cluster's own name to build the auto-derived
+  `<metrics.labels.cluster>="<name>"` filter (`10-configuration.md`).
+  Not needed at all while that key is left at its default `null`.
 
 **If you are using an API token** (recommended — see above), Proxmox's
 privilege separation means **the token has its own, separate ACL entries

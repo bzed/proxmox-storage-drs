@@ -46,7 +46,14 @@ section 3.3):
    `.device` and `.node` are really present and non-empty on a live series.
    A metric that exists but currently has no series is a **warning**, not an
    error — it may simply mean nothing has generated that kind of I/O
-   recently.
+   recently. This step also scans *every* series each metric query returns
+   (not just the one sample printed) for `metrics.labels.cluster` — or the
+   literal `cluster` as an unconditional discovery probe while that key is
+   still unset — and reports every distinct value found as an **info**
+   line, `'<label>' label values seen across these metrics: ...`. This is
+   how you find out what belongs in `metrics.labels.cluster`, before
+   setting it: nothing is printed at all when no series carries any such
+   label.
 3. **Configured labels present.** If `metrics.labels.vmid`/`.device`/`.node`
    do not appear (or are empty) on the sample series, that is an **error**:
    the load model has nothing to join disks on.
