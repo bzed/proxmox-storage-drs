@@ -612,6 +612,17 @@ former space costs nothing but a temporarily pessimistic reserve calculation, wh
 should treat it as a prompt to check for, and if confirmed gone, clean up the dangling reference (e.g.
 `qm unlink <vmid> unusedN`) rather than something the tool should silently paper over.
 
+**A content item can also be present but missing its own `size` — a second, narrower variant of the
+same gap.** Found on a live cluster (a `verify-storages` crash, `KeyError: 'size'`, not a warning):
+unlike the `unusedN` case above, the volid *is* in `GET /storage/{s}/content`, just without a `size`
+key on that entry at all. `_resolve_disk_size_and_format()` originally assumed any matched entry had
+one; it now falls back the same way an absent entry does (VM config `size=`, a warning naming which of
+the two gaps applies), still trusting the entry's own `format` since that field is independent of
+`size`. The equivalent sum over *foreign* (unreferenced) volumes in `_build_storages()` had the
+identical unguarded `item["size"]` and no VM config to fall back to for one — that one skips the
+volume from the reserve calculation instead (an undercount, the opposite conservative direction from
+the case above, for lack of any better number) and warns just as loudly.
+
 **Evacuating a storage completely is therefore possible online** — every disk type in the table above
 except CD-ROM-media entries can be relocated with the guest running, and CD-ROM entries hold no
 storage-owned data except cloud-init volumes, which are regenerable. Where a full evacuation is *not*
