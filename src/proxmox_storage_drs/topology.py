@@ -518,24 +518,30 @@ def _resolve_disk_size_and_format(
     key: str, volid: str, storage_id: str, params: dict[str, str], data: _ClusterData
 ) -> tuple[int, str, str | None]:
     """Section 3.5: content listing is authoritative; the config's own
-    `size=` is only a fallback, flagged with a warning when used."""
+    `size=` is only a fallback, flagged with a warning when used -- for the
+    volume being altogether absent from the listing, or (rarer, but seen on
+    a live cluster: a storage plugin can list a volid with no `size` key at
+    all, not just a falsy one) present but missing its own size. Format is
+    still trusted from the content item when one exists, even if its size
+    is not -- the two are independent fields, and there is no VM-config
+    fallback for format the way there is for size."""
     content_item = next(
         (c for c in data.content_by_id[storage_id] if c.get("volid") == volid), None
     )
     storage_type = data.definitions_by_id[storage_id].get("type", "")
-    if content_item is not None:
-        return (
-            int(content_item["size"]),
-            content_item.get("format") or _default_format(storage_type),
-            None,
-        )
+    disk_format = (content_item.get("format") if content_item else None) or _default_format(
+        storage_type
+    )
+    if content_item is not None and "size" in content_item:
+        return int(content_item["size"]), disk_format, None
+    gap = "not found in" if content_item is None else "has no size= in"
     size_bytes = _parse_pve_config_size_bytes(params.get("size", "")) or 0
     warning = (
-        f"{key}: {volid!r} not found in {storage_id!r}'s content listing; "
+        f"{key}: {volid!r} {gap} {storage_id!r}'s content listing; "
         "using the VM config's own size= instead, which can be stale if the volume was "
         "resized outside Proxmox"
     )
-    return size_bytes, _default_format(storage_type), warning
+    return size_bytes, disk_format, warning
 
 
 @dataclass(frozen=True, slots=True)
@@ -654,6 +660,7 @@ def _build_storages(
     config: Config,
     data: _ClusterData,
     referenced_volids: dict[str, set[str]],
+    warnings: list[str],
 ) -> tuple[Storage, ...]:
     storages: list[Storage] = []
     for storage_cfg in data.expanded_by_group[group_cfg.name]:
@@ -661,11 +668,24 @@ def _build_storages(
         definition = data.definitions_by_id[sid]
         status = data.status_by_id[sid]
         if config.snapshot_reserve.count_foreign_volumes:
-            foreign_bytes = sum(
-                int(item["size"])
-                for item in data.content_by_id[sid]
-                if item.get("volid") not in referenced_volids[sid]
-            )
+            foreign_bytes = 0
+            for item in data.content_by_id[sid]:
+                if item.get("volid") in referenced_volids[sid]:
+                    continue
+                if "size" not in item:
+                    # Same content-listing gap _resolve_disk_size_and_format
+                    # guards against, but a foreign volume has no VM config
+                    # to fall back to for a size -- skip it (undercounting
+                    # the reserve here, the opposite of that function's
+                    # conservative direction) and say so loudly, rather
+                    # than crash.
+                    warnings.append(
+                        f"{sid!r}: foreign volume {item.get('volid', '?')!r} has no size= in "
+                        "its content listing entry; not counted toward the snapshot reserve, "
+                        "which may therefore be an undercount"
+                    )
+                    continue
+                foreign_bytes += int(item["size"])
         else:
             foreign_bytes = 0
         throughput = definition.get("saferemove_throughput")
@@ -753,7 +773,7 @@ def build_topology(
     groups = tuple(
         Group(
             name=group_cfg.name,
-            storages=_build_storages(group_cfg, config, data, referenced_volids),
+            storages=_build_storages(group_cfg, config, data, referenced_volids, warnings),
             disks=tuple(disks_by_group[group_cfg.name]),
         )
         for group_cfg in config.groups

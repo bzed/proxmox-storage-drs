@@ -393,6 +393,64 @@ def test_build_topology_content_missing_falls_back_to_config_size(tmp_path: Path
     assert any("VM config's own size=" in w for w in topology.warnings)
 
 
+def test_build_topology_content_item_without_size_falls_back_to_config_size(
+    tmp_path: Path,
+) -> None:
+    """A storage plugin can list a volid with no `size` key at all -- seen
+    on a live cluster (KeyError crash before this was handled), distinct
+    from the volid being absent from the listing entirely. Falls back the
+    same way, and still trusts the content item's own `format`."""
+    config = make_config(tmp_path)
+    vm_resources = [_vm(201, "node1")]
+    vm_configs = {201: {"name": "vm201", "scsi0": "san-a:vm-201-disk-0,size=7G"}}
+    content = [
+        {
+            "volid": "san-a:vm-201-disk-0",
+            "vmid": 201,
+            "format": "qcow2",
+            "content": "images",
+            # deliberately no "size" key
+        }
+    ]
+    client = build_fake_client(
+        vm_resources, vm_configs, {201: [{"name": "current"}]}, {"san-a": content, "san-b": []}
+    )
+    topology = build_topology(client, config)
+    disk = topology.groups[0].disks[0]
+    assert disk.size_bytes == 7 * (1 << 30)
+    assert disk.format == "qcow2"
+    assert any("has no size=" in w and "content listing" in w for w in topology.warnings)
+
+
+def test_build_topology_foreign_volume_without_size_is_skipped_not_crashed(
+    tmp_path: Path,
+) -> None:
+    """The same content-listing gap, for a foreign (unreferenced) volume
+    counted toward the snapshot reserve instead of a managed disk -- no VM
+    config to fall back to here, so it is skipped (undercounting the
+    reserve) with a warning, rather than crashing."""
+    config = make_config(tmp_path)
+    vm_resources = [_vm(201, "node1")]
+    vm_configs = {201: {"name": "vm201", "scsi0": "san-a:vm-201-disk-0,size=7G"}}
+    content = [
+        _content("san-a", 201, "disk-0", 7 * (1 << 30)),
+        {
+            "volid": "san-a:base-9999-disk-0",
+            "vmid": None,
+            "format": "raw",
+            "content": "images",
+            # deliberately no "size" key
+        },
+    ]
+    client = build_fake_client(
+        vm_resources, vm_configs, {201: [{"name": "current"}]}, {"san-a": content, "san-b": []}
+    )
+    topology = build_topology(client, config)
+    storages_by_id = {s.id: s for s in topology.groups[0].storages}
+    assert storages_by_id["san-a"].foreign_used_bytes == 0
+    assert any("base-9999-disk-0" in w and "has no size=" in w for w in topology.warnings)
+
+
 def test_build_topology_stopped_vm_included_when_running_only_false(tmp_path: Path) -> None:
     config = make_config(tmp_path, exclude={"running_only": False})
     vm_resources = [_vm(202, "node1", status="stopped")]
