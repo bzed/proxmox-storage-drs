@@ -623,6 +623,16 @@ identical unguarded `item["size"]` and no VM config to fall back to for one — 
 volume from the reserve calculation instead (an undercount, the opposite conservative direction from
 the case above, for lack of any better number) and warns just as loudly.
 
+**`approximate-size` sits between those two, and is preferred over the VM config.** A `size`-less
+content item can still carry `approximate-size` — PVE's own field for storage plugins where an exact
+size is expensive to determine — and both call sites above check for it before falling further back:
+still a live number from the storage plugin itself, not a static one recorded at disk-attach time and
+never revisited, so it is the better of the two imperfect answers. Confirmed against a live cluster's
+own `GET /storage/{s}/content` response (not assumed from documentation) — a `dir`/NFS-backed storage
+holding a raw `.qcow2` filename directly, one further reason exact size can be expensive there. Only
+when *neither* `size` nor `approximate-size` is present does either function fall all the way back to
+the VM config (managed disk) or skip the volume (foreign one).
+
 **Evacuating a storage completely is therefore possible online** — every disk type in the table above
 except CD-ROM-media entries can be relocated with the guest running, and CD-ROM entries hold no
 storage-owned data except cloud-init volumes, which are regenerable. Where a full evacuation is *not*

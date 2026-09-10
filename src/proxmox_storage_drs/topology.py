@@ -518,13 +518,19 @@ def _resolve_disk_size_and_format(
     key: str, volid: str, storage_id: str, params: dict[str, str], data: _ClusterData
 ) -> tuple[int, str, str | None]:
     """Section 3.5: content listing is authoritative; the config's own
-    `size=` is only a fallback, flagged with a warning when used -- for the
-    volume being altogether absent from the listing, or (rarer, but seen on
-    a live cluster: a storage plugin can list a volid with no `size` key at
-    all, not just a falsy one) present but missing its own size. Format is
-    still trusted from the content item when one exists, even if its size
-    is not -- the two are independent fields, and there is no VM-config
-    fallback for format the way there is for size."""
+    `size=` is only a last-resort fallback, flagged with a warning when
+    used -- for the volume being altogether absent from the listing, or
+    (rarer, but seen on a live cluster: a storage plugin can list a volid
+    with no `size` key at all, not just a falsy one) present but missing
+    its own size. `size`-less content items can still carry
+    `approximate-size` -- PVE's own estimate for storage plugins where an
+    exact size is expensive to determine -- which is preferred ahead of the
+    VM config, since it is still a live figure from the storage plugin
+    rather than a static one supplied at disk-attach time and never
+    revisited. Format is trusted from the content item whenever one exists,
+    regardless of which size field (if any) it carries -- format is an
+    independent field, and there is no VM-config fallback for it the way
+    there is for size."""
     content_item = next(
         (c for c in data.content_by_id[storage_id] if c.get("volid") == volid), None
     )
@@ -532,9 +538,16 @@ def _resolve_disk_size_and_format(
     disk_format = (content_item.get("format") if content_item else None) or _default_format(
         storage_type
     )
-    if content_item is not None and "size" in content_item:
-        return int(content_item["size"]), disk_format, None
-    gap = "not found in" if content_item is None else "has no size= in"
+    if content_item is not None:
+        if "size" in content_item:
+            return int(content_item["size"]), disk_format, None
+        if "approximate-size" in content_item:
+            warning = (
+                f"{key}: {volid!r} has no exact size= in {storage_id!r}'s content listing; "
+                "using its approximate-size instead"
+            )
+            return int(content_item["approximate-size"]), disk_format, warning
+    gap = "not found in" if content_item is None else "has no size= or approximate-size in"
     size_bytes = _parse_pve_config_size_bytes(params.get("size", "")) or 0
     warning = (
         f"{key}: {volid!r} {gap} {storage_id!r}'s content listing; "
@@ -672,7 +685,14 @@ def _build_storages(
             for item in data.content_by_id[sid]:
                 if item.get("volid") in referenced_volids[sid]:
                     continue
-                if "size" not in item:
+                if "size" in item:
+                    foreign_bytes += int(item["size"])
+                elif "approximate-size" in item:
+                    # Same fallback tier _resolve_disk_size_and_format uses:
+                    # PVE's own estimate, preferred over dropping the
+                    # volume entirely.
+                    foreign_bytes += int(item["approximate-size"])
+                else:
                     # Same content-listing gap _resolve_disk_size_and_format
                     # guards against, but a foreign volume has no VM config
                     # to fall back to for a size -- skip it (undercounting
@@ -680,12 +700,10 @@ def _build_storages(
                     # conservative direction) and say so loudly, rather
                     # than crash.
                     warnings.append(
-                        f"{sid!r}: foreign volume {item.get('volid', '?')!r} has no size= in "
-                        "its content listing entry; not counted toward the snapshot reserve, "
-                        "which may therefore be an undercount"
+                        f"{sid!r}: foreign volume {item.get('volid', '?')!r} has no size= or "
+                        "approximate-size in its content listing entry; not counted toward the "
+                        "snapshot reserve, which may therefore be an undercount"
                     )
-                    continue
-                foreign_bytes += int(item["size"])
         else:
             foreign_bytes = 0
         throughput = definition.get("saferemove_throughput")
