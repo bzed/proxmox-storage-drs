@@ -145,19 +145,19 @@ def test_build_cluster_selector_escapes_quotes_and_backslashes() -> None:
     assert build_cluster_selector("cluster", 'a"b\\c') == 'cluster="a\\"b\\\\c"'
 
 
-def test_resolve_node_selector_prefers_cluster_over_node_names_once_configured() -> None:
-    """``metrics.labels.cluster`` being set at all is the opt-in signal
-    (section 3.4): once it is, the cluster name -- not the node list --
-    becomes the default, even though both are available."""
-    metrics = MetricsConfig(labels=MetricLabels(cluster="cluster"))
+def test_resolve_node_selector_prefers_cluster_over_node_names_by_default() -> None:
+    """``metrics.labels.cluster`` defaults to ``"cluster"``, a real label
+    name -- so a bare default ``MetricsConfig()`` already prefers the
+    cluster name over the node list, even though both are available."""
+    metrics = MetricsConfig()
     assert resolve_node_selector(metrics, ["pve01", "pve02"], cluster_name="abn") == 'cluster="abn"'
 
 
 def test_resolve_node_selector_falls_back_to_node_names_without_a_cluster_name() -> None:
-    """``metrics.labels.cluster`` configured but no name resolved (the PVE
-    API call failed to find one) falls back to the node list, not to
-    nothing -- the long-standing default stays available."""
-    metrics = MetricsConfig(labels=MetricLabels(cluster="cluster"))
+    """Default config, but no name resolved (the PVE API call failed to
+    find one): falls back to the node list, not to nothing -- the
+    original default stays available."""
+    metrics = MetricsConfig()
     assert (
         resolve_node_selector(metrics, ["pve01", "pve02"], cluster_name=None)
         == 'nodename=~"pve01|pve02"'
@@ -165,17 +165,17 @@ def test_resolve_node_selector_falls_back_to_node_names_without_a_cluster_name()
 
 
 def test_resolve_node_selector_extra_selector_still_wins_over_cluster() -> None:
-    metrics = MetricsConfig(
-        extra_selector='cluster="mycluster"', labels=MetricLabels(cluster="cluster")
-    )
+    metrics = MetricsConfig(extra_selector='cluster="mycluster"')
     assert resolve_node_selector(metrics, None, cluster_name="abn") == 'cluster="mycluster"'
 
 
-def test_resolve_node_selector_cluster_name_alone_does_nothing_when_unconfigured() -> None:
-    """A ``cluster_name`` argument is inert unless ``metrics.labels.cluster``
-    is also set -- callers (``verify-metrics``) that never fetch one can
-    also never accidentally activate this by passing a stray value."""
-    metrics = MetricsConfig()
+def test_resolve_node_selector_cluster_name_alone_does_nothing_once_opted_out() -> None:
+    """A ``cluster_name`` argument is inert once ``metrics.labels.cluster``
+    is explicitly set to ``None`` -- callers (``verify-metrics``) that
+    never fetch one can also never accidentally activate this by passing
+    a stray value, and an operator who opted out gets the node-list
+    default back regardless of what a caller passes here."""
+    metrics = MetricsConfig(labels=MetricLabels(cluster=None))
     assert resolve_node_selector(metrics, ["pve01"], cluster_name="abn") == 'nodename=~"pve01"'
 
 
@@ -463,10 +463,10 @@ def test_verify_metrics_device_label_not_instance_is_fine() -> None:
 def test_check_sample_series_reports_clusters_seen_across_all_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The unconfigured discovery probe: metrics.labels.cluster is unset,
-    so it looks for the literal 'cluster' label, across *every* series
-    each metric query returns -- not just the one sample reported per
-    metric -- and lists every distinct value found, from any metric."""
+    """The default discovery probe: metrics.labels.cluster defaults to the
+    literal 'cluster', looked for across *every* series each metric query
+    returns -- not just the one sample reported per metric -- and every
+    distinct value found, from any metric, gets listed."""
     from proxmox_storage_drs.metrics import _check_sample_series
 
     metrics = _full_metrics_config()
@@ -506,6 +506,29 @@ def test_check_sample_series_uses_configured_cluster_label_name(
     findings, _samples = _check_sample_series(client, metrics)
     info = [f.message for f in findings if f.level == "info"]
     assert any(m == "'site' label values seen across these metrics: dc6" for m in info)
+
+
+def test_check_sample_series_still_probes_literal_cluster_once_opted_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """metrics.labels.cluster explicitly None (opted out of the
+    auto-selector tier) does not blind this purely informational report --
+    it still falls back to probing the literal 'cluster', in case the
+    label turns out to be there after all."""
+    from proxmox_storage_drs.metrics import _check_sample_series
+
+    metrics = replace(_full_metrics_config(), labels=MetricLabels(cluster=None))
+
+    def fake_instant_query(name: str) -> list[dict[str, Any]]:
+        del name
+        return [{"metric": {"vmid": "101", "instance": "scsi0", "cluster": "abn"}}]
+
+    client = PrometheusClient(PROM_CONFIG, session=FakeSession({}))
+    monkeypatch.setattr(client, "instant_query", fake_instant_query)
+
+    findings, _samples = _check_sample_series(client, metrics)
+    info = [f.message for f in findings if f.level == "info"]
+    assert any(m == "'cluster' label values seen across these metrics: abn" for m in info)
 
 
 def test_check_sample_series_silent_when_no_cluster_label_anywhere(

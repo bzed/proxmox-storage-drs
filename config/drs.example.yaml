@@ -69,13 +69,13 @@ metrics:
     # setups rename it. Confirm with `pve-storage-drs verify-metrics` and set it here.
     device: instance
     node: nodename
-    # Only if your Prometheus carries a cluster-naming tag (shared by more
-    # than one PVE cluster, say) and you want it auto-scoped: set this to
-    # that label's name, e.g. "cluster". Leave null (the default) to keep
-    # scoping by this cluster's own node list instead -- `verify-metrics`
-    # reports what cluster-label values it actually sees, if any, which is
-    # how you find out whether this is worth setting at all.
-    cluster: null
+    # The cluster-naming tag -- defaults to "cluster" since deployments here
+    # carry one as standard practice; plan/show-load/apply/explain use it to
+    # auto-scope by this cluster's own name (fetched from the PVE API) rather
+    # than by node list. Set to null if your Prometheus genuinely has no such
+    # label -- `verify-metrics` reports what cluster-label values it actually
+    # sees, if any, so you can confirm either way before relying on it.
+    cluster: cluster
 
   rate_window: 5m       # inner range for rate(); must be >= 4x pvestatd_push_interval
   step: 5m              # sampling step for range queries

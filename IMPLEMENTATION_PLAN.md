@@ -366,34 +366,35 @@ Notes for the implementer:
 - Reject a disk whose sample coverage over `W` is below `window.min_coverage` and fall back to its
   last known load from `state.json`, flagging it in the plan output. Never treat missing data as zero
   load — that would silently invite migrations *onto* a busy storage.
-- **Scope every query to this cluster's own nodes — or, once configured, to this cluster's own name.**
-  None of the expressions above restrict which series they match beyond the metric name itself, which
-  is fine when one Prometheus serves exactly one PVE cluster but silently wrong the moment it serves
-  more than one (or anything else emitting a same-named metric): `vmid` is only unique *within* a
-  cluster, so an unscoped query would sum a same-numbered vmid from somewhere else into this one's
-  load without any error or warning. Add a matcher inside the vector selector, before `rate()`, in
-  this order:
+- **Scope every query to this cluster's own name, or failing that, its own nodes.** None of the
+  expressions above restrict which series they match beyond the metric name itself, which is fine
+  when one Prometheus serves exactly one PVE cluster but silently wrong the moment it serves more than
+  one (or anything else emitting a same-named metric): `vmid` is only unique *within* a cluster, so an
+  unscoped query would sum a same-numbered vmid from somewhere else into this one's load without any
+  error or warning. Add a matcher inside the vector selector, before `rate()`, in this order:
   1. `metrics.extra_selector`, verbatim, when the operator set one — needed when Telegraf's tagging
      doesn't carry PVE's own node name verbatim, or the restriction needed is something else the two
      auto-derived tiers below don't cover.
-  2. `<metrics.labels.cluster>="<name>"`, once `metrics.labels.cluster` names a real label — an exact
-     match, not an alternation, against this cluster's own name (`GET /cluster/status`, §3.5). That
-     field being configured at all is the opt-in signal: nothing changes for a deployment that has
-     not set it, and `verify-metrics`'s own report of which cluster-naming label values it actually
-     sees across your metrics (below) is how an operator finds out what belongs here before setting
-     it, rather than guessing.
+  2. `<metrics.labels.cluster>="<name>"`, as long as `metrics.labels.cluster` names a real label — an
+     exact match, not an alternation, against this cluster's own name (`GET /cluster/status`, §3.5).
+     This is the default tier, not an opt-in one: `metrics.labels.cluster` itself defaults to the
+     literal `"cluster"`, a tag this project's deployments carry as standard practice. Set it to
+     `null` to opt back out on a Prometheus that genuinely has no such label — `verify-metrics`'s own
+     report of which cluster-naming label values it actually sees across your metrics (below) is how
+     an operator confirms which is true, rather than guessing.
   3. `<metrics.labels.node>=~"pve01|pve02|..."` otherwise, built from the cluster's own node list
      (`GET /nodes`, §3.5) every run rather than hand-maintained, so a node added to the cluster is
      covered with no config edit. This was the only auto-derived tier before `metrics.labels.cluster`
-     existed, and stays the default for every config that has not set it.
+     existed, and is what a config gets by setting that key to `null`, or when tier 2's lookup itself
+     finds no name.
 
   `pve-storage-drs verify-metrics` applies only tier 1, never tiers 2 or 3: it is deliberately
   independent of the PVE API, so it has no node list or live cluster name to build either from. What
   it does instead is scan every configured metric's entire result set (not just the one sample series
-  it already reports per metric) for whatever `metrics.labels.cluster` names — or the literal
-  `"cluster"` as an unconditional discovery probe while that key is still unset — and report every
-  distinct value found, which is how an operator decides what to put in `metrics.labels.cluster` (or
-  `metrics.extra_selector`) in the first place.
+  it already reports per metric) for whatever `metrics.labels.cluster` names — falling back to the
+  literal `"cluster"` even when that key is `null`, purely as an unconditional discovery probe — and
+  report every distinct value found, which is how an operator confirms the default tag is really
+  there, or decides to opt out.
 
 ### 3.5 PVE API
 
@@ -431,7 +432,7 @@ Read path:
 | `GET /cluster/resources?type=storage` | Storage inventory, `shared` flag, used/total per node |
 | `GET /storage` | Storage definitions: type, `content`, `shared`, `nodes` restriction, **and** per-storage `saferemove` / `saferemove_throughput` — see §7.1 and §9.3 |
 | `GET /nodes` | Every node in the cluster, by name — §3.4's PromQL node-scoping filter, independent of which nodes currently host a VM or shared storage |
-| `GET /cluster/status` | This cluster's own name (the one `type: "cluster"` entry) — §3.4's cluster-scoping filter, only called when `metrics.labels.cluster` is configured |
+| `GET /cluster/status` | This cluster's own name (the one `type: "cluster"` entry) — §3.4's cluster-scoping filter, called on every run unless `metrics.labels.cluster` is set to `null` |
 | `GET /nodes/{node}/qemu/{vmid}/config` | **disk → storage mapping and size** |
 | `GET /nodes/{node}/storage/{storage}/status` | authoritative `total`/`used`/`avail` |
 | `GET /nodes/{node}/storage/{storage}/content` | per-volume real allocated sizes, owner vmid |

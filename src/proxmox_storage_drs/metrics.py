@@ -164,17 +164,18 @@ def resolve_node_selector(
        -- trusted completely, since only the operator knows their own
        Telegraf/InfluxDB tagging scheme, and it may name something other
        than a node or cluster at all.
-    2. ``metrics.labels.cluster``, once configured, becomes the default:
-       :func:`build_cluster_selector` from ``cluster_name``
+    2. :func:`build_cluster_selector` from ``cluster_name``
        (``PveClient.cluster_name()``, the live PVE cluster's own name) --
-       an operator only sees this once they have told the tool their
-       Prometheus actually carries that label (``verify-metrics``'s own
-       "label values seen" report is how they find out what to set it
-       to), so this never silently activates for a deployment with no
-       such label.
+       the default: ``metrics.labels.cluster`` itself defaults to
+       ``"cluster"``, a tag this project's deployments carry as standard
+       practice, so this tier is what most runs actually use. Set
+       ``metrics.labels.cluster: null`` explicitly to opt back out (a
+       Prometheus that genuinely has no such label) -- that is the one
+       thing that skips this tier regardless of what ``cluster_name`` a
+       caller passes in.
     3. The auto-derived :func:`build_node_selector` from ``node_names``
-       otherwise -- the long-standing default, unchanged for anyone who
-       has not set ``metrics.labels.cluster``.
+       otherwise -- the original default, still used whenever
+       ``metrics.labels.cluster`` is `null` or the API call found no name.
     4. ``None`` when nothing above applies -- ``verify-metrics`` passes
        ``node_names=None`` and ``cluster_name=None`` here rather than
        fetching either from the PVE API itself, since it is otherwise
@@ -396,7 +397,7 @@ def _check_metric_names_exist(client: PrometheusClient, metrics: MetricsConfig) 
     return findings
 
 
-_CLUSTER_LABEL_DISCOVERY_DEFAULT = "cluster"
+_CLUSTER_LABEL_DISCOVERY_FALLBACK = "cluster"
 
 
 def _check_sample_series(
@@ -405,19 +406,20 @@ def _check_sample_series(
     """Section 3.3 step 2/3/4: one sample series per metric, with its labels.
 
     Also scans *every* series each metric query returns (not just the one
-    sample reported above) for a cluster-naming label -- ``metrics.labels.cluster``
-    once configured, else the literal ``"cluster"`` as an unconditional
-    discovery probe, since the whole point is helping an operator on a
-    Prometheus shared by more than one PVE cluster find out what to set
-    ``metrics.labels.cluster``/``metrics.extra_selector`` to *before* they
-    have configured either. Reports the distinct values found across all
-    of them, once, or nothing at all when none carry it -- silent rather
-    than a warning, since most deployments have no such label and never
-    will."""
+    sample reported above) for a cluster-naming label -- ``metrics.labels.cluster``,
+    which defaults to the literal ``"cluster"`` since this project's
+    deployments carry that tag as standard practice, or whatever an
+    operator explicitly set it to instead (`null` included: this discovery
+    scan still runs, falling back to the literal ``"cluster"`` as a probe,
+    since it costs nothing and might reveal the label is there after all
+    even on a Prometheus not yet configured to use it). Reports the
+    distinct values found across all six metrics combined, once, or
+    nothing at all when none carry it -- silent rather than a warning,
+    since not every deployment has one."""
     findings: list[Finding] = []
     samples: dict[str, dict[str, str]] = {}
     labels = metrics.labels
-    cluster_label = labels.cluster or _CLUSTER_LABEL_DISCOVERY_DEFAULT
+    cluster_label = labels.cluster or _CLUSTER_LABEL_DISCOVERY_FALLBACK
     clusters_seen: set[str] = set()
     for field in RAW_METRIC_FIELDS:
         name = raw_metric_name(metrics, field)
