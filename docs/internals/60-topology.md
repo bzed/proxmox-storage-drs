@@ -64,7 +64,14 @@ calling `_collect_vm_disks` per VM, then `_build_storages`):
    lock. `PveClient` itself may reauthenticate mid-fetch if several threads
    hit an expired ticket at once (`50-pve-api.md`'s P-01 note); that
    reauthentication is what its own lock serializes, not this join.
-5. Non-QEMU resources (`type != "qemu"`) are skipped outright — this tool
+5. `storage_content()` again, per `(node, storage)` pair `_needed_content_node_pairs()`
+   finds among the just-fetched VMs' own disks that step 3's single
+   per-storage fetch does not already cover — see "Sizes" below for why a
+   second per-node fetch is worth its own concurrent pool pass rather than
+   reusing step 3's listing for everything. Runs the same
+   `ThreadPoolExecutor(read_workers)` pattern as step 4, between it and the
+   join.
+6. Non-QEMU resources (`type != "qemu"`) are skipped outright — this tool
    never touches LXC containers, and section 3.5's read/write paths are
    qemu-only throughout.
 
@@ -111,23 +118,47 @@ violating (C4)/(C5) — see `docs/internals/15-state.md`'s "Deliberately not
 implemented" section for why, and why that gap is bounded and safe rather
 than silently wrong.
 
-## Sizes: content is authoritative, config is the fallback
+## Sizes: content is authoritative, config is the fallback of last resort
 
-`_resolve_disk_size_and_format` looks up the volume in that storage's
-content listing first (section 3.5: authoritative for what is actually
-allocated) and falls back to parsing the VM config's own `size=` only when
-the volume is missing from content — logged as a warning naming the
-disk, since assume-thick-provisioning sizing from a stale or unlisted
-config value is a real, if rare, source of drift. Two independently
-verified reasons this fallback path is not merely defensive: the
-`Datastore.Allocate`-vs-`Audit` privilege gap (`50-pve-api.md`), and an
-`unusedN` volume, deleted directly on the storage backend outside Proxmox
-(confirmed with the cluster's operator), that PVE's own config still
-referenced and that PVE itself never noticed or refused to boot the VM
-over — `IMPLEMENTATION_PLAN.md` section 3.6's note. `_parse_pve_config_size_bytes` parses PVE's own config-file
-size suffixes (`512G` meaning binary GiB, no explicit `i`) — deliberately
-not `units.py`'s parser, which is for *this project's* config file, a
+`_resolve_disk_size_and_format` looks up the volume in a content listing
+first (section 3.5: authoritative for what is actually allocated), in
+three tiers: the entry's own `size` if present; its `approximate-size` if
+`size` is not; the VM config's own `size=` (logged as a warning naming the
+disk and which of the two content-listing gaps applied) only when the
+entry has neither, or is missing from the listing entirely. Two
+independently verified reasons the config fallback is not merely
+defensive: the `Datastore.Allocate`-vs-`Audit` privilege gap
+(`50-pve-api.md`), and an `unusedN` volume, deleted directly on the
+storage backend outside Proxmox (confirmed with the cluster's operator),
+that PVE's own config still referenced and that PVE itself never noticed
+or refused to boot the VM over — `IMPLEMENTATION_PLAN.md` section 3.6's
+note. `_build_storages`'s equivalent sum over *foreign* (unreferenced)
+volumes uses the same `size`/`approximate-size` tiering, but has no VM
+config to fall back to for a size at all — it skips the volume instead
+(warning, undercounting the reserve) when neither is present.
+`_parse_pve_config_size_bytes` parses PVE's own config-file size suffixes
+(`512G` meaning binary GiB, no explicit `i`) — deliberately not
+`units.py`'s parser, which is for *this project's* config file, a
 different and coincidentally similarly-shaped format.
+
+**Which node's content listing, though, is not a detail this function
+gets to be careless about.** Confirmed live, by the operator who hit it:
+PVE 9.2's qcow2-on-shared-LVM snapshot support means `size` for one of
+these volumes is only readable from the node that has its LV *active* —
+cheap on the node currently running the owning VM (PVE keeps it active
+there), expensive or blocked entirely on a shared storage's other nodes,
+which report `approximate-size` instead (PVE's own answer from LVM
+metadata, without activating anything). `_pick_active_node()`'s one pick
+per *storage* — the node every other section 3.5 call uses — is not
+guaranteed to be that node. So a managed disk's size/format is resolved
+against a content listing fetched from **that disk's own VM's node**
+specifically (`_needed_content_node_pairs()`, step 5 above), not
+`_pick_active_node()`'s pick; only the *foreign*-volume sum in
+`_build_storages` still uses the storage-wide listing, since an
+unreferenced volume has no owning VM to pick a node from. Before this
+fix, a disk on this kind of storage could silently carry the storage's
+generic pick's `approximate-size` (or fall further, to a possibly-stale
+VM config `size=`) even when the exact figure was one call away.
 
 ## `Uˢᵉˣᵗ`: everything not referenced
 

@@ -512,6 +512,77 @@ def test_build_topology_foreign_volume_uses_approximate_size_before_dropping(
     assert storages_by_id["san-a"].foreign_used_bytes == 3 * (1 << 30)
 
 
+def test_build_topology_content_queried_from_vm_own_node_not_storage_active_node(
+    tmp_path: Path,
+) -> None:
+    """PVE 9.2+: an inactive qcow2-on-shared-LVM volume reports only
+    approximate-size from a node that has not activated its LV; the node
+    actually running the VM -- which PVE always activates the LV on --
+    reports the real size. `_pick_active_node()`'s single pick for the
+    storage as a whole (here: nodeA, first in the list) must not be
+    trusted for a VM's own disk when it differs from that VM's own node
+    (here: nodeB, where VM 301 actually runs)."""
+    config = make_config(
+        tmp_path, groups=[{"name": "g1", "storages": [{"id": "san-a"}, {"id": "san-b"}]}]
+    )
+    storage_status = {"total": 10 * (1 << 40), "used": 3 * (1 << 40)}
+    vm_configs = {301: {"name": "vm301", "scsi0": "san-a:vm-301-disk-0,size=7G"}}
+    responses: dict[str, Any] = {
+        "cluster/resources": lambda type: (
+            [_vm(301, "nodeB")]
+            if type == "vm"
+            else [
+                {"storage": "san-a", "node": "nodeA", "status": "available"},
+                {"storage": "san-a", "node": "nodeB", "status": "available"},
+                {"storage": "san-b", "node": "nodeA", "status": "available"},
+            ]
+        ),
+        "storage": [
+            {"storage": "san-a", "type": "lvm", "shared": 1, "content": "images"},
+            {"storage": "san-b", "type": "lvm", "shared": 1, "content": "images"},
+        ],
+        "nodes/nodeA/storage/san-a/status": storage_status,
+        "nodes/nodeB/storage/san-a/status": storage_status,
+        "nodes/nodeA/storage/san-b/status": storage_status,
+        "nodes/nodeA/storage/san-b/content": [],
+        # nodeA (the generic "active" pick, first in the resources list)
+        # has not activated this volume's LV: approximate-size only.
+        "nodes/nodeA/storage/san-a/content": [
+            {
+                "volid": "san-a:vm-301-disk-0",
+                "vmid": 301,
+                "format": "qcow2",
+                "content": "images",
+                "approximate-size": 5 * (1 << 30),
+            }
+        ],
+        # nodeB is where VM 301 actually runs -- PVE activated the LV
+        # there, so its content listing has the real size.
+        "nodes/nodeB/storage/san-a/content": [
+            {
+                "volid": "san-a:vm-301-disk-0",
+                "vmid": 301,
+                "format": "qcow2",
+                "content": "images",
+                "size": 8 * (1 << 30),
+            }
+        ],
+        "nodes/nodeB/qemu/301/config": vm_configs[301],
+        "nodes/nodeB/qemu/301/snapshot": [{"name": "current"}],
+    }
+    fake = fake_api(responses)
+    client = PveClient(fake)
+
+    topology = build_topology(client, config)
+
+    disk = topology.groups[0].disks[0]
+    assert disk.size_bytes == 8 * (1 << 30)
+    assert disk.format == "qcow2"
+    assert not any("approximate-size" in w or "VM config" in w for w in topology.warnings)
+    content_calls = {path for _method, path, _kwargs in fake.calls if path.endswith("/content")}
+    assert "nodes/nodeB/storage/san-a/content" in content_calls
+
+
 def test_build_topology_stopped_vm_included_when_running_only_false(tmp_path: Path) -> None:
     config = make_config(tmp_path, exclude={"running_only": False})
     vm_resources = [_vm(202, "node1", status="stopped")]
