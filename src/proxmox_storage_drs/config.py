@@ -84,7 +84,7 @@ class MetricLabels:
     vmid: str = "vmid"
     device: str = "instance"
     node: str = "nodename"
-    cluster: str | None = None
+    cluster: str | None = "cluster"
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,7 +441,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         vmid=labels_raw.get("vmid", "vmid"),
         device=labels_raw.get("device", "instance"),
         node=labels_raw.get("node", "nodename"),
-        cluster=labels_raw.get("cluster"),
+        cluster=labels_raw.get("cluster", "cluster"),
     )
     metrics = MetricsConfig(
         read_ops=metrics_raw.get("read_ops", "blockstat_rd_operations"),

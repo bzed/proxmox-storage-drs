@@ -42,18 +42,25 @@ def write_config(tmp_path: Path, **overrides: object) -> Path:
 class _FakeClient(str):
     """The ``"fake-client"`` sentinel every ``build_pve_client`` mock in
     this file returns, subclassed just enough to also answer
-    ``node_names()`` -- ``cli._resolve_node_selector_for_run()`` calls
-    that on whatever ``build_pve_client`` produced. A plain ``str``
-    subclass rather than a new type entirely: every existing
-    ``client == "fake-client"`` assertion (and every direct
-    ``cli._run_auto_group("fake-client", ...)`` call) keeps working
-    unchanged, since this compares and hashes identically to the base
-    string. Empty by default -- no test here relies on a real node list,
-    only on ``resolve_node_selector()`` getting *something* iterable back
-    instead of an ``AttributeError``."""
+    ``node_names()``/``cluster_name()`` -- ``cli._resolve_node_selector_for_run()``
+    calls those on whatever ``build_pve_client`` produced, and
+    ``metrics.labels.cluster`` defaults to a real label name now, so
+    ``cluster_name()`` is called on every one of these tests too, not just
+    the ones that opt out. A plain ``str`` subclass rather than a new type
+    entirely: every existing ``client == "fake-client"`` assertion (and
+    every direct ``cli._run_auto_group("fake-client", ...)`` call) keeps
+    working unchanged, since this compares and hashes identically to the
+    base string. Both empty/``None`` by default -- no test here relies on
+    a real node list or cluster name, only on the selector-building calls
+    getting *something* back instead of an ``AttributeError``, which
+    resolves to the same ``None`` selector either default already gave
+    before this class grew ``cluster_name()``."""
 
     def node_names(self) -> list[str]:
         return []
+
+    def cluster_name(self) -> str | None:
+        return None
 
 
 FAKE_CLIENT = _FakeClient("fake-client")
@@ -112,42 +119,37 @@ def test_resolve_node_selector_for_run_skips_the_api_call_when_overridden() -> N
     assert selector == 'cluster="mycluster"'
 
 
-def test_resolve_node_selector_for_run_auto_derives_from_the_live_node_list() -> None:
-    client: Any = _NodeNamesClient(names=["pve02", "pve01"])
-    selector = cli._resolve_node_selector_for_run(client, MetricsConfig())
-    assert selector == 'nodename=~"pve01|pve02"'
-
-
-def test_resolve_node_selector_for_run_is_none_when_the_cluster_has_no_nodes() -> None:
-    client: Any = _NodeNamesClient(names=[])
-    assert cli._resolve_node_selector_for_run(client, MetricsConfig()) is None
-
-
-def test_resolve_node_selector_for_run_prefers_cluster_name_once_configured() -> None:
-    """metrics.labels.cluster set is the opt-in signal: the live cluster
-    name wins over the node list, and node_names() is never even called
-    since the cluster name alone already settles it."""
-    metrics = MetricsConfig(labels=MetricLabels(cluster="cluster"))
+def test_resolve_node_selector_for_run_defaults_to_the_live_cluster_name() -> None:
+    """metrics.labels.cluster defaults to "cluster" -- a real label name --
+    so a bare default MetricsConfig() already gets the cluster-name tier,
+    and node_names() is never even called since the cluster name alone
+    already settles it."""
     client: Any = _NodeNamesClient(cluster_name="abn", forbid_call=True)
-    selector = cli._resolve_node_selector_for_run(client, metrics)
+    selector = cli._resolve_node_selector_for_run(client, MetricsConfig())
     assert selector == 'cluster="abn"'
 
 
 def test_resolve_node_selector_for_run_falls_back_to_nodes_without_a_cluster_name() -> None:
-    """metrics.labels.cluster configured but the API call found no name:
-    falls back to the node list rather than giving up."""
-    metrics = MetricsConfig(labels=MetricLabels(cluster="cluster"))
-    client: Any = _NodeNamesClient(names=["pve01"], cluster_name=None)
-    selector = cli._resolve_node_selector_for_run(client, metrics)
-    assert selector == 'nodename=~"pve01"'
-
-
-def test_resolve_node_selector_for_run_never_calls_cluster_name_when_unconfigured() -> None:
-    """metrics.labels.cluster unset (the default): cluster_name() is never
-    called at all, not even to check -- the existing node-list behaviour
-    is completely unaffected by this feature until an operator opts in."""
-    client: Any = _NodeNamesClient(names=["pve01"], forbid_cluster_call=True)
+    """Default config, but the live API call found no cluster name: falls
+    back to the node list rather than giving up."""
+    client: Any = _NodeNamesClient(names=["pve02", "pve01"], cluster_name=None)
     selector = cli._resolve_node_selector_for_run(client, MetricsConfig())
+    assert selector == 'nodename=~"pve01|pve02"'
+
+
+def test_resolve_node_selector_for_run_is_none_when_neither_resolves() -> None:
+    client: Any = _NodeNamesClient(names=[], cluster_name=None)
+    assert cli._resolve_node_selector_for_run(client, MetricsConfig()) is None
+
+
+def test_resolve_node_selector_for_run_opts_out_with_cluster_label_set_to_none() -> None:
+    """metrics.labels.cluster explicitly set to null: cluster_name() is
+    never called at all, not even to check -- the original node-list
+    behaviour is exactly what an operator opting out gets back, with no
+    extra round-trip for the tier they turned off."""
+    metrics = MetricsConfig(labels=MetricLabels(cluster=None))
+    client: Any = _NodeNamesClient(names=["pve01"], forbid_cluster_call=True)
+    selector = cli._resolve_node_selector_for_run(client, metrics)
     assert selector == 'nodename=~"pve01"'
 
 

@@ -135,14 +135,15 @@ whose `type` is `"cluster"`** (every other entry is `type: "node"`) --
 confirmed live against a real PVE 9.2 cluster, `{"type": "cluster", "name":
 "pvezebe", "nodes": 3, "quorate": 1, ...}`. Needs `Sys.Audit` at `/`, the
 one privilege none of this project's other read calls require --
-`docs/manual/00-installation.md` only asks for it when
-`metrics.labels.cluster` is actually configured, since that is the only
-caller. Returns `None` rather than raising when the entry is missing or
-unnamed, the same "let the caller decide" contract `node_names()` already
-has -- `metrics.resolve_node_selector()` treats that `None` as "fall back
-to the node list," not fatal. Called at most once per command invocation
-(`cli._resolve_node_selector_for_run()`), and only when
-`metrics.labels.cluster` is set at all.
+`docs/manual/00-installation.md` asks for it unconditionally, since
+`metrics.labels.cluster` defaults to a real label name (`"cluster"`) and
+so this is the normal call every `plan`/`show-load`/`apply`/`explain` run
+makes, not a conditional one. Returns `None` rather than raising when the
+entry is missing or unnamed, the same "let the caller decide" contract
+`node_names()` already has -- `metrics.resolve_node_selector()` treats
+that `None` as "fall back to the node list," not fatal. Called at most
+once per command invocation (`cli._resolve_node_selector_for_run()`), and
+skipped only when `metrics.labels.cluster` is explicitly `null`.
 
 ## `move_disk()`: the one and only bytes/s -> KiB/s conversion
 

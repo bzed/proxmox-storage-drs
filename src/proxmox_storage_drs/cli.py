@@ -332,18 +332,21 @@ def _resolve_node_selector_for_run(client: PveClient, metrics: MetricsConfig) ->
     """Section 3.4's node/cluster-scoping filter for one command invocation.
 
     ``metrics.extra_selector`` short-circuits before any extra API call, as
-    before. Otherwise ``client.cluster_name()`` is called only when
-    ``metrics.labels.cluster`` is actually configured -- that field's
-    presence is the opt-in signal (see ``metrics.resolve_node_selector()``'s
-    own docstring for the full precedence) -- and ``client.node_names()``
-    only when the cluster name does not already settle it, so an operator
-    who has told the tool exactly what to filter on never pays for a call
-    that would have found the answer a different way. Every command that
-    reaches here already has a live PVE client from building its own
-    topology. ``verify-metrics`` calls ``metrics.resolve_node_selector()``
-    directly instead, with both ``node_names`` and ``cluster_name`` left
-    ``None``, since it is deliberately independent of the PVE API entirely
-    and never reaches this function at all."""
+    before. Otherwise ``client.cluster_name()`` is called whenever
+    ``metrics.labels.cluster`` names a label at all -- true by default
+    (``"cluster"``), so this is the normal path, not an opt-in one; only
+    an explicit ``metrics.labels.cluster: null`` skips this call outright
+    (see ``metrics.resolve_node_selector()``'s own docstring for the full
+    precedence). ``client.node_names()`` is called only when the cluster
+    name does not already settle it -- `null`, or a cluster with no
+    ``type: "cluster"`` entry to name it -- so a run that got its answer
+    from the cluster name never pays for the node-list call too. Every
+    command that reaches here already has a live PVE client from building
+    its own topology. ``verify-metrics`` calls
+    ``metrics.resolve_node_selector()`` directly instead, with both
+    ``node_names`` and ``cluster_name`` left ``None``, since it is
+    deliberately independent of the PVE API entirely and never reaches
+    this function at all."""
     if metrics.extra_selector:
         return metrics.extra_selector
     cluster_name = client.cluster_name() if metrics.labels.cluster else None

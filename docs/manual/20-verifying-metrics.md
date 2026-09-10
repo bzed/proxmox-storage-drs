@@ -20,7 +20,9 @@ A successful run looks like this (labels and values are illustrative):
 [   info] metrics.write_bytes = 'blockstat_wr_bytes' exists
 [   info] metrics.read_time_ns = 'blockstat_rd_total_time_ns' exists
 [   info] metrics.write_time_ns = 'blockstat_wr_total_time_ns' exists
-[   info] blockstat_rd_operations: sample series labels {'vmid': '101', 'instance': 'scsi0', 'nodename': 'pve01'}
+[   info] blockstat_rd_operations: sample series labels {'vmid': '101', 'instance': 'scsi0', 'nodename': 'pve01', 'cluster': 'pvezebe'}
+...
+[   info] 'cluster' label values seen across these metrics: pvezebe
 ...
 
 OK: verify-metrics found no blocking problems
@@ -47,13 +49,13 @@ section 3.3):
    A metric that exists but currently has no series is a **warning**, not an
    error — it may simply mean nothing has generated that kind of I/O
    recently. This step also scans *every* series each metric query returns
-   (not just the one sample printed) for `metrics.labels.cluster` — or the
-   literal `cluster` as an unconditional discovery probe while that key is
-   still unset — and reports every distinct value found as an **info**
-   line, `'<label>' label values seen across these metrics: ...`. This is
-   how you find out what belongs in `metrics.labels.cluster`, before
-   setting it: nothing is printed at all when no series carries any such
-   label.
+   (not just the one sample printed) for `metrics.labels.cluster`
+   (`"cluster"` by default) and reports every distinct value found as an
+   **info** line, `'<label>' label values seen across these metrics:
+   ...`. This is how you confirm the default is right for your Prometheus
+   — or, if you set `metrics.labels.cluster` to `null` because yours
+   genuinely has no such tag, how you'd notice if it turned out to have
+   one after all: nothing is printed at all when no series carries it.
 3. **Configured labels present.** If `metrics.labels.vmid`/`.device`/`.node`
    do not appear (or are empty) on the sample series, that is an **error**:
    the load model has nothing to join disks on.

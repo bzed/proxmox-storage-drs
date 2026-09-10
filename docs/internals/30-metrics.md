@@ -56,17 +56,22 @@ selector text itself is resolved once per command invocation by
 1. `metrics.extra_selector` verbatim when the operator set one (trusted
    completely; it may not even name a node or cluster label at all).
 2. `build_cluster_selector(metrics.labels.cluster, cluster_name)` --
-   `<label>="<name>"`, a plain equality match, not an alternation -- once
-   `metrics.labels.cluster` is configured *and* a `cluster_name` was
-   actually resolved. `metrics.labels.cluster` being non-`None` at all is
-   the opt-in signal; this tier never activates for a config that has not
-   set it, no matter what `cluster_name` argument a caller happens to
-   pass (`test_resolve_node_selector_cluster_name_alone_does_nothing_when_unconfigured`).
+   `<label>="<name>"`, a plain equality match, not an alternation -- as
+   long as `metrics.labels.cluster` names a label (default: the literal
+   `"cluster"`, since this project's deployments carry that tag as
+   standard practice) *and* a `cluster_name` was actually resolved. This
+   is the default tier, not an opt-in one -- `metrics.labels.cluster`
+   must be explicitly set to `None` for it to never fire, regardless of
+   what `cluster_name` argument a caller happens to pass
+   (`test_resolve_node_selector_cluster_name_alone_does_nothing_when_unconfigured`
+   covers that one remaining case: a caller passing a `cluster_name` while
+   the config still opted out).
 3. `build_node_selector(metrics.labels.node, node_names)` otherwise, which
    escapes every name (`_escape_promql_regex_literal()` -- an FQDN's `.`
    is a regex metacharacter otherwise) and joins them into one `=~`
-   alternation. This is the original, still-default behaviour for any
-   config that has not set `metrics.labels.cluster`.
+   alternation. This is the original default, from before
+   `metrics.labels.cluster` existed -- still what a config gets by setting
+   that key to `null`, or when the live lookup found no name.
 4. `None` when nothing above resolved anything.
 
 `node_names` comes from `PveClient.node_names()` (`GET /nodes`);
@@ -79,11 +84,11 @@ module and `loadmodel.py` never call the PVE API themselves.
 `cli._resolve_node_selector_for_run()` is the one place that decides
 *whether* to make either API call at all: both skipped when
 `metrics.extra_selector` is already set; `cluster_name()` skipped outright
-when `metrics.labels.cluster` is unset (tier 2 could not fire regardless);
-`node_names()` skipped when the cluster name alone already settled it. An
-operator who told the tool exactly what to filter on -- by any of the
-three tiers -- gets no extra round-trip for the ones below it.
-`verify-metrics` never reaches this function — it calls
+only when `metrics.labels.cluster` is `null` (tier 2 could not fire
+regardless); `node_names()` skipped when the cluster name alone already
+settled it. Since `metrics.labels.cluster` defaults to a real label name,
+`cluster_name()` is the normal call every run makes, not a conditional
+extra one. `verify-metrics` never reaches this function — it calls
 `resolve_node_selector(metrics, None)` directly, applying only an explicit
 override (`cluster_name` left at its default `None` too), because it is
 deliberately independent of the PVE API and has no node list or live
@@ -92,8 +97,9 @@ cluster name of its own to build either tier from (`_check_coverage()`/
 `rate()`/range query at all; the others query a raw metric name or sample
 one series directly, where cross-cluster contamination is not a
 correctness question the way a summed rate is). What `verify-metrics`
-does instead, to help an operator find out whether tier 2 is even worth
-configuring, is report what it sees: see `_check_sample_series()` below.
+does instead, to help an operator confirm the default tag is really there
+(or decide to opt out), is report what it sees: see `_check_sample_series()`
+below.
 
 ## `verify_metrics()`: six checks, six functions
 
@@ -120,13 +126,13 @@ deliberately: it scans *all six* metrics' *entire* result sets (not the
 one `result[0]` sample each already reports), because the whole point is
 finding every distinct value across everything this run touches, on a
 Prometheus an operator may not yet know is shared. `metrics.labels.cluster`
-names which label to look for; while it is `None` (the default), the probe
-falls back to the literal string `"cluster"` -- a guess, not a
-requirement, made solely so an operator discovers the label exists before
-ever configuring anything. One `Finding("info", ...)` lists every value
-found across all six metrics combined, or none at all when nothing
-carried it -- silence, not a warning, since most deployments have no such
-label and never will.
+names which label to look for (`"cluster"` by default); if an operator has
+set it to `None`, the probe falls back to that same literal string anyway
+-- a courtesy guess, not a requirement, so opting out of the auto-selector
+tier does not also blind this purely informational report. One
+`Finding("info", ...)` lists every value found across all six metrics
+combined, or none at all when nothing carried it -- silence, not a
+warning, since not every deployment has one.
 
 `VerifyMetricsReport.ok` is `True` iff no `Finding` has `level == "error"` —
 `cli.py`'s `verify-metrics` handler uses exactly this property to decide the
