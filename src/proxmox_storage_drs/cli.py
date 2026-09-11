@@ -43,7 +43,7 @@ from proxmox_storage_drs.config import (
     load_config,
 )
 from proxmox_storage_drs.crashrecovery import reconcile_inflight
-from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
+from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError, PveApiError
 from proxmox_storage_drs.execute import (
     ConfirmCallback,
     ExecutionResult,
@@ -337,8 +337,14 @@ def _resolve_node_selector_for_run(client: PveClient, metrics: MetricsConfig) ->
     (``"cluster"``), so this is the normal path, not an opt-in one; only
     an explicit ``metrics.labels.cluster: null`` skips this call outright
     (see ``metrics.resolve_node_selector()``'s own docstring for the full
-    precedence). ``client.node_names()`` is called only when the cluster
-    name does not already settle it -- `null`, or a cluster with no
+    precedence). A ``PveApiError`` from that one call (REVIEW.md W-08 --
+    most often ``Sys.Audit`` missing on a token provisioned before this
+    tier existed) is caught narrowly here and degrades to the node-list
+    tier with a warning, rather than failing the whole run over a scoping
+    lookup that has an equally-correct fallback: a token that can already
+    list storages and VMs can also list nodes. ``client.node_names()`` is
+    called only when the cluster name does not already settle it -- an
+    explicit opt-out, a caught error, or a cluster with no
     ``type: "cluster"`` entry to name it -- so a run that got its answer
     from the cluster name never pays for the node-list call too. Every
     command that reaches here already has a live PVE client from building
@@ -349,7 +355,18 @@ def _resolve_node_selector_for_run(client: PveClient, metrics: MetricsConfig) ->
     this function at all."""
     if metrics.extra_selector:
         return metrics.extra_selector
-    cluster_name = client.cluster_name() if metrics.labels.cluster else None
+    cluster_name: str | None = None
+    if metrics.labels.cluster:
+        try:
+            cluster_name = client.cluster_name()
+        except PveApiError as exc:
+            logger.warning(
+                "could not determine the live cluster's name (%s); falling back to "
+                "metrics.labels.cluster's node-list scoping tier for this run -- grant "
+                "Sys.Audit at '/' to the configured token to use cluster-name scoping instead",
+                exc,
+                extra={"event": "cluster_name_lookup_failed"},
+            )
     if metrics.labels.cluster and cluster_name:
         return resolve_node_selector(metrics, None, cluster_name)
     return resolve_node_selector(metrics, client.node_names(), cluster_name)
@@ -442,7 +459,15 @@ def _render_storage_and_disk_load_lines(
         for disk_load in group_load.disks:
             if disk_load.flagged_reason:
                 lines.append(f"  ⚠ {disk_load.disk_key}: {disk_load.flagged_reason}")
-        if group_load.idle:
+        if group_load.no_series_matched:
+            # REVIEW.md W-06/W-07: distinguish this from a genuinely idle
+            # group -- every per-disk flag above is really one symptom of
+            # the same cause, named once here instead of "idle".
+            lines.append(
+                "  ⚠ the resolved query filter matched no series at all -- not necessarily "
+                "idle; check metrics.labels.cluster/node against verify-metrics"
+            )
+        elif group_load.idle:
             lines.append("  (idle: no measured I/O for this group this window)")
     return lines
 

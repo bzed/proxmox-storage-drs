@@ -17,11 +17,17 @@ pve-storage-drs (0.1.0) trixie; urgency=medium
       solver.backend: auto/heuristic/cpsat/cbc.
     - schedule.py and payback.py (phase 5): move ordering/pacing and the
       benefit-vs-cost gate a plan must clear before it is offered.
-    - state.py (phase 7, section 11.2): drift history and
-      gates.cooldown_per_disk/cooldown_per_storage tracking.
-    - explain (phase 8): the diagnostic subcommand -- measured load,
-      pinned disks with per-pin action hints, fragmentation, the
-      objective's five terms, and the pinned-load-fraction warning.
+    - execute.py (phase 7, section 11.2 state.json): dry-run/confirm/auto
+      execution, drift history and gates.cooldown_per_disk/
+      cooldown_per_storage tracking, and crash-recovery from an in-flight
+      move.
+    - auto mode and execution.time_windows (phase 8): unattended
+      operation, the migration cap and the re-plan loop.
+    - forecast.py's seasonal-naive model, validated by backtest beyond
+      quantile/p95 (phase 9).
+  * explain: the diagnostic subcommand -- measured load, pinned disks with
+    per-pin action hints, fragmentation, the objective's five terms, and
+    the pinned-load-fraction warning.
   * All six subcommands (show-load, verify-metrics, verify-storages, plan,
     apply, explain) are implemented and documented; none report "not
     implemented yet" any longer.
@@ -29,10 +35,11 @@ pve-storage-drs (0.1.0) trixie; urgency=medium
     docs/internals (implementation reference) now cover every module and
     CLI subcommand, alongside IMPLEMENTATION_PLAN.md itself; all three are
     built to PDF and committed with sha256 freshness stamps.
-  * Hardened through REVIEW.md passes 1-13 (findings F-01 through V-05):
+  * Hardened through REVIEW.md passes 1-14 (findings F-01 through W-09):
     config edge cases, PromQL correctness, PVE API privilege requirements,
     disk-bus/snapshot/lock handling, payback and scheduling fixes, cooldown
-    and state-tracking corrections, and plain-language runtime messages.
+    and state-tracking corrections, plain-language runtime messages, and
+    disk-size-resolution/query-scoping fixes below.
   * Packaging: debian/control, debian/rules, debian/tests and the
     autopkgtest (installed-package smoke test) now match a real,
     importable package; both GitHub Actions and the GitLab/Salsa pipeline
@@ -43,6 +50,20 @@ pve-storage-drs (0.1.0) trixie; urgency=medium
     section 5.5) remains a genuine fallback for a non-Debian install with
     no solver, or when a solve fails or times out; CP-SAT (ortools) stays
     an optional pip-only extra, unpackaged for Debian.
+  * Disk-size resolution (topology.py) fixed against three live-cluster
+    incidents: a content-listing entry present but missing its own `size`
+    no longer crashes (falls back to the VM config's size=, warning
+    named); a size-less entry's approximate-size (PVE 9.2+, qcow2 on
+    shared LVM) is now preferred over that fallback; and a managed disk's
+    exact size is now queried from its own VM's node rather than an
+    arbitrary node reporting the storage active, since only the node with
+    the volume's LV active can report it.
+  * Query scoping (metrics.py/cli.py): verify-metrics now reports every
+    cluster-naming label value it sees across your metrics, and
+    plan/show-load/apply/explain scope every query by this cluster's own
+    name by default (metrics.labels.cluster, default "cluster") rather
+    than by node list; set that key to null to opt back out on a
+    Prometheus with no such label.
   * Dogfooded against a real Proxmox VE 9.2 cluster and Prometheus
     instance; no known outstanding correctness findings.
 

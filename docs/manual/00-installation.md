@@ -44,7 +44,10 @@ storages in your `groups`, not backup targets):
   so the tool looks up this cluster's own name and builds
   `<metrics.labels.cluster>="<name>"` as its default query filter on every
   run unless you set that key to `null`. `PVEAuditor` includes this one
-  too.
+  too. Missing this privilege does not fail the run: a denied
+  `GET /cluster/status` logs a warning and falls back to the older
+  node-list scoping tier instead (REVIEW.md W-08) — equally correct, just
+  worth fixing so the intended default takes effect.
 
 **If you are using an API token** (recommended — see above), Proxmox's
 privilege separation means **the token has its own, separate ACL entries

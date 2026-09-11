@@ -435,8 +435,9 @@ def _disk_snapshot_or_orphan_reason(
 @dataclass(frozen=True, slots=True)
 class _ClusterData:
     """Everything fetched before the per-VM join, gathered in one place so
-    the join itself (`_collect_vm_disks`) takes one argument bundle rather
-    than seven."""
+    the join itself (`_join_vm_disks`) takes one argument bundle (plus
+    `content_by_node`, the per-`(node, storage)` fetch a later commit added
+    alongside it) rather than eight separate parameters."""
 
     storage_group_of: dict[str, str]
     definitions_by_id: dict[str, dict[str, Any]]

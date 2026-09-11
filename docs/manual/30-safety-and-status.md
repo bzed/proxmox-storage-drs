@@ -59,10 +59,10 @@ around for its own sake.
 
 ## Optional dependencies
 
-`pve-storage-drs` runs, plans and executes (`dry-run`/`confirm`; `auto` not
-yet) with only `requests`, `ruamel.yaml` and `jsonschema` installed. Two
-dependencies are still optional and are imported only where they are used,
-never at module level:
+`pve-storage-drs` runs, plans and executes — every `execution.mode`
+(`dry-run`/`confirm`/`auto`) included — with only `requests`, `ruamel.yaml`
+and `jsonschema` installed. Two dependencies are still optional and are
+imported only where they are used, never at module level:
 
 - **`ortools`** (`pip install proxmox-storage-drs[solver]`, **not** packaged
   for Debian — CP-SAT has no Debian package at all) — the preferred MILP

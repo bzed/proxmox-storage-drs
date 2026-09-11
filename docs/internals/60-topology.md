@@ -24,9 +24,11 @@ see that section's note if you need the history.
 
 ## One pass, in the order section 3.5 lists
 
-`build_topology()` fetches everything it needs exactly once, in five
-stages (`_fetch_cluster_data`, then a loop over `client.vm_resources()`
-calling `_collect_vm_disks` per VM, then `_build_storages`):
+`build_topology()` fetches everything it needs exactly once, in six
+stages: `_fetch_cluster_data`, a concurrent per-VM fetch phase
+(`_fetch_vm()`) over `client.vm_resources()`, a concurrent per-`(node,
+storage)` content-fetch phase, the single-threaded join
+(`_join_vm_disks()`) that consumes both, and finally `_build_storages`:
 
 1. `storage_definitions()` (the list form — see `50-pve-api.md`), which is
    also what every `/…/` storage pattern (section 11.4, below) is matched
@@ -70,7 +72,12 @@ calling `_collect_vm_disks` per VM, then `_build_storages`):
    second per-node fetch is worth its own concurrent pool pass rather than
    reusing step 3's listing for everything. Runs the same
    `ThreadPoolExecutor(read_workers)` pattern as step 4, between it and the
-   join.
+   join. Bounded by distinct `(node, storage)` pairs, not by VM count
+   (REVIEW.md W-05): worst case (VMs spread across every node, disks on
+   every managed storage) is `|nodes| · |storages|` extra full content
+   listings, though a typical cluster's VM placement is far more
+   concentrated than that. `IMPLEMENTATION_PLAN.md` §3.5's expected
+   call-count formula carries the `|extra content pairs|` term for this.
 6. Non-QEMU resources (`type != "qemu"`) are skipped outright — this tool
    never touches LXC containers, and section 3.5's read/write paths are
    qemu-only throughout.
@@ -78,7 +85,7 @@ calling `_collect_vm_disks` per VM, then `_build_storages`):
 ## The `lock` field comes from `vm_config()`, not a separate call
 
 Section 9.3's own pseudocode says `lock` is readable from either
-`/qemu/{vmid}/config` or `/status/current`. `_collect_vm_disks` reads it
+`/qemu/{vmid}/config` or `/status/current`. `_join_vm_disks` reads it
 from the config response already being fetched for the disk join, so
 planning-time lock detection costs no extra API call. `/status/current` is
 still needed later, but only immediately before a specific move (section

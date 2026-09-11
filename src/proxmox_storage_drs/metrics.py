@@ -413,9 +413,16 @@ def _check_sample_series(
     scan still runs, falling back to the literal ``"cluster"`` as a probe,
     since it costs nothing and might reveal the label is there after all
     even on a Prometheus not yet configured to use it). Reports the
-    distinct values found across all six metrics combined, once, or
-    nothing at all when none carry it -- silent rather than a warning,
-    since not every deployment has one."""
+    distinct values found across all six metrics combined, once.
+
+    When ``metrics.labels.cluster`` is set (the default included) and *no*
+    series anywhere carries it, this is a **warning**, not silence:
+    ``resolve_node_selector()`` uses that same label to build
+    ``cluster="<name>"`` as the default scoping tier for every
+    plan/show-load/apply/explain query, and an absent label means every one
+    of those queries will match zero series -- REVIEW.md W-06. Only the
+    explicit ``metrics.labels.cluster: null`` opt-out keeps this probe's
+    absence silent, since then nothing relies on the label existing."""
     findings: list[Finding] = []
     samples: dict[str, dict[str, str]] = {}
     labels = metrics.labels
@@ -457,6 +464,17 @@ def _check_sample_series(
                 "info",
                 f"{cluster_label!r} label values seen across these metrics: "
                 + ", ".join(sorted(clusters_seen)),
+            )
+        )
+    elif labels.cluster:
+        findings.append(
+            Finding(
+                "warning",
+                f"no series carries a {cluster_label!r} label; with the default "
+                f"metrics.labels.cluster ({cluster_label!r}), every plan/show-load/apply/"
+                'explain query would be scoped to cluster="<name>" and match nothing -- '
+                "set metrics.labels.cluster to null in your config, or fix your Prometheus "
+                "tagging to add the label",
             )
         )
     return findings, samples

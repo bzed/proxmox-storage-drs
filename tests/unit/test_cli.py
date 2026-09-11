@@ -95,11 +95,13 @@ class _NodeNamesClient:
         forbid_call: bool = False,
         cluster_name: str | None = None,
         forbid_cluster_call: bool = False,
+        cluster_name_raises: Exception | None = None,
     ) -> None:
         self._names = names or []
         self._forbid_call = forbid_call
         self._cluster_name = cluster_name
         self._forbid_cluster_call = forbid_cluster_call
+        self._cluster_name_raises = cluster_name_raises
 
     def node_names(self) -> list[str]:
         if self._forbid_call:
@@ -109,6 +111,8 @@ class _NodeNamesClient:
     def cluster_name(self) -> str | None:
         if self._forbid_cluster_call:
             raise AssertionError("cluster_name() must not be called when extra_selector is set")
+        if self._cluster_name_raises is not None:
+            raise self._cluster_name_raises
         return self._cluster_name
 
 
@@ -151,6 +155,25 @@ def test_resolve_node_selector_for_run_opts_out_with_cluster_label_set_to_none()
     client: Any = _NodeNamesClient(names=["pve01"], forbid_cluster_call=True)
     selector = cli._resolve_node_selector_for_run(client, metrics)
     assert selector == 'nodename=~"pve01"'
+
+
+def test_resolve_node_selector_for_run_degrades_to_nodes_on_a_denied_cluster_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """REVIEW.md W-08: a denied GET /cluster/status (missing Sys.Audit,
+    most often a token provisioned before this tier existed) must not fail
+    the whole run -- it degrades to the node-list tier, with a warning
+    logged naming the cause, exactly as an unnamed/missing cluster entry
+    already does."""
+    from proxmox_storage_drs.exceptions import PveApiError
+
+    client: Any = _NodeNamesClient(
+        names=["pve01"], cluster_name_raises=PveApiError("fetching cluster status: 403 Forbidden")
+    )
+    with caplog.at_level(logging.WARNING):
+        selector = cli._resolve_node_selector_for_run(client, MetricsConfig())
+    assert selector == 'nodename=~"pve01"'
+    assert any("cluster" in record.message.lower() for record in caplog.records)
 
 
 # --------------------------------------------------------------------- --version
@@ -561,6 +584,34 @@ def test_show_load_human_output_notes_an_idle_group(
     path = write_config(tmp_path)
     assert cli.main(["-c", str(path), "show-load"]) == 0
     assert "idle: no measured I/O" in capsys.readouterr().out
+
+
+def test_show_load_human_output_names_a_selector_matching_nothing_not_idle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW.md W-06/W-07: the same all-zero GroupLoad as the idle test
+    above, but with ``no_series_matched`` set -- the human output must name
+    the scoping mismatch, not print "(idle: ...)"."""
+    no_series_load = GroupLoad(
+        group_name="fc-tier1",
+        idle=True,
+        average_utilization=0.0,
+        disks=(
+            DiskLoad(disk_key="101:scsi0", load=0.0, flagged_reason=None),
+            DiskLoad(disk_key="102:scsi0", load=0.0, flagged_reason=None),
+        ),
+        storages=(
+            StorageLoad(storage_id="san-a", load=0.0, utilization=0.0),
+            StorageLoad(storage_id="san-b", load=0.0, utilization=0.0),
+        ),
+        no_series_matched=True,
+    )
+    _patch_show_load_deps(monkeypatch, no_series_load)
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "show-load"]) == 0
+    out = capsys.readouterr().out
+    assert "matched no series at all" in out
+    assert "idle: no measured I/O" not in out
 
 
 def test_show_load_json_reports_a_metrics_error_per_group(
