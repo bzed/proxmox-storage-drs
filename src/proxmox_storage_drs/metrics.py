@@ -517,6 +517,8 @@ def compute_disk_coverage(
     metrics: MetricsConfig,
     window: WindowConfig,
     selector: str | None = None,
+    *,
+    now: float | None = None,
 ) -> dict[DiskKey, float]:
     """Section 3.3 step 5 / section 3.4's ``min_coverage`` rule: per-disk
     sample coverage over the decision window, as a fraction in ``[0, 1]``.
@@ -549,10 +551,15 @@ def compute_disk_coverage(
         selector=selector,
     )
     # Prometheus's query_range API takes absolute start/end (Unix time or
-    # RFC3339), never an offset relative to "now" -- anchoring to time.time()
-    # here is not optional. An unanchored negative value was rejected outright
-    # by a live server during development; see the git history for the fix.
-    end = time.time()
+    # RFC3339), never an offset relative to "now" -- anchoring to a concrete
+    # instant here is not optional. An unanchored negative value was
+    # rejected outright by a live server during development; see the git
+    # history for the fix. That instant defaults to the real wall clock
+    # (correct for the live gate/verify-metrics callers) but collect.py
+    # passes its own controlled capture instant instead, so a bundle's
+    # captured range does not depend on the real time collect-testdata
+    # happened to run at (section 16.1's determinism requirement).
+    end = now if now is not None else time.time()
     start = end - window.lookback_seconds
     result = client.range_query(expr, start, end, metrics.step_seconds)
 
@@ -578,10 +585,11 @@ def _check_coverage(
     metrics: MetricsConfig,
     window: WindowConfig,
     selector: str | None = None,
+    now: float | None = None,
 ) -> tuple[list[Finding], dict[DiskKey, float]]:
     """Section 3.3 step 5: report which disks fall below ``window.min_coverage``."""
     try:
-        coverage = compute_disk_coverage(client, metrics, window, selector=selector)
+        coverage = compute_disk_coverage(client, metrics, window, selector=selector, now=now)
     except MetricsError as exc:
         return [Finding("error", f"coverage check failed: {exc}")], {}
 
@@ -601,19 +609,28 @@ def _check_coverage(
 
 
 def _check_observed_spacing(
-    client: PrometheusClient, metrics: MetricsConfig, selector: str | None = None
+    client: PrometheusClient,
+    metrics: MetricsConfig,
+    selector: str | None = None,
+    now: float | None = None,
 ) -> tuple[list[Finding], float | None]:
     """Section 3.3 step 6: observed sample spacing vs. ``pvestatd_push_interval``.
 
     Measures the modal delta between consecutive timestamps of one live
     series over a short recent range, since that is what the ``rate_window
     >= 4x`` rule (section 11.1) is actually protecting.
+
+    ``now`` defaults to the real wall clock (``time.time()``), correct for
+    the live ``verify-metrics`` command; ``collect.py`` passes its own
+    controlled capture instant instead, so this probe's window -- and thus
+    the bundle byte it produces -- does not depend on the real time a
+    capture happened to run at (section 16.1's determinism requirement).
     """
     metric_name = metrics.read_ops
     if selector:
         metric_name = f"{metric_name}{{{selector}}}"
     probe_window_seconds = max(metrics.pvestatd_push_interval_seconds * 20, 600.0)
-    end = time.time()
+    end = now if now is not None else time.time()
     start = end - probe_window_seconds
     try:
         result = client.range_query(metric_name, start, end, metrics.pvestatd_push_interval_seconds)
@@ -653,12 +670,18 @@ def _check_observed_spacing(
 
 
 def verify_metrics(
-    client: PrometheusClient, metrics: MetricsConfig, window: WindowConfig
+    client: PrometheusClient,
+    metrics: MetricsConfig,
+    window: WindowConfig,
+    *,
+    now: float | None = None,
 ) -> VerifyMetricsReport:
     """Run every section 3.3 check and assemble the report.
 
     Must be run before relying on any plan (section 3.3); ``cli.py``'s
-    ``verify-metrics`` command is this function plus formatting.
+    ``verify-metrics`` command is this function plus formatting. ``now``
+    is forwarded to :func:`_check_observed_spacing` -- see its docstring;
+    the live command leaves it as the real wall clock.
     """
     # `verify-metrics` never talks to the PVE API (`resolve_node_selector()`'s
     # own docstring), so only an explicit `metrics.extra_selector` narrows
@@ -673,9 +696,11 @@ def verify_metrics(
     collision = _check_device_label_collision(metrics)
     if collision is not None:
         findings.append(collision)
-    coverage_findings, coverage = _check_coverage(client, metrics, window, selector=selector)
+    coverage_findings, coverage = _check_coverage(
+        client, metrics, window, selector=selector, now=now
+    )
     findings.extend(coverage_findings)
-    spacing_findings, spacing = _check_observed_spacing(client, metrics, selector=selector)
+    spacing_findings, spacing = _check_observed_spacing(client, metrics, selector=selector, now=now)
     findings.extend(spacing_findings)
 
     return VerifyMetricsReport(

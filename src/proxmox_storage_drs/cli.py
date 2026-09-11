@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from proxmox_storage_drs import __version__, optimize
+from proxmox_storage_drs import __version__, collect, optimize, replay
 from proxmox_storage_drs.config import (
     DEFAULT_CONFIG_PATH,
     ENV_CONFIG_VAR,
@@ -109,7 +109,7 @@ from proxmox_storage_drs.state import (
 )
 from proxmox_storage_drs.timewindow import current_deadline
 from proxmox_storage_drs.topology import Disk, Group, Storage, Topology, build_topology
-from proxmox_storage_drs.units import format_bytes, format_duration_seconds
+from proxmox_storage_drs.units import format_bytes, format_duration_seconds, parse_duration_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,9 @@ _SUBCOMMANDS: dict[str, str] = {
     "explain": "Say why the tool did what it did: gates, pins, deferrals and payback arithmetic.",
     "verify-metrics": "Validate configured metric/label names against the live Prometheus.",
     "verify-storages": "Report saferemove and the implied wipe time per storage.",
+    "collect-testdata": (
+        "Capture an anonymized diagnostic bundle (topology, config, metrics). Read-only."
+    ),
 }
 
 
@@ -196,11 +199,73 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show the pve-storage-drs(1) manual page and exit.",
     )
+    parser.add_argument(
+        "--replay",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Run against a collect-testdata bundle at PATH instead of the live cluster -- "
+            "no network access at all (section 16.5). The bundle's own config.yaml is used "
+            "unless -c is also given. apply and any --mode above dry-run are a usage error."
+        ),
+    )
 
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     subparsers.add_parser("help", help="Alias for --manual.")
     for name, help_text in _SUBCOMMANDS.items():
+        if name == "collect-testdata":
+            continue  # has its own options, added below
         subparsers.add_parser(name, help=help_text)
+
+    collect_parser = subparsers.add_parser(
+        "collect-testdata", help=_SUBCOMMANDS["collect-testdata"]
+    )
+    collect_parser.add_argument(
+        "-o",
+        "--output",
+        metavar="DIR",
+        default=None,
+        help="Where the bundle directory/tarball are written (default: support.bundle_dir).",
+    )
+    collect_parser.add_argument(
+        "--estimate",
+        action="store_true",
+        help="Print the query count and payload estimate, then exit without fetching.",
+    )
+    collect_parser.add_argument(
+        "--range",
+        metavar="DURATION",
+        default=None,
+        help="Override the range of the series capture (default: support.capture_range).",
+    )
+    collect_parser.add_argument(
+        "--step",
+        metavar="DURATION",
+        default=None,
+        help="Override the series resolution (default: metrics.step).",
+    )
+    collect_parser.add_argument(
+        "--no-series",
+        action="store_true",
+        help="Capture topology, instant queries and findings only -- no forecaster-sized series.",
+    )
+    collect_parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Write the bundle directory only, no .tar.gz.",
+    )
+    collect_parser.add_argument(
+        "--salt-file",
+        metavar="PATH",
+        default=None,
+        help="Use a different anonymization salt file (default: support.salt_path).",
+    )
+    collect_parser.add_argument(
+        "--new-salt",
+        action="store_true",
+        help="Generate a fresh salt, replacing the persisted one. Bundles made before and "
+        "after no longer share a pseudonym mapping.",
+    )
 
     return parser
 
@@ -344,6 +409,52 @@ def _resolve_node_selector_for_run(client: PveClient, metrics: MetricsConfig) ->
     return resolve_node_selector(metrics, client.node_names())
 
 
+def _pve_client_for(resolved: ResolvedConfig, args: argparse.Namespace) -> PveClient:
+    """The one place a :class:`PveClient` is constructed for a command run
+    (section 16.5) -- every handler calls this instead of
+    ``build_pve_client()`` directly, so ``--replay`` substitutes
+    :class:`~proxmox_storage_drs.replay.ReplayPveClient` here and nowhere
+    else has to know the difference."""
+    replay_path = getattr(args, "replay", None)
+    if replay_path:
+        return replay.ReplayPveClient(replay_path)
+    return build_pve_client(resolved.config.proxmox)
+
+
+def _metrics_client_for(resolved: ResolvedConfig, args: argparse.Namespace) -> PrometheusClient:
+    """The Prometheus-side counterpart to :func:`_pve_client_for`."""
+    replay_path = getattr(args, "replay", None)
+    if replay_path:
+        return replay.ReplayPrometheusClient(resolved.config.prometheus, replay_path)
+    return PrometheusClient(resolved.config.prometheus)
+
+
+def _now_for(args: argparse.Namespace) -> datetime:
+    """The "now" every read-only handler builds its query time window
+    from. Under ``--replay`` this must be the bundle's own fixed, rebased
+    capture instant (``replay.bundle_reference_now()``) rather than the
+    real wall clock -- otherwise every range query a replayed ``plan``/
+    ``show-load``/``explain`` run constructs falls outside what the bundle
+    actually captured, and every one of them is a guaranteed key miss
+    (section 16.5)."""
+    replay_path = getattr(args, "replay", None)
+    if replay_path:
+        return replay.bundle_reference_now(replay_path)
+    return datetime.now(timezone.utc)
+
+
+def _state_path_for(resolved: ResolvedConfig, args: argparse.Namespace) -> str:
+    """Section 16.5: "state.json under replay is read from the bundle if
+    present and written nowhere." Every read-only handler loads state
+    through this instead of ``resolved.config.state.path`` directly; a
+    replay never reaches ``save_locked_state()`` at all, since ``apply`` is
+    refused under ``--replay`` before any handler runs (``main()``)."""
+    replay_path = getattr(args, "replay", None)
+    if replay_path:
+        return str(Path(replay_path) / "state.json")
+    return resolved.config.state.path
+
+
 def _last_loads_by_group(state: State, topology: Topology) -> dict[str, dict[str, float] | None]:
     """One :func:`state.load_vector_for_group` lookup per group, done once
     up front rather than re-reading ``state`` inside each render function
@@ -377,8 +488,10 @@ def _render_verify_metrics_json(report: VerifyMetricsReport) -> dict[str, object
 
 def _handle_verify_metrics(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
-    client = PrometheusClient(resolved.config.prometheus)
-    report = verify_metrics(client, resolved.config.metrics, resolved.config.window)
+    client = _metrics_client_for(resolved, args)
+    report = verify_metrics(
+        client, resolved.config.metrics, resolved.config.window, now=_now_for(args).timestamp()
+    )
     if args.json:
         print(json.dumps(_render_verify_metrics_json(report), indent=2, sort_keys=True))
     else:
@@ -567,17 +680,17 @@ def _render_show_load_json(
 
 def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
-    client = build_pve_client(resolved.config.proxmox)
+    client = _pve_client_for(resolved, args)
     # Read-only: never takes state.py's advisory lock (see its module
     # docstring) -- show-load never executes a migration, so there is
     # nothing here for the lock to protect against. Read once, reused for
     # both build_topology()'s (C2) cooldown pin and the gate's drift input.
-    now = datetime.now(timezone.utc)
-    state = load_state(resolved.config.state.path)
+    now = _now_for(args)
+    state = load_state(_state_path_for(resolved, args))
     topology = _filter_groups(
         build_topology(client, resolved.config, state=state, now=now), args.group
     )
-    prom_client = PrometheusClient(resolved.config.prometheus)
+    prom_client = _metrics_client_for(resolved, args)
     node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
     last_loads_by_group = _last_loads_by_group(state, topology)
     group_loads: dict[str, GroupLoad] = {}
@@ -592,6 +705,7 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
                 group,
                 last_known_loads=last_loads_by_group.get(group.name),
                 node_selector=node_selector,
+                now=now.timestamp(),
             )
         except MetricsError as exc:
             # Section 4's load numbers are not safety-critical the way (C4)/
@@ -1719,6 +1833,7 @@ def _plan_group(
             group,
             last_known_loads=last_loads_by_group.get(group.name),
             node_selector=node_selector,
+            now=now.timestamp(),
         )
     except MetricsError as exc:
         # Section 6: gating (and so planning) cannot proceed without a
@@ -1810,17 +1925,17 @@ def _plan_group(
 
 def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
-    client = build_pve_client(resolved.config.proxmox)
+    client = _pve_client_for(resolved, args)
     # Read-only: plan never executes a migration, so -- like show-load --
     # it never takes state.py's advisory lock (see that module's docstring).
     # Read once, reused for build_topology()'s (C2) cooldown pin, the
     # gate's drift input, and run_heuristic()'s storage-cooldown exclusion.
-    now = datetime.now(timezone.utc)
-    state = load_state(resolved.config.state.path)
+    now = _now_for(args)
+    state = load_state(_state_path_for(resolved, args))
     topology = _filter_groups(
         build_topology(client, resolved.config, state=state, now=now), args.group
     )
-    prom_client = PrometheusClient(resolved.config.prometheus)
+    prom_client = _metrics_client_for(resolved, args)
     node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
     min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     last_loads_by_group = _last_loads_by_group(state, topology)
@@ -1914,13 +2029,13 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
     group. Never executes anything -- exactly like ``plan``, it never
     takes ``state.py``'s advisory lock."""
     del mode
-    client = build_pve_client(resolved.config.proxmox)
-    now = datetime.now(timezone.utc)
-    state = load_state(resolved.config.state.path)
+    client = _pve_client_for(resolved, args)
+    now = _now_for(args)
+    state = load_state(_state_path_for(resolved, args))
     topology = _filter_groups(
         build_topology(client, resolved.config, state=state, now=now), args.group
     )
-    prom_client = PrometheusClient(resolved.config.prometheus)
+    prom_client = _metrics_client_for(resolved, args)
     node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
     min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     last_loads_by_group = _last_loads_by_group(state, topology)
@@ -2509,13 +2624,13 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
     execution_results: dict[str, ExecutionResult] = {}
 
     try:
-        client = build_pve_client(resolved.config.proxmox)
+        client = _pve_client_for(resolved, args)
         resolved, state = _reconcile_inflight_and_fold_exclusions(client, resolved, state_box)
 
         topology = _filter_groups(
             build_topology(client, resolved.config, state=state, now=now), args.group
         )
-        prom_client = PrometheusClient(resolved.config.prometheus)
+        prom_client = _metrics_client_for(resolved, args)
         node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
         min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
         last_loads_by_group = _last_loads_by_group(state, topology)
@@ -2778,7 +2893,7 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
 
 def _handle_verify_storages(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
     del mode
-    client = build_pve_client(resolved.config.proxmox)
+    client = _pve_client_for(resolved, args)
     topology = _filter_groups(build_topology(client, resolved.config), args.group)
     if args.json:
         print(
@@ -2791,6 +2906,96 @@ def _handle_verify_storages(resolved: ResolvedConfig, args: argparse.Namespace, 
     return 0
 
 
+def _render_collect_testdata_human(estimate: collect.CaptureEstimate, config: Any) -> str:
+    lines = [
+        f"groups: {estimate.group_count}   disks: {estimate.disk_count}",
+        f"range: {format_duration_seconds(estimate.range_seconds)}  "
+        f"step: {format_duration_seconds(estimate.step_seconds)}",
+        f"estimated Prometheus queries: {estimate.query_count}",
+        f"estimated series sample points: {estimate.sample_points}",
+    ]
+    if estimate.exceeds(config.support.max_series_points):
+        lines.append(
+            f"REFUSED: exceeds support.max_series_points ({config.support.max_series_points}) "
+            "-- pass --range/--step/--no-series to bring it under, or raise the config limit"
+        )
+    return "\n".join(lines)
+
+
+def _handle_collect_testdata(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+    """Section 16.4. Always the real clients -- collect-testdata needs a
+    live cluster and is refused outright under ``--replay`` (``main()``)."""
+    del mode
+    client = build_pve_client(resolved.config.proxmox)
+    topology = build_topology(client, resolved.config)
+
+    range_seconds = (
+        parse_duration_seconds(args.range)
+        if args.range
+        else collect.capture_range_seconds(resolved.config, None)
+    )
+    step_seconds = parse_duration_seconds(args.step) if args.step else None
+    estimate = collect.estimate_capture(
+        topology,
+        resolved.config,
+        range_seconds=range_seconds,
+        step_seconds=step_seconds or resolved.config.metrics.step_seconds,
+        no_series=args.no_series,
+    )
+    if args.estimate:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "group_count": estimate.group_count,
+                        "disk_count": estimate.disk_count,
+                        "query_count": estimate.query_count,
+                        "sample_points": estimate.sample_points,
+                        "range_seconds": estimate.range_seconds,
+                        "step_seconds": estimate.step_seconds,
+                        "refused": estimate.exceeds(resolved.config.support.max_series_points),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(_render_collect_testdata_human(estimate, resolved.config))
+        return 0
+
+    prom_client = PrometheusClient(resolved.config.prometheus)
+    options = collect.CaptureOptions(
+        output_dir=args.output or resolved.config.support.bundle_dir,
+        range_seconds=parse_duration_seconds(args.range) if args.range else None,
+        step_seconds=step_seconds,
+        no_series=args.no_series,
+        no_archive=args.no_archive,
+        salt_path=args.salt_file,
+        new_salt=args.new_salt,
+    )
+    bundle = collect.capture_bundle(client, prom_client, resolved, options)
+    collect.write_bundle_dir(options.output_dir, bundle)
+    if not options.no_archive:
+        collect.write_tarball(options.output_dir, f"{options.output_dir}.tar.gz")
+
+    if args.json:
+        print(json.dumps(bundle.manifest, indent=2, sort_keys=True))
+    else:
+        counts = bundle.manifest["counts"]
+        print(f"bundle: {options.output_dir}")
+        print(
+            f"groups={counts['groups']} storages={counts['storages']} vms={counts['vms']} "
+            f"disks={counts['disks']}"
+        )
+        print(f"salt fingerprint: {bundle.salt_fingerprint}")
+        failures = [c for c in bundle.manifest["calls"] if c["outcome"] == "http_error"]
+        if failures:
+            print(f"{len(failures)} capture call(s) failed (see manifest.json for detail):")
+            for f in failures[:10]:
+                print(f"  {f['description']}: {f['detail']}")
+    return 0 if bundle.ok else 1
+
+
 _COMMAND_HANDLERS: dict[str, CommandHandler] = {
     name: _make_not_yet_implemented_handler(name) for name in _SUBCOMMANDS
 }
@@ -2800,9 +3005,33 @@ _COMMAND_HANDLERS["verify-storages"] = _handle_verify_storages
 _COMMAND_HANDLERS["plan"] = _handle_plan
 _COMMAND_HANDLERS["apply"] = _handle_apply
 _COMMAND_HANDLERS["explain"] = _handle_explain
+_COMMAND_HANDLERS["collect-testdata"] = _handle_collect_testdata
 
 
 # ------------------------------------------------------------------- main
+
+
+def _pre_config_usage_error(args: argparse.Namespace) -> str | None:
+    """Section 16.4/16.5 usage errors decidable from ``args`` alone, before
+    the network or even the config file is touched. Returns the message to
+    print, or ``None`` if none apply."""
+    if args.command == "collect-testdata" and args.mode in ("confirm", "auto"):
+        return "collect-testdata is read-only; --mode confirm/auto is a usage error " "alongside it"
+    if args.replay and args.command == "apply":
+        return "apply is refused under --replay (section 16.5)"
+    if args.replay and args.command == "collect-testdata":
+        return "collect-testdata needs a live cluster; it cannot run under --replay"
+    return None
+
+
+def _replay_config_path(args: argparse.Namespace) -> tuple[str | None, bool]:
+    """``(config_path, require_connection)`` for :func:`load_config` --
+    section 16.5: the bundle's own ``config.yaml`` unless ``-c`` overrides
+    it, and never a hard failure over the credentials/endpoints a bundle
+    deliberately omits."""
+    if args.replay:
+        return args.config or str(Path(args.replay) / "config.yaml"), False
+    return args.config, True
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2818,10 +3047,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_usage(sys.stderr)
         return 2
 
+    usage_error = _pre_config_usage_error(args)
+    if usage_error is not None:
+        print(f"pve-storage-drs: {usage_error}", file=sys.stderr)
+        return 2
+
     configure_logging(args.verbose, args.quiet)
 
+    config_path, require_connection = _replay_config_path(args)
     try:
-        resolved = load_config(args.config)
+        resolved = load_config(config_path, require_connection=require_connection)
     except ConfigError as exc:
         print(f"pve-storage-drs: {exc}", file=sys.stderr)
         return 1
@@ -2836,6 +3071,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     effective_mode = resolved.config.execution.mode
     if args.mode is not None:
         effective_mode = apply_mode_override(resolved.config.execution.mode, args.mode)
+    if args.replay and effective_mode != "dry-run":
+        print(
+            f"pve-storage-drs: --replay only ever runs dry-run; refusing effective mode "
+            f"{effective_mode!r} (section 16.5)",
+            file=sys.stderr,
+        )
+        return 2
 
     handler = _COMMAND_HANDLERS[args.command]
     try:

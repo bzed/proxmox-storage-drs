@@ -322,6 +322,8 @@ def compute_group_load(
     group: Group,
     last_known_loads: Mapping[str, float] | None = None,
     node_selector: str | None = None,
+    *,
+    now: float | None = None,
 ) -> GroupLoad:
     """Compute one group's :class:`GroupLoad` for this run. Section 4.
 
@@ -348,13 +350,18 @@ def compute_group_load(
     cannot bias every other disk's normalized share -- the rejected disk's
     own `ℓ_d` is then substituted from ``last_known_loads`` (or flagged
     0.0), independent of the group blend.
+
+    ``now`` is forwarded to :func:`~proxmox_storage_drs.metrics.compute_disk_coverage`
+    (default: the real wall clock); ``cli.py`` passes its own controlled
+    instant under ``--replay`` (section 16.5), so the coverage window's
+    absolute start/end matches what the bundle actually captured.
     """
     if not group.disks:
         return GroupLoad(
             group_name=group.name, idle=True, average_utilization=0.0, disks=(), storages=()
         )
 
-    coverage = compute_disk_coverage(client, metrics, window, selector=node_selector)
+    coverage = compute_disk_coverage(client, metrics, window, selector=node_selector, now=now)
     raw = _fetch_all_raw_quantities(client, metrics, window, node_selector)
     # REVIEW.md W-06/W-07: a resolved selector that matches zero series
     # anywhere looks identical, downstream, to a genuinely idle group --

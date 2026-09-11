@@ -331,3 +331,28 @@ forecast:
     trend: add
     seasonal: add
     residual_z: 2.0            # upper bound = point + z * sigma(residuals)
+
+support:
+  # Diagnostic bundles: `pve-storage-drs collect-testdata` and the global
+  # `--replay` option (plan section 16). Nothing here is read on the normal
+  # plan/apply path.
+  #
+  # 32 random bytes, generated on first use and persisted here. Keyed
+  # pseudonyms (node/storage/vmid/...) are stable for the life of this file;
+  # `--new-salt` rotates it, after which old and new bundles no longer share
+  # a mapping. Per node by default -- point this at a pmxcfs path (e.g.
+  # /etc/pve/pve-storage-drs-anon-salt) if every node in the cluster should
+  # produce the same pseudonyms.
+  salt_path: /var/lib/pve-storage-drs/anonymization-salt
+  # Default -o/--output for collect-testdata.
+  bundle_dir: /var/lib/pve-storage-drs/testdata
+  # Hard refusal, not a truncation: collect-testdata prints the estimated
+  # series-sample count before fetching anything and refuses above this,
+  # naming the --range/--step/--no-series flags that would bring it under.
+  max_series_points: 5000000
+  # "auto" captures the union of every forecaster's required_range() (section
+  # 16.2), currently max(window.lookback, forecast.seasonal_lookback_days,
+  # 2 * holt_winters.seasonal_periods * metrics.step) -- the superset any
+  # supported config could need, not just the one active here. A duration
+  # (e.g. "14d") overrides it; --range on the command line overrides both.
+  capture_range: auto

@@ -268,6 +268,20 @@ class ForecastConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SupportConfig:
+    """Section 16.7. Diagnostic-bundle support: the anonymization salt, the
+    default ``collect-testdata`` output directory, the hard refusal ceiling
+    on a series capture, and the capture range (``"auto"`` for section 16.2's
+    computed maximum over every forecaster's ``required_range()``, or an
+    explicit ``units.parse_duration_seconds()``-parseable duration)."""
+
+    salt_path: str = "/var/lib/pve-storage-drs/anonymization-salt"
+    bundle_dir: str = "/var/lib/pve-storage-drs/testdata"
+    max_series_points: int = 5_000_000
+    capture_range: str = "auto"
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     schema_version: int
     proxmox: ProxmoxConfig
@@ -286,6 +300,7 @@ class Config:
     report: ReportConfig
     state: StateConfig
     forecast: ForecastConfig
+    support: SupportConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,7 +342,10 @@ def resolve_config_path(
 
 
 def load_config(
-    cli_path: str | None = None, env: Mapping[str, str] | None = None
+    cli_path: str | None = None,
+    env: Mapping[str, str] | None = None,
+    *,
+    require_connection: bool = True,
 ) -> ResolvedConfig:
     """Resolve, read, parse and validate the configuration.
 
@@ -336,6 +354,14 @@ def load_config(
     :class:`ConfigError` on any failure -- there is deliberately no
     warn-and-continue path (AGENTS.md section 6: "a misconfigured balancer
     moving production disks is worse than one that refuses to start").
+
+    ``require_connection`` gates the one semantic rule that does not apply
+    under ``--replay`` (section 16.5): a diagnostic bundle's ``config.yaml``
+    deliberately omits ``proxmox.host``/``auth`` and ``prometheus.url``
+    (section 16.3 -- "dropped, not blanked"), so ``cli.py`` passes ``False``
+    when loading a bundle's own configuration. Every other caller keeps the
+    default, which preserves today's behaviour: a missing host or URL is a
+    hard failure before anything is planned.
     """
     environ = env if env is not None else os.environ
     path, was_explicit = resolve_config_path(cli_path, environ)
@@ -364,7 +390,7 @@ def load_config(
 
     _validate_schema(raw)
     config = _build_config(raw, environ)
-    warnings = _validate_semantics(config)
+    warnings = _validate_semantics(config, require_connection=require_connection)
 
     return ResolvedConfig(config=config, path=path, sha256=sha256, warnings=tuple(warnings))
 
@@ -608,6 +634,14 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         holt_winters=holt_winters,
     )
 
+    support_raw = raw.get("support", {})
+    support = SupportConfig(
+        salt_path=support_raw.get("salt_path", "/var/lib/pve-storage-drs/anonymization-salt"),
+        bundle_dir=support_raw.get("bundle_dir", "/var/lib/pve-storage-drs/testdata"),
+        max_series_points=support_raw.get("max_series_points", 5_000_000),
+        capture_range=support_raw.get("capture_range", "auto"),
+    )
+
     return Config(
         schema_version=raw.get("schema_version", 1),
         proxmox=proxmox,
@@ -626,6 +660,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         report=report,
         state=state,
         forecast=forecast,
+        support=support,
     )
 
 
@@ -783,7 +818,44 @@ def _check_time_windows(config: Config, errors: list[str]) -> None:
             )
 
 
-def _validate_semantics(config: Config) -> list[str]:
+def _check_support(config: Config, errors: list[str]) -> None:
+    """``support.capture_range`` is the literal ``"auto"`` (section 16.2's
+    computed maximum) or a duration ``units.parse_duration_seconds()`` can
+    parse -- anything else is a typo that would otherwise surface only when
+    ``collect-testdata`` runs, minutes into a capture."""
+    capture_range = config.support.capture_range
+    if capture_range != "auto":
+        try:
+            parse_duration_seconds(capture_range)
+        except ConfigError as exc:
+            errors.append(
+                f"support.capture_range {capture_range!r} is neither 'auto' nor a "
+                f"parseable duration: {exc}"
+            )
+
+
+def _check_connection_config(config: Config, errors: list[str]) -> None:
+    """A live run needs somewhere to connect to; a ``--replay`` bundle's own
+    ``config.yaml`` deliberately has neither (section 16.3: credentials and
+    endpoints are dropped, not blanked), so this check runs only when the
+    caller asked for it (``load_config(require_connection=True)``, the
+    default for every path except loading a bundle -- section 16.5).
+
+    Deliberately just presence, matching exactly what the JSON schema
+    enforced before ``proxmox.host``/``prometheus.url`` became structurally
+    optional: this is a like-for-like move of that rule from the schema to
+    here, not a new, stricter one. Whether ``proxmox.auth`` actually holds a
+    usable credential (a file value, or one of ``PVE_PASSWORD``/
+    ``PVE_TOKEN_SECRET`` from the environment) is left to ``pve.py``'s own
+    connection attempt, exactly as before -- ``config/drs.example.yaml``
+    ships with no real credential on purpose, and must keep validating."""
+    if not config.proxmox.host:
+        errors.append("proxmox.host is required")
+    if not config.prometheus.url:
+        errors.append("prometheus.url is required")
+
+
+def _validate_semantics(config: Config, *, require_connection: bool = True) -> list[str]:
     """Section 11.1 rules that jsonschema cannot express (cross-field, or need
     a value computed from two independently-optional settings). Returns
     non-fatal warnings; raises :class:`ConfigError` (with every error found,
@@ -793,6 +865,8 @@ def _validate_semantics(config: Config) -> list[str]:
     warnings: list[str] = []
 
     _check_schema_version(config, errors)
+    if require_connection:
+        _check_connection_config(config, errors)
     _check_group_storage_membership(config, errors)
     _check_storage_patterns_compile(config, errors)
     _check_group_size(config, errors)
@@ -801,6 +875,7 @@ def _validate_semantics(config: Config) -> list[str]:
     _check_forecast_window(config, errors)
     _check_saturation_load(config, warnings)
     _check_time_windows(config, errors)
+    _check_support(config, errors)
 
     if errors:
         raise ConfigError("config validation failed:\n  " + "\n  ".join(errors))

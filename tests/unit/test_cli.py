@@ -15,8 +15,8 @@ from typing import Any
 import pytest
 import yaml
 
-from proxmox_storage_drs import __version__, cli
-from proxmox_storage_drs.config import MetricsConfig, ResolvedConfig
+from proxmox_storage_drs import __version__, cli, replay
+from proxmox_storage_drs.config import MetricsConfig, ResolvedConfig, load_config
 from proxmox_storage_drs.execute import MoveOutcome
 from proxmox_storage_drs.heuristic import ObjectiveBreakdown
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
@@ -403,6 +403,8 @@ def _patch_show_load_deps(
         group: object,
         last_known_loads: object = None,
         node_selector: object = None,
+        *,
+        now: object = None,
     ) -> GroupLoad:
         if isinstance(group_load, Exception):
             raise group_load
@@ -1680,6 +1682,8 @@ def test_plan_reports_a_metrics_error_per_group(
         group: object,
         last_known_loads: object = None,
         node_selector: object = None,
+        *,
+        now: object = None,
     ) -> None:
         raise MetricsError("connection refused")
 
@@ -2107,6 +2111,8 @@ def test_apply_reports_a_metrics_error_and_a_no_action_group_without_executing(
         group: Group,
         last_known_loads: object = None,
         node_selector: object = None,
+        *,
+        now: object = None,
     ) -> GroupLoad:
         if group.name == "fc-tier1":
             raise MetricsError("connection refused")
@@ -3398,3 +3404,202 @@ def test_plan_json_output_includes_the_solver_backend_and_status(
     group_payload = payload["groups"][0]
     assert group_payload["solver_backend"] == "heuristic"
     assert group_payload["solver_status"] is None
+
+
+# ------------------------------------------------ collect-testdata / --replay
+
+
+def test_pre_config_usage_error_collect_testdata_with_mode_confirm() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["--mode", "confirm", "collect-testdata"])
+    assert cli._pre_config_usage_error(args) is not None
+
+
+def test_pre_config_usage_error_replay_apply() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["--replay", "/nonexistent", "apply"])
+    assert cli._pre_config_usage_error(args) is not None
+
+
+def test_pre_config_usage_error_replay_collect_testdata() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["--replay", "/nonexistent", "collect-testdata"])
+    assert cli._pre_config_usage_error(args) is not None
+
+
+def test_pre_config_usage_error_none_for_ordinary_commands() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["plan"])
+    assert cli._pre_config_usage_error(args) is None
+
+
+def test_main_collect_testdata_with_mode_confirm_exits_2() -> None:
+    assert cli.main(["--mode", "confirm", "collect-testdata"]) == 2
+
+
+def test_main_replay_apply_exits_2_before_touching_the_config() -> None:
+    # The path does not exist -- if this reached config loading it would
+    # fail with exit 1 (ConfigError), not 2, so exit 2 here proves the
+    # usage-error check ran first.
+    assert cli.main(["--replay", "/nonexistent-bundle", "apply"]) == 2
+
+
+def test_main_replay_collect_testdata_exits_2() -> None:
+    assert cli.main(["--replay", "/nonexistent-bundle", "collect-testdata"]) == 2
+
+
+def test_replay_config_path_defaults_to_the_bundle_config_yaml() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["--replay", "/some/bundle", "plan"])
+    path, require_connection = cli._replay_config_path(args)
+    assert path == "/some/bundle/config.yaml"
+    assert require_connection is False
+
+
+def test_replay_config_path_dash_c_overrides_it() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["--replay", "/some/bundle", "-c", "/other/drs.yaml", "plan"])
+    path, require_connection = cli._replay_config_path(args)
+    assert path == "/other/drs.yaml"
+    assert require_connection is False
+
+
+def test_replay_config_path_without_replay_is_unchanged() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["-c", "/etc/pve/drs.yaml", "plan"])
+    path, require_connection = cli._replay_config_path(args)
+    assert path == "/etc/pve/drs.yaml"
+    assert require_connection is True
+
+
+def test_pve_client_for_returns_replay_client_when_replay_is_set(tmp_path: Path) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["--replay", str(tmp_path), "plan"])
+    path = write_config(tmp_path)
+    resolved = load_config(str(path))
+    client = cli._pve_client_for(resolved, args)
+    assert isinstance(client, replay.ReplayPveClient)
+
+
+def test_metrics_client_for_returns_replay_client_when_replay_is_set(tmp_path: Path) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["--replay", str(tmp_path), "plan"])
+    path = write_config(tmp_path)
+    resolved = load_config(str(path))
+    client = cli._metrics_client_for(resolved, args)
+    assert isinstance(client, replay.ReplayPrometheusClient)
+
+
+def test_pve_client_for_returns_a_real_client_without_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "build_pve_client", lambda *a, **k: FAKE_CLIENT)
+    parser = cli.build_parser()
+    args = parser.parse_args(["plan"])
+    path = write_config(tmp_path)
+    resolved = load_config(str(path))
+    client = cli._pve_client_for(resolved, args)
+    assert not isinstance(client, replay.ReplayPveClient)
+
+
+def test_state_path_for_replay_points_inside_the_bundle(tmp_path: Path) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["--replay", str(tmp_path), "plan"])
+    path = write_config(tmp_path)
+    resolved = load_config(str(path))
+    assert cli._state_path_for(resolved, args) == str(tmp_path / "state.json")
+
+
+def test_state_path_for_without_replay_is_the_configured_path(tmp_path: Path) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["plan"])
+    path = write_config(tmp_path, state={"path": str(tmp_path / "st.json")})
+    resolved = load_config(str(path))
+    assert cli._state_path_for(resolved, args) == str(tmp_path / "st.json")
+
+
+def _write_real_bundle(tmp_path: Path) -> Path:
+    """A real, on-disk diagnostic bundle -- built the same way
+    test_collect.py does, against the same fakes -- so the --replay tests
+    below exercise a genuine capture -> write -> replay round trip rather
+    than a hand-built fixture that might not match what collect.py
+    actually produces."""
+    from proxmox_storage_drs import collect
+    from tests.unit.test_collect import capture
+
+    bundle = capture(tmp_path)
+    out = tmp_path / "bundle"
+    collect.write_bundle_dir(out, bundle)
+    return out
+
+
+def test_main_replay_verify_metrics_end_to_end(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import requests
+
+    bundle_dir = _write_real_bundle(tmp_path)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("--replay must never construct a real requests.Session")
+
+    monkeypatch.setattr(requests, "Session", boom)
+
+    exit_code = cli.main(["--replay", str(bundle_dir), "--json", "verify-metrics"])
+    assert exit_code in (0, 1)  # a real report, not a crash -- findings may include warnings
+    payload = json.loads(capsys.readouterr().out)
+    assert "findings" in payload
+
+
+def test_main_replay_show_load_end_to_end(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import requests
+
+    bundle_dir = _write_real_bundle(tmp_path)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("--replay must never construct a real requests.Session")
+
+    monkeypatch.setattr(requests, "Session", boom)
+
+    exit_code = cli.main(["--replay", str(bundle_dir), "--json", "show-load"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["groups"]
+
+
+def test_main_replay_mode_confirm_is_refused_after_config_load(tmp_path: Path) -> None:
+    bundle_dir = _write_real_bundle(tmp_path)
+    assert cli.main(["--replay", str(bundle_dir), "--mode", "confirm", "show-load"]) == 2
+
+
+def test_main_replay_apply_refused_even_with_a_real_bundle(tmp_path: Path) -> None:
+    bundle_dir = _write_real_bundle(tmp_path)
+    assert cli.main(["--replay", str(bundle_dir), "apply"]) == 2
+
+
+def test_handle_collect_testdata_estimate_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    topology = _sample_topology()
+    monkeypatch.setattr(cli, "build_topology", _fake_build_topology(topology))
+    monkeypatch.setattr(cli, "build_pve_client", lambda *a, **k: FAKE_CLIENT)
+    path = write_config(tmp_path, support={"salt_path": str(tmp_path / "salt")})
+    assert cli.main(["-c", str(path), "--json", "collect-testdata", "--estimate"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["disk_count"] == len(topology.groups[0].disks)
+    assert "sample_points" in payload
+
+
+def test_handle_collect_testdata_estimate_human_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    topology = _sample_topology()
+    monkeypatch.setattr(cli, "build_topology", _fake_build_topology(topology))
+    monkeypatch.setattr(cli, "build_pve_client", lambda *a, **k: FAKE_CLIENT)
+    path = write_config(tmp_path, support={"salt_path": str(tmp_path / "salt")})
+    assert cli.main(["-c", str(path), "collect-testdata", "--estimate"]) == 0
+    out = capsys.readouterr().out
+    assert "groups:" in out
+    assert "estimated series sample points" in out

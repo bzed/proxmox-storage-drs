@@ -1,4 +1,4 @@
-3d2899836a24b50883b99b258c0105e1ac3eb8a234d151f9694ec6f509eecb79  docs/internals/00-overview.md
+b3f114b46b81019f2f1ce321a441c1f92c7c99617135f3ff97b0560b7c8484d4  docs/internals/00-overview.md
 f94cc4319984bf1b7daa1175b825bff23321988a561fb8c23d305f81ab2aa079  docs/internals/10-configuration.md
 8a72d0b05041fc196d57da0f36b16faff7b3d80c99c16455f4180c26afeaeefb  docs/internals/15-state.md
 588ddcb6fe663d19da66dda085c39fe8bb26973e3a92121509a2af9cc2cdbdbd  docs/internals/20-forecasting.md
@@ -14,3 +14,4 @@ a14dddd1a852691375cea268f3fd5ff41429aa0b5e6dd39a42d8d7af6a1ea4c9  docs/internals
 0e9ce172146575efcd3241cac095c6fb3469c51e00711385002da1e842c8e90b  docs/internals/93-crashrecovery.md
 72fa81ad52988e28695aa7b4b69352aa4146a6c8825d1c2b30373035496c3aec  docs/internals/95-schedule.md
 1655e1eafec4eb12189641ccb6e658baa4d2920c510b7306d89c0b20f3b11e99  docs/internals/96-payback.md
+8b48252249a2a91b9dc5c856f808947693c1d99821b381f47c1b8def99575927  docs/internals/97-collect-and-replay.md

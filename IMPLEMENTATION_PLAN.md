@@ -1873,6 +1873,7 @@ Accepted before the subcommand, and shown by `pve-storage-drs --help` with their
 | `--quiet` | normal | Warnings and errors only, for the systemd timer |
 | `--version` | — | Version, then exit |
 | `--manual` | — | Show `pve-storage-drs(1)` (§8.5 of `AGENTS.md`) |
+| `--replay PATH` | live cluster | Run against a `collect-testdata` bundle at `PATH` instead of the live cluster, with no network access at all — §16.5 |
 
 Two rules the implementation must honour.
 
@@ -2732,10 +2733,12 @@ the commit that implements them and not before.
 collected from the author's own cluster replays to the same plan the live run produced, the scrub
 audit passes on it, and the determinism test is green.
 
-Nothing in this section is implemented yet. `tests/corpus/` and its `README.md` exist from the
-commit that adds this section, so that the place to put a bundle is already there and documented —
-the folder is not the feature, but an operator who reads this section and asks "where do I send
-it?" deserves an answer that is not "wait for the next release". The manual's per-command status
-table (`docs/manual/30-safety-and-status.md`) lists `collect-testdata` as specified and not yet
-built, in the same form it already uses for `explain`'s implemented subset, and stays that way
-until phase 10 lands.
+`anonymize.py`, `collect.py`, `replay.py`, `cli.py`'s wiring (`collect-testdata`, the global
+`--replay`) and `tests/corpus/validate_corpus.py` are implemented, with unit and CLI-level tests
+covering capture, every anonymization rule, the deterministic writer, and a full
+capture → write → replay round trip. `tests/corpus/` and its `README.md` existed from the commit
+that added this section, ahead of the code, so the place to put a bundle was already there and
+documented; phase 10's own "done when" — a bundle collected from the author's own cluster replays
+to the same plan the live run produced, the scrub audit passes on it, and the determinism test is
+green — is exercised against the dev cluster of the project's own development notes once a bundle
+from it lands in `tests/corpus/`.
