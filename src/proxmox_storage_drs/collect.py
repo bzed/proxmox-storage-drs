@@ -548,7 +548,11 @@ def _label_value_for(label_kind: str, value: str, mapper: Mapper) -> str | None:
 
 
 def _anonymize_prometheus_series(
-    result: list[dict[str, Any]], vmid_label: str, device_label: str, mapper: Mapper
+    result: list[dict[str, Any]],
+    vmid_label: str,
+    device_label: str,
+    mapper: Mapper,
+    node_label: str | None = None,
 ) -> list[dict[str, Any]]:
     """Anonymizes a Prometheus ``result`` list -- both the instant-query
     shape (one ``"value": [ts, v]`` pair) and the range-query shape (a
@@ -559,7 +563,19 @@ def _anonymize_prometheus_series(
     clock while only the file's start/end were rebased meant a replayed
     request's (rebased) window and the stored (real) sample timestamps
     never overlapped at all, so every trim came back empty and every
-    disk's coverage silently read 0%."""
+    disk's coverage silently read 0%.
+
+    ``node_label``, when given, is carried through (its *value* mapped via
+    ``mapper.node()``) -- section 16.3's per-kind table keeps all three
+    configured labels (vmid/device/node), not just two. The `sum by
+    (vmid, device)` rate expressions this module's own driver issues never
+    carry a node label at all (section 3.4's own aggregation collapses
+    it), but ``verify_metrics()``'s bare-metric-name sample-series check
+    queries the raw series directly and does -- dropping it
+    unconditionally made ``verify-metrics --replay`` report a live
+    cluster's real node label as "missing", which the live command never
+    would. Every *other* label is dropped regardless, live cluster
+    findings aside -- the allowlist, section 16.3's whole point."""
     out = []
     for series in result:
         labels = series.get("metric", {})
@@ -574,7 +590,12 @@ def _anonymize_prometheus_series(
         if new_vmid is None:
             continue
         new_series = dict(series)
-        new_series["metric"] = {vmid_label: str(new_vmid), device_label: device}
+        new_metric = {vmid_label: str(new_vmid), device_label: device}
+        if node_label is not None:
+            node_value = labels.get(node_label)
+            if node_value and node_value in mapper.known_nodes:
+                new_metric[node_label] = mapper.node(node_value)
+        new_series["metric"] = new_metric
         if "value" in series:
             ts, value = series["value"]
             new_series["value"] = [mapper.rebase_timestamp(float(ts)), value]
@@ -803,6 +824,7 @@ def _anonymize_captured_prometheus(
     files: dict[str, Any] = {}
     vmid_label = config.metrics.labels.vmid
     device_label = config.metrics.labels.device
+    node_label = config.metrics.labels.node
 
     range_captures: dict[str, list[tuple[float, float, float, list[dict[str, Any]]]]] = {}
     for path, params, raw_result in recording_prom.captured:
@@ -814,7 +836,9 @@ def _anonymize_captured_prometheus(
             series = raw_result.get("result", []) if isinstance(raw_result, dict) else []
             files[f"instant/{hash_query_text(query)}.json"] = {
                 "query": query,
-                "result": _anonymize_prometheus_series(series, vmid_label, device_label, mapper),
+                "result": _anonymize_prometheus_series(
+                    series, vmid_label, device_label, mapper, node_label
+                ),
             }
         elif path == "/api/v1/query_range":
             query = _anonymize_query_text(params["query"], mapper, rate_expr_map)
@@ -847,7 +871,9 @@ def _anonymize_captured_prometheus(
             "start": start - mapper.time_offset_seconds,
             "end": end - mapper.time_offset_seconds,
             "step": step,
-            "result": _anonymize_prometheus_series(result, vmid_label, device_label, mapper),
+            "result": _anonymize_prometheus_series(
+                result, vmid_label, device_label, mapper, node_label
+            ),
         }
     return files
 
