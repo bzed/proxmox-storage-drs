@@ -79,3 +79,14 @@ class StateError(DrsError):
     something it was actively asked to do: persist state, or take the
     advisory lock.
     """
+
+
+class BundleError(DrsError):
+    """A diagnostic bundle (IMPLEMENTATION_PLAN.md section 16) could not be
+    written or read: a capture refused before fetching anything
+    (``support.max_series_points`` exceeded), a malformed or missing
+    ``manifest.json``/``config.yaml``, or a ``--replay`` cache miss -- the
+    bundle has no recorded response for a query the engine just generated.
+    The last case in particular must be loud and specific (section 16.5),
+    never an empty result silently standing in for "no data".
+    """
