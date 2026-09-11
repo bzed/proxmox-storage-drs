@@ -213,6 +213,21 @@ def test_capture_bundle_config_yaml_drops_credentials(tmp_path: Path) -> None:
     assert all(s.startswith("stor-") for s in storage_ids)
 
 
+def test_capture_bundle_config_yaml_expands_storage_patterns(tmp_path: Path) -> None:
+    """A live capture against a real dev cluster (section 16.3's own
+    "the actual mechanism") found this the hard way: a `/…/` pattern
+    group entry's own text ('/san-.*/') is not a real storage id, so
+    matching it against `mapper.known_storages` (real, expanded ids only)
+    always missed and silently produced an empty storages list. The bundle
+    must carry the *expanded* literal ids build_topology() actually
+    resolved, not the raw config entry."""
+    bundle = capture(tmp_path, groups=[{"name": "g1", "storages": [{"id": "/san-.*/"}]}])
+    assert bundle.ok
+    storages = bundle.config_yaml["groups"][0]["storages"]
+    assert len(storages) == 2  # san-a, san-b both matched the pattern
+    assert all(s["id"].startswith("stor-") for s in storages)
+
+
 def test_capture_bundle_prometheus_series_vmid_is_remapped(tmp_path: Path) -> None:
     bundle = capture(tmp_path)
     range_files = [v for k, v in bundle.prometheus_files.items() if k.startswith("range/")]
