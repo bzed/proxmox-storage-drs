@@ -1,19 +1,32 @@
 pve-storage-drs (0.1.1) trixie; urgency=medium
 
-  * REVIEW.md fourteenth-pass fixes: W-01..W-09.
-    - metrics.labels.cluster's default scoping tier silently matched zero
-      series on a Prometheus without that label, misreporting a busy
-      cluster as idle; verify-metrics now warns when the label is relied
-      on but absent, and show-load/gates.py name the scoping mismatch
-      explicitly instead of calling the group idle (W-06/W-07).
-    - A denied GET /cluster/status (missing Sys.Audit) no longer fails
-      the whole run; it degrades to the node-list scoping tier with a
-      logged warning instead (W-08).
-    - Documentation residue fixed: changelog phase mislabelling, a stale
-      topology stage count and dead function name, the operator manual's
-      warnings paragraph (now covers all four size-resolution warnings),
-      the read-path call-count formula, and two examples left on the
-      pre-default node-scoped selector (W-01..W-05, W-09).
+  * Disk-size resolution (topology.py) fixed against three live-cluster
+    incidents: a content-listing entry present but missing its own `size`
+    no longer crashes (falls back to the VM config's size=, warning
+    named); a size-less entry's approximate-size (PVE 9.2+, qcow2 on
+    shared LVM) is now preferred over that fallback; and a managed disk's
+    exact size is now queried from its own VM's node rather than an
+    arbitrary node reporting the storage active, since only the node with
+    the volume's LV active can report it.
+  * Query scoping (metrics.py/cli.py): verify-metrics now reports every
+    cluster-naming label value it sees across your metrics, and
+    plan/show-load/apply/explain scope every query by this cluster's own
+    name by default (metrics.labels.cluster, default "cluster") rather
+    than by node list; set that key to null to opt back out on a
+    Prometheus with no such label.
+  * REVIEW.md fourteenth-pass fixes (findings W-01..W-09): the
+    cluster-scoping default above silently matched zero series on a
+    Prometheus without that label, misreporting a busy cluster as idle --
+    verify-metrics now warns when the label is relied on but absent, and
+    show-load/gates.py name the scoping mismatch explicitly instead of
+    calling the group idle (W-06/W-07). A denied GET /cluster/status
+    (missing Sys.Audit) no longer fails the whole run; it degrades to the
+    node-list scoping tier with a logged warning instead (W-08). Plus six
+    documentation-residue fixes: changelog phase mislabelling, a stale
+    topology stage count and dead function name, the operator manual's
+    warnings paragraph (now covers all four size-resolution warnings),
+    the read-path call-count formula, and two examples left on the
+    pre-default node-scoped selector (W-01..W-05, W-09).
 
  -- Bernd Zeimetz <bzed@debian.org>  Fri, 11 Sep 2026 10:41:49 +0200
 
@@ -54,11 +67,10 @@ pve-storage-drs (0.1.0) trixie; urgency=medium
     docs/internals (implementation reference) now cover every module and
     CLI subcommand, alongside IMPLEMENTATION_PLAN.md itself; all three are
     built to PDF and committed with sha256 freshness stamps.
-  * Hardened through REVIEW.md passes 1-14 (findings F-01 through W-09):
+  * Hardened through REVIEW.md passes 1-13 (findings F-01 through V-05):
     config edge cases, PromQL correctness, PVE API privilege requirements,
     disk-bus/snapshot/lock handling, payback and scheduling fixes, cooldown
-    and state-tracking corrections, plain-language runtime messages, and
-    disk-size-resolution/query-scoping fixes below.
+    and state-tracking corrections, and plain-language runtime messages.
   * Packaging: debian/control, debian/rules, debian/tests and the
     autopkgtest (installed-package smoke test) now match a real,
     importable package; both GitHub Actions and the GitLab/Salsa pipeline
@@ -69,20 +81,6 @@ pve-storage-drs (0.1.0) trixie; urgency=medium
     section 5.5) remains a genuine fallback for a non-Debian install with
     no solver, or when a solve fails or times out; CP-SAT (ortools) stays
     an optional pip-only extra, unpackaged for Debian.
-  * Disk-size resolution (topology.py) fixed against three live-cluster
-    incidents: a content-listing entry present but missing its own `size`
-    no longer crashes (falls back to the VM config's size=, warning
-    named); a size-less entry's approximate-size (PVE 9.2+, qcow2 on
-    shared LVM) is now preferred over that fallback; and a managed disk's
-    exact size is now queried from its own VM's node rather than an
-    arbitrary node reporting the storage active, since only the node with
-    the volume's LV active can report it.
-  * Query scoping (metrics.py/cli.py): verify-metrics now reports every
-    cluster-naming label value it sees across your metrics, and
-    plan/show-load/apply/explain scope every query by this cluster's own
-    name by default (metrics.labels.cluster, default "cluster") rather
-    than by node list; set that key to null to opt back out on a
-    Prometheus with no such label.
   * Dogfooded against a real Proxmox VE 9.2 cluster and Prometheus
     instance; no known outstanding correctness findings.
 
