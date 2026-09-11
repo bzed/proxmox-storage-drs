@@ -50,7 +50,7 @@ endif
 
 SOURCES := src tests tools
 
-.PHONY: help venv venv-typecheck install fmt fmt-check lint typecheck test cov fixtures check clean
+.PHONY: help venv venv-typecheck install fmt fmt-check lint typecheck test cov fixtures corpus corpus-check check clean
 
 help:
 	@echo "venv       create $(VENV) and install dev+solver+forecast dependencies"
@@ -63,6 +63,8 @@ help:
 	@echo "test       pytest with coverage, fails below 85%"
 	@echo "cov        pytest with an HTML coverage report in htmlcov/"
 	@echo "fixtures   assert tests/fixtures/*.expected.json are current"
+	@echo "corpus-check  scrub audit + invariant/regression checks on tests/corpus/ (part of check)"
+	@echo "corpus     the full variant matrix over tests/corpus/ + \$$DRS_CORPUS_DIR"
 	@echo "pdf        render IMPLEMENTATION_PLAN.md to docs/IMPLEMENTATION_PLAN.pdf"
 	@echo "internals  render docs/internals/*.md to docs/internals.pdf"
 	@echo "manual     render docs/manual/*.md to docs/pve-storage-drs-manual.pdf"
@@ -147,7 +149,22 @@ cov: $(VENVDEP)
 fixtures:
 	python3 tests/fixtures/generate_expected.py --check
 
-check: fmt-check lint typecheck test fixtures docs-check
+# Section 16.6: the scrub audit + invariant/regression checks over the
+# *committed* corpus only (bounded by its own 8 MiB-per-bundle rule), so
+# this stays cheap enough for `check`. An empty tests/corpus/ is a clean
+# pass. `$(PY)` (not bare python3): this script imports proxmox_storage_drs
+# itself, unlike generate_expected.py above.
+corpus-check: $(VENVDEP)
+	$(PY) tests/corpus/validate_corpus.py --check
+
+# The full variant matrix (every solver backend x spread metric x forecast
+# model x beta sweep) over every committed bundle *and* every bundle found
+# under $DRS_CORPUS_DIR -- a CI job of its own, not part of `check`.
+corpus: $(VENVDEP)
+	$(SOLVER_EXTRAS)
+	$(PY) tests/corpus/validate_corpus.py --full-matrix
+
+check: fmt-check lint typecheck test fixtures corpus-check docs-check
 	@echo "check: OK"
 
 clean:
