@@ -112,9 +112,15 @@ class _Raise:
 def _instant_answer(params: dict[str, str]) -> dict[str, Any]:
     query = params["query"]
     if "blockstat_rd_total_time_ns" in query and "quantile_over_time" in query:
+        # A real, "now"-adjacent timestamp -- not an arbitrary fixed one --
+        # since this is exactly what the collector's own timestamp-rebase
+        # step has to shift into the bundle's synthetic epoch correctly.
         return {
             "result": [
-                {"metric": {"vmid": "101", "instance": "scsi0"}, "value": [1700000000, "1.5"]}
+                {
+                    "metric": {"vmid": "101", "instance": "scsi0"},
+                    "value": [CAPTURE_NOW.timestamp(), "1.5"],
+                }
             ]
         }
     return {"result": []}
@@ -123,11 +129,14 @@ def _instant_answer(params: dict[str, str]) -> dict[str, Any]:
 def _range_answer(params: dict[str, str]) -> dict[str, Any]:
     query = params["query"]
     if "blockstat_rd_total_time_ns" in query:
+        # Real points inside the requested [start, end] window, like a
+        # real Prometheus would answer -- not a fixed, unrelated timestamp.
+        start = float(params["start"])
         return {
             "result": [
                 {
                     "metric": {"vmid": "101", "instance": "scsi0"},
-                    "values": [[1700000000.0, "1.0"], [1700000300.0, "2.0"]],
+                    "values": [[start, "1.0"], [start + 300.0, "2.0"]],
                 }
             ]
         }
@@ -276,6 +285,32 @@ def test_capture_bundle_prometheus_series_vmid_is_remapped(tmp_path: Path) -> No
     series = populated[0]["result"][0]
     assert series["metric"]["vmid"] != "101"
     assert series["metric"]["instance"] == "scsi0"  # device passes through unchanged
+
+
+def test_capture_bundle_prometheus_sample_timestamps_are_rebased(tmp_path: Path) -> None:
+    """A live capture against the dev cluster found this the hard way: a
+    range file's own start/end were rebased, but the individual sample
+    timestamps inside "values" were not, so every --replay request's
+    (rebased) window and the stored (still-real) points never overlapped
+    -- every trim came back empty and every disk read 0% coverage. The
+    fake session's canned timestamps (1700000000-ish, "real" by
+    construction) must not survive into the bundle unchanged."""
+    bundle = capture(tmp_path)
+    range_files = [v for k, v in bundle.prometheus_files.items() if k.startswith("range/")]
+    populated = [f for f in range_files if f["result"]]
+    assert populated
+    for payload in populated:
+        for series in payload["result"]:
+            for ts, _value in series["values"]:
+                assert payload["start"] - 1 <= ts <= payload["end"] + 1
+
+    instant_files = [v for k, v in bundle.prometheus_files.items() if k.startswith("instant/")]
+    populated_instant = [f for f in instant_files if f["result"]]
+    assert populated_instant
+    for payload in populated_instant:
+        for series in payload["result"]:
+            ts, _value = series["value"]
+            assert ts != 1700000000  # the fake's own raw canned timestamp
 
 
 def test_capture_bundle_no_series_skips_the_forecasting_range_series(tmp_path: Path) -> None:
