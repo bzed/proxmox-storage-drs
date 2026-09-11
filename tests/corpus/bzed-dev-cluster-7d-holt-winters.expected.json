@@ -1,0 +1,295 @@
+{
+  "bundle": "bzed-dev-cluster-7d-holt-winters",
+  "cases": [
+    {
+      "report": {
+        "groups": [
+          {
+            "after_spread": 0.0035760193555848955,
+            "before_spread": 0.4472677911606871,
+            "deadlock_message": null,
+            "deadlocked": [],
+            "gate": {
+              "act": true,
+              "drift_fraction": null,
+              "imbalance_fraction": 0.4472677911606871,
+              "reason": "imbalance 44.7% meets or exceeds gates.imbalance_threshold (20.0%)",
+              "reserve_override": false
+            },
+            "load_error": null,
+            "moves": [
+              {
+                "cost_load_seconds": 1536.0,
+                "device": "scsi1",
+                "disk_key": "489208:scsi1",
+                "duration_mirror_seconds": 768.0,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-9034bbcd",
+                "imbalance_reduction": 0.5778807928028378,
+                "load_per_tib": 2.0722331084099923,
+                "resolves_reserve_violation": false,
+                "size_bytes": 161061273600,
+                "to_storage": "stor-593d0eeb",
+                "vmid": 489208
+              },
+              {
+                "cost_load_seconds": 204.8,
+                "device": "scsi0",
+                "disk_key": "509010:scsi0",
+                "duration_mirror_seconds": 102.4,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": 0.009872266270471552,
+                "load_per_tib": 0.25273001652407234,
+                "resolves_reserve_violation": false,
+                "size_bytes": 21474836480,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 509010
+              }
+            ],
+            "name": "group-448ef164",
+            "payback": {
+              "accepted": true,
+              "aggregate_ok": true,
+              "benefit_load_seconds": 355473.05012753746,
+              "deferred_moves": [],
+              "ratio": 204.20097089127842,
+              "rejected_moves": [],
+              "total_cost_load_seconds": 1740.8
+            },
+            "solver_backend": "heuristic",
+            "solver_status": null
+          }
+        ],
+        "warnings": []
+      },
+      "skipped": null,
+      "variant": {
+        "beta": 0.0,
+        "forecast_model": "quantile",
+        "solver_backend": "heuristic",
+        "spread_metric": "l1"
+      }
+    },
+    {
+      "report": {
+        "groups": [
+          {
+            "after_spread": 0.0016276268581549176,
+            "before_spread": 0.4472677911606871,
+            "deadlock_message": null,
+            "deadlocked": [],
+            "gate": {
+              "act": true,
+              "drift_fraction": null,
+              "imbalance_fraction": 0.4472677911606871,
+              "reason": "imbalance 44.7% meets or exceeds gates.imbalance_threshold (20.0%)",
+              "reserve_override": false
+            },
+            "load_error": null,
+            "moves": [
+              {
+                "cost_load_seconds": 1536.0,
+                "device": "scsi1",
+                "disk_key": "489208:scsi1",
+                "duration_mirror_seconds": 768.0,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-9034bbcd",
+                "imbalance_reduction": 0.5778807928028378,
+                "load_per_tib": 2.0722331084099923,
+                "resolves_reserve_violation": false,
+                "size_bytes": 161061273600,
+                "to_storage": "stor-593d0eeb",
+                "vmid": 489208
+              },
+              {
+                "cost_load_seconds": 0.01,
+                "device": "efidisk0",
+                "disk_key": "156937:efidisk0",
+                "duration_mirror_seconds": 0.005,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": 0.0,
+                "load_per_tib": 0.0,
+                "resolves_reserve_violation": false,
+                "size_bytes": 1048576,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 156937
+              },
+              {
+                "cost_load_seconds": 2048.0,
+                "device": "scsi2",
+                "disk_key": "204608:scsi2",
+                "duration_mirror_seconds": 1024.0,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": -0.039251502778709924,
+                "load_per_tib": 0.17528384884572695,
+                "resolves_reserve_violation": false,
+                "size_bytes": 214748364800,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 204608
+              },
+              {
+                "cost_load_seconds": 655.36,
+                "device": "scsi0",
+                "disk_key": "156937:scsi0",
+                "duration_mirror_seconds": 327.68,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": -0.060843930354764986,
+                "load_per_tib": 0.48675144283811966,
+                "resolves_reserve_violation": false,
+                "size_bytes": 68719476736,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 156937
+              },
+              {
+                "cost_load_seconds": 2560.0,
+                "device": "scsi1",
+                "disk_key": "204608:scsi1",
+                "duration_mirror_seconds": 1280.0,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": -0.240761290328398,
+                "load_per_tib": 0.49307912259255887,
+                "resolves_reserve_violation": false,
+                "size_bytes": 268435456000,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 204608
+              },
+              {
+                "cost_load_seconds": 512.0,
+                "device": "scsi0",
+                "disk_key": "807825:scsi0",
+                "duration_mirror_seconds": 256.0,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": -0.06596522567922758,
+                "load_per_tib": 0.6754839109552904,
+                "resolves_reserve_violation": false,
+                "size_bytes": 53687091200,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 807825
+              },
+              {
+                "cost_load_seconds": 1024.0,
+                "device": "scsi2",
+                "disk_key": "807825:scsi2",
+                "duration_mirror_seconds": 512.0,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": -0.16671995393728167,
+                "load_per_tib": 0.8536061641588821,
+                "resolves_reserve_violation": false,
+                "size_bytes": 107374182400,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 807825
+              },
+              {
+                "cost_load_seconds": 1024.0,
+                "device": "scsi0",
+                "disk_key": "204608:scsi0",
+                "duration_mirror_seconds": 512.0,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": -0.25111931659255105,
+                "load_per_tib": 1.285730900953862,
+                "resolves_reserve_violation": false,
+                "size_bytes": 107374182400,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 204608
+              },
+              {
+                "cost_load_seconds": 1024.0,
+                "device": "scsi0",
+                "disk_key": "489208:scsi0",
+                "duration_mirror_seconds": 512.0,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-9034bbcd",
+                "imbalance_reduction": 0.22388897747659453,
+                "load_per_tib": 7.44781932821465,
+                "resolves_reserve_violation": false,
+                "size_bytes": 107374182400,
+                "to_storage": "stor-593d0eeb",
+                "vmid": 489208
+              },
+              {
+                "cost_load_seconds": 358.4,
+                "device": "scsi0",
+                "disk_key": "393932:scsi0",
+                "duration_mirror_seconds": 179.2,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": 0.24344066638146078,
+                "load_per_tib": 3.5611891767802257,
+                "resolves_reserve_violation": false,
+                "size_bytes": 37580963840,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 393932
+              },
+              {
+                "cost_load_seconds": 614.4,
+                "device": "scsi1",
+                "disk_key": "807825:scsi1",
+                "duration_mirror_seconds": 307.2,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-593d0eeb",
+                "imbalance_reduction": 0.3697848537752746,
+                "load_per_tib": 3.155497418882342,
+                "resolves_reserve_violation": false,
+                "size_bytes": 64424509440,
+                "to_storage": "stor-9034bbcd",
+                "vmid": 807825
+              }
+            ],
+            "name": "group-448ef164",
+            "payback": {
+              "accepted": true,
+              "aggregate_ok": true,
+              "benefit_load_seconds": 357034.0459988138,
+              "deferred_moves": [],
+              "ratio": 31.43965315760629,
+              "rejected_moves": [],
+              "total_cost_load_seconds": 11356.17
+            },
+            "solver_backend": "cbc",
+            "solver_status": "optimal"
+          }
+        ],
+        "warnings": []
+      },
+      "skipped": null,
+      "variant": {
+        "beta": 0.0,
+        "forecast_model": "quantile",
+        "solver_backend": "cbc",
+        "spread_metric": "l1"
+      }
+    },
+    {
+      "report": null,
+      "skipped": "cpsat not installed",
+      "variant": {
+        "beta": 0.0,
+        "forecast_model": "quantile",
+        "solver_backend": "cpsat",
+        "spread_metric": "l1"
+      }
+    }
+  ],
+  "schema_version": 1
+}

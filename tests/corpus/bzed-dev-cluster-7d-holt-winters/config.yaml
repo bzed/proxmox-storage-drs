@@ -1,0 +1,114 @@
+exclude:
+  disks: []
+  include_unused_disks: true
+  running_only: true
+  skip_vms_with_snapshots: true
+  storages: []
+  tags:
+  - tag-d2fbde41
+  vmids: []
+execution:
+  abort_on_failure: true
+  locks:
+    on_timeout: skip
+    poll_interval: 30.0
+    wait_timeout: 14400.0
+  max_concurrent_migrations: 1
+  max_concurrent_per_storage: 1
+  max_migrations_per_run: 5
+  max_replans_per_run: 3
+  mode: dry-run
+  poll_interval_seconds: 10.0
+  source_release:
+    timeout: 172800.0
+    wait: true
+  time_windows: []
+forecast:
+  holt_winters:
+    residual_z: 2.0
+    seasonal: add
+    seasonal_periods: 24
+    trend: add
+  model: holt_winters
+  seasonal_lookback_days: 7.0
+gates:
+  cooldown_per_disk: 86400.0
+  cooldown_per_storage: 3600.0
+  drift_threshold: 0.1
+  imbalance_threshold: 0.2
+groups:
+- name: group-448ef164
+  storages:
+  - capability_weight: 1.0
+    id: stor-593d0eeb
+    reserve_factor: 2.0
+  - capability_weight: 1.0
+    id: stor-9034bbcd
+    reserve_factor: 2.0
+load_weights:
+  bytes: 1.0
+  iotime: 1.0
+  ops: 1.0
+  read_factor: 1.0
+  write_factor: 3.0
+metrics:
+  extra_selector: null
+  labels:
+    device: instance
+    node: nodename
+    vmid: vmid
+  pvestatd_push_interval: 60.0
+  rate_window: 300.0
+  read_bytes: rd_bytes
+  read_ops: rd_operations
+  read_time_ns: rd_total_time_ns
+  step: 3600.0
+  write_bytes: wr_bytes
+  write_ops: wr_operations
+  write_time_ns: wr_total_time_ns
+migration:
+  account_saferemove_wipe: true
+  assume_thick_provisioning: true
+  bwlimit_bytes_per_sec: 209715200
+  max_single_move_duration: 21600.0
+  payback_horizon: 604800.0
+  payback_ratio: 10.0
+  saturation_ceiling: 0.85
+  source_load_weight: 1.0
+  target_load_weight: 1.0
+  wipe_load_weight: 1.0
+objective:
+  affinity_counts_pinned_disks: false
+  alpha_spread: 1.0
+  beta_move_count: 0.25
+  gamma_move_bytes_per_tib: 0.05
+  kappa_vm_affinity: 0.5
+  reserve_violation_penalty: 1000.0
+  spread_metric: l1
+prometheus: {}
+proxmox:
+  read_workers: 12
+report:
+  warn_pinned_load_fraction: 0.25
+schema_version: 1
+snapshot_reserve:
+  count_foreign_volumes: true
+  factor: 2.0
+  min_free_bytes: 0
+solver:
+  backend: auto
+  heuristic_iterations: 5000
+  mip_gap: 0.02
+  time_limit_seconds: 60.0
+state:
+  path: state.json
+support:
+  bundle_dir: testdata
+  capture_range: auto
+  max_series_points: 5000000
+  salt_path: anonymization-salt
+window:
+  lookback: 604800.0
+  min_coverage: 0.8
+  quantile: 0.95
+  upper_quantile: 0.99

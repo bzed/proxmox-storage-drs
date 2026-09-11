@@ -1,0 +1,158 @@
+{
+  "verify_metrics": {
+    "coverage_by_disk": {
+      "156937:efidisk0": 1.0,
+      "156937:ide2": 1.0,
+      "156937:pflash0": 1.0,
+      "156937:scsi0": 1.0,
+      "204608:ide2": 1.0,
+      "204608:scsi0": 1.0,
+      "204608:scsi1": 1.0,
+      "204608:scsi2": 1.0,
+      "244122:ide2": 1.0,
+      "244122:scsi0": 1.0,
+      "244122:scsi1": 1.0,
+      "362759:efidisk0": 1.0,
+      "362759:ide0": 1.0,
+      "362759:ide2": 1.0,
+      "362759:pflash0": 1.0,
+      "362759:scsi0": 1.0,
+      "389722:ide2": 1.0,
+      "389722:scsi0": 1.0,
+      "393932:efidisk0": 1.0,
+      "393932:ide2": 1.0,
+      "393932:pflash0": 1.0,
+      "393932:sata0": 1.0,
+      "393932:scsi0": 1.0,
+      "489208:ide2": 1.0,
+      "489208:scsi0": 1.0,
+      "489208:scsi1": 1.0,
+      "509010:efidisk0": 1.0,
+      "509010:ide2": 1.0,
+      "509010:pflash0": 1.0,
+      "509010:scsi0": 1.0,
+      "572614:ide2": 1.0,
+      "572614:scsi0": 1.0,
+      "572614:scsi1": 1.0,
+      "589980:ide2": 1.0,
+      "589980:scsi0": 1.0,
+      "589980:scsi1": 1.0,
+      "60204:efidisk0": 1.0,
+      "60204:ide2": 1.0,
+      "60204:pflash0": 1.0,
+      "60204:scsi0": 1.0,
+      "60204:scsi1": 1.0,
+      "60204:scsi2": 1.0,
+      "60204:scsi3": 1.0,
+      "612603:ide2": 1.0,
+      "612603:scsi0": 1.0,
+      "612603:scsi1": 1.0,
+      "612603:scsi2": 1.0,
+      "612603:scsi3": 1.0,
+      "612603:scsi4": 1.0,
+      "612603:scsi5": 1.0,
+      "612603:scsi6": 1.0,
+      "612603:scsi7": 1.0,
+      "612603:scsi8": 1.0,
+      "612603:scsi9": 1.0,
+      "738059:ide2": 1.0,
+      "738059:scsi0": 1.0,
+      "807825:ide2": 1.0,
+      "807825:scsi0": 1.0,
+      "807825:scsi1": 1.0,
+      "807825:scsi2": 1.0,
+      "92831:efidisk0": 1.0,
+      "92831:ide2": 1.0,
+      "92831:pflash0": 1.0,
+      "92831:scsi0": 1.0
+    },
+    "findings": [
+      {
+        "level": "info",
+        "message": "metrics.read_ops = 'rd_operations' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.write_ops = 'wr_operations' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.read_bytes = 'rd_bytes' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.write_bytes = 'wr_bytes' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.read_time_ns = 'rd_total_time_ns' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.write_time_ns = 'wr_total_time_ns' exists"
+      },
+      {
+        "level": "info",
+        "message": "rd_operations: sample series labels {'nodename': 'node-9bcf256f', 'object': 'qemu', 'service_name': 'unknown', 'vmid': '389722', '__name__': 'rd_operations', 'host': 'data001', 'instance': 'ide2', 'measurement': 'blockstat'}"
+      },
+      {
+        "level": "info",
+        "message": "wr_operations: sample series labels {'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu', 'service_name': 'unknown', 'vmid': '389722', '__name__': 'wr_operations', 'host': 'data001', 'instance': 'ide2'}"
+      },
+      {
+        "level": "info",
+        "message": "rd_bytes: sample series labels {'__name__': 'rd_bytes', 'host': 'data001', 'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu', 'service_name': 'unknown', 'vmid': '389722'}"
+      },
+      {
+        "level": "info",
+        "message": "wr_bytes: sample series labels {'service_name': 'unknown', 'vmid': '389722', '__name__': 'wr_bytes', 'host': 'data001', 'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu'}"
+      },
+      {
+        "level": "info",
+        "message": "rd_total_time_ns: sample series labels {'object': 'qemu', 'service_name': 'unknown', 'vmid': '389722', '__name__': 'rd_total_time_ns', 'host': 'data001', 'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f'}"
+      },
+      {
+        "level": "info",
+        "message": "wr_total_time_ns: sample series labels {'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu', 'service_name': 'unknown', 'vmid': '389722', '__name__': 'wr_total_time_ns', 'host': 'data001'}"
+      },
+      {
+        "level": "warning",
+        "message": "metrics.labels.device is 'instance', which collides with Prometheus's own scrape-target label of the same name -- confirm this is really the per-disk device tag and not the scrape target"
+      }
+    ],
+    "observed_spacing_seconds": 60,
+    "ok": true,
+    "sample_series": {
+      "rd_bytes": {
+        "instance": "ide2",
+        "nodename": "node-9bcf256f",
+        "vmid": "389722"
+      },
+      "rd_operations": {
+        "instance": "ide2",
+        "nodename": "node-9bcf256f",
+        "vmid": "389722"
+      },
+      "rd_total_time_ns": {
+        "instance": "ide2",
+        "nodename": "node-9bcf256f",
+        "vmid": "389722"
+      },
+      "wr_bytes": {
+        "instance": "ide2",
+        "nodename": "node-9bcf256f",
+        "vmid": "389722"
+      },
+      "wr_operations": {
+        "instance": "ide2",
+        "nodename": "node-9bcf256f",
+        "vmid": "389722"
+      },
+      "wr_total_time_ns": {
+        "instance": "ide2",
+        "nodename": "node-9bcf256f",
+        "vmid": "389722"
+      }
+    }
+  }
+}

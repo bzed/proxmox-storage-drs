@@ -1,0 +1,24 @@
+submitted_by: Bernd Zeimetz <bernd@bzed.de>
+submitted_on: 2026-09-11
+consent:
+  redistribute_under: AGPL-3.0-or-later
+  reviewed_bundle_before_sending: true
+collected_with: pve-storage-drs 0.1.1
+versions:
+  pve: 9.2.11
+  prometheus_backend: gigapipe
+what_this_reproduces: >
+  The same real 3-node cluster as bzed-dev-cluster-24h, this time captured with
+  window.lookback: 7d and forecast.model: holt_winters (metrics.step raised to
+  1h, and holt_winters.seasonal_periods scaled from 288 to 24 to match, to keep
+  the bundle under the 8 MiB ceiling at 7 days of history -- see config/drs.yaml
+  and manifest.json's capture block). bzed-dev-cluster-24h's 24h lookback is too
+  short for holt_winters (needs 48h) or seasonal_naive (needs 7d), so both
+  gracefully skip in every variant sweep against it; this bundle actually
+  exercises holt_winters end to end instead of skipping it.
+
+  Also the bundle that found check_milp_vs_heuristic's move-count-as-proxy false
+  positive in tests/corpus/validate_corpus.py (fixed in the preceding commit):
+  cpsat legitimately used more moves than the heuristic to reach a far better
+  spread at objective.beta_move_count=0.0, which the old check misread as "the
+  MILP did worse".

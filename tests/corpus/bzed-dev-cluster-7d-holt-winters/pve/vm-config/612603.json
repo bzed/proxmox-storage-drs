@@ -1,0 +1,13 @@
+{
+  "ide2": "none,media=cdrom",
+  "scsi0": "stor-593d0eeb:vm-612603-disk-0,size=100G",
+  "scsi1": "stor-593d0eeb:vm-612603-disk-1,size=150G",
+  "scsi2": "stor-593d0eeb:vm-612603-disk-2,size=150G",
+  "scsi3": "stor-593d0eeb:vm-612603-disk-3,size=100G",
+  "scsi4": "stor-593d0eeb:vm-612603-disk-4,size=200G",
+  "scsi5": "stor-593d0eeb:vm-612603-disk-5,size=100G",
+  "scsi6": "stor-593d0eeb:vm-612603-disk-6,size=300G",
+  "scsi7": "stor-593d0eeb:vm-612603-disk-7,size=200G",
+  "scsi8": "stor-593d0eeb:vm-612603-disk-8,size=400G",
+  "scsi9": "stor-593d0eeb:vm-612603-disk-9,size=400G"
+}
