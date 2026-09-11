@@ -106,7 +106,10 @@ executed a migration — see [`15-state.md`](15-state.md),
 | `payback.py` | `evaluate_plan_payback()`: the cost/benefit acceptance test, with a reserve-override exemption mirroring `gates.py`'s | section 7 |
 | `execute.py` | `execute_plan()`: pre-flight re-check per move, VM-lock wait, `move_disk`, the three-condition completion criterion, orphan detection on failure, `auto`'s own time-window/migration-count budgets | section 9 |
 | `timewindow.py` | `current_deadline()`: is `now` (local time) inside a configured `execution.time_windows` entry, and when does it close | section 9.1 |
-| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan`, `apply` (including `auto`'s own re-plan loop) | section 11.3 |
+| `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan`, `apply`, `collect-testdata`, the global `--replay` | section 11.3 |
+| `anonymize.py` | Allowlists, `pseudonym()`/`Mapper`, timestamp rebasing. Pure, no I/O — the shared implementation behind `collect.py` and `tests/corpus/validate_corpus.py`'s scrub audit | section 16.3 |
+| `collect.py` | `capture_bundle()`: the recording client wrappers, the estimate/refusal, the deterministic writer | section 16.1-16.4 |
+| `replay.py` | `ReplayPveClient`/`ReplayPrometheusClient`: real `PveClient`/`PrometheusClient` subclasses serving a bundle, no network | section 16.5 |
 
 Every phase 8 knob is now real: time windows, `max_migrations_per_run`,
 the re-plan loop, and concurrent execution

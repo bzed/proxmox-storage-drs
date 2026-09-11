@@ -65,6 +65,13 @@ the same file on every node.
   and the largest disk on it, and warn where the implied wipe time exceeds the configured move
   duration or storage cooldown.
 
+**collect-testdata**
+: Capture an anonymized diagnostic bundle -- topology, the effective configuration with credentials
+  and endpoints removed, and Prometheus metrics -- for the author to reproduce a problem offline.
+  Read-only and dry-run-only: **--mode confirm**/**auto** alongside it is a usage error. See
+  **--estimate**, **--range**, **--step**, **--no-series**, **--no-archive**, **--salt-file** and
+  **--new-salt** under **pve-storage-drs collect-testdata --help**, and the operator manual.
+
 # OPTIONS
 
 Global options are accepted before the command.
@@ -103,6 +110,14 @@ Global options are accepted before the command.
 **--manual**
 : Show this manual page.
 
+**--replay** *PATH*
+: Run against a **collect-testdata** bundle at *PATH* instead of the live cluster -- no network
+  access at all. The bundle's own *config.yaml* is used unless **--config** is also given, in which
+  case its knobs run against the bundle's data (a different solver backend, spread metric or
+  forecaster than the operator who captured it selected). **apply** and any **--mode** above
+  *dry-run* are a usage error under **--replay**; so is **collect-testdata** itself, which needs a
+  live cluster.
+
 **-h**, **--help**
 : Print a usage summary with every option and its default, and exit. **pve-storage-drs** *command*
   **--help** does the same for one command.
@@ -120,7 +135,8 @@ Top-level keys: **proxmox** (API connection and credentials), **prometheus** (UR
 **load** (the weighting of I/O time, operations and bytes), **objective** (the solver's trade-off
 weights), **gates** (drift and imbalance thresholds, cooldowns), **migration** (bandwidth, cost and
 payback), **execution** (mode, concurrency, time windows, locking), **exclude**, **report**,
-**state** and **forecast**.
+**state**, **forecast** and **support** (the anonymization salt and defaults for
+**collect-testdata**).
 
 Every option is documented individually, with its unit, its default and what happens at either
 extreme, in the manual listed under **SEE ALSO**. That document, not this page, is authoritative
@@ -150,6 +166,13 @@ and in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**, and prefer an API token over a 
 
 */usr/share/doc/pve-storage-drs/*
 : The manual and the specification.
+
+*/var/lib/pve-storage-drs/anonymization-salt*
+: **collect-testdata**'s pseudonym key, generated on first use, mode 0600. Never written into a
+  bundle. **--new-salt** rotates it; bundles made before and after no longer share a mapping.
+
+*/var/lib/pve-storage-drs/testdata/*
+: Default **collect-testdata** output directory (**support.bundle_dir**, **-o**/**--output**).
 
 # EXIT STATUS
 
