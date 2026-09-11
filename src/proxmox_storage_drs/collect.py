@@ -67,6 +67,7 @@ from proxmox_storage_drs.metrics import (
 )
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.topology import (
+    DISK_KEY_RE,
     Topology,
     _pick_active_node,
     build_topology,
@@ -544,7 +545,16 @@ def _label_value_for(label_kind: str, value: str, mapper: Mapper) -> str | None:
         return None if new_vmid is None else str(new_vmid)
     if label_kind == "node":
         return mapper.node(value) if value in mapper.known_nodes else None
-    return value  # device: passes through unchanged
+    # device: passes through unchanged, but only if it actually looks like
+    # one of the enumerated bus keys (section 3.5's regex) -- label_values()
+    # is a *global* Prometheus query, not scoped to the blockstat
+    # measurement, so when the configured device label is literally
+    # "instance" (verify-metrics' own check 4 warning: it collides with
+    # Prometheus's unrelated scrape-target label of the same name) it can
+    # just as easily return a scrape target ("127.0.0.1:8098") as a real
+    # device name -- confirmed on a live cluster. Fail closed rather than
+    # pass through anything shaped like a device that is not actually one.
+    return value if DISK_KEY_RE.match(value) else None
 
 
 def _anonymize_prometheus_series(
@@ -582,6 +592,12 @@ def _anonymize_prometheus_series(
         vmid_raw = labels.get(vmid_label)
         device = labels.get(device_label)
         if vmid_raw is None or not device:
+            continue
+        # Same fail-closed guard as _label_value_for(): a device label
+        # literally named "instance" can carry Prometheus's own unrelated
+        # scrape-target value instead of a real device key (confirmed live
+        # -- verify-metrics' own check 4 exists for exactly this).
+        if not DISK_KEY_RE.match(device):
             continue
         try:
             new_vmid = mapper.vmid(int(vmid_raw))

@@ -301,6 +301,46 @@ def test_capture_bundle_prometheus_series_vmid_is_remapped(tmp_path: Path) -> No
     assert series["metric"]["instance"] == "scsi0"  # device passes through unchanged
 
 
+def test_capture_bundle_rejects_a_device_label_value_that_is_not_a_real_device(
+    tmp_path: Path,
+) -> None:
+    """A live capture against the dev cluster found this directly:
+    metrics.labels.device is literally "instance" there (verify-metrics'
+    own check 4 warning -- it collides with Prometheus's unrelated
+    scrape-target label of the same name), and label_values("instance")
+    is a *global* Prometheus query, not scoped to the blockstat
+    measurement -- it returned a real scrape target ("127.0.0.1:8098")
+    alongside genuine device keys. Both label_values() results and a
+    series' own "instance" tag must be checked against the enumerated bus
+    -key shape (section 3.5) and dropped, not passed through, when they
+    are not."""
+    session = FakePrometheusSession(
+        answers={
+            "label/__name__/values": METRIC_NAMES,
+            "label/vmid/values": ["101"],
+            "label/instance/values": ["scsi0", "127.0.0.1:8098"],
+            "label/nodename/values": ["node1"],
+            "api/v1/query_range": _range_answer,
+            "api/v1/query": _instant_answer,
+        }
+    )
+    prom_client = PrometheusClient(
+        config_module.PrometheusConfig(url="http://localhost:9090"), session
+    )
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    bundle = collect.capture_bundle(
+        make_pve_client(), prom_client, resolved, options, now=CAPTURE_NOW
+    )
+
+    device_label_files = [
+        v for k, v in bundle.prometheus_files.items() if k.startswith("label-values/")
+    ]
+    matches = [f for f in device_label_files if f["label"] == "instance"]
+    assert matches
+    assert matches[0]["result"] == ["scsi0"]  # the scrape target dropped, not passed through
+
+
 def test_capture_bundle_prometheus_sample_timestamps_are_rebased(tmp_path: Path) -> None:
     """A live capture against the dev cluster found this the hard way: a
     range file's own start/end were rebased, but the individual sample
