@@ -746,22 +746,35 @@ def _label_kind_for(label_name: str, labels: Any) -> str:
     return "device"  # the device label, __name__, or anything else: passes through
 
 
-def _anonymize_query_text(query: str, mapper: Mapper) -> str:
-    """The PromQL text this module *issues* carries real node names (the
-    node-scoping selector, section 3.4) -- it has to, or it matches
-    nothing on the real Prometheus server. The text written into a bundle,
-    and the key every file is hashed under, must not: a real name here
-    would both leak it and never match what a later ``--replay`` run's own
-    (anonymized) selector reconstructs. Longest-first substring
-    replacement, matching :func:`_redact_finding_message`'s own reasoning."""
-    text = query
-    for node in sorted(mapper.known_nodes, key=len, reverse=True):
-        text = text.replace(node, mapper.node(node))
-    return text
+def _anonymize_query_text(query: str, mapper: Mapper, rate_expr_map: dict[str, str]) -> str:
+    """Rewrites captured PromQL text so it matches what a ``--replay`` run
+    reconstructs. Two cases:
+
+    - The text contains one of ``rate_expr_map``'s real-selector rate
+      expressions (section 3.4's ``sum by (...) (rate(...))``, built with
+      the cluster's real node names -- the only thing the real Prometheus
+      server can match) as an exact substring -- a bare range query, or
+      embedded inside ``quantile_over_time(...)``. Replaced wholesale with
+      the pre-built, independently-sorted anonymized equivalent, never by
+      substituting node names one at a time inside the text: sorting the
+      real names and sorting their pseudonyms can disagree, and a replay
+      run always builds its selector by sorting pseudonyms.
+    - No known rate expression appears at all -- ``verify_metrics()``'s
+      own checks never carry a node selector in the first place (it never
+      talks to the PVE API), so there is nothing node-shaped to rewrite,
+      and this is a no-op.
+    """
+    for real_expr, anon_expr in rate_expr_map.items():
+        if real_expr in query:
+            return query.replace(real_expr, anon_expr)
+    return query
 
 
 def _anonymize_captured_prometheus(
-    recording_prom: RecordingPrometheusClient, config: Config, mapper: Mapper
+    recording_prom: RecordingPrometheusClient,
+    config: Config,
+    mapper: Mapper,
+    rate_expr_map: dict[str, str],
 ) -> dict[str, Any]:
     """Turns every ``(path, params, raw response)`` :class:`RecordingPrometheusClient`
     recorded -- from this module's own driver functions *and* from whatever
@@ -780,14 +793,14 @@ def _anonymize_captured_prometheus(
         # returns the raw `data` dict for these two endpoints (a bare list
         # only for label_values), and both call `.get("result", [])`.
         if path == "/api/v1/query":
-            query = _anonymize_query_text(params["query"], mapper)
+            query = _anonymize_query_text(params["query"], mapper, rate_expr_map)
             series = raw_result.get("result", []) if isinstance(raw_result, dict) else []
             files[f"instant/{hash_query_text(query)}.json"] = {
                 "query": query,
                 "result": _anonymize_prometheus_series(series, vmid_label, device_label, mapper),
             }
         elif path == "/api/v1/query_range":
-            query = _anonymize_query_text(params["query"], mapper)
+            query = _anonymize_query_text(params["query"], mapper, rate_expr_map)
             series = raw_result.get("result", []) if isinstance(raw_result, dict) else []
             range_captures.setdefault(query, []).append(
                 (
@@ -853,14 +866,47 @@ def _capture_prometheus_files(
     # (recording_prom's calls are genuine HTTP requests), and only a
     # selector built from the cluster's actual node names matches any real
     # series at all. The query *text* this module writes into the bundle
-    # is anonymized afterwards, in _anonymize_captured_prometheus() below
-    # -- a real name here would leak, and it would also never match what a
-    # later --replay run's own (anonymized) selector reconstructs, but
-    # neither problem is solved by anonymizing the text *before* issuing
-    # it: that just queries the real server for a node name it does not
-    # have, and gets nothing back (the bug a live capture against the dev
-    # cluster actually hit, section 16.3's "the actual mechanism").
+    # is anonymized afterwards -- a real name here would leak, and it
+    # would also never match what a later --replay run's own (anonymized)
+    # selector reconstructs, but neither problem is solved by anonymizing
+    # the text *before* issuing it: that just queries the real server for
+    # a node name it does not have, and gets nothing back (the first of
+    # two bugs a live capture against the dev cluster actually hit,
+    # section 16.3's "the actual mechanism").
     node_selector = resolve_node_selector(config.metrics, sorted(known_nodes))
+    # The second bug that same capture hit: build_node_selector() sorts
+    # its *own* input, so blindly substring-replacing each real node name
+    # inside already-built query text preserves the *real*-name sort
+    # order, while a --replay run building the selector fresh from
+    # ReplayPveClient.node_names() sorts the *pseudonyms* -- a different
+    # order, hence different text, whenever a real name's lexical rank
+    # differs from its pseudonym's. rate_expr_map is built by calling
+    # build_rate_promql() a second time with a selector built from
+    # pre-anonymized, independently-sorted names, so both sides are each
+    # self-consistent constructions rather than one derived from the
+    # other by text surgery -- the one substitution
+    # _anonymize_query_text() still does (on a query with no node
+    # selector at all, e.g. verify_metrics()'s own unscoped checks) has no
+    # ordering to get wrong in the first place.
+    anon_node_selector = resolve_node_selector(
+        config.metrics, sorted(mapper.node(n) for n in known_nodes)
+    )
+    rate_expr_map = {
+        build_rate_promql(
+            raw_metric_name(config.metrics, field),
+            config.metrics.labels.vmid,
+            config.metrics.labels.device,
+            config.metrics.rate_window_seconds,
+            node_selector,
+        ): build_rate_promql(
+            raw_metric_name(config.metrics, field),
+            config.metrics.labels.vmid,
+            config.metrics.labels.device,
+            config.metrics.rate_window_seconds,
+            anon_node_selector,
+        )
+        for field in RAW_METRIC_FIELDS
+    }
     for group in topology.groups:
         _drive_group_series(
             recording_prom,
@@ -875,7 +921,7 @@ def _capture_prometheus_files(
         )
     _drive_label_values(recording_prom, config, log)
 
-    files = _anonymize_captured_prometheus(recording_prom, config, mapper)
+    files = _anonymize_captured_prometheus(recording_prom, config, mapper, rate_expr_map)
     return files, verify_report
 
 
