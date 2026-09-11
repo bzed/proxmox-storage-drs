@@ -39,15 +39,6 @@ storages in your `groups`, not backup targets):
   parent `/storage` — that is the grant confirmed to work.
 - Also add `VM.Audit` cluster-wide (`/`) for VM inventory and config, which
   `PVEAuditor` already includes if you use that built-in role as a base.
-- Also add `Sys.Audit` cluster-wide (`/`), needed for `GET /cluster/status`
-  — `metrics.labels.cluster` defaults to `"cluster"` (`10-configuration.md`),
-  so the tool looks up this cluster's own name and builds
-  `<metrics.labels.cluster>="<name>"` as its default query filter on every
-  run unless you set that key to `null`. `PVEAuditor` includes this one
-  too. Missing this privilege does not fail the run: a denied
-  `GET /cluster/status` logs a warning and falls back to the older
-  node-list scoping tier instead (REVIEW.md W-08) — equally correct, just
-  worth fixing so the intended default takes effect.
 
 **If you are using an API token** (recommended — see above), Proxmox's
 privilege separation means **the token has its own, separate ACL entries
@@ -60,10 +51,9 @@ API Tokens → uncheck "Privilege Separation") so it always matches its
 user's permissions exactly.
 
 A concrete, minimal setup: create a role (e.g. `pve-storage-drs`) with
-`Datastore.Allocate,Datastore.Audit,VM.Audit,Sys.Audit`, then add it as an
-ACL entry for both the user and the token at `/` for `VM.Audit`/`Sys.Audit`,
-and at each managed storage's `/storage/<id>` path for the datastore
-privileges.
+`Datastore.Allocate,Datastore.Audit,VM.Audit`, then add it as an ACL entry
+for both the user and the token at `/` for `VM.Audit`, and at each managed
+storage's `/storage/<id>` path for the datastore privileges.
 
 **Two further, VM-level privileges are needed once `apply` executes a
 move** — `VM.Config.Disk` and `VM.Migrate`, both cluster-wide (`/`) or at

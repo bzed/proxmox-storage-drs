@@ -85,9 +85,9 @@ this group this window)` line instead of per-disk warnings — unless every
 one of the six queries came back with literally zero series (as opposed to
 some series with a genuinely-zero rate), in which case the line reads `⚠
 the resolved query filter matched no series at all` instead: that is a
-scoping problem (`metrics.labels.cluster`/`.node`, or `extra_selector`),
-not an idle cluster, and `verify-metrics`'s cluster-label discovery scan
-(`docs/manual/20-verifying-metrics.md`) is the next place to look —
+scoping problem (`metrics.labels.node`, or `extra_selector`), not an idle
+cluster, and `verify-metrics`'s sample-series labels
+(`docs/manual/20-verifying-metrics.md`) are the next place to look —
 REVIEW.md W-06/W-07.
 
 **A Prometheus outage does not fail this command.** Sizes and reserve

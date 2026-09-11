@@ -293,28 +293,6 @@ class PveClient:
         )
         return sorted({str(n["node"]) for n in result if n.get("node")})
 
-    def cluster_name(self) -> str | None:
-        """``GET /cluster/status``: this cluster's own name, from the one
-        entry whose ``type`` is ``"cluster"`` (every other entry is
-        ``type: "node"``) -- confirmed live against a real PVE 9.2 cluster:
-        ``{"id": "cluster", "type": "cluster", "name": "pvezebe", "nodes":
-        3, "quorate": 1, "version": 4}`` alongside one entry per node.
-        Requires ``Sys.Audit`` at ``/`` (docs/manual/00-installation.md) --
-        the one privilege this call needs beyond what every other read here
-        already does. ``None`` if that entry is missing or unnamed,
-        mirroring ``node_names()``'s "let the caller decide" contract
-        rather than raising for something `metrics.resolve_node_selector()`
-        already treats as "fall back", not fatal.
-        """
-        result: list[dict[str, Any]] = self._call(
-            "fetching cluster status", lambda: self._api.cluster.status.get()
-        )
-        for entry in result:
-            if entry.get("type") == "cluster":
-                name = entry.get("name")
-                return str(name) if name else None
-        return None
-
     def storage_definitions(self) -> list[dict[str, Any]]:
         """``GET /storage``: every storage's full config, including ``saferemove``.
 

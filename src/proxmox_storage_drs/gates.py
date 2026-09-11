@@ -129,12 +129,12 @@ def evaluate_group_gates(
                 )
 
     if not group_load.storages or group_load.average_utilization == 0.0:
-        # REVIEW.md W-06/W-07: a resolved node/cluster selector that
-        # matched zero series looks identical to a genuinely idle group
-        # from here -- ``group_load`` already told them apart.
+        # REVIEW.md W-06/W-07: a resolved node selector that matched zero
+        # series looks identical to a genuinely idle group from here --
+        # ``group_load`` already told them apart.
         reason = (
             "the resolved query filter matched no series at all -- this is not necessarily "
-            "an idle group; check metrics.labels.cluster/node against verify-metrics"
+            "an idle group; check metrics.labels.node against verify-metrics"
             if group_load.no_series_matched
             else "group is idle: no measured I/O to balance"
         )

@@ -84,7 +84,6 @@ class MetricLabels:
     vmid: str = "vmid"
     device: str = "instance"
     node: str = "nodename"
-    cluster: str | None = "cluster"
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,7 +440,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         vmid=labels_raw.get("vmid", "vmid"),
         device=labels_raw.get("device", "instance"),
         node=labels_raw.get("node", "nodename"),
-        cluster=labels_raw.get("cluster", "cluster"),
     )
     metrics = MetricsConfig(
         read_ops=metrics_raw.get("read_ops", "blockstat_rd_operations"),
@@ -719,18 +717,13 @@ def _check_window(config: Config, errors: list[str]) -> None:
 
 def _check_metrics(config: Config, errors: list[str]) -> None:
     # Label names non-empty (schema covers empty-string) and pairwise distinct:
-    # a duplicate silently collapses series into one. cluster is optional
-    # (None means "not configured, don't check it") but still joins this
-    # check when set -- it is just as capable of colliding with the other
-    # three as they are with each other.
+    # a duplicate silently collapses series into one.
     labels = config.metrics.labels
     label_values = [labels.vmid, labels.device, labels.node]
-    if labels.cluster is not None:
-        label_values.append(labels.cluster)
     if len(set(label_values)) != len(label_values):
         errors.append(
-            "metrics.labels.vmid, .device, .node and .cluster (when set) must be pairwise "
-            f"distinct (got {label_values}); a duplicate silently collapses series"
+            "metrics.labels.vmid, .device and .node must be pairwise distinct "
+            f"(got {label_values}); a duplicate silently collapses series"
         )
 
     # rate_window >= 4 * pvestatd_push_interval, or rate() sees too few points.

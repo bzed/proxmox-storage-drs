@@ -48,14 +48,7 @@ section 3.3):
    `.device` and `.node` are really present and non-empty on a live series.
    A metric that exists but currently has no series is a **warning**, not an
    error — it may simply mean nothing has generated that kind of I/O
-   recently. This step also scans *every* series each metric query returns
-   (not just the one sample printed) for `metrics.labels.cluster`
-   (`"cluster"` by default) and reports every distinct value found as an
-   **info** line, `'<label>' label values seen across these metrics:
-   ...`. This is how you confirm the default is right for your Prometheus
-   — or, if you set `metrics.labels.cluster` to `null` because yours
-   genuinely has no such tag, how you'd notice if it turned out to have
-   one after all: nothing is printed at all when no series carries it.
+   recently.
 3. **Configured labels present.** If `metrics.labels.vmid`/`.device`/`.node`
    do not appear (or are empty) on the sample series, that is an **error**:
    the load model has nothing to join disks on.

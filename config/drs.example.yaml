@@ -69,13 +69,6 @@ metrics:
     # setups rename it. Confirm with `pve-storage-drs verify-metrics` and set it here.
     device: instance
     node: nodename
-    # The cluster-naming tag -- defaults to "cluster" since deployments here
-    # carry one as standard practice; plan/show-load/apply/explain use it to
-    # auto-scope by this cluster's own name (fetched from the PVE API) rather
-    # than by node list. Set to null if your Prometheus genuinely has no such
-    # label -- `verify-metrics` reports what cluster-label values it actually
-    # sees, if any, so you can confirm either way before relying on it.
-    cluster: cluster
 
   rate_window: 5m       # inner range for rate(); must be >= 4x pvestatd_push_interval
   step: 5m              # sampling step for range queries
@@ -86,14 +79,13 @@ metrics:
 
   # Every query is scoped automatically, so a Prometheus shared by more than
   # one PVE cluster cannot silently sum in a same-numbered vmid from
-  # somewhere else: by default to labels.cluster="<this cluster's own name>"
-  # (fetched from the PVE API -- see labels.cluster above), or to
-  # labels.node =~ "<this cluster's own node names>" if labels.cluster is
-  # null or its lookup finds no name. Set extra_selector to override both of
-  # those with a raw PromQL label matcher of your own -- e.g. if your
-  # Telegraf tagging doesn't use PVE's own node/cluster names, or you need to
+  # somewhere else: by default to labels.node =~ "<this cluster's own node
+  # names>" (fetched from the PVE API). Set extra_selector to override that
+  # with a raw PromQL label matcher of your own -- e.g. if your Telegraf
+  # tagging doesn't use PVE's own node names, you want to scope by a
+  # cluster-naming tag your deployment happens to carry, or you need to
   # restrict by something else entirely:
-  # extra_selector: 'datacenter="dc1"'
+  # extra_selector: 'cluster="mycluster"'
   extra_selector: null
 
 # ------------------------------------------------------------ decision window

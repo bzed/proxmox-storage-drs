@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 from proxmox_storage_drs import __version__, cli
-from proxmox_storage_drs.config import MetricLabels, MetricsConfig, ResolvedConfig
+from proxmox_storage_drs.config import MetricsConfig, ResolvedConfig
 from proxmox_storage_drs.execute import MoveOutcome
 from proxmox_storage_drs.heuristic import ObjectiveBreakdown
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
@@ -42,25 +42,18 @@ def write_config(tmp_path: Path, **overrides: object) -> Path:
 class _FakeClient(str):
     """The ``"fake-client"`` sentinel every ``build_pve_client`` mock in
     this file returns, subclassed just enough to also answer
-    ``node_names()``/``cluster_name()`` -- ``cli._resolve_node_selector_for_run()``
-    calls those on whatever ``build_pve_client`` produced, and
-    ``metrics.labels.cluster`` defaults to a real label name now, so
-    ``cluster_name()`` is called on every one of these tests too, not just
-    the ones that opt out. A plain ``str`` subclass rather than a new type
-    entirely: every existing ``client == "fake-client"`` assertion (and
-    every direct ``cli._run_auto_group("fake-client", ...)`` call) keeps
-    working unchanged, since this compares and hashes identically to the
-    base string. Both empty/``None`` by default -- no test here relies on
-    a real node list or cluster name, only on the selector-building calls
-    getting *something* back instead of an ``AttributeError``, which
-    resolves to the same ``None`` selector either default already gave
-    before this class grew ``cluster_name()``."""
+    ``node_names()`` -- ``cli._resolve_node_selector_for_run()`` calls that
+    on whatever ``build_pve_client`` produced. A plain ``str`` subclass
+    rather than a new type entirely: every existing
+    ``client == "fake-client"`` assertion (and every direct
+    ``cli._run_auto_group("fake-client", ...)`` call) keeps working
+    unchanged, since this compares and hashes identically to the base
+    string. Empty by default -- no test here relies on a real node list,
+    only on the selector-building call getting *something* back instead of
+    an ``AttributeError``, which resolves to the same ``None`` selector."""
 
     def node_names(self) -> list[str]:
         return []
-
-    def cluster_name(self) -> str | None:
-        return None
 
 
 FAKE_CLIENT = _FakeClient("fake-client")
@@ -82,98 +75,38 @@ def _fake_build_topology(topology: Topology) -> object:
 
 
 class _NodeNamesClient:
-    """A ``PveClient`` stand-in exposing ``node_names()``/``cluster_name()``
-    -- enough for ``_resolve_node_selector_for_run()``'s branches. Raises if
-    either is called when it should not be (an operator override set, or a
-    cluster name that already settled it): each is a real PVE API
-    round-trip in production, so a test asserting one was skipped needs it
-    to actually blow up, not just go unasserted."""
+    """A ``PveClient`` stand-in exposing ``node_names()`` -- enough for
+    ``_resolve_node_selector_for_run()``'s branches. Raises if called when
+    it should not be (an operator override set): a real PVE API round-trip
+    in production, so a test asserting it was skipped needs it to actually
+    blow up, not just go unasserted."""
 
-    def __init__(
-        self,
-        names: list[str] | None = None,
-        forbid_call: bool = False,
-        cluster_name: str | None = None,
-        forbid_cluster_call: bool = False,
-        cluster_name_raises: Exception | None = None,
-    ) -> None:
+    def __init__(self, names: list[str] | None = None, forbid_call: bool = False) -> None:
         self._names = names or []
         self._forbid_call = forbid_call
-        self._cluster_name = cluster_name
-        self._forbid_cluster_call = forbid_cluster_call
-        self._cluster_name_raises = cluster_name_raises
 
     def node_names(self) -> list[str]:
         if self._forbid_call:
             raise AssertionError("node_names() must not be called when already settled")
         return self._names
 
-    def cluster_name(self) -> str | None:
-        if self._forbid_cluster_call:
-            raise AssertionError("cluster_name() must not be called when extra_selector is set")
-        if self._cluster_name_raises is not None:
-            raise self._cluster_name_raises
-        return self._cluster_name
-
 
 def test_resolve_node_selector_for_run_skips_the_api_call_when_overridden() -> None:
     resolved = MetricsConfig(extra_selector='cluster="mycluster"')
-    client: Any = _NodeNamesClient(forbid_call=True, forbid_cluster_call=True)
+    client: Any = _NodeNamesClient(forbid_call=True)
     selector = cli._resolve_node_selector_for_run(client, resolved)
     assert selector == 'cluster="mycluster"'
 
 
-def test_resolve_node_selector_for_run_defaults_to_the_live_cluster_name() -> None:
-    """metrics.labels.cluster defaults to "cluster" -- a real label name --
-    so a bare default MetricsConfig() already gets the cluster-name tier,
-    and node_names() is never even called since the cluster name alone
-    already settles it."""
-    client: Any = _NodeNamesClient(cluster_name="abn", forbid_call=True)
-    selector = cli._resolve_node_selector_for_run(client, MetricsConfig())
-    assert selector == 'cluster="abn"'
-
-
-def test_resolve_node_selector_for_run_falls_back_to_nodes_without_a_cluster_name() -> None:
-    """Default config, but the live API call found no cluster name: falls
-    back to the node list rather than giving up."""
-    client: Any = _NodeNamesClient(names=["pve02", "pve01"], cluster_name=None)
+def test_resolve_node_selector_for_run_defaults_to_the_node_list() -> None:
+    client: Any = _NodeNamesClient(names=["pve02", "pve01"])
     selector = cli._resolve_node_selector_for_run(client, MetricsConfig())
     assert selector == 'nodename=~"pve01|pve02"'
 
 
 def test_resolve_node_selector_for_run_is_none_when_neither_resolves() -> None:
-    client: Any = _NodeNamesClient(names=[], cluster_name=None)
+    client: Any = _NodeNamesClient(names=[])
     assert cli._resolve_node_selector_for_run(client, MetricsConfig()) is None
-
-
-def test_resolve_node_selector_for_run_opts_out_with_cluster_label_set_to_none() -> None:
-    """metrics.labels.cluster explicitly set to null: cluster_name() is
-    never called at all, not even to check -- the original node-list
-    behaviour is exactly what an operator opting out gets back, with no
-    extra round-trip for the tier they turned off."""
-    metrics = MetricsConfig(labels=MetricLabels(cluster=None))
-    client: Any = _NodeNamesClient(names=["pve01"], forbid_cluster_call=True)
-    selector = cli._resolve_node_selector_for_run(client, metrics)
-    assert selector == 'nodename=~"pve01"'
-
-
-def test_resolve_node_selector_for_run_degrades_to_nodes_on_a_denied_cluster_call(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """REVIEW.md W-08: a denied GET /cluster/status (missing Sys.Audit,
-    most often a token provisioned before this tier existed) must not fail
-    the whole run -- it degrades to the node-list tier, with a warning
-    logged naming the cause, exactly as an unnamed/missing cluster entry
-    already does."""
-    from proxmox_storage_drs.exceptions import PveApiError
-
-    client: Any = _NodeNamesClient(
-        names=["pve01"], cluster_name_raises=PveApiError("fetching cluster status: 403 Forbidden")
-    )
-    with caplog.at_level(logging.WARNING):
-        selector = cli._resolve_node_selector_for_run(client, MetricsConfig())
-    assert selector == 'nodename=~"pve01"'
-    assert any("cluster" in record.message.lower() for record in caplog.records)
 
 
 # --------------------------------------------------------------------- --version

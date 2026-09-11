@@ -366,43 +366,34 @@ Notes for the implementer:
 - Reject a disk whose sample coverage over `W` is below `window.min_coverage` and fall back to its
   last known load from `state.json`, flagging it in the plan output. Never treat missing data as zero
   load — that would silently invite migrations *onto* a busy storage.
-- **Scope every query to this cluster's own name, or failing that, its own nodes.** None of the
-  expressions above restrict which series they match beyond the metric name itself, which is fine
-  when one Prometheus serves exactly one PVE cluster but silently wrong the moment it serves more than
-  one (or anything else emitting a same-named metric): `vmid` is only unique *within* a cluster, so an
-  unscoped query would sum a same-numbered vmid from somewhere else into this one's load without any
-  error or warning. Add a matcher inside the vector selector, before `rate()`, in this order:
+- **Scope every query to this cluster's own nodes.** None of the expressions above restrict which
+  series they match beyond the metric name itself, which is fine when one Prometheus serves exactly
+  one PVE cluster but silently wrong the moment it serves more than one (or anything else emitting a
+  same-named metric): `vmid` is only unique *within* a cluster, so an unscoped query would sum a
+  same-numbered vmid from somewhere else into this one's load without any error or warning. Add a
+  matcher inside the vector selector, before `rate()`, in this order:
   1. `metrics.extra_selector`, verbatim, when the operator set one — needed when Telegraf's tagging
-     doesn't carry PVE's own node name verbatim, or the restriction needed is something else the two
-     auto-derived tiers below don't cover.
-  2. `<metrics.labels.cluster>="<name>"`, as long as `metrics.labels.cluster` names a real label — an
-     exact match, not an alternation, against this cluster's own name (`GET /cluster/status`, §3.5).
-     This is the default tier, not an opt-in one: `metrics.labels.cluster` itself defaults to the
-     literal `"cluster"`, a tag this project's deployments carry as standard practice. Set it to
-     `null` to opt back out on a Prometheus that genuinely has no such label — `verify-metrics`'s own
-     report of which cluster-naming label values it actually sees across your metrics (below) is how
-     an operator confirms which is true, rather than guessing; when it sees none at all *and*
-     `metrics.labels.cluster` is still set (the default included), that report is a warning, not
-     silence — this default tier would otherwise scope every load query to a label nothing carries,
-     matching zero series (REVIEW.md W-06). A run-time symptom of the same mismatch — a resolved
-     selector that matches literally nothing across all six raw queries — is also named explicitly,
-     as "the resolved query filter matched no series at all", rather than being reported as an idle
-     group (`loadmodel.compute_group_load`'s `no_series_matched`, REVIEW.md W-07). A denied
-     `GET /cluster/status` (missing `Sys.Audit`) does not fail the run either: it logs a warning and
-     falls through to tier 3 (REVIEW.md W-08).
-  3. `<metrics.labels.node>=~"pve01|pve02|..."` otherwise, built from the cluster's own node list
+     doesn't carry PVE's own node name verbatim, the operator wants to scope by a cluster-naming tag
+     their own deployment happens to carry, or the restriction needed is something else entirely.
+  2. `<metrics.labels.node>=~"pve01|pve02|..."` otherwise, built from the cluster's own node list
      (`GET /nodes`, §3.5) every run rather than hand-maintained, so a node added to the cluster is
-     covered with no config edit. This was the only auto-derived tier before `metrics.labels.cluster`
-     existed, and is what a config gets by setting that key to `null`, or when tier 2's lookup itself
-     finds no name.
+     covered with no config edit. This is the default tier.
 
-  `pve-storage-drs verify-metrics` applies only tier 1, never tiers 2 or 3: it is deliberately
-  independent of the PVE API, so it has no node list or live cluster name to build either from. What
-  it does instead is scan every configured metric's entire result set (not just the one sample series
-  it already reports per metric) for whatever `metrics.labels.cluster` names — falling back to the
-  literal `"cluster"` even when that key is `null`, purely as an unconditional discovery probe — and
-  report every distinct value found, which is how an operator confirms the default tag is really
-  there, or decides to opt out.
+  A run-time symptom of a scoping mismatch (whichever tier produced it) — a resolved selector that
+  matches literally nothing across all six raw queries — is named explicitly, as "the resolved query
+  filter matched no series at all", rather than being reported as an idle group
+  (`loadmodel.compute_group_load`'s `no_series_matched`, REVIEW.md W-07).
+
+  `pve-storage-drs verify-metrics` applies only tier 1, never tier 2: it is deliberately independent
+  of the PVE API, so it has no node list to build tier 2 from.
+
+  An earlier revision of this section had a middle tier here, matching a `cluster`-naming label
+  (`metrics.labels.cluster`, defaulting to the literal `"cluster"`) against this cluster's own name
+  (`GET /cluster/status`, needing `Sys.Audit` at `/`). It was removed: the premise that this project's
+  deployments carry such a label "as standard practice" was an operator's own mistaken assumption, not
+  a real convention or a Prometheus finding — there never was such a tag, and the tier existed only on
+  that premise. Use `metrics.extra_selector` for a cluster-naming (or any other) label a deployment
+  actually has.
 
 ### 3.5 PVE API
 
@@ -440,7 +431,6 @@ Read path:
 | `GET /cluster/resources?type=storage` | Storage inventory, `shared` flag, used/total per node |
 | `GET /storage` | Storage definitions: type, `content`, `shared`, `nodes` restriction, **and** per-storage `saferemove` / `saferemove_throughput` — see §7.1 and §9.3 |
 | `GET /nodes` | Every node in the cluster, by name — §3.4's PromQL node-scoping filter, independent of which nodes currently host a VM or shared storage |
-| `GET /cluster/status` | This cluster's own name (the one `type: "cluster"` entry) — §3.4's cluster-scoping filter, called on every run unless `metrics.labels.cluster` is set to `null` |
 | `GET /nodes/{node}/qemu/{vmid}/config` | **disk → storage mapping and size** |
 | `GET /nodes/{node}/storage/{storage}/status` | authoritative `total`/`used`/`avail` |
 | `GET /nodes/{node}/storage/{storage}/content` | per-volume real allocated sizes, owner vmid |
@@ -541,14 +531,13 @@ fetching dominates run time. Specify:
   optimization is real but smaller than a naive reading suggests.
 
 Expected call count per run: `4 + 2·|VMs considered| + 2·|storages| + |extra content pairs|` — four
-cluster-wide calls (VM inventory, storage inventory, storage definitions, and `GET /cluster/status`
-for tier 2's cluster name, §3.4, unless `metrics.labels.cluster` is `null`), two per considered VM
+cluster-wide calls (VM inventory, storage inventory, storage definitions, and `GET /nodes` for §3.4's
+default node-scoping filter, skipped only when `metrics.extra_selector` is set), two per considered VM
 (config, which also carries `lock` per §9.3's pseudocode so no separate `/status/current` call is
-needed at planning time; and `/snapshot`, per §3.7), and two per storage (`status`, `content`). The
-node-list tier's own `GET /nodes` adds one more cluster-wide call whenever it is used (tier 2 opted
-out or its lookup found no name). `|extra content pairs|` is the amplification the managed-disk
-own-VM-node size fetch adds (below, "The actual mechanism..."): one additional `content` call per
-distinct `(node, storage)` pair a managed disk's VM runs on, beyond the per-storage active-node pick
+needed at planning time; and `/snapshot`, per §3.7), and two per storage (`status`, `content`).
+`|extra content pairs|` is the amplification the managed-disk own-VM-node size fetch adds (below,
+"The actual mechanism..."): one additional `content` call per distinct `(node, storage)` pair a
+managed disk's VM runs on, beyond the per-storage active-node pick
 already counted above — deduplicated by `_needed_content_node_pairs()`, so it is bounded by distinct
 nodes hosting managed disks, not by VM count, but is otherwise unbounded above (worst case
 `|nodes| · |storages|`) and grows with how spread out VMs are across nodes, not with cluster size
