@@ -16,11 +16,11 @@ and is replayed by the engine with no network access at all:
 pve-storage-drs --replay tests/corpus/<bundle-name> plan --json
 ```
 
-**Status: `collect-testdata` and `--replay` are specified (section 16) and not yet
-implemented** — phase 10 of section 12. This directory and this file exist ahead of the
-code so that the place to put a bundle, and the terms on which one is accepted, are
-written down before the first one arrives. An empty corpus is a clean pass: the test suite
-must be green on a fresh clone with no bundles in it.
+**Status: implemented** — phase 10 of section 12, section 16 is the specification.
+`bzed-dev-cluster-24h` is the first bundle, collected from the project's own dev cluster
+(see `bzed-dev-cluster-24h.submission.yaml`). An empty corpus is still a clean pass: the
+test suite is green on a fresh clone even with no bundles in it, so a bundle here is
+additional coverage, not a dependency.
 
 ## Why real bundles
 
