@@ -1,0 +1,68 @@
+[
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 489208,
+    "volid": "stor-9034bbcd:vm-489208-disk-0"
+  },
+  {
+    "format": "raw",
+    "size": 161061273600,
+    "vmid": 489208,
+    "volid": "stor-9034bbcd:vm-489208-disk-1"
+  },
+  {
+    "format": "raw",
+    "size": 37580963840,
+    "vmid": 572614,
+    "volid": "stor-9034bbcd:vm-572614-disk-0"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 572614,
+    "volid": "stor-9034bbcd:vm-572614-disk-1"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 60204,
+    "volid": "stor-9034bbcd:vm-60204-disk-0"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 60204,
+    "volid": "stor-9034bbcd:vm-60204-disk-1"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 60204,
+    "volid": "stor-9034bbcd:vm-60204-disk-2"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 60204,
+    "volid": "stor-9034bbcd:vm-60204-disk-3"
+  },
+  {
+    "format": "raw",
+    "size": 1048576,
+    "vmid": 60204,
+    "volid": "stor-9034bbcd:vm-60204-disk-4"
+  },
+  {
+    "format": "raw",
+    "size": 26843545600,
+    "vmid": 92831,
+    "volid": "stor-9034bbcd:vm-92831-disk-0"
+  },
+  {
+    "format": "raw",
+    "size": 1048576,
+    "vmid": 92831,
+    "volid": "stor-9034bbcd:vm-92831-disk-1"
+  }
+]

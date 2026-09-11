@@ -1,0 +1,82 @@
+{
+  "bundle": "bzed-dev-cluster-24h",
+  "cases": [
+    {
+      "report": {
+        "groups": [
+          {
+            "after_spread": null,
+            "before_spread": 0.04868579173307583,
+            "deadlock_message": null,
+            "deadlocked": [],
+            "gate": {
+              "act": false,
+              "drift_fraction": null,
+              "imbalance_fraction": 0.04868579173307583,
+              "reason": "imbalance 4.9% is below gates.imbalance_threshold (20.0%)",
+              "reserve_override": false
+            },
+            "load_error": null,
+            "moves": [],
+            "name": "group-448ef164",
+            "payback": null,
+            "solver_backend": null,
+            "solver_status": null
+          }
+        ],
+        "warnings": []
+      },
+      "skipped": null,
+      "variant": {
+        "beta": 0.0,
+        "forecast_model": "quantile",
+        "solver_backend": "heuristic",
+        "spread_metric": "l1"
+      }
+    },
+    {
+      "report": {
+        "groups": [
+          {
+            "after_spread": null,
+            "before_spread": 0.04868579173307583,
+            "deadlock_message": null,
+            "deadlocked": [],
+            "gate": {
+              "act": false,
+              "drift_fraction": null,
+              "imbalance_fraction": 0.04868579173307583,
+              "reason": "imbalance 4.9% is below gates.imbalance_threshold (20.0%)",
+              "reserve_override": false
+            },
+            "load_error": null,
+            "moves": [],
+            "name": "group-448ef164",
+            "payback": null,
+            "solver_backend": null,
+            "solver_status": null
+          }
+        ],
+        "warnings": []
+      },
+      "skipped": null,
+      "variant": {
+        "beta": 0.0,
+        "forecast_model": "quantile",
+        "solver_backend": "cbc",
+        "spread_metric": "l1"
+      }
+    },
+    {
+      "report": null,
+      "skipped": "cpsat not installed",
+      "variant": {
+        "beta": 0.0,
+        "forecast_model": "quantile",
+        "solver_backend": "cpsat",
+        "spread_metric": "l1"
+      }
+    }
+  ],
+  "schema_version": 1
+}
