@@ -384,11 +384,20 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
 
 
 def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> list[str]:
-    """Section 16.6, check 3: the MILP must never do worse (more moves for
-    the same spread improvement is treated as "worse" here, in the absence
-    of the raw objective scalar in the JSON report) than the heuristic on
-    the same variant otherwise."""
+    """Section 16.6, check 3: the MILP must never reach a worse spread than
+    the heuristic on the same variant. Compares each group's own
+    ``after_spread`` (``plan --json``'s already-computed post-plan spread
+    fraction, lower is better) directly, group by group -- *not* move
+    count. Move count is not a valid proxy for "worse": at
+    objective.beta_move_count=0.0 moves cost nothing, so a MILP reaching a
+    far better spread with more moves than the heuristic is exactly the
+    outcome this check exists to want, not flag. (Found for real on a 7-day
+    holt_winters capture -- tests/corpus/bzed-dev-cluster-7d-holt-winters --
+    where the previous move-count check flagged cpsat for using 13 moves
+    against the heuristic's 4, when cpsat's after_spread was ~0.00002
+    against the heuristic's 0.41: strictly better, not worse.)"""
     violations = []
+    tolerance = 1e-6
     by_key: dict[tuple[Any, ...], dict[str, VariantResult]] = {}
     for result in results:
         if result.report is None:
@@ -407,15 +416,25 @@ def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> lis
                 continue
             if heuristic.report is None or milp.report is None:
                 continue
-            heuristic_groups: list[dict[str, Any]] = heuristic.report["groups"]
-            milp_groups: list[dict[str, Any]] = milp.report["groups"]
-            h_moves = sum(len(g["moves"]) for g in heuristic_groups)
-            m_moves = sum(len(g["moves"]) for g in milp_groups)
-            if m_moves > h_moves:
-                violations.append(
-                    f"{bundle.name} {key}: {backend_name} used more moves ({m_moves}) than "
-                    f"the heuristic ({h_moves}) -- the MILP should never do worse"
-                )
+            heuristic_by_name = {g["name"]: g for g in heuristic.report["groups"]}
+            milp_by_name = {g["name"]: g for g in milp.report["groups"]}
+            for name, h_group in heuristic_by_name.items():
+                m_group = milp_by_name.get(name)
+                if m_group is None:
+                    continue
+                h_spread = h_group.get("after_spread")
+                m_spread = m_group.get("after_spread")
+                # Either side not having acted (after_spread is only set
+                # once a plan's final_breakdown exists) leaves nothing
+                # comparable -- not a violation, just not this check's case.
+                if h_spread is None or m_spread is None:
+                    continue
+                if m_spread > h_spread + tolerance:
+                    violations.append(
+                        f"{bundle.name} {key} group {name!r}: {backend_name}'s after_spread "
+                        f"({m_spread:g}) is worse than the heuristic's ({h_spread:g}) -- "
+                        "the MILP should never do worse"
+                    )
     return violations
 
 
