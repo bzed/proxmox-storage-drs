@@ -550,6 +550,16 @@ def _label_value_for(label_kind: str, value: str, mapper: Mapper) -> str | None:
 def _anonymize_prometheus_series(
     result: list[dict[str, Any]], vmid_label: str, device_label: str, mapper: Mapper
 ) -> list[dict[str, Any]]:
+    """Anonymizes a Prometheus ``result`` list -- both the instant-query
+    shape (one ``"value": [ts, v]`` pair) and the range-query shape (a
+    ``"values": [[ts, v], ...]`` matrix). Every sample timestamp is rebased
+    through ``mapper.rebase_timestamp()``, the same offset the range file's
+    own ``start``/``end`` go through -- a live capture against the dev
+    cluster found this the hard way: leaving the *points* on the real
+    clock while only the file's start/end were rebased meant a replayed
+    request's (rebased) window and the stored (real) sample timestamps
+    never overlapped at all, so every trim came back empty and every
+    disk's coverage silently read 0%."""
     out = []
     for series in result:
         labels = series.get("metric", {})
@@ -565,6 +575,13 @@ def _anonymize_prometheus_series(
             continue
         new_series = dict(series)
         new_series["metric"] = {vmid_label: str(new_vmid), device_label: device}
+        if "value" in series:
+            ts, value = series["value"]
+            new_series["value"] = [mapper.rebase_timestamp(float(ts)), value]
+        if "values" in series:
+            new_series["values"] = [
+                [mapper.rebase_timestamp(float(ts)), value] for ts, value in series["values"]
+            ]
         out.append(new_series)
     return sorted(out, key=lambda s: sorted(s["metric"].items()))
 
