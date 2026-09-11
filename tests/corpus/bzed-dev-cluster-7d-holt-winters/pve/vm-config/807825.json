@@ -1,0 +1,6 @@
+{
+  "ide2": "none,media=cdrom",
+  "scsi0": "stor-593d0eeb:vm-807825-disk-0,size=50G",
+  "scsi1": "stor-593d0eeb:vm-807825-disk-1,size=60G",
+  "scsi2": "stor-593d0eeb:vm-807825-disk-2,size=100G"
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "node": "node-eb330724",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 60204
+  },
+  {
+    "node": "node-eb330724",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 92831
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 156937
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 204608
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 244122
+  },
+  {
+    "node": "node-7439cb15",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 362759
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 389722
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 393932
+  },
+  {
+    "node": "node-7439cb15",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 489208
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 509010
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 572614
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 589980
+  },
+  {
+    "node": "node-7439cb15",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 612603
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 738059
+  },
+  {
+    "node": "node-9bcf256f",
+    "status": "running",
+    "type": "qemu",
+    "vmid": 807825
+  }
+]

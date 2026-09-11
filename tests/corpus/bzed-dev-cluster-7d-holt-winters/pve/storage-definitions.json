@@ -1,0 +1,37 @@
+[
+  {
+    "content": "backup",
+    "shared": 1,
+    "storage": "stor-3a534dd6",
+    "type": "pbs"
+  },
+  {
+    "content": "snippets,rootdir,images,vztmpl,backup,iso",
+    "storage": "stor-5675eb7b",
+    "type": "dir"
+  },
+  {
+    "content": "rootdir,images",
+    "shared": 1,
+    "storage": "stor-593d0eeb",
+    "type": "rbd"
+  },
+  {
+    "content": "images,rootdir",
+    "shared": 1,
+    "storage": "stor-9034bbcd",
+    "type": "rbd"
+  },
+  {
+    "content": "rootdir,images",
+    "shared": 1,
+    "storage": "stor-b727a76b",
+    "type": "rbd"
+  },
+  {
+    "content": "images,rootdir",
+    "nodes": "node-7439cb15,node-9bcf256f,node-eb330724",
+    "storage": "stor-e9a2b886",
+    "type": "zfspool"
+  }
+]
