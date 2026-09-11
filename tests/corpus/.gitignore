@@ -1,0 +1,8 @@
+# Bundles are committed as unpacked directories (see README.md); the tarball
+# `collect-testdata` writes alongside one is for sending, not for git.
+*.tar.gz
+*.tar.zst
+
+# Scratch space for bundles being reviewed before they are either committed or
+# discarded, and for anything too large to commit (point DRS_CORPUS_DIR at it).
+local/
