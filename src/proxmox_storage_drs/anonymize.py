@@ -315,6 +315,14 @@ class Mapper:
             self.dropped_records += 1
         return result
 
+    def registered_vmids(self) -> MappingType[int, int]:
+        """Every original vmid -> pseudonym pair registered so far. Exposed
+        (read-only) for the one caller outside this class with a legitimate
+        need to walk the whole mapping rather than look up one vmid at a
+        time: redacting a free-text message that might embed a real vmid
+        anywhere in it (``collect._redact_finding_message``)."""
+        return dict(self._vmid_map)
+
     # ------------------------------------------------------------ simple
 
     def node(self, name: str) -> str:

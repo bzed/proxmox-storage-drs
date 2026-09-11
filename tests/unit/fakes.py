@@ -54,3 +54,56 @@ class FakeProxmoxResource:
 
 def fake_api(responses: dict[str, Any], error: BaseException | None = None) -> FakeProxmoxResource:
     return FakeProxmoxResource(responses=responses, calls=[], error=error)
+
+
+@dataclass
+class FakeQueryResponse:
+    """Matches ``metrics._ResponseLike``: ``.status_code`` and ``.json()``."""
+
+    status_code: int = 200
+    payload: Any = field(default_factory=dict)
+    text: str = ""
+
+    def json(self) -> Any:
+        return self.payload
+
+
+@dataclass
+class FakePrometheusSession:
+    """A ``metrics._SessionLike`` double capable of answering *many*
+    distinct queries against one endpoint path -- ``FakeSession`` in
+    ``test_metrics.py`` answers one canned value per path, which is not
+    enough for ``collect.py``'s tests, where every one of the six raw
+    metrics' quantile/range queries needs its own response. ``answers`` maps
+    a path (matched by suffix, as ``FakeSession`` does) to either a fixed
+    payload or a callable ``params -> payload``, so one entry can vary its
+    answer by ``params["query"]``/``params["start"]``/etc.
+    """
+
+    answers: dict[str, Any]
+    calls: list[tuple[str, dict[str, str]]] = field(default_factory=list)
+
+    def get(
+        self,
+        url: str,
+        params: dict[str, str],
+        timeout: float,
+        auth: object,
+        headers: dict[str, str],
+    ) -> FakeQueryResponse:
+        del timeout, auth, headers
+        for path, answer in self.answers.items():
+            if url.endswith(path):
+                self.calls.append((path, dict(params)))
+                payload = answer(params) if callable(answer) else answer
+                if isinstance(payload, BaseException):
+                    raise payload
+                return FakeQueryResponse(200, {"status": "success", "data": payload})
+        self.calls.append((url, dict(params)))
+        # No entry matched: an empty-but-valid default, shaped for whichever
+        # endpoint this is -- a bare list for label_values, an empty
+        # `result` for query/query_range -- so a collect.py/replay.py test
+        # that only cares about a handful of specific queries does not have
+        # to enumerate every internal call verify_metrics() itself makes.
+        default: Any = [] if "/label/" in url else {"result": []}
+        return FakeQueryResponse(200, {"status": "success", "data": default})

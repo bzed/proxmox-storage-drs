@@ -1,0 +1,342 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""collect.py: capture, anonymize and write a diagnostic bundle. See
+IMPLEMENTATION_PLAN.md section 16.
+
+No test here talks to a real PVE API or Prometheus (.agents/testing.md):
+``tests/unit/fakes.py``'s ``fake_api``/``FakePrometheusSession`` stand in for
+both, exactly as ``test_topology.py``/``test_metrics.py`` already do.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+from proxmox_storage_drs import collect
+from proxmox_storage_drs import config as config_module
+from proxmox_storage_drs.exceptions import BundleError, PveApiError
+from proxmox_storage_drs.metrics import PrometheusClient
+from proxmox_storage_drs.pve import PveClient
+from tests.unit.fakes import FakePrometheusSession, fake_api
+
+CAPTURE_NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)  # an arbitrary Tuesday noon
+
+STORAGE_DEFS = [
+    {"storage": "san-a", "type": "rbd", "shared": 1, "content": "images,rootdir"},
+    {"storage": "san-b", "type": "rbd", "shared": 1, "content": "images,rootdir"},
+]
+STORAGE_RESOURCES = [
+    {"storage": "san-a", "node": "node1", "status": "available"},
+    {"storage": "san-b", "node": "node1", "status": "available"},
+]
+STORAGE_STATUS = {
+    "san-a": {"total": 10 * (1 << 40), "used": 3 * (1 << 40)},
+    "san-b": {"total": 5 * (1 << 40), "used": 1 * (1 << 40)},
+}
+VM_RESOURCES = [
+    {"vmid": 101, "node": "node1", "status": "running", "type": "qemu", "tags": "", "name": "db-01"}
+]
+VM_CONFIGS = {101: {"name": "db-01", "scsi0": "san-a:vm-101-disk-0,size=10G"}}
+VM_SNAPSHOTS: dict[int, list[dict[str, Any]]] = {101: [{"name": "current"}]}
+CONTENT_SAN_A = [
+    {"volid": "san-a:vm-101-disk-0", "vmid": 101, "size": 10 * (1 << 30), "format": "raw"}
+]
+CONTENT_SAN_B: list[dict[str, Any]] = []
+
+METRIC_NAMES = [
+    "blockstat_rd_operations",
+    "blockstat_wr_operations",
+    "blockstat_rd_bytes",
+    "blockstat_wr_bytes",
+    "blockstat_rd_total_time_ns",
+    "blockstat_wr_total_time_ns",
+]
+
+
+def make_config(tmp_path: Path, **overrides: Any) -> config_module.ResolvedConfig:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    data: dict[str, Any] = {
+        "schema_version": 1,
+        "proxmox": {"host": "pve.example.com", "auth": {"username": "drs@pve"}},
+        "prometheus": {"url": "http://localhost:9090"},
+        "groups": [{"name": "g1", "storages": [{"id": "san-a"}, {"id": "san-b"}]}],
+        # Never the real /var/lib/pve-storage-drs default in a test.
+        "support": {"salt_path": str(tmp_path / "salt")},
+    }
+    data.update(overrides)
+    path = tmp_path / "drs.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return config_module.load_config(str(path), env={})
+
+
+def make_pve_client(error_on: str | None = None) -> PveClient:
+    responses: dict[str, Any] = {
+        "cluster/resources": lambda type: (VM_RESOURCES if type == "vm" else STORAGE_RESOURCES),
+        "storage": STORAGE_DEFS,
+        "nodes": [{"node": "node1"}],
+        "cluster/tasks": [],
+        "nodes/node1/storage/san-a/status": STORAGE_STATUS["san-a"],
+        "nodes/node1/storage/san-b/status": STORAGE_STATUS["san-b"],
+        "nodes/node1/storage/san-a/content": CONTENT_SAN_A,
+        "nodes/node1/storage/san-b/content": CONTENT_SAN_B,
+        "nodes/node1/qemu/101/config": VM_CONFIGS[101],
+        "nodes/node1/qemu/101/snapshot": VM_SNAPSHOTS[101],
+        "nodes/node1/qemu/101/status/current": {},
+    }
+    error = PveApiError("simulated failure") if error_on else None
+    api = fake_api(responses, error=None)
+    client = PveClient(api)
+    if error_on:
+        # Only the named path fails -- swap that one response for the error
+        # by wrapping fake_api with a second, selectively-failing client.
+        failing_responses = dict(responses)
+        failing_responses[error_on] = _Raise(error)
+        client = PveClient(fake_api(failing_responses))
+    return client
+
+
+class _Raise:
+    def __init__(self, exc: BaseException | None) -> None:
+        self._exc = exc
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        raise self._exc  # type: ignore[misc]
+
+
+def _instant_answer(params: dict[str, str]) -> dict[str, Any]:
+    query = params["query"]
+    if "blockstat_rd_total_time_ns" in query and "quantile_over_time" in query:
+        return {
+            "result": [
+                {"metric": {"vmid": "101", "instance": "scsi0"}, "value": [1700000000, "1.5"]}
+            ]
+        }
+    return {"result": []}
+
+
+def _range_answer(params: dict[str, str]) -> dict[str, Any]:
+    query = params["query"]
+    if "blockstat_rd_total_time_ns" in query:
+        return {
+            "result": [
+                {
+                    "metric": {"vmid": "101", "instance": "scsi0"},
+                    "values": [[1700000000.0, "1.0"], [1700000300.0, "2.0"]],
+                }
+            ]
+        }
+    return {"result": []}
+
+
+def make_prometheus_client() -> PrometheusClient:
+    session = FakePrometheusSession(
+        answers={
+            "label/__name__/values": METRIC_NAMES,
+            "label/vmid/values": ["101"],
+            "label/instance/values": ["scsi0"],
+            "label/nodename/values": ["node1"],
+            "api/v1/query_range": _range_answer,
+            "api/v1/query": _instant_answer,
+        }
+    )
+    return PrometheusClient(config_module.PrometheusConfig(url="http://localhost:9090"), session)
+
+
+def capture(tmp_path: Path, **config_overrides: Any) -> collect.Bundle:
+    resolved = make_config(tmp_path, **config_overrides)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    return collect.capture_bundle(
+        make_pve_client(), make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+
+
+# --------------------------------------------------------------------- estimate
+
+
+def test_capture_range_seconds_auto_is_the_union_maximum(tmp_path: Path) -> None:
+    resolved = make_config(
+        tmp_path,
+        window={"lookback": "24h"},
+        forecast={
+            "model": "quantile",
+            "seasonal_lookback_days": 7,
+            "holt_winters": {"seasonal_periods": 288},
+        },
+    )
+    seconds = collect.capture_range_seconds(resolved.config, None)
+    assert seconds == 7 * 86400.0  # seasonal_lookback_days dominates here
+
+
+def test_capture_range_seconds_override_wins(tmp_path: Path) -> None:
+    resolved = make_config(tmp_path)
+    assert collect.capture_range_seconds(resolved.config, 3600.0) == 3600.0
+
+
+# ----------------------------------------------------------------------- capture
+
+
+def test_capture_bundle_produces_anonymized_pve_files(tmp_path: Path) -> None:
+    bundle = capture(tmp_path)
+    assert bundle.ok
+
+    vm_resources = bundle.pve_files["cluster-resources-vm.json"]
+    assert len(vm_resources) == 1
+    assert vm_resources[0]["vmid"] != 101
+    assert "name" not in vm_resources[0]  # free text dropped
+
+    storage_defs = bundle.pve_files["storage-definitions.json"]
+    storage_ids = {d["storage"] for d in storage_defs}
+    assert "san-a" not in storage_ids and "san-b" not in storage_ids
+    assert all(s.startswith("stor-") for s in storage_ids)
+
+    vm_config_files = [k for k in bundle.pve_files if k.startswith("vm-config/")]
+    assert len(vm_config_files) == 1
+    vm_config = bundle.pve_files[vm_config_files[0]]
+    assert "scsi0" in vm_config
+    assert vm_config["scsi0"].startswith("stor-")
+    assert "san-a" not in vm_config["scsi0"]
+
+
+def test_capture_bundle_config_yaml_drops_credentials(tmp_path: Path) -> None:
+    bundle = capture(tmp_path)
+    assert "host" not in bundle.config_yaml["proxmox"]
+    assert bundle.config_yaml["prometheus"] == {}
+    group_names = [g["name"] for g in bundle.config_yaml["groups"]]
+    assert group_names == [g for g in group_names if g.startswith("group-")]
+    storage_ids = [s["id"] for group in bundle.config_yaml["groups"] for s in group["storages"]]
+    assert all(s.startswith("stor-") for s in storage_ids)
+
+
+def test_capture_bundle_prometheus_series_vmid_is_remapped(tmp_path: Path) -> None:
+    bundle = capture(tmp_path)
+    range_files = [v for k, v in bundle.prometheus_files.items() if k.startswith("range/")]
+    populated = [f for f in range_files if f["result"]]
+    assert populated, "expected at least one non-empty range capture"
+    series = populated[0]["result"][0]
+    assert series["metric"]["vmid"] != "101"
+    assert series["metric"]["instance"] == "scsi0"  # device passes through unchanged
+
+
+def test_capture_bundle_no_series_skips_the_forecasting_range_series(tmp_path: Path) -> None:
+    """--no-series must skip the big, per-group superset range captures --
+    it does not (and need not) suppress verify_metrics()'s own two smaller,
+    fixed-window range probes (observed-spacing, coverage), neither of
+    which is chunked and neither of which relates to support.capture_range."""
+    resolved = make_config(tmp_path)
+    capture_range = collect.capture_range_seconds(resolved.config, None)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"), no_series=True)
+    bundle = collect.capture_bundle(
+        make_pve_client(), make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    range_files = [v for k, v in bundle.prometheus_files.items() if k.startswith("range/")]
+    assert range_files  # verify_metrics' own probes are still captured
+    for f in range_files:
+        assert f["end"] - f["start"] < capture_range
+    assert bundle.manifest["capture"]["no_series"] is True
+
+
+def test_capture_bundle_refuses_over_max_series_points(tmp_path: Path) -> None:
+    resolved = make_config(tmp_path, support={"max_series_points": 1}, window={"lookback": "24h"})
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    with pytest.raises(BundleError, match="max_series_points"):
+        collect.capture_bundle(
+            make_pve_client(), make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+        )
+
+
+def test_capture_bundle_records_pve_failure_without_aborting(tmp_path: Path) -> None:
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    client = make_pve_client(error_on="cluster/tasks")
+    bundle = collect.capture_bundle(
+        client, make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    assert not bundle.ok
+    failed = [c for c in bundle.manifest["calls"] if c["outcome"] == "http_error"]
+    assert failed
+    assert any("cluster_tasks" in c["description"] for c in failed)
+
+
+def test_capture_bundle_manifest_never_carries_real_date(tmp_path: Path) -> None:
+    bundle = capture(tmp_path)
+    manifest_text = json.dumps(bundle.manifest)
+    assert "2026" not in manifest_text
+    assert "synthetic_now_epoch" in bundle.manifest["capture"]
+
+
+# --------------------------------------------------------------------- writer
+
+
+def test_write_bundle_dir_is_deterministic(tmp_path: Path) -> None:
+    # Same salt for both captures -- otherwise the pseudonyms themselves
+    # would differ and nothing else could possibly match either.
+    shared_salt = tmp_path / "shared-salt"
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    bundle_a = capture(tmp_path / "a", support={"salt_path": str(shared_salt)})
+    bundle_b = capture(tmp_path / "b", support={"salt_path": str(shared_salt)})
+
+    dir_a = tmp_path / "out-a"
+    dir_b = tmp_path / "out-b"
+    collect.write_bundle_dir(dir_a, bundle_a)
+    collect.write_bundle_dir(dir_b, bundle_b)
+
+    files_a = sorted(p.relative_to(dir_a) for p in dir_a.rglob("*") if p.is_file())
+    files_b = sorted(p.relative_to(dir_b) for p in dir_b.rglob("*") if p.is_file())
+    assert files_a == files_b
+    for rel in files_a:
+        assert (dir_a / rel).read_bytes() == (dir_b / rel).read_bytes(), rel
+
+
+def test_write_bundle_dir_writes_sha256sums(tmp_path: Path) -> None:
+    bundle = capture(tmp_path)
+    out = tmp_path / "out"
+    collect.write_bundle_dir(out, bundle)
+    assert (out / "manifest.json").is_file()
+    assert (out / "config.yaml").is_file()
+    assert (out / "findings.json").is_file()
+    shasums = (out / "SHA256SUMS").read_text(encoding="utf-8")
+    assert "manifest.json" in shasums
+    assert "config.yaml" in shasums
+
+
+def test_write_tarball_produces_a_gzip_file(tmp_path: Path) -> None:
+    bundle = capture(tmp_path)
+    out = tmp_path / "out"
+    collect.write_bundle_dir(out, bundle)
+    tar_path = tmp_path / "out.tar.gz"
+    collect.write_tarball(out, tar_path)
+    assert tar_path.is_file()
+    with open(tar_path, "rb") as fh:
+        magic = fh.read(2)
+    assert magic == b"\x1f\x8b"  # gzip magic bytes
+
+
+def test_write_tarball_is_deterministic(tmp_path: Path) -> None:
+    bundle = capture(tmp_path)
+    out = tmp_path / "out"
+    collect.write_bundle_dir(out, bundle)
+    tar1 = tmp_path / "one.tar.gz"
+    tar2 = tmp_path / "two.tar.gz"
+    collect.write_tarball(out, tar1)
+    collect.write_tarball(out, tar2)
+    assert tar1.read_bytes() == tar2.read_bytes()
+
+
+# ----------------------------------------------------------------- hashing
+
+
+def test_hash_query_text_is_deterministic() -> None:
+    assert collect.hash_query_text("foo") == collect.hash_query_text("foo")
+    assert collect.hash_query_text("foo") != collect.hash_query_text("bar")
+
+
+def test_hash_label_name_is_deterministic() -> None:
+    assert collect.hash_label_name("vmid") == collect.hash_label_name("vmid")
+    assert collect.hash_label_name("vmid") != collect.hash_label_name("device")
