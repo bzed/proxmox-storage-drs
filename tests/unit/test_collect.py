@@ -11,6 +11,7 @@ both, exactly as ``test_topology.py``/``test_metrics.py`` already do.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -264,6 +265,24 @@ def test_capture_bundle_queries_the_real_prometheus_with_real_node_names(
     for payload in bundle.prometheus_files.values():
         query_text = payload.get("query", "")
         assert "node1" not in query_text
+
+
+def test_capture_bundle_manifest_call_log_is_anonymized(tmp_path: Path) -> None:
+    """A live capture against the dev cluster found this one directly: the
+    recording clients build each call's description/detail from the *real*
+    call they wrap (real node name, real storage id, real vmid) since the
+    call log exists to describe what happened, not to feed replay.py --
+    and, unlike every other file in the bundle, nothing was redacting it
+    before it reached manifest.json. Section 16.3's governing rule applies
+    to this free text exactly as it does to structured fields."""
+    bundle = capture(tmp_path)
+    manifest_text = json.dumps(bundle.manifest)
+    for real in ("node1", "san-a", "san-b"):
+        assert real not in manifest_text
+    assert not re.search(r"\b101\b", manifest_text)
+    descriptions = [c["description"] for c in bundle.manifest["calls"]]
+    assert any("node-" in d for d in descriptions)
+    assert any("stor-" in d for d in descriptions)
 
 
 def test_capture_bundle_config_yaml_drops_credentials(tmp_path: Path) -> None:

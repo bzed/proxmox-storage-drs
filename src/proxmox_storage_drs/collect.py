@@ -1133,24 +1133,29 @@ def _stitch_range_captures(
 # ---------------------------------------------------------------- findings
 
 
-def _redact_finding_message(message: str, mapper: Mapper) -> str:
-    """``verify_metrics()``'s own finding text is written for a human
-    reading it against their live cluster, so a few of its messages embed
-    real identifiers verbatim (a sample series' own label values, a
-    per-disk coverage gap's ``vmid:device``) -- section 16.3's allowlist
-    principle applies to free text too, not just structured fields. Rather
-    than special-casing every message shape metrics.py might ever produce,
-    this substitutes any *whole* number matching an already-registered real
-    vmid, and any occurrence of a real node name, with its pseudonym --
+def _redact_free_text(text: str, mapper: Mapper) -> str:
+    """``verify_metrics()``'s own finding text, and this module's own call
+    log (built from the *real* PVE/Prometheus calls, since the recording
+    clients run before ``mapper`` exists -- see :func:`capture_bundle`),
+    are both written for a human reading them against a live cluster, so
+    they embed real identifiers verbatim (a sample series' own label
+    values, a per-disk coverage gap's ``vmid:device``, a node/storage name
+    in a call description). Section 16.3's allowlist principle applies to
+    free text too, not just structured fields. Rather than special-casing
+    every message shape the callers might ever produce, this substitutes
+    any *whole* number matching an already-registered real vmid, and any
+    occurrence of a real node or storage name, with its pseudonym --
     broader than strictly necessary (a coincidental vmid-shaped number that
     is not actually a vmid would also get rewritten), which is the safe
     direction to be wrong in for a privacy control."""
-    text = message
+    result = text
     for real_vmid, new_vmid in sorted(mapper.registered_vmids().items()):
-        text = re.sub(rf"\b{real_vmid}\b", str(new_vmid), text)
+        result = re.sub(rf"\b{real_vmid}\b", str(new_vmid), result)
     for real_node in sorted(mapper.known_nodes, key=len, reverse=True):
-        text = text.replace(real_node, mapper.node(real_node))
-    return text
+        result = result.replace(real_node, mapper.node(real_node))
+    for real_storage in sorted(mapper.known_storages, key=len, reverse=True):
+        result = result.replace(real_storage, mapper.storage(real_storage))
+    return result
 
 
 def _findings_to_json(
@@ -1159,8 +1164,7 @@ def _findings_to_json(
     if report is None:
         return {"verify_metrics": None}
     findings = [
-        {"level": f.level, "message": _redact_finding_message(f.message, mapper)}
-        for f in report.findings
+        {"level": f.level, "message": _redact_free_text(f.message, mapper)} for f in report.findings
     ]
     sample_series = {}
     for field_name, labels in report.sample_series.items():
@@ -1410,9 +1414,20 @@ def _build_manifest(
             "dropped_records": mapper.dropped_records,
         },
         "salt_fingerprint": fingerprint,
+        # The recording clients build each description/detail from the
+        # *real* call they wrap (section 16.2's call log exists to show
+        # what kind of query ran and what happened, and predates `mapper`
+        # -- see capture_bundle()), so every entry is redacted here, once,
+        # before it ever reaches manifest.json. This is the same governing
+        # rule as everything else in the bundle: "a field reaches the
+        # bundle only if anonymize.py names it" (section 16.3).
         "calls": sorted(
             (
-                {"description": c.description, "outcome": c.outcome, "detail": c.detail}
+                {
+                    "description": _redact_free_text(c.description, mapper),
+                    "outcome": c.outcome,
+                    "detail": _redact_free_text(c.detail, mapper) if c.detail else c.detail,
+                }
                 for c in log.calls
             ),
             key=lambda c: c["description"],

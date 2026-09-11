@@ -320,7 +320,7 @@ class Mapper:
         (read-only) for the one caller outside this class with a legitimate
         need to walk the whole mapping rather than look up one vmid at a
         time: redacting a free-text message that might embed a real vmid
-        anywhere in it (``collect._redact_finding_message``)."""
+        anywhere in it (``collect._redact_free_text``)."""
         return dict(self._vmid_map)
 
     # ------------------------------------------------------------ simple
