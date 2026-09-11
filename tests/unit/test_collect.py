@@ -203,6 +203,46 @@ def test_capture_bundle_produces_anonymized_pve_files(tmp_path: Path) -> None:
     assert "san-a" not in vm_config["scsi0"]
 
 
+def test_capture_bundle_queries_the_real_prometheus_with_real_node_names(
+    tmp_path: Path,
+) -> None:
+    """A live capture against the dev cluster found this one directly
+    (section 16.3's "the actual mechanism"): querying the real Prometheus
+    with an *anonymized* node selector matches no real series at all --
+    real data only comes back for a selector built from the real node
+    names. The text this module *writes into the bundle* must still be
+    anonymized; the two are deliberately different strings (see
+    collect._anonymize_query_text's own docstring)."""
+    session = FakePrometheusSession(
+        answers={
+            "label/__name__/values": METRIC_NAMES,
+            "label/vmid/values": ["101"],
+            "label/instance/values": ["scsi0"],
+            "label/nodename/values": ["node1"],
+            "api/v1/query_range": _range_answer,
+            "api/v1/query": _instant_answer,
+        }
+    )
+    prom_client = PrometheusClient(
+        config_module.PrometheusConfig(url="http://localhost:9090"), session
+    )
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    bundle = collect.capture_bundle(
+        make_pve_client(), prom_client, resolved, options, now=CAPTURE_NOW
+    )
+
+    # The real HTTP calls this module issued must use the real node name --
+    # otherwise a live capture returns nothing for every query.
+    sent_queries = [params.get("query", "") for _path, params in session.calls]
+    assert any("node1" in q for q in sent_queries if "nodename" in q)
+
+    # What actually reaches the bundle must not.
+    for payload in bundle.prometheus_files.values():
+        query_text = payload.get("query", "")
+        assert "node1" not in query_text
+
+
 def test_capture_bundle_config_yaml_drops_credentials(tmp_path: Path) -> None:
     bundle = capture(tmp_path)
     assert "host" not in bundle.config_yaml["proxmox"]

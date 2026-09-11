@@ -746,6 +746,20 @@ def _label_kind_for(label_name: str, labels: Any) -> str:
     return "device"  # the device label, __name__, or anything else: passes through
 
 
+def _anonymize_query_text(query: str, mapper: Mapper) -> str:
+    """The PromQL text this module *issues* carries real node names (the
+    node-scoping selector, section 3.4) -- it has to, or it matches
+    nothing on the real Prometheus server. The text written into a bundle,
+    and the key every file is hashed under, must not: a real name here
+    would both leak it and never match what a later ``--replay`` run's own
+    (anonymized) selector reconstructs. Longest-first substring
+    replacement, matching :func:`_redact_finding_message`'s own reasoning."""
+    text = query
+    for node in sorted(mapper.known_nodes, key=len, reverse=True):
+        text = text.replace(node, mapper.node(node))
+    return text
+
+
 def _anonymize_captured_prometheus(
     recording_prom: RecordingPrometheusClient, config: Config, mapper: Mapper
 ) -> dict[str, Any]:
@@ -766,14 +780,14 @@ def _anonymize_captured_prometheus(
         # returns the raw `data` dict for these two endpoints (a bare list
         # only for label_values), and both call `.get("result", [])`.
         if path == "/api/v1/query":
-            query = params["query"]
+            query = _anonymize_query_text(params["query"], mapper)
             series = raw_result.get("result", []) if isinstance(raw_result, dict) else []
             files[f"instant/{hash_query_text(query)}.json"] = {
                 "query": query,
                 "result": _anonymize_prometheus_series(series, vmid_label, device_label, mapper),
             }
         elif path == "/api/v1/query_range":
-            query = params["query"]
+            query = _anonymize_query_text(params["query"], mapper)
             series = raw_result.get("result", []) if isinstance(raw_result, dict) else []
             range_captures.setdefault(query, []).append(
                 (
@@ -835,15 +849,18 @@ def _capture_prometheus_files(
         log.record("verify_metrics", "http_error", str(exc))
         verify_report = None
 
-    # Anonymized node names, not the real ones: this selector text is
-    # captured verbatim as part of the stored query (section 16.1 -- every
-    # captured file carries the query text it was recorded for), and a
-    # later --replay run reconstructs the identical selector from
-    # ReplayPveClient.node_names() (the bundle's own, already-anonymized
-    # node list) -- using real names here would both leak them into the
-    # bundle and make every query text fail to match at replay time.
-    anonymized_node_names = sorted(mapper.node(n) for n in known_nodes)
-    node_selector = resolve_node_selector(config.metrics, anonymized_node_names)
+    # The REAL node names: this selector is sent to the real Prometheus
+    # (recording_prom's calls are genuine HTTP requests), and only a
+    # selector built from the cluster's actual node names matches any real
+    # series at all. The query *text* this module writes into the bundle
+    # is anonymized afterwards, in _anonymize_captured_prometheus() below
+    # -- a real name here would leak, and it would also never match what a
+    # later --replay run's own (anonymized) selector reconstructs, but
+    # neither problem is solved by anonymizing the text *before* issuing
+    # it: that just queries the real server for a node name it does not
+    # have, and gets nothing back (the bug a live capture against the dev
+    # cluster actually hit, section 16.3's "the actual mechanism").
+    node_selector = resolve_node_selector(config.metrics, sorted(known_nodes))
     for group in topology.groups:
         _drive_group_series(
             recording_prom,
