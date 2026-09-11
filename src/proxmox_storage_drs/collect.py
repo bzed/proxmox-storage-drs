@@ -924,7 +924,7 @@ def capture_bundle(
     )
 
     findings = _findings_to_json(verify_report, config, mapper)
-    config_yaml = _anonymized_config_dict(config, mapper)
+    config_yaml = _anonymized_config_dict(config, mapper, topology)
     manifest = _build_manifest(
         resolved, topology, estimate, log, salt_fingerprint(salt), capture_now, mapper, options
     )
@@ -1069,33 +1069,38 @@ def _findings_to_json(
 # -------------------------------------------------------------- config.yaml
 
 
-def _anonymized_config_dict(config: Config, mapper: Mapper) -> dict[str, Any]:
+def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) -> dict[str, Any]:
     """Section 16.3's "the configuration in the bundle": credentials and
-    endpoints dropped (not blanked), every identifier mapped, patterns
-    already expanded to literal (anonymized) ids by ``build_topology()``,
-    everything else carried verbatim."""
+    endpoints dropped (not blanked), every identifier mapped, everything
+    else carried verbatim.
+
+    Built from ``topology.groups`` -- the already-expanded, already
+    -resolved :class:`~proxmox_storage_drs.topology.Storage` objects
+    ``build_topology()`` produced -- rather than from ``config.groups``
+    directly: a ``/…/`` storage pattern (section 11.4) cannot survive
+    anonymization as a pattern (its text names real storages), so the
+    bundle carries the literal, anonymized ids it matched instead, with
+    each storage's already-resolved (pattern-default-or-literal-override)
+    ``capability_weight``/``reserve_factor``/``saturation_load`` -- exactly
+    what a replay needs, and none of what would let it re-test the
+    expansion itself, a gap named here rather than discovered later."""
     groups = []
-    for group_cfg in config.groups:
+    for group in topology.groups:
         groups.append(
             {
-                "name": mapper.group(group_cfg.name),
+                "name": mapper.group(group.name),
                 "storages": [
                     {
                         "id": mapper.storage(s.id),
                         "capability_weight": s.capability_weight,
-                        **(
-                            {"reserve_factor": s.reserve_factor}
-                            if s.reserve_factor is not None
-                            else {}
-                        ),
+                        "reserve_factor": s.reserve_factor,
                         **(
                             {"saturation_load": s.saturation_load}
                             if s.saturation_load is not None
                             else {}
                         ),
                     }
-                    for s in group_cfg.storages
-                    if s.id in mapper.known_storages
+                    for s in group.storages
                 ],
             }
         )
