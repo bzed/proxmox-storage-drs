@@ -211,60 +211,44 @@ this is still set to the literal string `instance`.
 
 String, default `nodename`.
 
-The Prometheus label carrying the PVE node name. Also what the
-auto-derived filter below is built from whenever `metrics.labels.cluster`
-is set to `null` or the cluster name lookup finds nothing (section 3.4):
-the tool fetches this cluster's own node list from the PVE API and scopes
-every query to `<this label>=~"<node1>|<node2>|..."`, so a Prometheus
-shared by more than one PVE cluster (or by anything else emitting a
-same-named metric) cannot silently sum in a same-numbered vmid from
-somewhere else. `verify-metrics` never applies this auto-derived filter —
-see `metrics.extra_selector` below.
-
-### `metrics.labels.cluster`
-
-String or `null`, default `"cluster"`.
-
-The Prometheus label carrying a cluster-naming tag — this project's
-deployments carry one as standard practice, hence the non-`null` default,
-unlike `metrics.extra_selector` below. As long as this names a real label,
-`plan`/`show-load`/`apply`/`explain` default to `<this label>="<name>"` —
-the live cluster's own name, fetched from `GET /cluster/status`
-(`PveClient.cluster_name()`, needs `Sys.Audit` at `/` — see "Setting up
-the PVE credential") — as their auto-derived filter, in place of the
-node-list one above, unless `metrics.extra_selector` overrides it. Set
-this to `null` to opt back out on a Prometheus that genuinely carries no
-such label — the node-list filter above takes over instead, unchanged
-from how it always worked. The same fallback also applies automatically
-if the label is configured but the `GET /cluster/status` lookup itself
-comes back empty.
+The Prometheus label carrying the PVE node name — what the auto-derived
+filter below is built from (section 3.4): the tool fetches this cluster's
+own node list from the PVE API and scopes every query to `<this
+label>=~"<node1>|<node2>|..."`, so a Prometheus shared by more than one
+PVE cluster (or by anything else emitting a same-named metric) cannot
+silently sum in a same-numbered vmid from somewhere else. This is the
+default filter for every run; `verify-metrics` never applies it — see
+`metrics.extra_selector` below.
 
 **Confirm what's actually there with `verify-metrics`** before assuming
-the default is right for your Prometheus: it always scans every
-configured metric's *entire* result set (not just the one sample series
-it already reports) for whichever label this key names — or the literal
-`cluster` as a probe even while this key is `null` — and reports every
-distinct value found as `'<label>' label values seen across these
-metrics: <value1>, <value2>, ...`, silently, with no finding at all, when
-none carry it.
+the default is right for your Prometheus: it reports each configured
+metric's sample series labels so you can check this key names a real one.
 
 ### `metrics.extra_selector`
 
 String or `null`, default `null` (auto).
 
-Overrides the automatic cluster- or node-scoping filter above with a raw
-PromQL label matcher, inserted verbatim into every query's vector selector
-(e.g. `{metrics.extra_selector}` becomes part of
+Overrides the automatic node-scoping filter above with a raw PromQL label
+matcher, inserted verbatim into every query's vector selector (e.g.
+`{metrics.extra_selector}` becomes part of
 `rate(blockstat_rd_operations{cluster="mycluster"}[5m])`). Set this when
-`metrics.labels.cluster`'s auto-derived filter isn't quite what you need,
-when your own Telegraf/InfluxDB tagging scheme doesn't put the exact PVE
-node name in `metrics.labels.node` either, or when the restriction needed
-is something else entirely. Write exactly what your label scheme needs,
-e.g. `nodename=~"pve01|pve02|pve03"` or `cluster="mycluster"`; the value
-is used as-is, with no further quoting or escaping.
-`pve-storage-drs verify-metrics` applies this override too when set, but
-never derives its own filter automatically (from either label) — it is
-deliberately independent of the PVE API entirely.
+the node-list filter isn't quite what you need — your own Telegraf/InfluxDB
+tagging scheme doesn't put the exact PVE node name in `metrics.labels.node`,
+you want to scope by something else (a cluster-naming tag your deployment
+happens to carry, say), or the restriction needed is something else
+entirely. Write exactly what your label scheme needs, e.g.
+`nodename=~"pve01|pve02|pve03"` or `cluster="mycluster"`; the value is
+used as-is, with no further quoting or escaping. `pve-storage-drs
+verify-metrics` applies this override too when set, but never derives its
+own filter automatically — it is deliberately independent of the PVE API
+entirely.
+
+There is deliberately no "cluster label" auto-scoping tier above the
+node-list default: an earlier revision of this tool assumed such a label
+was standard practice across this project's deployments, which turned out
+to be wrong — nothing in the Telegraf/InfluxDB pipeline guarantees one.
+Use `metrics.extra_selector` for that instead, if your Prometheus actually
+carries such a label.
 
 ### `metrics.rate_window`
 

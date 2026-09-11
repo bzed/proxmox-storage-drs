@@ -3653,6 +3653,62 @@ PDF to 38, all three stamps regenerated alongside their Markdown).
 
 ---
 
+## 27. Operator correction: the cluster-naming-label default was a wrong assumption
+
+The whole `metrics.labels.cluster` auto-scoping tier added in pass 25/26 (§3.4's tier 2,
+`build_cluster_selector()`, `PveClient.cluster_name()`, the W-06/W-07/W-08 fixes above) rested on
+one claim, stated as fact in that pass's own writing: "this project's deployments carry [a
+cluster-naming tag] as standard practice." Diagnosing a live `verify-metrics` false-positive
+("no series to measure coverage on" despite the metric genuinely existing) surfaced that this
+claim was simply wrong — there is no such convention across this project's real deployments, and
+nothing about the Telegraf/InfluxDB `blockstat` pipeline guarantees a `cluster` label at all. The
+operator: "Yesterday I wrongly assumed that there is a fixed 'cluster' metric label that matches
+the cluster by default, this assumption was totally wrong."
+
+**Fix, applied forward (not by rewriting the fourteenth-pass sections above, which stand as the
+historical record of what was believed and done at the time):**
+
+- `metrics.resolve_node_selector()` loses tier 2 entirely. The precedence is back to two tiers:
+  `metrics.extra_selector` (operator-set, verbatim) when set, else the auto-derived node-list
+  filter from this cluster's own `GET /nodes` — the same default the tool had before pass 25 ever
+  introduced the cluster-name tier.
+- `build_cluster_selector()`, `PveClient.cluster_name()` (`GET /cluster/status`, the `Sys.Audit`
+  privilege it alone needed), `metrics.labels.cluster` (config field, schema property,
+  `_check_metrics`'s pairwise-distinctness check), and `_check_sample_series()`'s cluster-label
+  discovery scan/warning are all removed as dead code built on the mistaken premise — not merely
+  disabled behind an opt-out.
+- `cli._resolve_node_selector_for_run()` simplifies to `extra_selector` else `resolve_node_selector(metrics,
+  client.node_names())` — no more API call, no more privilege-degrade branch, since there is no
+  longer a second tier to degrade from.
+- `loadmodel.GroupLoad.no_series_matched` and its gates.py/cli.py "the resolved query filter
+  matched no series at all" reporting (W-07) are kept as-is: a node-selector mismatch is just as
+  real a failure mode as a cluster-selector one was, so that diagnostic still earns its place —
+  only its message wording dropped the now-nonexistent `metrics.labels.cluster` mention.
+- Every doc this feature touched (`IMPLEMENTATION_PLAN.md` §3.4/§3.5, `docs/internals/30-metrics.md`,
+  `docs/internals/50-pve-api.md`, `docs/manual/00-installation.md`, `docs/manual/10-configuration.md`,
+  `docs/manual/20-verifying-metrics.md`, `docs/manual/25-show-load-and-verify-storages.md`,
+  `docs/manual/29-explain.md`, `config/drs.example.yaml`) rewritten to match, each carrying a short
+  note that the removed tier existed only on a mistaken assumption, not a Prometheus finding.
+- Regression tests removed with the code they tested (`test_build_cluster_selector_*`,
+  `test_resolve_node_selector_*cluster*`, `test_check_sample_series_*cluster*label*`,
+  `test_cluster_name*` in `test_pve.py`, `test_cluster_label_*` in `test_config.py`, the
+  `cluster_name`-aware branches of `_NodeNamesClient`/`_FakeClient` in `test_cli.py`); the four
+  `_resolve_node_selector_for_run` tests that still make sense (override wins, node-list default,
+  none-resolves) kept, renamed where the cluster-tier framing no longer applied.
+
+Net effect: a config that never set `metrics.labels.cluster` (i.e. relied on the removed default)
+now gets the plain node-list filter it always would have gotten pre-pass-25 — a strictly more
+conservative, already-correct scoping, not a new risk. A config that explicitly set
+`metrics.labels.cluster` to a real value now fails schema validation (`additionalProperties:
+false`) rather than being silently ignored; the equivalent filter is
+`metrics.extra_selector: '<label>="<value>"'`.
+
+Verification: `make check` clean (fmt, lint, typecheck, test, fixtures, docs-check —
+`IMPLEMENTATION_PLAN.pdf`/internals/manual PDFs rebuilt) — **661 passed**, **98.64% line
+coverage**.
+
+---
+
 ## Appendix A — Independent verification of the §14 worked example
 
 All values re-derived by hand from §14.1's input.

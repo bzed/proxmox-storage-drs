@@ -82,28 +82,27 @@ narrative is *about*, not part of the plan itself.
 
 One extra line, printed once for the whole run rather than once per group
 (every group here was computed against the identical selector and window):
-the exact section 3.4 node/cluster-scoping filter this run's queries
-carried (`(no node-scoping filter)` if none applied), and the
+the exact section 3.4 node-scoping filter this run's queries carried
+(`(no node-scoping filter)` if none applied), and the
 `window.lookback`/`quantile`/`metrics.rate_window`/`metrics.step` settings
 the load above was computed from — see `docs/manual/10-configuration.md`
 for what each controls and `IMPLEMENTATION_PLAN.md` section 3.4 for the
 filter itself. This is the one piece of `explain`'s output that is about
 *how* the data was fetched rather than what it is, which is why it is the
-one thing here gated behind `-v` instead of always shown. With the default
-`metrics.labels.cluster: "cluster"`, this is the live cluster's own name;
-with that key set to `null` (or its lookup finding no name), it falls back
-to the node-list alternation instead:
+one thing here gated behind `-v` instead of always shown. By default this
+is the node-list alternation from this cluster's own node names; with
+`metrics.extra_selector` set, it is that instead:
 
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml -v explain
-data source: {cluster="pvezebe"}  window 1.0d lookback, quantile 0.95, rate_window 5.0m, step 5.0m
+data source: {nodename=~"pve01|pve02|pve03"}  window 1.0d lookback, quantile 0.95, rate_window 5.0m, step 5.0m
 
 Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   ...
 ```
 
-(With `metrics.labels.cluster: null`, the same line instead reads
-`data source: {nodename=~"pve01|pve02|pve03"}`.)
+(With `metrics.extra_selector: 'cluster="mycluster"'`, the same line
+instead reads `data source: {cluster="mycluster"}`.)
 
 ## `pinned (not movable this run):`
 

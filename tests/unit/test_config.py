@@ -282,40 +282,16 @@ def test_duplicate_labels_are_rejected(tmp_path: Path) -> None:
         config.load_config(str(path), env={})
 
 
-def test_cluster_label_defaults_to_the_literal_cluster(tmp_path: Path) -> None:
-    """Deployments here carry a cluster-naming tag as standard practice,
-    so this key defaults to a real label name, not null."""
-    data = minimal_config_dict()
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert resolved.config.metrics.labels.cluster == "cluster"
-
-
-def test_cluster_label_is_parsed_when_set(tmp_path: Path) -> None:
+def test_cluster_label_key_is_rejected_by_schema(tmp_path: Path) -> None:
+    """There is no ``metrics.labels.cluster`` any more -- an earlier
+    revision's assumption that this project's deployments carry a
+    cluster-naming tag "as standard practice" was simply wrong, so the key
+    was removed. A config that still sets it fails schema validation
+    (``additionalProperties: false``) rather than being silently ignored."""
     data = minimal_config_dict()
     data["metrics"] = {"labels": {"cluster": "site"}}
     path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert resolved.config.metrics.labels.cluster == "site"
-
-
-def test_cluster_label_can_be_explicitly_disabled(tmp_path: Path) -> None:
-    """An operator whose Prometheus genuinely has no cluster-naming tag
-    can opt back out with an explicit null, overriding the default."""
-    data = minimal_config_dict()
-    data["metrics"] = {"labels": {"cluster": None}}
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert resolved.config.metrics.labels.cluster is None
-
-
-def test_cluster_label_colliding_with_another_is_rejected(tmp_path: Path) -> None:
-    data = minimal_config_dict()
-    data["metrics"] = {
-        "labels": {"vmid": "vmid", "device": "instance", "node": "cluster", "cluster": "cluster"}
-    }
-    path = write_config(tmp_path, data)
-    with pytest.raises(ConfigError, match="pairwise distinct"):
+    with pytest.raises(ConfigError):
         config.load_config(str(path), env={})
 
 

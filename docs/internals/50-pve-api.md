@@ -130,25 +130,14 @@ missing node partway through the window would look like it has less
 history than it really does). Called once per command invocation
 (`cli._resolve_node_selector_for_run()`), not per group.
 
-**`cluster_name()` uses `GET /cluster/status`, filtered to the one entry
-whose `type` is `"cluster"`** (every other entry is `type: "node"`) --
-confirmed live against a real PVE 9.2 cluster, `{"type": "cluster", "name":
-"pvezebe", "nodes": 3, "quorate": 1, ...}`. Needs `Sys.Audit` at `/`, the
-one privilege none of this project's other read calls require --
-`docs/manual/00-installation.md` asks for it unconditionally, since
-`metrics.labels.cluster` defaults to a real label name (`"cluster"`) and
-so this is the normal call every `plan`/`show-load`/`apply`/`explain` run
-makes, not a conditional one. Returns `None` rather than raising when the
-entry is missing or unnamed, the same "let the caller decide" contract
-`node_names()` already has -- `metrics.resolve_node_selector()` treats
-that `None` as "fall back to the node list," not fatal. A denied call
-(`PveApiError` -- missing `Sys.Audit`, most often a token provisioned
-before this tier existed) is caught the same way, one layer up in
-`cli._resolve_node_selector_for_run()` itself: logged as a warning, then
-treated identically to `None` -- REVIEW.md W-08, so a run never fails
-outright over a scoping lookup that has an equally-correct fallback.
-Called at most once per command invocation (`cli._resolve_node_selector_for_run()`), and
-skipped only when `metrics.labels.cluster` is explicitly `null`.
+There used to be a `cluster_name()` method here (`GET /cluster/status`,
+`Sys.Audit` at `/`), backing a middle scoping tier in
+`metrics.resolve_node_selector()` that matched a `cluster`-naming label
+against this cluster's own name. It was removed along with that tier --
+operator correction: the premise that this project's deployments carry
+such a label "as standard practice" was wrong, so the extra
+`Sys.Audit`-gated API call it existed for bought nothing. See
+`docs/internals/30-metrics.md`'s node-scoping section.
 
 ## `move_disk()`: the one and only bytes/s -> KiB/s conversion
 
