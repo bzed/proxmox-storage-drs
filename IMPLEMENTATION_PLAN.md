@@ -2740,5 +2740,6 @@ capture → write → replay round trip. `tests/corpus/` and its `README.md` exi
 that added this section, ahead of the code, so the place to put a bundle was already there and
 documented; phase 10's own "done when" — a bundle collected from the author's own cluster replays
 to the same plan the live run produced, the scrub audit passes on it, and the determinism test is
-green — is exercised against the dev cluster of the project's own development notes once a bundle
-from it lands in `tests/corpus/`.
+green — is met: `bzed-dev-cluster-24h`, a `--range 24h` capture from the project's own dev cluster,
+is in `tests/corpus/`, replays all five read-only commands to the same result the live run
+produced, and passes the scrub audit with zero violations.
