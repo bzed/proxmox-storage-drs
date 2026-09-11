@@ -123,6 +123,20 @@ def _instant_answer(params: dict[str, str]) -> dict[str, Any]:
                 }
             ]
         }
+    if query == "blockstat_rd_operations":
+        # verify_metrics()'s own bare-metric-name sample-series check --
+        # not wrapped in sum by(...), so the real "nodename" label a live
+        # series carries is still present here, unlike the rate
+        # expressions above (section 3.4's sum by (vmid, device) already
+        # collapses it).
+        return {
+            "result": [
+                {
+                    "metric": {"vmid": "101", "instance": "scsi0", "nodename": "node1"},
+                    "value": [CAPTURE_NOW.timestamp(), "1.5"],
+                }
+            ]
+        }
     return {"result": []}
 
 
@@ -311,6 +325,28 @@ def test_capture_bundle_prometheus_sample_timestamps_are_rebased(tmp_path: Path)
         for series in payload["result"]:
             ts, _value = series["value"]
             assert ts != 1700000000  # the fake's own raw canned timestamp
+
+
+def test_capture_bundle_preserves_the_node_label_when_present(tmp_path: Path) -> None:
+    """A live capture against the dev cluster found this one too:
+    verify_metrics()'s own bare-metric-name sample-series check queries
+    the raw series directly (not wrapped in sum by (vmid, device), which
+    is what collapses the node label elsewhere), so it *does* carry a
+    real node label -- dropping it unconditionally made a replayed
+    verify-metrics report a live cluster's real label as "missing"."""
+    bundle = capture(tmp_path)
+    matches = [
+        f
+        for f in bundle.prometheus_files.values()
+        if f.get("result")
+        and isinstance(f["result"][0], dict)
+        and "nodename" in f["result"][0].get("metric", {})
+    ]
+    assert matches, "expected at least one sample series to carry the node label"
+    for f in matches:
+        node_value = f["result"][0]["metric"]["nodename"]
+        assert node_value != "node1"
+        assert node_value.startswith("node-")
 
 
 def test_capture_bundle_no_series_skips_the_forecasting_range_series(tmp_path: Path) -> None:
