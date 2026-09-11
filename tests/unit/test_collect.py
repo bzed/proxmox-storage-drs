@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 import yaml
 
-from proxmox_storage_drs import collect
+from proxmox_storage_drs import anonymize, collect
 from proxmox_storage_drs import config as config_module
 from proxmox_storage_drs.exceptions import BundleError, PveApiError
 from proxmox_storage_drs.metrics import PrometheusClient
@@ -395,3 +395,39 @@ def test_hash_query_text_is_deterministic() -> None:
 def test_hash_label_name_is_deterministic() -> None:
     assert collect.hash_label_name("vmid") == collect.hash_label_name("vmid")
     assert collect.hash_label_name("vmid") != collect.hash_label_name("device")
+
+
+# ------------------------------------------------------- query anonymization
+
+
+def test_anonymize_query_text_rewrites_a_known_rate_expression() -> None:
+    """A live capture against the dev cluster found the previous
+    implementation's bug directly: blindly substring-replacing each real
+    node name inside already-built selector text preserves the *real*
+    -name sort order (build_node_selector() sorted its own real-name
+    input), while a --replay run builds the selector fresh from
+    pseudonyms and sorts *those* -- a different string whenever a real
+    name's lexical rank differs from its pseudonym's. The fix looks up the
+    exact real rate expression in a pre-built map instead of touching
+    node-name substrings piecemeal."""
+    real_expr = 'sum by (vmid, instance) (rate(rd_operations{nodename=~"real-b|real-a"}[300s]))'
+    anon_expr = 'sum by (vmid, instance) (rate(rd_operations{nodename=~"node-x|node-y"}[300s]))'
+    rate_expr_map = {real_expr: anon_expr}
+    mapper = anonymize.Mapper(salt=b"x" * 32, capture_start_epoch=CAPTURE_NOW.timestamp())
+
+    # A bare range query: the whole text is the rate expression.
+    assert collect._anonymize_query_text(real_expr, mapper, rate_expr_map) == anon_expr
+
+    # Embedded inside quantile_over_time(...), as the instant queries are.
+    wrapped = f"quantile_over_time(0.95, ({real_expr})[86400s:300s])"
+    expected = f"quantile_over_time(0.95, ({anon_expr})[86400s:300s])"
+    assert collect._anonymize_query_text(wrapped, mapper, rate_expr_map) == expected
+
+
+def test_anonymize_query_text_is_a_noop_with_no_known_rate_expression() -> None:
+    """verify_metrics() never carries a node selector at all -- nothing to
+    rewrite, and _anonymize_query_text() must leave a query it does not
+    recognize alone rather than guessing."""
+    mapper = anonymize.Mapper(salt=b"x" * 32, capture_start_epoch=CAPTURE_NOW.timestamp())
+    query = "blockstat_rd_operations"
+    assert collect._anonymize_query_text(query, mapper, {}) == query
