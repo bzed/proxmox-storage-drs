@@ -97,7 +97,7 @@ data the report carries forward):
 | Function | Section 3.3 step | Returns |
 |---|---|---|
 | `_check_metric_names_exist` | 1 | findings only |
-| `_check_sample_series` | 2 + 3 (labels present) | findings, `{metric_name: sample_labels}` |
+| `_check_sample_series` | 2 + 3 (labels present) + cross-metric disk consistency | findings, `{metric_name: sample_labels}` |
 | `_check_device_label_collision` | 4 | one `Finding` or `None` (pure, no I/O) |
 | `_check_coverage` | 5 | findings, `{DiskKey: coverage_fraction}` |
 | `_check_observed_spacing` | 6 | findings, `observed_spacing_seconds` |
@@ -107,6 +107,19 @@ as the one representative metric rather than probing all six: a coverage or
 spacing gap is a property of the underlying Telegraf scrape, not of which of
 the six raw quantities is read, so probing all six would be six times the
 Prometheus load for no additional information.
+
+That assumption has one real exception: InfluxDB's line protocol fixes a
+field's type from its first write, and Telegraf's Prometheus-compatible
+output silently drops a field the moment it sees a non-numeric value for it
+(Prometheus/OpenMetrics has no string sample type) -- independently of the
+other five fields for the same disk. If the dropped field happens not to be
+`read_ops`, `_check_coverage` alone would never notice. `_check_sample_series`
+already runs an instant query against all six metrics anyway (step 2), so
+its private `_check_cross_metric_disk_consistency()` reuses those same
+results -- no extra Prometheus load -- to compare each metric's own
+`(vmid, device)` set against the union across all six, and warns naming the
+metric and the specific disk(s) missing from it whenever one metric's set is
+a strict subset of another's.
 
 `VerifyMetricsReport.ok` is `True` iff no `Finding` has `level == "error"` —
 `cli.py`'s `verify-metrics` handler uses exactly this property to decide the

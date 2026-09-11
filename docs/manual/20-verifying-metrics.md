@@ -48,7 +48,17 @@ section 3.3):
    `.device` and `.node` are really present and non-empty on a live series.
    A metric that exists but currently has no series is a **warning**, not an
    error — it may simply mean nothing has generated that kind of I/O
-   recently.
+   recently. This step also cross-checks the full `(vmid, device)` set each
+   of the six metrics reports against the other five — at no extra
+   Prometheus cost, since it reuses these same six instant queries. If one
+   metric is silently missing a disk the other five all report, that is a
+   **warning** naming the metric and the disk: the usual cause is Telegraf's
+   Prometheus-compatible output dropping a field the moment it sees a
+   non-numeric value for it (InfluxDB's line protocol fixes a field's type
+   from its first write, and Prometheus/OpenMetrics has no string sample
+   type) — independently of the other five fields for the same disk, which
+   is exactly why check 5 below (only looking at `read_ops`) cannot catch
+   this on its own if a *different* field is the one affected.
 3. **Configured labels present.** If `metrics.labels.vmid`/`.device`/`.node`
    do not appear (or are empty) on the sample series, that is an **error**:
    the load model has nothing to join disks on.
@@ -78,6 +88,11 @@ section 3.3):
 - **A label is missing or empty**: the sample series printed by check 2 is
   the fastest way to see what labels Prometheus actually has for that
   series — update `metrics.labels.*` to name the real ones.
+- **One metric is missing disks the others report**: check your Telegraf
+  configuration (and the PVE-side field it collects) for that specific
+  field emitting a non-numeric value for that disk at some point — that is
+  enough to make Telegraf drop it permanently for that series, even while
+  every other field for the same disk keeps working normally.
 - **Coverage is low for specific disks**: check that Telegraf is actually
   scraping every node, and that `window.lookback` is not longer than your
   Prometheus retention.

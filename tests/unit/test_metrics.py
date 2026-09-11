@@ -417,6 +417,83 @@ def test_verify_metrics_device_label_not_instance_is_fine() -> None:
     assert _check_device_label_collision(metrics) is None
 
 
+def test_disk_keys_seen_skips_series_missing_either_label() -> None:
+    from proxmox_storage_drs.metrics import _disk_keys_seen
+
+    result: list[dict[str, Any]] = [
+        {"metric": {"vmid": "101", "instance": "scsi0"}},
+        {"metric": {"vmid": "102"}},  # no device label
+        {"metric": {"instance": "scsi0"}},  # no vmid label
+    ]
+    assert _disk_keys_seen(result, "vmid", "instance") == {("101", "scsi0")}
+
+
+def test_cross_metric_disk_consistency_silent_when_all_metrics_agree() -> None:
+    from proxmox_storage_drs.metrics import _check_cross_metric_disk_consistency
+
+    keys = {("101", "scsi0"), ("102", "efidisk0")}
+    findings = _check_cross_metric_disk_consistency({"rd_operations": keys, "wr_operations": keys})
+    assert findings == []
+
+
+def test_cross_metric_disk_consistency_warns_on_a_dropped_field() -> None:
+    """REVIEW.md-worthy real-world failure: Telegraf's Prometheus-compatible
+    output silently drops a field the moment it sees a non-numeric value for
+    it (InfluxDB fixes a field's type from its first write) -- which can
+    drop just one of the six metrics for one disk, without touching the
+    other five. ``compute_disk_coverage`` alone (only checking ``read_ops``)
+    would miss this entirely if the dropped field is one of the other five;
+    this cross-check catches it from data ``_check_sample_series`` already
+    fetched, at no extra Prometheus cost."""
+    from proxmox_storage_drs.metrics import _check_cross_metric_disk_consistency
+
+    findings = _check_cross_metric_disk_consistency(
+        {
+            "rd_operations": {("101", "scsi0"), ("102", "efidisk0")},
+            "wr_total_time_ns": {("101", "scsi0")},  # missing 102:efidisk0
+        }
+    )
+    assert len(findings) == 1
+    assert findings[0].level == "warning"
+    assert "wr_total_time_ns" in findings[0].message
+    assert "102:efidisk0" in findings[0].message
+    assert "non-numeric" in findings[0].message
+
+
+def test_cross_metric_disk_consistency_truncates_a_long_missing_list() -> None:
+    from proxmox_storage_drs.metrics import _check_cross_metric_disk_consistency
+
+    full = {(str(vmid), "scsi0") for vmid in range(100, 108)}  # 8 disks
+    findings = _check_cross_metric_disk_consistency({"a": full, "b": set()})
+    assert len(findings) == 1
+    assert "no series for 8 disk(s)" in findings[0].message
+    assert "+3 more" in findings[0].message
+
+
+def test_check_sample_series_reports_a_cross_metric_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Integration through the real caller: a field silently missing one
+    disk the others all report shows up as a warning naming that field."""
+    from proxmox_storage_drs.metrics import _check_sample_series
+
+    metrics = _full_metrics_config()
+
+    def fake_instant_query(name: str) -> list[dict[str, Any]]:
+        common = [
+            {"metric": {"vmid": "101", "instance": "scsi0", "nodename": "pve01"}},
+            {"metric": {"vmid": "102", "instance": "efidisk0", "nodename": "pve01"}},
+        ]
+        if name == metrics.write_time_ns:
+            return common[:1]  # drops 102:efidisk0
+        return common
+
+    client = PrometheusClient(PROM_CONFIG, session=FakeSession({}))
+    monkeypatch.setattr(client, "instant_query", fake_instant_query)
+
+    findings, _samples = _check_sample_series(client, metrics)
+    warnings = [f.message for f in findings if f.level == "warning"]
+    assert any(metrics.write_time_ns in m and "102:efidisk0" in m for m in warnings)
+
+
 def test_verify_metrics_query_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     metrics = _full_metrics_config()
     window = WindowConfig()

@@ -3709,6 +3709,45 @@ coverage**.
 
 ---
 
+## 28. Real-world finding: a non-numeric value silently drops one metric per disk, independently of the other five
+
+Live dogfooding against a second production cluster (a fresh InfluxDB-transport/gigapipe metrics
+pipeline switch) surfaced a real gap in `compute_disk_coverage()`'s own documented assumption:
+"coverage gaps are a property of the underlying Telegraf scrape, not of which of the six raw
+quantities is read." That holds for *timing* gaps (the scrape didn't happen), but not for one
+specific *type*-based gap: InfluxDB's line protocol fixes a field's type from its first write, and
+Telegraf's Prometheus-compatible output silently drops a field the instant it observes a
+non-numeric value for it — Prometheus/OpenMetrics has no string sample type. That drop is per
+*field*, not per scrape cycle, so it can hit exactly one of the six configured metrics for one
+disk while the other five (including `read_ops`, the one metric `compute_disk_coverage` actually
+checks) keep reporting normally. A coverage check that only ever looks at `read_ops` — by design,
+to avoid six times the Prometheus load — cannot see this if the dropped field is one of the other
+five.
+
+**Fix:** `_check_sample_series()` (which already runs one instant query per metric, for steps 2-3)
+now also collects the full `(vmid, device)` set each of the six metrics reports, and a new pure
+helper, `_check_cross_metric_disk_consistency()`, compares each metric's set against the union
+across all six — warning, naming the metric and the specific disk(s), whenever one metric's set is
+a strict subset of another's. This costs nothing extra: it reuses instant-query results
+`_check_sample_series` already fetches for an unrelated purpose, rather than issuing any additional
+Prometheus queries. `_check_metric_names_exist`'s "does not exist" error and `_check_sample_series`'s
+"no series returned" warning both gained the same explanatory hint, since a metric missing
+*everywhere* (rather than for just one disk) is the same underlying cause taken to its extreme.
+`IMPLEMENTATION_PLAN.md` §3.3, `docs/internals/30-metrics.md`, and
+`docs/manual/20-verifying-metrics.md` updated to describe the new check and its "if it fails"
+guidance.
+
+New regression tests (`test_metrics.py`): `test_disk_keys_seen_skips_series_missing_either_label`,
+`test_cross_metric_disk_consistency_silent_when_all_metrics_agree`,
+`test_cross_metric_disk_consistency_warns_on_a_dropped_field`,
+`test_cross_metric_disk_consistency_truncates_a_long_missing_list`,
+`test_check_sample_series_reports_a_cross_metric_gap`.
+
+Verification: `make check` clean — **666 passed**, **98.65% line coverage**; all three PDFs
+rebuilt.
+
+---
+
 ## Appendix A — Independent verification of the §14 worked example
 
 All values re-derived by hand from §14.1's input.

@@ -313,7 +313,15 @@ constant. Implement `pve-storage-drs verify-metrics` as a first-class command th
 else. It shall:
 
 1. query `/api/v1/label/__name__/values` and confirm each configured metric name exists;
-2. run one instant query per metric and print a sample series with all labels;
+2. run one instant query per metric and print a sample series with all labels. Reusing these same
+   six results at no extra Prometheus cost, cross-check the full `(vmid, device)` set each metric
+   reports against the other five's, and warn naming the metric and the disk(s) whenever one
+   metric's set is a strict subset of another's — the one common, real-world way this happens:
+   InfluxDB's line protocol fixes a field's type from its first write, and Telegraf's
+   Prometheus-compatible output silently drops a field the moment it sees a non-numeric value for
+   it (Prometheus/OpenMetrics has no string sample type), independently of the other five fields
+   for the same disk. Step 5 below (checking only `read_ops`) cannot catch this alone if a
+   *different* field is the one silently dropped;
 3. confirm the configured `vmid`, `device` and `node` labels are present and non-empty;
 4. warn loudly if the device label is literally `instance` — **PVE's `instance` tag collides with
    Prometheus's own scrape-target `instance` label**, and many Telegraf configurations rename or
