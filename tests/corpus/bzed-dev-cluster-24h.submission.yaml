@@ -1,0 +1,21 @@
+submitted_by: Bernd Zeimetz <bernd@bzed.de>
+submitted_on: 2026-09-11
+consent:
+  redistribute_under: AGPL-3.0-or-later
+  reviewed_bundle_before_sending: true
+collected_with: pve-storage-drs 0.1.1
+versions:
+  pve: 9.2.11
+  prometheus_backend: gigapipe
+what_this_reproduces: >
+  A real 3-node PVE cluster (bzed-shared group, two shared RBD storages, 15 VMs,
+  39 disks), captured with `--range 24h` to stay under the 8 MiB ceiling. Exercises
+  the full collect-testdata/--replay round trip against real cluster shapes rather
+  than a synthetic fixture: pattern-expanded group storages, per-disk coverage from
+  the real Telegraf/InfluxDB/gigapipe metrics pipeline, and the MILP-vs-heuristic
+  comparison at a scale no fixture enumerates. Also the bundle that found and fixed
+  seven real collector bugs during development (pattern-storage config loss,
+  anonymized-vs-real selector confusion, query-text sort order, sample-timestamp
+  rebasing, node-label handling, a device-label leak via the Prometheus `instance`
+  label colliding with the scrape-target label, and metric names wrongly validated
+  as device keys) -- see git history around 2026-09-11.

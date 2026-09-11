@@ -7,6 +7,16 @@ Files: *
 Copyright: 2026 Bernd Zeimetz <bernd@bzed.de>
 License: AGPL-3.0-or-later
 
+Files: tests/corpus/*
+Comment:
+ Anonymized diagnostic bundles submitted by cluster operators for the
+ project's real-cluster regression suite (see tests/corpus/README.md and
+ IMPLEMENTATION_PLAN.md section 16). Not installed by the package. Each
+ bundle's submitter and consent are recorded in its own
+ <bundle-name>.submission.yaml.
+Copyright: 2026 Bernd Zeimetz <bernd@bzed.de>
+License: AGPL-3.0-or-later
+
 License: AGPL-3.0-or-later
  This program is free software: you can redistribute it and/or modify it under
  the terms of the GNU Affero General Public License as published by the Free
