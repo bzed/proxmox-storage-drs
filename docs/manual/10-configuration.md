@@ -990,3 +990,49 @@ The upper bound is `point_estimate + residual_z * stdev(residuals)` from the
 in-sample fit — this is what the section 7.3 saturation guard actually
 consumes (see `window.upper_quantile` for the equivalent under the
 `quantile` model; the optimizer itself does not consume this).
+
+## `support` — diagnostic bundles
+
+See [`26-collect-testdata-and-replay.md`](26-collect-testdata-and-replay.md) and
+`IMPLEMENTATION_PLAN.md` section 16. Nothing here is read on the normal
+`plan`/`apply` path — only by `collect-testdata` and by `--replay`'s config
+loading.
+
+### `support.salt_path`
+
+File path, default `/var/lib/pve-storage-drs/anonymization-salt`.
+
+32 random bytes, generated on first use and persisted here, mode `0600`,
+never written into a bundle. Every pseudonym `collect-testdata` produces is
+`HMAC-SHA256` keyed on this salt, so the same object maps to the same
+pseudonym across runs and across bundles until `--new-salt` rotates it.
+Reproducibility is per salt file, i.e. per node by default; point this at a
+pmxcfs path (e.g. `/etc/pve/pve-storage-drs-anon-salt`) if every node in the
+cluster should agree on one mapping — that also replicates the salt to every
+node, which is the trade-off being made.
+
+### `support.bundle_dir`
+
+Directory path, default `/var/lib/pve-storage-drs/testdata`.
+
+Default `-o`/`--output` for `collect-testdata` when the flag is not given.
+
+### `support.max_series_points`
+
+Positive integer, default `5000000`.
+
+`collect-testdata` prints the estimated series-sample count before fetching
+anything and refuses outright above this ceiling — never a silent
+truncation — naming the `--range`/`--step`/`--no-series` flags that would
+bring the estimate under it.
+
+### `support.capture_range`
+
+The literal string `"auto"`, or a duration, default `"auto"`.
+
+`"auto"` captures the union of every forecaster's `required_range()`
+(section 16.2) — currently
+`max(window.lookback, forecast.seasonal_lookback_days, 2 * forecast.holt_winters.seasonal_periods * metrics.step)`
+— so a bundle can reproduce a forecaster the capturing operator never
+configured. An explicit duration (e.g. `14d`) overrides that; `--range` on
+the command line overrides both.

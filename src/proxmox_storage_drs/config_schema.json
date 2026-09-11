@@ -8,7 +8,7 @@
     "schema_version": { "type": "integer", "minimum": 1 },
     "proxmox": {
       "type": "object",
-      "required": ["host", "auth"],
+      "$comment": "host/auth are not schema-required: a --replay bundle's config.yaml omits both (section 16.3 -- dropped, not blanked). config.py's _check_connection_config enforces them semantically, but only when load_config()'s require_connection is true (the default for every path except loading a bundle).",
       "additionalProperties": false,
       "properties": {
         "host": { "type": "string", "minLength": 1 },
@@ -31,7 +31,7 @@
     },
     "prometheus": {
       "type": "object",
-      "required": ["url"],
+      "$comment": "url is not schema-required, for the same reason proxmox.host is not -- see the $comment there.",
       "additionalProperties": false,
       "properties": {
         "url": { "type": "string", "minLength": 1 },
@@ -264,6 +264,17 @@
             "residual_z": { "type": "number", "exclusiveMinimum": 0 }
           }
         }
+      }
+    },
+    "support": {
+      "type": "object",
+      "$comment": "Section 16.7. capture_range's shape (the literal 'auto' vs. a duration) is a semantic distinction, not a structural one -- checked in config.py, matching this schema's own convention for every other duration-or-special-value field.",
+      "additionalProperties": false,
+      "properties": {
+        "salt_path": { "type": "string", "minLength": 1 },
+        "bundle_dir": { "type": "string", "minLength": 1 },
+        "max_series_points": { "type": "integer", "exclusiveMinimum": 0 },
+        "capture_range": { "type": "string", "minLength": 1 }
       }
     }
   }
