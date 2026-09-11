@@ -113,7 +113,10 @@ The join between them is the disk identity `(vmid, device)`, which both sides ex
 | `payback.py` | Migration cost model and acceptance test |
 | `schedule.py` | Ordering under the transient reserve invariant |
 | `execute.py` | Three execution modes, task supervision |
-| `cli.py` | `plan`, `apply`, `verify-metrics`, `verify-storages`, `show-load`, `explain` |
+| `anonymize.py` | Keyed pseudonyms and field allowlists for diagnostic bundles (§16.3). Pure |
+| `collect.py` | `collect-testdata`: capture, anonymize and write a diagnostic bundle (§16) |
+| `replay.py` | Read a bundle back and serve it through the `metrics.py`/`pve.py` interfaces (§16.5) |
+| `cli.py` | `plan`, `apply`, `verify-metrics`, `verify-storages`, `show-load`, `explain`, `collect-testdata` |
 
 The installed executable is **`pve-storage-drs`** — one `[project.scripts]` entry point onto
 `cli.py`. Every command in this document is written as `pve-storage-drs <subcommand>`; the manpage
@@ -1977,6 +1980,7 @@ Each phase is independently testable and useful on its own.
 | 7 | `execute.py` | `confirm` mode against a lab cluster, including a VM locked mid-run and a source storage with `saferemove` on — the run must wait, not fail |
 | 8 | `auto` mode + time windows | Unattended operation |
 | 9 | `forecast.py` beyond p95 | Seasonal-naive validated by backtest |
+| 10 | `anonymize.py`, `collect.py`, `replay.py`, `tests/corpus/` (§16) | A bundle collected from a live cluster replays to the same plan the live run produced; the scrub audit and the determinism test pass on it |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
@@ -2012,6 +2016,10 @@ production fallback for large groups. Do not start with the solver.
 | Engine crashes mid-move | `inflight_upids` in `state.json` + startup scan; the PVE task continues regardless |
 | Concurrent moves onto one storage | Generalized transient invariant over the in-flight set (§8.1) |
 | Config knob with no effect | §11.1 validation; every knob maps to exactly one formula (§15) |
+| A diagnostic bundle carries an identifier or a secret | Allowlist, never denylist: a field reaches a bundle only if `anonymize.py` names it, and an identifier with no mapping drops its whole record rather than passing through. The corpus scrub audit re-checks every committed bundle against the same allowlist plus IP/email/IQN/PEM/hex patterns, on the assumption that the collector has a bug (§16.3, §16.6) |
+| Two unrelated clusters produce the same pseudonyms | The salt is 32 bytes of `os.urandom()` persisted per host, never `/etc/machine-id` — which is routinely cloned by templates and golden images and would turn the mapping into a cross-bundle correlation key (§16.3) |
+| A bundle replays to a different plan than the live run | The replay clients key on the anonymized query text the engine itself regenerates, and a miss is a loud error naming the query and the range, never an empty result (§16.5). `collect-testdata` captures the superset of every forecaster's `required_range()`, not the configured model's (§16.2) |
+| A bundle looks complete but a permission silently emptied a response | Every captured call records its outcome (`ok`/`http_error`/`empty`/`refused`/`skipped`) and the bundle ships `verify-metrics`/`verify-storages` findings from capture time — the `Datastore.Allocate` false negative of §3.5 must be visible in the bundle, not inferred from it (§16.2) |
 
 Overarching rule: **the reserve constraint is never traded against balance.** Stated precisely: with
 the lexicographic solve of (C5) this is exact — the reserve shortfall is minimized in a prior stage
@@ -2271,3 +2279,463 @@ bug waiting to happen; this table is the audit.
 | `exclude.*` | §5.3 (C2) variable fixing |
 | `forecast.model` + `holt_winters.*` | §10.1 |
 | `proxmox.read_workers` | §3.5 read-path concurrency |
+| `support.salt_path` | §16.3, the persisted anonymization salt — per node by default, cluster-wide if pointed at pmxcfs |
+| `support.bundle_dir` | §16.4, default output location for `collect-testdata` |
+| `support.max_series_points` | §16.2, hard refusal ceiling on the series capture |
+| `support.capture_range` | §16.2, `auto` for the maximum over every forecaster's `required_range()` |
+
+---
+
+## 16. Diagnostic bundles: `collect-testdata` and `--replay`
+
+Two facts motivate this section, and neither is a hypothetical.
+
+**One cluster is not a test corpus.** Everything in §14 is a hand-built fixture, and the only real
+cluster this tool has ever run against is the author's own. Every interesting failure so far — a
+metric silently missing for one disk (§3.3), `/content` returning empty under `Datastore.Audit`
+(§3.5), a coverage query starved by a too-short `window.lookback` — was found by an operator
+running the tool and then *describing* what they saw. A description is not a regression test: none
+of those three is in CI as the shape of data that produced it, because that data never left the
+cluster.
+
+**The data cannot leave the cluster as-is.** A PVE cluster's inventory is a list of customer names,
+hostnames, iSCSI IQNs, PBS fingerprints, ticket numbers in snapshot descriptions and storage
+comments, and credentials in storage definitions. An operator who wants to help cannot simply tar
+up API responses, and asking them to redact by hand guarantees either a leak or a refusal.
+
+So: one read-only command that captures everything the engine could ever ask for, replaces every
+identifier with a keyed pseudonym that is stable on that host and one-way to everybody else, and
+writes a self-contained bundle the operator can read before they send it. And one global option
+that runs the engine against such a bundle with no network at all, so a submitted bundle becomes an
+executable test case.
+
+### 16.1 The bundle
+
+A bundle is a **directory**, plus a deterministic `.tar.gz` of that directory for sending. The
+directory is the canonical form: it is what the scrub audit (§16.6) reads, what `git diff` shows
+when a bundle is committed to the corpus, and what an operator opens to satisfy themselves before
+attaching anything to an email.
+
+```
+drs-testdata-cluster-3f8a91c2-2026-09-11/
+  manifest.json            # schema, versions, what was captured, what failed, counts
+  config.yaml              # the anonymized, credential-free effective configuration
+  findings.json            # verify-metrics and verify-storages output, as captured
+  pve/
+    cluster-resources-vm.json
+    cluster-resources-storage.json
+    storage-definitions.json
+    nodes.json
+    cluster-tasks.json
+    vm-config/<vmid>.json
+    vm-snapshots/<vmid>.json
+    vm-status-current/<vmid>.json
+    storage-status/<node>/<storage>.json
+    storage-content/<node>/<storage>.json
+  prometheus/
+    label-values/<label>.json
+    instant/<sha256-of-query>.json
+    range/<sha256-of-query-and-range>.json
+  SHA256SUMS
+```
+
+Every file is JSON (or YAML for `config.yaml`), written with sorted keys, two-space indent, `\n`
+endings and no trailing whitespace, so a bundle diffs line by line. The Prometheus payloads are
+**not** individually compressed: the directory form is meant to be read and to compress well in
+git, and the single gzip of the tarball does the compression once.
+
+`prometheus/instant/<sha256>.json` and `range/<sha256>.json` each carry the query text they were
+recorded for alongside the response, so a bundle is self-describing and a key miss at replay time
+(§16.5) can name what it was looking for. The hash is over the *anonymized* query text (plus the
+range parameters), because that is what the engine will generate when it replays against the
+bundle's own anonymized config — see §16.5 for why that closes rather than opens a gap.
+
+**Determinism.** Two captures of an unchanged cluster must produce byte-identical bundles apart
+from the coarsened capture timestamp in `manifest.json` and the metric samples themselves. That
+means: every collection is sorted before it is written (by vmid, by storage id, by node, by series
+label tuple); floats are written with `repr()`'s round-trip form and never reformatted; the tar
+members are sorted, with `mtime=0`, `uid=gid=0`, empty `uname`/`gname` and fixed modes; and the
+gzip header carries `mtime=0`. `tests/unit/test_collect.py` asserts this by running the collector
+twice against the same fakes and comparing bytes — a determinism claim nobody checks is a
+determinism claim that is already false.
+
+### 16.2 Capture: the superset, not the configured path
+
+The point of a bundle is that the *author* can run configurations the *operator* never ran. A
+bundle captured for `forecast.model: quantile` and `solver.backend: heuristic` that only contains
+24 h of data is worthless for reproducing a Holt-Winters misfit. So the collector deliberately
+captures the superset of what any supported configuration could ask for.
+
+**PVE.** Every read endpoint in §3.5's table, exactly once each, for every VM and every
+`(node, storage)` pair the topology pass finds — including `cluster_tasks`, which §13's
+crash-recovery scan reads and nothing else does. This is the same read path a `plan` run performs
+(§3.5's "expected call count per run"), so the cost is one planning run's worth of API calls, not
+a multiple of it. The write path is never touched: this command has no code path that can issue
+`move_disk`, and `--replay` has none either (§16.5).
+
+**Prometheus.** For every group, for each of the six raw metrics of §3.3:
+
+- the instant query `verify-metrics` issues, so a bundle reproduces §3.3's own checks;
+- `label_values` for each of the three configured labels;
+- the `quantile_over_time` reductions of §3.4 that `loadmodel.compute_group_load()` consumes, for
+  both `window.quantile` and `window.upper_quantile`;
+- the `sum by (vmid, device) (rate(...))` **range** query of §3.4 over the **capture range**:
+
+```
+capture_range = max over every registered forecaster of required_range()
+              = max(window.lookback,
+                    forecast.seasonal_lookback_days,
+                    2 · holt_winters.seasonal_periods · metrics.step)
+```
+
+at `metrics.step` resolution — the union of §10.1's table, not the row the operator happens to have
+selected. With the defaults that is `max(24h, 7d, 48h) = 7d`.
+
+This is cheap in *queries* and expensive in *bytes*, which is the right way round. Each range query
+returns every disk in the group as one response, so the query count is
+`6 · |groups| · (1 range + 3 instant) + 3 label_values`, tens of queries for any cluster — while
+the payload is `6 · |disks| · capture_range / metrics.step` samples, about 12000 samples per disk
+at the defaults, or roughly 2.4 million samples for a 200-disk cluster. So:
+
+- the collector **prints the estimate and the query count before it fetches anything**, derived
+  from the topology pass it has already done;
+- `support.max_series_points` (default 5 million) is a hard refusal, not a truncation, naming the
+  flags that would bring the capture under it;
+- `--range`, `--step` and `--no-series` override the capture range, the resolution and the range
+  queries respectively, each recorded in the manifest so the author can see what they are missing
+  rather than inferring it from a short file.
+
+A range longer than Prometheus will serve in one request is **chunked into day-sized sub-queries
+and stitched**, deterministically (chunk boundaries fall on the range's own start, never on
+wall-clock "now"), because a backend refusing a 7 d × 5 m request with `max_samples` exceeded is a
+configuration difference between deployments and not a reason to hand back a short bundle.
+
+**Failures are recorded, never rendered as absence.** This is the direct lesson of §3.5's
+`Datastore.Allocate` finding: a `/content` call that returns `200` and an empty list looks exactly
+like an empty storage. Every captured call carries its outcome in the manifest —
+`ok` / `http_error` / `empty` / `refused` / `skipped` — and the bundle additionally ships
+`findings.json`, the verbatim output of `verify-metrics` and `verify-storages` against the live
+cluster at capture time. An operator whose bundle records "every storage reported zero volumes" has
+a bundle that says so, and the author reading it sees a permissions finding instead of a cluster
+with no disks.
+
+A capture in which some calls failed is still written, and the command exits `1` with the failures
+summarized. A partial bundle is useful; a bundle that pretends to be complete is not.
+
+### 16.3 Anonymization
+
+#### The governing rule: allowlist, never denylist
+
+**A field reaches the bundle only if `anonymize.py` names it.** Not "every field except the ones we
+strip" — every field the engine actually reads, and nothing else. The allowlist is derived from
+`pve.py`'s own accessors and is the single implementation (`AGENTS.md` §5) shared by the collector
+and the corpus scrub audit (§16.6), so the audit cannot drift from what the collector permits.
+
+This is the one decision in this section that must not be softened for convenience. A denylist of
+"fields known to be sensitive" is wrong on the next PVE release, which will add a field nobody
+listed: `GET /storage` alone carries `fingerprint`, `password`, `encryption-key`, `keyring`,
+`server`, `portal`, `target`, `export`, `monhost`, `username`, `options` and `comment`, of which
+the engine reads exactly `storage`, `type`, `content`, `shared`, `nodes`, `disable`, `saferemove`
+and `saferemove_throughput`. A VM config carries `net0` (MAC addresses), `ipconfig0`, `sshkeys`,
+`cipassword`, `smbios1`, `description` and `hookscript`, of which the engine reads the disk keys of
+§3.5's bus regex, `lock` and `template`. Everything else is not "redacted" — it is never read into
+the bundle's data model at all.
+
+Within an allowlisted *value* the same rule applies one level down. A disk value
+`san-a:vm-101-disk-0,size=512G,iothread=1,discard=on` is parsed into its volume id, `size`,
+`format` and `media` and re-serialized from those four; `iothread` and `discard` do not survive
+because nothing reads them.
+
+#### The pseudonym function, and the salt
+
+```
+pseudonym(kind, value) = HMAC-SHA256(salt, kind || "\0" || value)
+```
+
+truncated and rendered per kind (below). `kind` is included so that a node and a storage that
+happen to share a name do not collide into one pseudonym — they are different objects and must stay
+different.
+
+**The salt is 32 bytes from `os.urandom()`, generated on first use and persisted at
+`support.salt_path`** (default `/var/lib/pve-storage-drs/anonymization-salt`, mode `0600`). It is
+never written into a bundle. The manifest instead carries
+`salt_fingerprint = HMAC-SHA256(salt, "drs-salt-fingerprint")`, which lets two bundles be proven to
+share a mapping — so the author can diff a before-and-after pair from the same cluster — without
+revealing the salt or letting anyone test a guess at an original name against the bundle.
+
+This is what makes the mapping reproducible in the sense that matters: **the same host maps the same
+object to the same pseudonym forever**, across runs, across releases and across bundles, until the
+operator rotates the salt with `--new-salt`. Two consequences worth stating plainly, because the
+word "reproducible" invites the wrong one:
+
+- what is stable is the *mapping*, not the payload — a bundle taken a week later has the same names
+  for the same VMs and storages, and different metric samples, which is precisely what makes the
+  pair comparable;
+- reproducibility is **per salt file**, so it is per node by default. An operator who wants every
+  node in the cluster to produce the same mapping points `support.salt_path` at a pmxcfs path
+  (`/etc/pve/pve-storage-drs-anon-salt`); the manual documents that as the choice it is, since it
+  also replicates the salt to every node.
+
+**Not derived from `/etc/machine-id`, and not from the cluster name.** Both are tempting because
+they need no state file. `machine-id` is disqualified by cloning: it is generated at install time
+and VM templates, golden images and cloned PVE installs routinely carry the same one, so two
+unrelated clusters could produce the same pseudonyms for the same vmid — turning the mapping into a
+cross-bundle correlation key, the exact opposite of the goal. The cluster name is disqualified by
+entropy: a low-entropy, guessable input to a public HMAC construction is a mapping anyone can
+invert by brute force over a name list.
+
+#### Per-kind mapping
+
+| Kind | Pseudonym | Notes |
+|---|---|---|
+| Cluster name | `cluster-<8 hex>` | |
+| Node name | `node-<8 hex>`, or `node-<8 hex>.<8 hex>.invalid` when the original was an FQDN | Shape preserved *only* for FQDN-ness, so §3.4's `_escape_promql_regex_literal()` dot-escaping path stays exercised by a bundle from a cluster that uses FQDNs. `.invalid` per RFC 2606 |
+| Storage id | `stor-<8 hex>` | Lowercase letters, digits and `-` only — deliberately the narrowest shape real ids take, so a pseudonym is accepted anywhere an id is |
+| Group name | `group-<8 hex>` | `groups[].name`, `--group` and every `state.json` key that embeds it move together |
+| vmid | `100 + (HMAC mod 899_900)`, deterministic linear probing on collision | Must stay an integer: it is a PromQL label value, a config value in `exclude.vmids` and a component of a volume id. Probing walks candidates in order of *original* vmid so the result never depends on iteration order |
+| Volume id | rebuilt as `<storage-pseudonym>:<prefix>-<vmid-pseudonym>-disk-<n>` | The structural prefix (`vm-`, `base-`) and the disk index survive because §3.5's parser and §3.6's movability rules read them. A volume whose name does not match the pattern keeps only its prefix and index |
+| Tag, pool | `tag-<8 hex>`, `pool-<8 hex>` | Pseudonymized rather than dropped because `exclude.tags` filters on them; the same mapping rewrites `exclude.tags` in `config.yaml` so the exclusion replays |
+| UPID | rebuilt from anonymized parts | `UPID:{node}:{pid}:{pstart}:{starttime}:{type}:{id}:{user}:`, the grammar confirmed against a real cluster in `crashrecovery.py`. Node, id and user are mapped; `pid`/`pstart` are replaced with fixed constants (they identify a process on a named host and nothing the engine reads) |
+| Username / realm | `user-<8 hex>@realm` | Only ever seen inside a UPID |
+| Metric name | canonical `drs_rd_operations`, `drs_wr_bytes`, … | A deployment may prefix metric names with an organization's own string. The bundle's `config.yaml` names the canonical forms, so the mapping is self-consistent |
+| Prometheus label name | the configured `vmid`/`device`/`node` label names are kept verbatim; every other label is **dropped** | Label *names* are chosen by the operator's Telegraf config and can be identifying (`customer`, `datacenter`), but the three configured ones must survive or the bundle cannot be joined. They are already in `config.yaml`, so they leak nothing the config does not |
+| Device name (`scsi0`, `efidisk0`, `tpmstate0`, `unused3`) | **not anonymized** | A closed enumerated set (§3.5's bus regex) carrying no identity, and §3.6's movability rules and §3.7's pinning read them directly. Mapping them would destroy the behaviour the bundle exists to reproduce |
+| VM name, description, notes, comment, snapshot name | **dropped** | Free text, nothing reads it. `show-load` under replay prints the vmid where it would print a name |
+
+**Timestamps are rebased.** Every absolute timestamp — sample timestamps, `ctime` on a volume,
+`snaptime`, a UPID's `starttime` — is shifted by a single per-bundle offset so that the capture
+window starts at a fixed synthetic epoch, and the manifest records the *duration* and the
+*wall-clock-hour alignment* rather than the date. Load has a daily and a weekly shape that the
+seasonal forecasters of §10.1 must be able to learn, so hour-of-day and day-of-week are preserved
+modulo the week; the absolute date is not, because "this cluster's I/O spiked on the afternoon of
+the 3rd" is a correlation handle for anyone who reads incident reports.
+
+**Unmapped means dropped.** If the collector meets an identifier of a mapped kind that is not in
+its map — a volume id naming a storage outside every group, a UPID for a node that has left the
+cluster — it drops the containing record, logs a warning and counts it in the manifest. It never
+passes the original through and never invents a mapping on the spot. Fail closed: the failure mode
+of "dropped a record the author might have wanted" is a worse bundle, and the failure mode of the
+alternative is a leak.
+
+#### The configuration in the bundle
+
+`config.yaml` is the effective configuration as `config.py` resolved it, with four classes of
+change. It matters that this file is right: it is what `--replay` runs on, so an inconsistency
+between it and the recorded responses shows up as a key miss (§16.5) rather than as a wrong answer.
+
+- **Credentials and endpoints are dropped, not blanked.** `proxmox.host`, `.user`, `.password`,
+  `.token_id`, `.token_secret`, `.fingerprint`, `prometheus.url` and every `prometheus` auth field
+  are absent from the file, not present-and-empty. Replay needs none of them (§16.5), and a blanked
+  field invites a future reader to wonder what was in it.
+- **Every identifier is mapped with the same mapping as the data**: `groups[].name`,
+  `groups[].storages[].id`, `exclude.vmids`, `exclude.storages`, `exclude.disks` and
+  `exclude.tags`. A knob the engine compares against a captured value must move together with it or
+  the exclusion silently stops applying, which is a quiet behaviour change in a file that claims to
+  reproduce a run. `state.path`, `support.salt_path` and `support.bundle_dir` are replaced with
+  fixed placeholders — a filesystem path is free text and routinely carries an organization's name.
+- **`/…/` storage patterns are expanded at capture time** (§11.4) and the bundle carries the
+  literal, anonymized ids they matched. A pattern cannot survive anonymization: its text names real
+  storages, and a pattern rewritten over pseudonyms would match nothing on re-expansion. The
+  manifest records each pattern entry's *existence* and the number of storages it matched, so the
+  author can see that a group was pattern-driven; the bundle loses the ability to test §11.4's
+  expansion itself, which is a real and deliberate gap named here rather than discovered later.
+- **`metrics.extra_selector` is rewritten**, not carried, for the same reason: it is operator-authored
+  PromQL over real label values. The collector replaces it with the equivalent anonymized node
+  alternation — the selector §3.4's default tier would have built — and the manifest flags that it
+  did. A bundle from a cluster whose selector does something the default tier cannot express is
+  therefore not byte-faithful to its live queries, and says so in the manifest instead of quietly
+  producing a plan from differently-scoped data.
+
+Everything else — `window`, `snapshot_reserve`, `gates`, `migration`, `objective`, `solver`,
+`execution`, `forecast`, `report`, the per-storage `capability_weight`/`reserve_factor`/
+`saturation_load` — is carried **verbatim**. Those knobs are the test case.
+
+#### What is deliberately preserved
+
+Sizes, capacities, used/free bytes, per-disk load samples, storage `type`, `content`, `shared`,
+`disable`, `saferemove`, `saferemove_throughput`, disk `format`, the PVE and Prometheus version
+strings, the count and grouping of everything, and the entire configuration except its credentials.
+All of it is what makes a bundle a test case rather than a shape, and none of it is an identifier.
+
+#### Threat model, stated honestly
+
+The bundle contains **no direct identifier and no secret**: no hostname, no IP, no IQN, no
+fingerprint, no key, no password, no customer-authored free text. That is a property the scrub
+audit mechanically checks (§16.6).
+
+It is **not** anonymous against someone who already knows the cluster. A cluster with three nodes,
+two 8 TiB LUNs and 1214 VMs is recognizable to anyone who has seen it, and the load shape of a
+particular workload is a fingerprint. The tool must not claim otherwise, and the manual must say
+so in the same paragraph that explains how to run the command: a bundle is safe to hand to the
+author, it is not safe to publish, and the decision to submit one is the operator's informed
+decision and not a formality. `tests/corpus/README.md` carries the same statement for the author's
+side of the exchange.
+
+### 16.4 The command
+
+```sh
+pve-storage-drs -c /etc/pve/drs.yaml collect-testdata [options]
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `-o`, `--output DIR` | `support.bundle_dir` (`/var/lib/pve-storage-drs/testdata`) | Where the bundle directory and its tarball are written |
+| `--estimate` | off | Print the query count and payload estimate, then exit without fetching |
+| `--range DURATION` | the §16.2 capture range | Override the range of the series capture |
+| `--step DURATION` | `metrics.step` | Override the series resolution |
+| `--no-series` | off | Capture topology, instant queries and findings only. Produces a small bundle that cannot exercise §10's forecasters |
+| `--no-archive` | off | Write the directory only, no tarball |
+| `--salt-file PATH` | `support.salt_path` | Use a different salt file |
+| `--new-salt` | off | Generate a fresh salt, replacing the persisted one. Logged at warning: bundles made before and after no longer share a mapping |
+
+It is a **read-only command and a dry-run-only command**: `--mode confirm` or `--mode auto`
+alongside it is a usage error, not a silently ignored flag, because the one thing an operator
+collecting diagnostics must never risk is having started a migration. Exit `0` when every capture
+step succeeded, `1` when a bundle was written with recorded failures, `2` on a usage error.
+
+Human output names the bundle path, its size, the counts (groups, storages, VMs, disks, series,
+samples), the salt fingerprint, and every recorded failure. `--json` emits the manifest.
+
+### 16.5 Replay: the `--replay` global option
+
+```sh
+pve-storage-drs --replay ./drs-testdata-cluster-3f8a91c2-2026-09-11 plan --json
+```
+
+`--replay PATH` is a **global** option (§11.3), not a subcommand, and that is the whole design: it
+substitutes both clients at the one place each is constructed, so every read-only command —
+`verify-metrics`, `verify-storages`, `show-load`, `plan`, `explain` — runs unchanged against the
+bundle. One option, five commands under test, and no second copy of the pipeline to keep in step
+with the real one.
+
+- The configuration comes from the bundle's own `config.yaml` unless `-c` is also given, in which
+  case the file's knobs are used against the bundle's data — that is how the author runs the
+  operator's cluster through a solver backend, a `spread_metric` or a forecaster the operator never
+  selected.
+- **`apply` refuses.** So does any `--mode` above `dry-run`. Exit `2`.
+- **No network is reachable.** The replay clients are constructed *instead of* the real ones and
+  hold no session, and a bundle's `config.yaml` carries no credentials or endpoints, so a bug
+  cannot fall back to a live cluster. A unit test asserts that constructing the replay path never
+  constructs a `requests.Session` or a `ProxmoxAPI`.
+- **A key miss is a loud, specific error**, never an empty result: "bundle has no recorded response
+  for `sum by (vmid, instance) (rate(drs_rd_operations[600s]))` over 7 d at 300 s — captured with
+  `--step 60s`?" This is the failure mode that would otherwise make a replay silently diverge from
+  the live run, and §13 gains a row for it. It is also why the cache key is the anonymized query
+  text: the engine under replay reads the anonymized config, generates the anonymized query, and
+  hits or misses deterministically — a key computed over the *original* text could only ever miss.
+- `state.json` under replay is read from the bundle if present and written nowhere. A replay never
+  touches the host's real state.
+
+`--replay` ships with the tool rather than living in `tests/`, for two reasons: the operator needs
+it to check their own bundle before sending it ("does `plan` against this bundle show the problem I
+am reporting?"), and a debugging aid that only exists inside a test harness is one the author
+cannot hand back to the operator when the answer is "your bundle replays fine, so the difference is
+in your live cluster".
+
+### 16.6 The corpus: `tests/corpus/`
+
+Submitted bundles land in **`tests/corpus/`**, one directory per bundle, and become part of the
+test suite.
+
+```
+tests/corpus/
+  README.md                      # what goes here, how to add one, and the honesty statement
+  <bundle-name>/                 # the unpacked bundle directory, exactly as collected
+  <bundle-name>.submission.yaml  # provenance and consent (below)
+  <bundle-name>.expected.json    # generated, never hand-edited
+  validate_corpus.py             # the generator and the --check gate
+```
+
+`<name>.submission.yaml` records what the repository needs to know about data it did not produce:
+who submitted it and under what terms (redistribution under AGPL-3.0-or-later, as the rest of the
+repository), the PVE and Prometheus versions, the collector version, whether the submitter reviewed
+the bundle before sending, and what the bundle is *for* — the behaviour it is expected to
+reproduce. A bundle with no such file is not a test case, it is an unattributed dump, and the suite
+fails on it. `debian/copyright` gains a stanza for `tests/corpus/*` when the first bundle lands;
+the corpus is not installed by the package.
+
+#### What the suite asserts
+
+The central difficulty is that **a real bundle has no known-correct answer**. Nobody can enumerate
+`3^1214` assignments, so unlike §14's fixtures a corpus bundle cannot assert "the plan is optimal".
+Four kinds of assertion that do hold:
+
+1. **The scrub audit** — cheap, and it runs on every bundle in the corpus on every `make check`,
+   before anything else. It walks every file and fails on: any key not in `anonymize.py`'s
+   allowlist (the same allowlist the collector uses, so the two cannot drift); any value matching
+   an IPv4 or IPv6 literal, an email address, an `iqn.`/`naa.`/`wwn.` prefix, a PEM block, a
+   64-hex-or-longer run, a `.com`/`.net`/`.org`/`.local` hostname, or a JWT-shaped string; any node
+   or storage name not matching the pseudonym grammar; any absolute timestamp outside the synthetic
+   epoch window. It is a second line of defence that assumes the collector has a bug, which is the
+   only useful assumption to make about a privacy control.
+2. **Invariants, not optima.** For every bundle and every variant: `Σ r_s = 0` in the final
+   assignment whenever a reserve-feasible assignment exists; §8.1's transient predicate holds at
+   every step of the emitted order; every move in the plan is to a storage (C2) permits for that
+   disk's format and group; §7.3's per-move duration rule and saturation guard hold for every
+   accepted move; the objective the scheduler was handed equals the objective recomputed from the
+   final assignment. These are the safety properties of `AGENTS.md` §6 and they are checkable
+   without knowing the optimum.
+3. **MILP versus heuristic, on real data.** Run the same bundle through CP-SAT, CBC and the
+   heuristic and assert the MILP objective is `≤` the heuristic's, and that both MILP backends
+   agree to within the §5.5 tolerance. This is the cross-check §14 can only perform on six disks,
+   and it is the single highest-value thing a real bundle buys: a heuristic that beats the MILP
+   means the two have drifted apart on the shared feasibility or objective functions, which
+   `AGENTS.md` §5 exists to prevent and which no synthetic fixture of this size can detect.
+4. **Regression.** `<name>.expected.json` records, per variant, the gate verdict, the plan (as a
+   sorted list of moves), the order, the objective breakdown, the payback arithmetic and the
+   findings. It is generated by `validate_corpus.py` and asserted current by
+   `validate_corpus.py --check`, exactly as `tests/fixtures/generate_expected.py` is for §14 — and
+   for the same reason: an expected file that a human may edit is an expected file that will be
+   edited to match a bug.
+
+#### The variant matrix
+
+Per bundle, the matrix the generator sweeps: `solver.backend` ∈ {cp-sat, cbc, heuristic} ×
+`objective.spread_metric` ∈ {l1, minmax} × `forecast.model` ∈ {quantile, seasonal_naive,
+holt_winters} × `objective.beta_move_count` over a small sweep, with everything else from the
+bundle's own `config.yaml`. A variant whose backend or forecaster is unavailable in the running
+environment is **skipped and recorded as skipped**, never silently dropped: CP-SAT is an optional
+dependency (`AGENTS.md` §9.1) and a corpus result that quietly means "CBC only" is a corpus result
+that lies.
+
+#### Size, and bundles too big to commit
+
+A committed bundle is reviewable data, so there is a ceiling. Rule: a bundle is committed only if
+its directory is under **8 MiB**, which at the §16.2 estimate is a cluster of a few dozen disks or
+a `--no-series` capture of a large one. Anything bigger is kept outside the repository and found
+via `DRS_CORPUS_DIR`, a colon-separated list of directories the suite also walks; CI sets it where
+a large corpus is available and the suite runs the committed bundles alone where it is not. An
+empty `tests/corpus/` is a clean pass, not a failure — the suite must be green on a fresh clone
+with no bundles at all.
+
+`make corpus` runs the full matrix over every discoverable bundle. `make check` runs the scrub
+audit over every bundle plus the invariant and regression assertions for the committed ones,
+because those are bounded by the 8 MiB rule; the full matrix over a large external corpus is a CI
+job of its own.
+
+### 16.7 Modules, phases and the honest status
+
+Three new modules, split along the line that matters — the part that must be right is pure:
+
+| Module | Responsibility |
+|---|---|
+| `anonymize.py` | The allowlists, the pseudonym function, the per-kind mappings, the timestamp rebase. Pure, no I/O, and the shared implementation behind both the collector and the scrub audit |
+| `collect.py` | Capture orchestration, the estimate, chunking, the manifest, the deterministic writer |
+| `replay.py` | The bundle reader and the two replay clients, satisfying the same interfaces `metrics.py` and `pve.py` define |
+
+`config.py` gains a `support` block: `support.salt_path`, `support.bundle_dir`,
+`support.max_series_points`, `support.capture_range` (`auto` for §16.2's computed maximum, or an
+explicit duration). All four appear in §15.1, in `config/drs.example.yaml` and in the manual, in
+the commit that implements them and not before.
+
+§12 gains **phase 10**: `collect-testdata` + `--replay` + `tests/corpus/`, done when a bundle
+collected from the author's own cluster replays to the same plan the live run produced, the scrub
+audit passes on it, and the determinism test is green.
+
+Nothing in this section is implemented yet. `tests/corpus/` and its `README.md` exist from the
+commit that adds this section, so that the place to put a bundle is already there and documented —
+the folder is not the feature, but an operator who reads this section and asks "where do I send
+it?" deserves an answer that is not "wait for the next release". The manual's per-command status
+table (`docs/manual/30-safety-and-status.md`) lists `collect-testdata` as specified and not yet
+built, in the same form it already uses for `explain`'s implemented subset, and stays that way
+until phase 10 lands.
