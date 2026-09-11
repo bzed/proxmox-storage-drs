@@ -366,6 +366,14 @@ class VerifyMetricsReport:
         return not any(f.level == "error" for f in self.findings)
 
 
+_NUMERIC_DROP_HINT = (
+    "Prometheus/OpenMetrics has no string sample type, and Telegraf silently drops a field "
+    "the moment it observes a non-numeric value for it (InfluxDB line protocol fixes a field's "
+    "type from its first write) -- check your PVE/Telegraf blockstat collection for a "
+    "non-numeric value on this field"
+)
+
+
 def _check_metric_names_exist(client: PrometheusClient, metrics: MetricsConfig) -> list[Finding]:
     """Section 3.3 step 1: every configured metric name must exist."""
     try:
@@ -377,10 +385,70 @@ def _check_metric_names_exist(client: PrometheusClient, metrics: MetricsConfig) 
         name = raw_metric_name(metrics, field)
         if name not in known_names:
             findings.append(
-                Finding("error", f"metrics.{field} = {name!r} does not exist in Prometheus")
+                Finding(
+                    "error",
+                    f"metrics.{field} = {name!r} does not exist in Prometheus -- "
+                    f"{_NUMERIC_DROP_HINT}, or it genuinely has not been configured/emitted",
+                )
             )
         else:
             findings.append(Finding("info", f"metrics.{field} = {name!r} exists"))
+    return findings
+
+
+def _disk_keys_seen(
+    result: list[dict[str, Any]], vmid_label: str, device_label: str
+) -> set[tuple[str, str]]:
+    """Every distinct ``(vmid, device)`` pair carried by an
+    :meth:`PrometheusClient.instant_query` result -- pure and side-effect
+    free so :func:`_check_cross_metric_disk_consistency` below is
+    unit-testable without a fake session at all. A series missing either
+    label is skipped, matching every other per-disk join in this module
+    (``compute_disk_coverage``, ``loadmodel.py``)."""
+    keys: set[tuple[str, str]] = set()
+    for series in result:
+        series_labels = series.get("metric", {})
+        vmid_value = series_labels.get(vmid_label)
+        device_value = series_labels.get(device_label)
+        if vmid_value and device_value:
+            keys.add((vmid_value, device_value))
+    return keys
+
+
+def _check_cross_metric_disk_consistency(
+    keys_by_metric: dict[str, set[tuple[str, str]]],
+) -> list[Finding]:
+    """Flags a disk reported by *some* of the six configured metrics but not
+    others -- normally impossible, since all six come from one Telegraf
+    ``blockstat`` collection per disk (the same assumption
+    :func:`compute_disk_coverage` relies on to check only ``read_ops``).
+    The one common way it happens anyway: InfluxDB's line protocol fixes a
+    field's type from its first write, and Telegraf's Prometheus-compatible
+    output silently drops a field the instant it sees a non-numeric value
+    for it -- Prometheus/OpenMetrics has no string sample type. That drop
+    can hit one field for one disk without touching the other five, which
+    is exactly the asymmetry this catches and ``compute_disk_coverage``
+    alone (checking only ``read_ops``) cannot: if the dropped field happens
+    not to be ``read_ops``, coverage looks perfect while a real gap sits in
+    one of the other five. Costs nothing extra: every input set here is
+    already fetched by ``_check_sample_series``'s own instant queries."""
+    all_keys: set[tuple[str, str]] = set()
+    for keys in keys_by_metric.values():
+        all_keys |= keys
+    findings: list[Finding] = []
+    for name, keys in keys_by_metric.items():
+        missing = sorted(all_keys - keys)
+        if not missing:
+            continue
+        shown = ", ".join(f"{vmid}:{device}" for vmid, device in missing[:5])
+        more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+        findings.append(
+            Finding(
+                "warning",
+                f"{name}: no series for {len(missing)} disk(s) that other configured metrics "
+                f"do report ({shown}{more}) -- {_NUMERIC_DROP_HINT}",
+            )
+        )
     return findings
 
 
@@ -391,6 +459,7 @@ def _check_sample_series(
     findings: list[Finding] = []
     samples: dict[str, dict[str, str]] = {}
     labels = metrics.labels
+    keys_by_metric: dict[str, set[tuple[str, str]]] = {}
     for field in RAW_METRIC_FIELDS:
         name = raw_metric_name(metrics, field)
         try:
@@ -399,10 +468,16 @@ def _check_sample_series(
             findings.append(Finding("error", f"{name}: query failed: {exc}"))
             continue
         if not result:
-            findings.append(Finding("warning", f"{name}: no series returned (no data yet?)"))
+            findings.append(
+                Finding(
+                    "warning",
+                    f"{name}: no series returned -- no data yet, or {_NUMERIC_DROP_HINT}",
+                )
+            )
             continue
         sample_labels = result[0].get("metric", {})
         samples[name] = sample_labels
+        keys_by_metric[name] = _disk_keys_seen(result, labels.vmid, labels.device)
         findings.append(Finding("info", f"{name}: sample series labels {sample_labels}"))
         for role, label_name in (
             ("vmid", labels.vmid),
@@ -417,6 +492,7 @@ def _check_sample_series(
                         "empty on the sample series",
                     )
                 )
+    findings.extend(_check_cross_metric_disk_consistency(keys_by_metric))
     return findings, samples
 
 
@@ -448,7 +524,13 @@ def compute_disk_coverage(
     Uses ``read_ops`` as the representative metric: coverage gaps are a
     property of the underlying scrape, not of which of the six fields is
     read, and running six range queries here would be six times the load for
-    no extra information. Shared by ``verify-metrics``'s own report
+    no extra information. That assumption can break for one specific
+    reason -- a non-numeric value silently dropping just one of the six
+    fields for one disk, Telegraf/InfluxDB-side, independently of the other
+    five (Prometheus/OpenMetrics has no string sample type) -- which is why
+    ``_check_sample_series``'s :func:`_check_cross_metric_disk_consistency`
+    cross-checks all six metrics' own disk sets against each other instead
+    of trusting this one. Shared by ``verify-metrics``'s own report
     (:func:`_check_coverage` below) and ``loadmodel.py``'s per-disk
     data-quality gate (section 3.4: "reject a disk whose sample coverage...
     is below ``window.min_coverage``") -- one implementation of the
