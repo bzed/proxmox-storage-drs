@@ -531,15 +531,15 @@ def test_check_sample_series_still_probes_literal_cluster_once_opted_out(
     assert any(m == "'cluster' label values seen across these metrics: abn" for m in info)
 
 
-def test_check_sample_series_silent_when_no_cluster_label_anywhere(
+def test_check_sample_series_silent_when_opted_out_and_no_cluster_label_anywhere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No finding at all when nothing carries the (default or configured)
-    cluster label -- most deployments have no such tag and never will, so
-    this must not become routine noise."""
+    """No finding at all when metrics.labels.cluster is explicitly None and
+    nothing carries even the literal 'cluster' probe -- an operator who
+    opted out relies on nothing here, so its absence is unremarkable."""
     from proxmox_storage_drs.metrics import _check_sample_series
 
-    metrics = _full_metrics_config()
+    metrics = replace(_full_metrics_config(), labels=MetricLabels(cluster=None))
 
     def fake_instant_query(name: str) -> list[dict[str, Any]]:
         del name
@@ -550,6 +550,32 @@ def test_check_sample_series_silent_when_no_cluster_label_anywhere(
 
     findings, _samples = _check_sample_series(client, metrics)
     assert not any("label values seen" in f.message for f in findings)
+    assert not any(f.level == "warning" and "cluster" in f.message for f in findings)
+
+
+def test_check_sample_series_warns_when_relied_on_cluster_label_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVIEW.md W-06: metrics.labels.cluster defaults to 'cluster', which
+    plan/show-load/apply/explain rely on as their default query-scoping
+    tier -- so finding no series carrying it anywhere must be a warning,
+    not silence, since the default tier would otherwise scope every query
+    to a label nothing carries and match zero series."""
+    from proxmox_storage_drs.metrics import _check_sample_series
+
+    metrics = _full_metrics_config()
+    assert metrics.labels.cluster == "cluster"  # the default this test relies on
+
+    def fake_instant_query(name: str) -> list[dict[str, Any]]:
+        del name
+        return [{"metric": {"vmid": "101", "instance": "scsi0"}}]
+
+    client = PrometheusClient(PROM_CONFIG, session=FakeSession({}))
+    monkeypatch.setattr(client, "instant_query", fake_instant_query)
+
+    findings, _samples = _check_sample_series(client, metrics)
+    warnings = [f.message for f in findings if f.level == "warning"]
+    assert any("no series carries a 'cluster' label" in m for m in warnings)
 
 
 def test_verify_metrics_query_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:

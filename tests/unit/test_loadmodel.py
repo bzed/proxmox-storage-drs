@@ -431,6 +431,62 @@ def test_compute_group_load_node_selector_none_is_unchanged_from_before() -> Non
     assert result.load_by_disk_key()["101:scsi0"] == pytest.approx(2.0)
 
 
+def test_compute_group_load_flags_a_selector_matching_no_series_at_all() -> None:
+    """REVIEW.md W-06/W-07: a resolved node/cluster selector that matches
+    zero series anywhere (every raw quantity and the coverage query alike)
+    is not the same thing as a genuinely idle group -- ``no_series_matched``
+    must say so, since the caller (``gates.py``, ``cli.py``) cannot tell
+    the two apart from ``idle``/``average_utilization`` alone."""
+    group = Group(
+        name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
+    )
+    selector = 'cluster="pvezebe"'
+    client, _session = _client(node_selector=selector)  # every field defaults to "no series"
+
+    result = compute_group_load(
+        client, METRICS, WINDOW, LoadWeights(), group, node_selector=selector
+    )
+
+    assert result.no_series_matched is True
+    assert result.idle is True
+
+
+def test_compute_group_load_no_series_matched_is_false_without_a_selector() -> None:
+    """The identical all-empty response, but no selector was ever applied
+    (the pre-scoping behaviour, or ``verify-metrics``'s own tier-1-only
+    queries) -- this is an ordinary idle/no-data case, not a scoping bug,
+    so ``no_series_matched`` must stay False."""
+    group = Group(
+        name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
+    )
+    client, _session = _client()
+
+    result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
+
+    assert result.no_series_matched is False
+    assert result.idle is True
+
+
+def test_compute_group_load_no_series_matched_is_false_with_real_data() -> None:
+    """A selector applied but data actually comes back: not a scoping
+    problem, so ``no_series_matched`` stays False even though it is the
+    same selector-applied code path as the matching-nothing test above."""
+    group = Group(
+        name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
+    )
+    selector = 'cluster="pvezebe"'
+    coverage = [full_coverage(101, "scsi0")]
+    client, _session = _client(
+        read_time=[series(101, "scsi0", 2.0e9)], coverage=coverage, node_selector=selector
+    )
+
+    result = compute_group_load(
+        client, METRICS, WINDOW, LoadWeights(), group, node_selector=selector
+    )
+
+    assert result.no_series_matched is False
+
+
 # ---------------------------------------------------------------- coverage rejection
 
 

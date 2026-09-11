@@ -193,6 +193,26 @@ def test_idle_group_never_acts_on_first_run() -> None:
     assert "idle" in decision.reason
 
 
+def test_no_series_matched_reports_the_query_filter_not_idle() -> None:
+    """REVIEW.md W-06/W-07: the same act=False verdict as the ordinary idle
+    case, but the reason must name the actual cause (a scoping mismatch)
+    rather than call a possibly-busy group idle."""
+    group_load = GroupLoad(
+        group_name="g",
+        idle=True,
+        average_utilization=0.0,
+        disks=(DiskLoad("101:scsi0", 0.0, "sample coverage 0% is below window.min_coverage"),),
+        storages=(StorageLoad("san-a", 0.0, 0.0),),
+        no_series_matched=True,
+    )
+
+    decision = evaluate_group_gates(group_load, reserves_ok(group_load), GATES, last_load=None)
+
+    assert not decision.act
+    assert "matched no series" in decision.reason
+    assert "group is idle" not in decision.reason
+
+
 def test_no_storages_at_all_does_not_act() -> None:
     group_load = GroupLoad(
         group_name="g", idle=True, average_utilization=0.0, disks=(), storages=()

@@ -381,7 +381,15 @@ Notes for the implementer:
      literal `"cluster"`, a tag this project's deployments carry as standard practice. Set it to
      `null` to opt back out on a Prometheus that genuinely has no such label — `verify-metrics`'s own
      report of which cluster-naming label values it actually sees across your metrics (below) is how
-     an operator confirms which is true, rather than guessing.
+     an operator confirms which is true, rather than guessing; when it sees none at all *and*
+     `metrics.labels.cluster` is still set (the default included), that report is a warning, not
+     silence — this default tier would otherwise scope every load query to a label nothing carries,
+     matching zero series (REVIEW.md W-06). A run-time symptom of the same mismatch — a resolved
+     selector that matches literally nothing across all six raw queries — is also named explicitly,
+     as "the resolved query filter matched no series at all", rather than being reported as an idle
+     group (`loadmodel.compute_group_load`'s `no_series_matched`, REVIEW.md W-07). A denied
+     `GET /cluster/status` (missing `Sys.Audit`) does not fail the run either: it logs a warning and
+     falls through to tier 3 (REVIEW.md W-08).
   3. `<metrics.labels.node>=~"pve01|pve02|..."` otherwise, built from the cluster's own node list
      (`GET /nodes`, §3.5) every run rather than hand-maintained, so a node added to the cluster is
      covered with no config edit. This was the only auto-derived tier before `metrics.labels.cluster`
@@ -532,10 +540,19 @@ fetching dominates run time. Specify:
   reveals which storage it is actually on, so it costs a fetch too — the saving from this
   optimization is real but smaller than a naive reading suggests.
 
-Expected call count per run: `3 + 2·|VMs considered| + 2·|storages|` — three cluster-wide calls
-(VM inventory, storage inventory, storage definitions), two per considered VM (config, which also
-carries `lock` per §9.3's pseudocode so no separate `/status/current` call is needed at planning
-time; and `/snapshot`, per §3.7), and two per storage (`status`, `content`).
+Expected call count per run: `4 + 2·|VMs considered| + 2·|storages| + |extra content pairs|` — four
+cluster-wide calls (VM inventory, storage inventory, storage definitions, and `GET /cluster/status`
+for tier 2's cluster name, §3.4, unless `metrics.labels.cluster` is `null`), two per considered VM
+(config, which also carries `lock` per §9.3's pseudocode so no separate `/status/current` call is
+needed at planning time; and `/snapshot`, per §3.7), and two per storage (`status`, `content`). The
+node-list tier's own `GET /nodes` adds one more cluster-wide call whenever it is used (tier 2 opted
+out or its lookup found no name). `|extra content pairs|` is the amplification the managed-disk
+own-VM-node size fetch adds (below, "The actual mechanism..."): one additional `content` call per
+distinct `(node, storage)` pair a managed disk's VM runs on, beyond the per-storage active-node pick
+already counted above — deduplicated by `_needed_content_node_pairs()`, so it is bounded by distinct
+nodes hosting managed disks, not by VM count, but is otherwise unbounded above (worst case
+`|nodes| · |storages|`) and grows with how spread out VMs are across nodes, not with cluster size
+alone.
 
 Write path:
 

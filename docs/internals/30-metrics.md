@@ -131,8 +131,15 @@ set it to `None`, the probe falls back to that same literal string anyway
 -- a courtesy guess, not a requirement, so opting out of the auto-selector
 tier does not also blind this purely informational report. One
 `Finding("info", ...)` lists every value found across all six metrics
-combined, or none at all when nothing carried it -- silence, not a
-warning, since not every deployment has one.
+combined. When nothing carried it, the outcome depends on whether the
+label was relied on: silence for the explicit `metrics.labels.cluster:
+null` opt-out (nothing downstream needs the label, so its absence is
+unremarkable), but a `Finding("warning", ...)` for every other case --
+`metrics.labels.cluster`'s default included -- naming the label and the
+fix, since `cli._resolve_node_selector_for_run()` builds
+`<label>="<cluster name>"` as the default query filter for
+`plan`/`show-load`/`apply`/`explain`, and an absent label means every one
+of those queries matches zero series (REVIEW.md W-06).
 
 `VerifyMetricsReport.ok` is `True` iff no `Finding` has `level == "error"` —
 `cli.py`'s `verify-metrics` handler uses exactly this property to decide the

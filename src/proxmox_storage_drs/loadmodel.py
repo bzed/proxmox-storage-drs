@@ -92,6 +92,14 @@ class GroupLoad:
     average_utilization: float  # u* = (Sum_d l_d) / (Sum_s c_s), section 5.3 (C6)
     disks: tuple[DiskLoad, ...]
     storages: tuple[StorageLoad, ...]
+    # REVIEW.md W-06/W-07: True when a non-``None`` ``node_selector`` was
+    # applied and *every* one of the six raw queries plus the coverage
+    # query came back with zero series -- the query filter matched
+    # nothing at all, not "this group's disks are genuinely idle". Kept
+    # distinct from ``idle`` (which also covers the ordinary,
+    # correctly-scoped, truly-quiet-this-window case) so a caller can
+    # name the actual cause instead of reporting a busy cluster as idle.
+    no_series_matched: bool = False
 
     def load_by_disk_key(self) -> dict[str, float]:
         """Convenience for callers (``show-load``) keying off `Disk.key`."""
@@ -348,6 +356,16 @@ def compute_group_load(
 
     coverage = compute_disk_coverage(client, metrics, window, selector=node_selector)
     raw = _fetch_all_raw_quantities(client, metrics, window, node_selector)
+    # REVIEW.md W-06/W-07: a resolved selector that matches zero series
+    # anywhere looks identical, downstream, to a genuinely idle group --
+    # every disk coverage-rejected, t_total == 0.0 -- unless it is told
+    # apart here, at the one point that still has both the selector and
+    # the raw (pre-rejection) query results in hand.
+    no_series_matched = (
+        node_selector is not None
+        and not coverage
+        and not any(getattr(raw, field) for field in RAW_METRIC_FIELDS)
+    )
     fallback = last_known_loads or {}
 
     accepted_raw: dict[str, tuple[float, float, float]] = {}
@@ -414,6 +432,7 @@ def compute_group_load(
         average_utilization=average_utilization,
         disks=tuple(disk_loads),
         storages=tuple(storage_loads),
+        no_series_matched=no_series_matched,
     )
 
 

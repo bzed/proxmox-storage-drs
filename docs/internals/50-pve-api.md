@@ -141,8 +141,13 @@ so this is the normal call every `plan`/`show-load`/`apply`/`explain` run
 makes, not a conditional one. Returns `None` rather than raising when the
 entry is missing or unnamed, the same "let the caller decide" contract
 `node_names()` already has -- `metrics.resolve_node_selector()` treats
-that `None` as "fall back to the node list," not fatal. Called at most
-once per command invocation (`cli._resolve_node_selector_for_run()`), and
+that `None` as "fall back to the node list," not fatal. A denied call
+(`PveApiError` -- missing `Sys.Audit`, most often a token provisioned
+before this tier existed) is caught the same way, one layer up in
+`cli._resolve_node_selector_for_run()` itself: logged as a warning, then
+treated identically to `None` -- REVIEW.md W-08, so a run never fails
+outright over a scoping lookup that has an equally-correct fallback.
+Called at most once per command invocation (`cli._resolve_node_selector_for_run()`), and
 skipped only when `metrics.labels.cluster` is explicitly `null`.
 
 ## `move_disk()`: the one and only bytes/s -> KiB/s conversion

@@ -107,6 +107,27 @@ pip-installs `ortools` as a documented-in-workflow-only exception to AGENTS.md �
 "apt, never pip" rule), one Info (an untracked, referenced-nowhere helper script in the working
 tree). **Section 24** records how all five were resolved.
 
+A **fourteenth pass** (section 25) reviews the next eight commits: the 0.1.0 version/changelog cut,
+`python3-pulp`/`coinor-cbc` promoted from `Recommends` to `Depends`, three live-cluster fixes to
+disk-size resolution in `topology.py` (a `KeyError('size')` crash on a present-but-sizeless content
+item, a new `approximate-size` tier above the VM-config fallback, and querying a managed disk's
+content listing from its own VM's node so the exact `size` — not the approximate one — is what gets
+used), and a two-commit change to §3.4 query scoping (`verify-metrics`'s cluster-label discovery,
+then `metrics.labels.cluster` defaulting to `"cluster"` so queries scope by the live cluster's own
+name instead of its node list). Nine findings (W-01..W-09) are identified: one Medium — the
+cluster-label default makes every load query match zero series, and the tool degrade to "idle", on
+a Prometheus that carries no such label (the vanilla metric-server shape), and `verify-metrics`
+cannot detect this because it deliberately never applies the tier it broke. Seven Low: five
+documentation-staleness findings (a stale "`auto` not yet" on the manual's own authoritative
+status page; phase mislabelling in the 0.1.0 changelog, which also records none of the range's
+post-cut features; a stale "five stages"/`_collect_vm_disks` cluster around the internals page's
+renumbered step list; the operator manual's warnings paragraph not extended for the three new size
+warnings; and two locations — the example config's `extra_selector` comment and `explain`'s worked
+example — still showing the old node-scoped default) plus two behaviour-adjacent ones (the runtime
+presentation of a selector matching nothing as an idle group; every run now hard-requiring
+`Sys.Audit` for `GET /cluster/status`). One Info: the content-listing read-path amplification,
+and §3.5's stale expected-call-count formula, unquantified.
+
 ---
 
 ## 0. Overall assessment
@@ -3114,6 +3135,521 @@ the thirteenth pass's 98.66%: the new `_pin_action_hint()` branch). `make check`
 lint, typecheck, test, fixtures, docs-check — `IMPLEMENTATION_PLAN.pdf` rebuilt to 42 pages,
 internals PDF to 46, manual PDF to 37, all three stamps regenerated in the same commit as their
 Markdown per AGENTS.md §7).
+
+---
+
+## 25. Fourteenth-pass review — 0.1.0, CBC as a hard `Depends`, three live-cluster size fixes, and cluster-name query scoping
+
+Reviewed commit range `fd5180e..HEAD` (the V-01..V-05 fixes themselves are already recorded in
+section 24). Eight non-merge commits: `4f1172a` (the 0.1.0 `debian/changelog` entry, with
+`pyproject.toml`/`__init__.py` bumped to match), `64f4022` (the entry's distribution set to
+`trixie` rather than `UNRELEASED`), `b4447ca` (`coinor-cbc` and `python3-pulp` moved from
+`Recommends` to `Depends` in `debian/control`, with the plan, both relevant manual pages,
+`.agents/packaging.md`, the `import-all` autopkgtest comment and the changelog bullet all updated
+together — plus a genuine factual correction: the old claim that Debian's `python3-pulp` itself
+merely `Recommends` `coinor-cbc` was wrong), `59cda4c` (fix a real `KeyError('size')` crash when a
+content-listing entry matches a VM disk's volid but carries no `size` key — the same latent
+unguarded `item["size"]` fixed in `_build_storages()`'s foreign-volume sum too), `f2ddeeb` (a new
+middle tier: a `size`-less content item's `approximate-size` beats the VM config's own `size=`),
+`f25a201` (query a managed disk's content listing from *its own VM's node*, because PVE 9.2's
+qcow2-on-shared-LVM volumes report their exact `size` only from the node with the LV active),
+`a189a6f` (§3.4 grows a second auto-derived scoping tier — the live cluster's own name, from a new
+`PveClient.cluster_name()` (`GET /cluster/status`) — plus a `verify-metrics` discovery scan that
+reports every cluster-label value seen across the metrics, so an operator on a shared Prometheus
+finds out what to configure), and `3b5f031` (operator-directed: `metrics.labels.cluster` defaults
+to `"cluster"` rather than `null`, making cluster-name scoping the default tier for
+`plan`/`show-load`/`apply`/`explain`). Roughly 1,150 net inserted lines across 34 files (≈1,350
+across the individual commits before `3b5f031`'s rewording overwrote `a189a6f`'s), about 460 of
+them tests.
+
+The range's quality stays high. All three code fixes are driven by incidents on a live cluster,
+each lands with regression tests that would have reproduced the original failure, and each updates
+the plan and `docs/internals/60-topology.md` in the same commit — including an unusually honest
+correction of the *previous* commit's own wrong guess (f2ddeeb attributed `approximate-size` to a
+dir/NFS storage; f25a201 replaced that with the operator's actual mechanism and said so). The
+node-pair pre-pass in f25a201 is engineered the right way: deduplicated as a set (bounded by
+distinct nodes, not VMs), fetched concurrently under the same `read_workers` pattern as the per-VM
+phase, deterministically ordered (sorted pairs, `Executor.map`'s order-preserving results, and the
+join still single-threaded in `cluster-resources` order, so warning order is run-stable), with
+`_disk_specs_from_config()` factored out so the pre-pass and the join can never parse one VM's
+disks two different ways, and the active-pick listing reused rather than re-fetched wherever it
+already covers the pair. The packaging move is coherent end to end, states its one real trade —
+the autopkgtest can no longer prove heuristic-only operation at install time — honestly in three
+places, and its factual correction about `python3-pulp` checks out (verified below). The scoping
+work is built with the same discipline — one resolved selector per run threaded everywhere, a
+tier precedence that is unit-tested tier by tier including the opt-out and the
+caller-passes-a-name-while-config-opted-out corner, call-skipping proven by tests whose fakes
+*raise* if a skipped API call is made, string-literal escaping in the new selector builder, and
+seven documents (plus the schema, the example config and both PDFs) rewritten across the two
+commits — but its second half flips a default, and that flip is where this pass's one Medium
+finding lives (W-06): the silence and the runtime symptoms calibrated for the old opt-in design
+were kept when the default changed. Otherwise, every finding this pass is documentation residue of
+the exact family the last three passes kept finding: the operator-facing or summary layers (the
+status page, the warnings paragraph, the changelog, one internals header, two worked examples)
+lagging behaviour changes that the plan and internals otherwise tracked.
+
+### 25.1 Verification run
+
+- Dev venv `python3 -m pytest`: **674 passed, 1 warning** (the same benign statsmodels
+  `ConvergenceWarning` noted since the eleventh pass), **98.65% line coverage**. `make check`
+  clean: fmt-check, flake8, mypy (in its own `.venv-typecheck/`), test-with-coverage, the fixture
+  `--check`, and docs-check over all three PDF stamps plus the manpage.
+- System Python (pulp **2.7.0**, the exact Debian trixie/CI version, no `ortools`): **661 passed,
+  13 skipped** — only the cpsat-parametrized cases skip; the CBC and heuristic paths stay green on
+  the packaged toolchain, as they have since the S-01 fix.
+- **The new warning strings were exercised directly** (fake-client fixture, both tiers): a
+  size-less item with `approximate-size` warns `201:scsi0: 'san-a:vm-201-disk-0' has no exact
+  size= in 'san-a''s content listing; using its approximate-size instead`; one with neither warns
+  `... has no size= or approximate-size in ... using the VM config's own size= instead, which can
+  be stale if the volume was resized outside Proxmox`. Sizes resolve to 9 GiB and 4 GiB
+  respectively — the tiers work as the commit messages claim.
+- **The scoping flip's failure mode was traced end to end by code reading, not assumed**: with the
+  default `metrics.labels.cluster: "cluster"` and a Prometheus whose series carry no such label,
+  every load query embeds `cluster="<name>"` and returns zero series; `compute_group_load()`
+  then rejects every disk (`sample coverage 0% is below window.min_coverage`), substitutes 0.0 /
+  last-known, and the gate's verdict is `gates.py`'s "group is idle: no measured I/O to balance" —
+  a working, busy Prometheus presented as an idle one, with nothing naming the selector as the
+  cause. `verify-metrics` in the same state is **fully green**: it resolves its selector with
+  `resolve_node_selector(metrics, None)` (no node list, no cluster name), so tiers 2 and 3 never
+  apply to its own queries by design, and the discovery scan reports nothing (no series carries
+  the label) — the absence of a finding is the only trace. See W-06.
+- **External fact checks** (the Appendix B tradition), all against primary sources:
+  - `packages.debian.org/trixie/python3-pulp` (2.7.0+dfsg-4): **depends** on `coinor-cbc` —
+    `b4447ca`'s correction of the long-standing "Debian splits cbc into a mere Recommends" claim
+    is accurate. It also retroactively explains why S-01's crash was never observed on a real
+    Debian install: only a non-Debian `pip install pulp` can produce importable-pulp-without-cbc
+    there, which is exactly the residual case the `PulpSolverError` catch now names.
+  - pve-storage.git commit `7ce747e3a365` ("api/cli: list content: declare size optional and add
+    approximate-size", Fiona Ebner, 2026-05-18): "For inactive qcow2 volumes on LVM, currently no
+    size information is returned, because that would require activating each LV to scan the
+    qcow2 header. For a shared LVM, an LV might already be active on another node, so it cannot be
+    activated." — upstream independently confirms the operator's mechanism account that f25a201
+    built its fix on, essentially verbatim.
+  - pve-storage.git commit `025067598cc3` ("api: content: note typical upper-bound semantics for
+    approximate-size", Thomas Lamprecht): "The LVM plugin sets it to the LV allocation size
+    (qcow2 fully-allocated), which is an upper bound on the qcow2 virtual size", with the API
+    schema reading "Present instead of 'size' ... Will typically be an upper bound on the actual
+    size, but the exact semantics depend on the storage plugin." Two consequences verify the
+    implementation's choices: `size` and `approximate-size` are mutually exclusive upstream, which
+    the code's `if "size" in ... elif "approximate-size" in ...` tiering mirrors; and for its one
+    current producer the approximate figure is an *upper bound on the virtual size*, so the new
+    tier errs in the conservative direction for this project's thick-provisioning reserve model —
+    a property neither the plan nor `60-topology.md` states but that makes the tier strictly safer
+    than this review would otherwise have to question.
+  - pve-manager.git `PVE/API2/Cluster.pm`, `get_status` (the `GET /cluster/status` handler):
+    `permissions => { check => ['perm', '/', ['Sys.Audit']] }` — the new privilege requirement
+    `cluster_name()`'s docstring and the manual state is accurate, and it is indeed the one call
+    in this project that needs it.
+- V-01..V-05 all still in place (spot-checked: the rewritten `reserve_violation_penalty` entry,
+  `_pin_action_hint()` in both renderers, `29-explain.md`'s corrected 5.50/2.00 figures, AGENTS.md
+  §9.3's named CI pip exception, and the now-tracked `run-with-system-python.sh` referenced from
+  both the Makefile and `.agents/packaging.md`).
+- Version hygiene: 0.1.0 agrees across `debian/changelog`, `pyproject.toml` and `__init__.py`
+  (`test_version.py`), and `debian-package.yml`'s `dpkg-parsechangelog` check enforces the first
+  against the second.
+
+### 25.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| W-01 | Low | `docs/manual/30-safety-and-status.md` | The Optional-dependencies paragraph still says the tool executes "`dry-run`/`confirm`; `auto` not yet" — stale since phase 8 landed, contradicted by the same page's own `apply` status row above, by the manpage, the README and the changelog, and left standing by `b4447ca`, which rewrote the very sentence it sits in |
+| W-02 | Low | `debian/changelog` | The 0.1.0 entry's per-phase bullets mislabel `explain` as "phase 8" (that phase is `auto` mode + time windows) and `state.py` as "phase 7" (that phase is `execute.py`), while the actual phase-8 and phase-9 work appears nowhere — under an opening bullet claiming "all nine IMPLEMENTATION_PLAN.md phases are now built"; and none of the range's own post-cut features (the size tiers, the VM-own-node fetch, the cluster-scoping tier and its default) has a bullet either |
+| W-03 | Low | `docs/internals/60-topology.md`, `topology.py` | The step-list header still says "in five stages" over the six-item list `f25a201` created (it inserted step 5 and renumbered without touching the header), and three references to `_collect_vm_disks` — the header, the lock section, and `_ClusterData`'s docstring, whose "one argument bundle rather than seven" is now eight parameters — name a function renamed away in the P-02 split |
+| W-04 | Low | `docs/manual/25-show-load-and-verify-storages.md` | The Warnings-block paragraph documents one size warning and interprets it as the absent-volume/dangling-reference case with `qm unlink` advice; this range adds two new warnings to that same block (plus the foreign-volume undercount warning) that it does not mention, and for the sizeless-item variant its interpretation actively misdirects — the volume is right there in the listing |
+| W-05 | Info | plan §3.5, `docs/internals/60-topology.md` | The VM-own-node fix multiplies content-listing calls from one per managed storage to one per distinct (node, storage) pair hosting a managed disk — worst case nodes × storages full listings per run, deduplicated and `read_workers`-bounded but quantified nowhere; §3.5's own "expected call count" formula (`3 + 2·|VMs| + 2·|storages|`, unchanged since the F-fix era) is now stale three ways: no `/nodes`, no `/cluster/status`, no per-node content listings |
+| W-06 | Medium | `metrics.py`, `cli.py`, `gates.py` | `metrics.labels.cluster`'s new default makes `cluster="<name>"` the scoping of every load query — which matches *zero series* on a Prometheus that carries no such label (the vanilla metric-server shape: §3.1/§3.2's own tag inventory has none), and the tool then degrades silently: every disk flagged "sample coverage 0%", every gate verdict "group is idle", `verify-metrics` fully green (it never applies tiers 2/3 to its own queries, and the discovery scan's silence was calibrated for the old opt-in default). The one clue — the absent discovery line — is documented, but nothing warns, at verification time or run time |
+| W-07 | Low | `loadmodel.py`, `metrics.py`, `docs/manual/25-*.md` | The runtime half of W-06: a resolved non-`None` selector matching zero series is presented as "group is idle: no measured I/O to balance" plus per-disk coverage-0 flags — misattributing a scoping mismatch to the data; the manual's own advice for that presentation ("check `verify-metrics` first") dead-ends because verify-metrics is green |
+| W-08 | Low | `pve.py`, `cli.py`, `docs/manual/00-installation.md` | `GET /cluster/status` (`Sys.Audit` at `/`, verified against pve-manager) is now called on every `plan`/`show-load`/`apply`/`explain` run by default, so a credential provisioned per the pre-`3b5f031` manual fails the *whole* run — including read-only `show-load` — with a `PveApiError`, rather than degrading to the equally-safe node-list tier (403 → `cluster_name()` unavailable → tier 3) with a warning |
+| W-09 | Low | `config/drs.example.yaml`, `docs/manual/29-explain.md` | Two siblings of the documents `3b5f031` did rewrite: the example config's `extra_selector` comment still describes node-list scoping as "every query ... automatically" (now the fallback tier) with `cluster="mycluster"` as its override example — literally the new default — and `explain`'s worked example still prints its query-provenance line as the node alternation, the opt-out configuration's output |
+
+### 25.3 W-01 — "`auto` not yet" on the page the README calls authoritative
+
+**Severity:** Low
+**Files:** `docs/manual/30-safety-and-status.md:62-63`; touched (the sentence rewritten) by
+`b4447ca`
+
+The Optional-dependencies section opens: "`pve-storage-drs` runs, plans and executes
+(`dry-run`/`confirm`; `auto` not yet) with only `requests`, `ruamel.yaml` and `jsonschema`
+installed." The parenthetical has been false since phase 8 landed (eleventh-pass range): `apply`
+is implemented for all three `execution.mode` values, and *this same page's own* `apply` row says
+so at length — time windows, the migration cap, the re-plan loop, concurrent execution and all.
+The manpage (`--mode dry-run|confirm|auto`), the README ("Every command, including `apply`'s
+unattended `auto` mode ... is implemented") and the 0.1.0 changelog agree. `b4447ca` rewrote the
+sentence containing the parenthetical ("Three dependencies" → "Two dependencies") and kept it.
+
+Two things make this more than a typo: the README explicitly delegates authority to this page
+("`docs/manual/30-safety-and-status.md` is the authoritative, per-command status table — trust
+that over any impression given elsewhere"), and the page's own framing is that being honest about
+what is built "matters more than a document that reads as finished". A reader who trusts it will
+simply not use `auto` mode — conservative, but still wrong, and it is the sixth finding in the
+P-01/T-03/V-01 line of self-contradicting documentation. It survived the U-02 and T-05
+stale-claim sweeps because it matches neither their "not yet written" nor their
+"not implemented anywhere" phrasings.
+
+**Recommendation:** delete the parenthetical (the sentence's actual subject — minimal-dependency
+operation — does not need an execution-mode caveat), or rewrite it to "... executes in every
+`execution.mode` ...". Worth doing in the same sweep as W-04, and worth adding "`auto` not yet"
+to whatever pattern the next stale-claim grep uses.
+
+### 25.4 W-02 — the 0.1.0 changelog mislabels two phases and omits two
+
+**Severity:** Low
+**Files:** `debian/changelog:3-25`
+
+The entry's opening bullet claims "all nine IMPLEMENTATION_PLAN.md phases are now built", but the
+per-phase bullets that follow name the wrong work for two phases and never mention two more:
+"explain (phase 8)" — the plan's phase 8 is "`auto` mode + time windows", and `explain` belongs
+to no phase (it is §9.5's narration command); "state.py (phase 7, section 11.2)" — the plan's
+phase 7 is `execute.py`, which the entry never names at all; and neither the real phase-8 work
+(auto mode, time windows, the migration cap, the re-plan loop) nor phase-9's (the seasonal-naive
+backtest gate, which pass eleven reviewed landing) appears anywhere in the entry. `debian/changelog`
+is a shipped, write-once artefact once uploaded, and this range is the one that declared the
+version final for trixie — and then kept landing features after the cut with no bullet at all:
+none of the range's own user-visible work (the `approximate-size` tier, the VM-own-node size
+fetch, the cluster-scoping tier and its default) is recorded in the 0.1.0 entry either, even
+though it is still unreleased and therefore still appendable.
+
+**Recommendation:** fix the two labels and add the two missing items while the entry is still
+unreleased — the project's own stated convention (never rewrite a past entry's own text, per
+`4f1172a`) protects 0.0.1's honest "not yet buildable" from 0.0.1's own time, not a present-tense
+error in a brand-new entry.
+
+### 25.5 W-03 — "in five stages" over a six-item list, and a dead function name
+
+**Severity:** Low
+**Files:** `docs/internals/60-topology.md:27-29,81`; `src/proxmox_storage_drs/topology.py:436-439`
+
+`f25a201` inserted a new step 5 into `60-topology.md`'s numbered fetch-stage list and renumbered
+the old step 5 to 6 — but not the sentence directly above the list: "`build_topology()` fetches
+everything it needs exactly once, in five stages (`_fetch_cluster_data`, then a loop over
+`client.vm_resources()` calling `_collect_vm_disks` per VM, then `_build_storages`)". Three
+things in that one sentence are now wrong: the count (six items), the shape it sketches (there
+are now two concurrent fetch phases plus a single-threaded join, not fetch-loop-build), and the
+function name — `_collect_vm_disks` has not existed since the P-02 concurrency split renamed it
+`_fetch_vm()`/`_join_vm_disks()` (the rename is even explained six lines below, at step 4, which
+makes the header's use of the old name a genuine trip-up rather than a harmless anachronism).
+The same dead name survives in the page's lock section (line 81) and in `_ClusterData`'s own
+docstring (`topology.py:438`), whose "takes one argument bundle rather than seven" claim
+f25a201 also aged: `_join_vm_disks()` takes eight parameters now that `content_by_node` threads
+through it.
+
+**Recommendation:** rewrite the header sentence to match the list it introduces (six stages,
+`_fetch_cluster_data` → per-VM concurrent fetch → per-pair content fetch → join →
+`_build_storages`), fix the two remaining `_collect_vm_disks` references, and re-count the
+`_ClusterData` docstring's parameters.
+
+### 25.6 W-04 — the operator manual's warnings paragraph predates three new warnings
+
+**Severity:** Low
+**Files:** `docs/manual/25-show-load-and-verify-storages.md:92-103`; warnings added by
+`59cda4c`/`f2ddeeb`
+
+The manual's Warnings-block paragraph documents exactly one size-resolution warning — "a disk
+whose size came from its own config rather than the storage's authoritative content listing" —
+and interprets it: the volume usually no longer exists, most often removed behind Proxmox's back,
+so check and `qm unlink` the dangling reference. This range added three new operator-visible
+warnings to that same block without extending the paragraph:
+
+- *"has no size= or approximate-size in ... using the VM config's own size= instead"* — the
+  volume **is** in the listing (this is the KeyError case, fixed); the plugin just could not
+  report a size cheaply. The manual's absent-volume interpretation and `qm unlink` advice are the
+  wrong first move here: the right one is to note the fallback happened and, if the figure
+  matters, ask why the plugin could not size it.
+- *"has no exact size= ... using its approximate-size instead"* — benign by construction (PVE
+  answered approximately; upstream documents the figure as typically an upper bound), needs no
+  action, and is exactly what a stopped VM's disks on qcow2-on-shared-LVM will produce.
+- *"foreign volume ... has no size= or approximate-size ... not counted toward the snapshot
+  reserve, which may therefore be an undercount"* — the one warning of the three that deserves
+  operator attention, and the only one the manual's paragraph cannot even gesture at.
+
+The plan (§3.5) and `60-topology.md` were updated in the same commits; the operator manual — the
+layer these warnings are actually addressed to — was not. This is the P-01/T-03/V-01 family a
+seventh time (W-01 above being the sixth), with the twist that the strings were *new* rather than
+reworded, so nothing forced a manual touch the way the plain-language sweep did.
+
+**Recommendation:** extend the paragraph to enumerate the now-four size warnings with one
+interpretation each (gone-vs-could-not-size-vs-approximate-vs-undercount), in the same style as
+the existing dangling-reference guidance. A structural fix is also available and cheap: the
+cross-reference tests already assert that CLI options appear in the manual; asserting that every
+warning string `topology.py` emits appears somewhere in `docs/manual/` would have caught W-04 (if
+not W-01) mechanically.
+
+### 25.7 W-05 — the content-listing read-path amplification is quantified nowhere (Info)
+
+`f25a201` turns `GET /nodes/{node}/storage/{storage}/content` from one call per managed storage
+into one additional call per *distinct (node, storage) pair* beyond the active pick that hosts a
+managed disk — worst case (VMs spread over every node, disks on every storage) nodes × storages
+full volume listings per run, every run, each potentially large on a many-thousand-volume
+storage. The design mitigations are right (set-deduplication bounds it by distinct nodes rather
+than VMs; the fetches share the per-VM phase's `read_workers` pool; pairs already covered by the
+active pick are not re-fetched), but neither plan §3.5's read-path table and its new mechanism
+paragraph nor `60-topology.md`'s step 5 states the bound or the growth at all. F-11 made
+read-path cost a Medium finding when the per-VM O(VMs) cost was unspecified; this is the same
+question one layer down, now with a concrete multiplier. Recorded as Info because the fix's
+correctness does not depend on it, the dogfooding cluster is small, and `read_workers` remains
+the documented lever — but the next reader of §3.5 should not have to re-derive the worst case
+from the code.
+
+While re-reading §3.5's cost text, its "Expected call count per run: `3 + 2·|VMs considered| +
+2·|storages|` — three cluster-wide calls" formula turns out to have gone stale *three* times
+without an edit (`git log -L` confirms it is unchanged since the F-fix era): the thirteenth
+pass's `GET /nodes` added a fourth cluster-wide call whenever tier 3 is used, `a189a6f`'s
+`GET /cluster/status` adds another by default (§3.5's own new read-path row documents the call
+but not the formula), and `f25a201` multiplied the per-storage `content` term. The formula is
+exactly the kind of sentence F-11's resolution added so the next reader would not have to
+re-derive costs — it should be recomputed (or replaced by a per-tier statement) in whichever
+commit addresses the amplification above.
+
+### 25.8 W-06 — the cluster-scoping default silently disables the tool on a label-less Prometheus
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/metrics.py:403-462` (`_check_sample_series`),
+`src/proxmox_storage_drs/cli.py` (`_resolve_node_selector_for_run`), `gates.py:131-138`,
+`IMPLEMENTATION_PLAN.md` §3.4, `docs/manual/10-configuration.md` (`metrics.labels.cluster`)
+
+`3b5f031`'s default flip is operator-directed and documented as such, and the operator's estate
+carries a cluster-naming tag — but the flip changes what *every* deployment gets out of the box,
+and the vanilla shape is the broken one. PVE's own metric-server path (§3.1/§3.2, the plan's own
+tag inventory: `vmid`, `instance`, `nodename`, ...) emits **no** `cluster` label; the tag exists
+on this operator's Prometheus because their own tagging adds it. On a deployment without it, the
+default resolves every load query's selector to `cluster="<live name>"`, which matches zero
+series. The consequences were traced end to end (25.1): every disk fails the coverage gate and is
+flagged with load 0.0, `t_total` is 0, and the gate's verdict — the tool's own summary of the
+situation — is "group is idle: no measured I/O to balance". Nothing unsafe happens (no load, no
+moves), which is why this is Medium and not High; but the tool's core function is silently off,
+the stated reason is false (the cluster is not idle), and the per-disk flags misattribute the
+cause to sample coverage.
+
+The design intended to catch this — verify-metrics, "must be run before relying on any plan"
+(§3.3) — is structurally blind to it, for two composed reasons:
+
+1. `verify_metrics()` resolves its own selector with `resolve_node_selector(metrics, None)` —
+   deliberately, so it stays PVE-independent — so its queries never carry tier 2 or tier 3 and
+   pass green on the very Prometheus where tier 2 will match nothing. The manual's `labels.node`
+   entry says "verify-metrics never applies this auto-derived filter", which is honest, but it
+   means the command verifies *different queries* than the ones the tool runs, for the first
+   time since scoping existed (tier 3's node list had the same property, but a node-list
+   alternation built from the live cluster cannot match nothing on a Prometheus that has the
+   metrics at all — `nodename` is in the metric-server's own tag set; `cluster` is not, which is
+   the whole difference).
+2. The one check that *does* look at the label — `a189a6f`'s discovery scan — was calibrated for
+   the opt-in design `a189a6f` itself shipped: "silent (no finding) when nothing carries it --
+   most deployments never will, and that must not become routine noise". That reasoning was
+   correct when `labels.cluster` defaulted to `null` (an absent label harmed nobody). `3b5f031`
+   flipped the default and kept the silence: absence went from "fine" to "every query this tool
+   issues matches nothing", and the scan still says nothing. The routine-noise argument now runs
+   exactly backwards — the noise is the silence.
+
+The documentation does connect the dots for a careful reader (the `labels.cluster` entry: "Set
+this to `null` to opt back out on a Prometheus that genuinely carries no such label" and
+"**Confirm what's actually there with `verify-metrics`** before assuming the default is right"),
+and both commits rewrote seven documents apiece. But docs-as-mitigation for a silent default-on
+failure is the P-01/T-03/W-01 family with behaviour attached, and this review has six precedents
+saying the manual sentence is not enough.
+
+**Recommendation:** keep the operator's chosen default, add the guard that must come with it.
+(a) In `_check_sample_series`: when `metrics.labels.cluster` is set (default or explicit) and
+the discovery scan found *no* series carrying it, emit a **warning** — not silence — naming the
+label and the fix ("no series carries a `<label>` label; with the default
+`metrics.labels.cluster` every load query would match nothing — set it to null or fix your
+tagging"). Silence stays correct only for the explicit-`null` probe case, where the label is not
+relied on. (b) At run time, one cheap signal closes W-07's half with it: when the resolved
+selector is non-`None` and all six raw queries return zero series, say *that* (name the
+selector) rather than letting the gate call the group idle. With those two, the default is as
+safe to ship as the node tier it replaced.
+
+### 25.9 W-07 — a selector that matches nothing is presented as an idle group (Low)
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/loadmodel.py` (`compute_group_load`), `gates.py:131-138`,
+`docs/manual/25-show-load-and-verify-storages.md:86-90`
+
+The runtime presentation half of W-06, separable because it has its own fix and its own
+audience. A Prometheus outage and a selector-matching-nothing are indistinguishable in the
+output today — per-disk "sample coverage 0% is below window.min_coverage" flags plus either
+"per-disk load unavailable" or "group is idle" — but they have opposite diagnoses, and the
+manual's own troubleshooting advice for that presentation ("**A Prometheus outage does not fail
+this command** ... check `verify-metrics` first if you see this") dead-ends on the
+selector case, because verify-metrics is green there (25.1). The information needed to
+distinguish is already in hand at the point of decision: `compute_group_load()` knows the
+selector it passed to every query and sees that all six came back empty. One warning — "the
+resolved query filter {selector} matched no series at all" — placed next to the flags would turn
+a misattributed idle into a one-line diagnosis.
+
+### 25.10 W-08 — every run now hard-requires `Sys.Audit` for one scoping lookup (Low)
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/pve.py` (`cluster_name`), `cli.py`
+(`_resolve_node_selector_for_run`), `docs/manual/00-installation.md:42-47`
+
+With the default on, `_resolve_node_selector_for_run()` calls `client.cluster_name()` —
+`GET /cluster/status`, which requires `Sys.Audit` at `/` (verified against pve-manager's
+`PVE/API2/Cluster.pm`; also the one call in this project needing it) — on *every*
+`plan`/`show-load`/`apply`/`explain` run. `PveClient._call()` wraps every HTTP error as a hard
+`PveApiError`, so a token provisioned exactly per the pre-`3b5f031` manual (Datastore +
+VM.Audit, no Sys.Audit) now fails the entire run with an error naming the call — including
+`show-load`, a read-only diagnostic. `3b5f031` does update the manual to ask for `Sys.Audit`
+unconditionally, so a *new* setup following current docs works; what breaks is the upgrade path,
+and the breakage is a clean, explained error rather than a traceback. Two softer designs were
+available: degrade a 403 to "no cluster name available" and fall through to the node-list tier —
+which is *equally correct scoping*, not a weakening, and which `cluster_name()`'s own
+"let the caller decide" contract already sketches for the missing-entry case — logging one
+warning about the missing privilege; or catch it in `_resolve_node_selector_for_run()` only.
+Hard-failing is a legitimate choice (fail loudly rather than silently run less-precisely
+scoped), but it should be a *stated* choice: neither the commit message, the manual's
+privilege note, nor the plan's §3.4 text mentions that the lookup failing takes the whole run
+down rather than degrading.
+
+**Recommendation:** either document the hard-fail as deliberate ("a run that cannot even
+determine its own scoping stops"), or degrade with a warning — the latter costs nothing in
+correctness and keeps `show-load` diagnostic. If degrading, keep it narrow (403/`PveApiError`
+from this one call only), never a blanket swallow, per AGENTS.md §5.
+
+### 25.11 W-09 — two sibling artefacts still show the old node-scoped default (Low)
+
+**Severity:** Low
+**Files:** `config/drs.example.yaml:86-93`, `docs/manual/29-explain.md:96`
+
+`3b5f031` reworded the node-scoping story across seven documents and updated `20-verifying-metrics.md`'s
+worked example to show what a real run prints now (a `cluster` label on the sample series and the
+discovery line) — and left two siblings behind:
+
+- `config/drs.example.yaml`'s `extra_selector` comment block still opens "**Every query is scoped
+  to `labels.node =~` \"<this cluster's own node names>\"** automatically (fetched from the PVE
+  API)" — now a description of the tier-3 *fallback*, not the default — and its example value
+  `cluster="mycluster"` is now literally what the tool does unconfigured. The `labels.cluster`
+  comment eleven lines above was rewritten for the new default; this block, which describes the
+  same machinery, was not.
+- `29-explain.md`'s worked example still prints its query-provenance line as
+  `{nodename=~"pve01|pve02|pve03"}` — the opt-out configuration's output. An operator who reads
+  the manual top to bottom (the `labels.cluster` entry says the default is `cluster="<name>"`)
+  then meets an example showing the node alternation will reasonably wonder which one they will
+  get.
+
+Both are self-consistent snapshots of the pre-flip behaviour, exactly V-03's shape: the range
+updated one example meticulously and the sibling fell outside the sweep.
+
+**Recommendation:** rewrite the example-config block to describe the two auto-derived tiers in
+order (cluster name by default, node list when opted out or unnamed) with `extra_selector` as the
+outright override, and change `29-explain.md`'s provenance line to `cluster="..."` (or, better,
+keep both and caption the null opt-out explicitly — but pick one deliberately). The
+warning-string cross-reference test proposed in W-04 could grow an example-config counterpart
+cheaply, but two hand fixes suffice.
+
+### 25.12 What this pass confirms
+
+- **The three size fixes are conservative in the right directions wherever a choice existed.**
+  A present-but-sizeless managed disk falls to the VM config's `size=` (the plan's own
+  pessimistic-when-wrong direction, and the tier upstream's schema makes the rare case);
+  `approximate-size` now counts for foreign volumes instead of being dropped — strictly
+  shrinking the one documented unsafe-direction gap in the data path (the reserve undercount),
+  and upstream-verified to be an upper bound on virtual size for its only current producer; and
+  the VM-own-node fetch makes the exact figure the common case rather than the approximate one.
+  The residual gap — a foreign volume with *neither* field — still skips-and-warns toward
+  undercounting the reserve; it is documented in the plan, the internals page and the warning
+  itself, and `f2ddeeb` reduced its reach, but it is worth remembering the next time a plugin
+  surfaces with neither field: `compute_reserve_status` builds its `used` from
+  managed + `foreign_used_bytes`, not from `storage_status()`'s own `used`, so a skipped foreign
+  volume is invisible to (C4)/(C5), not merely to the display.
+- **The node-pair pre-pass cannot drift from the join.** `_disk_specs_from_config()` is the one
+  parser both phases call; `_needed_content_node_pairs()` excludes unmanaged storages the join
+  warns-and-skips anyway; the join's fallback to the storage-wide listing is unreachable for any
+  pair the pre-pass could have missed (and harmless if it ever were); and `content_by_node`
+  aliases the already-fetched per-storage listings rather than re-fetching them. The regression
+  test asserts the VM's own node's endpoint was actually *called* (via the fake client's log),
+  not merely that the final number matches — the stronger claim, and the right one.
+- **`_pick_active_node()`'s corrected docstring is itself correct per upstream**: the *set* of
+  volids does not vary by node (`approximate-size` rides on the same entries), which is what
+  keeps snapshot-companion detection and the foreign-volume sum safe on the single per-storage
+  pick; only per-item size fields do vary, and those are exactly what now goes to the VM's own
+  node.
+- **The packaging move loses one guarantee and says so.** With pulp a `Depends`, no Debian
+  install can be solver-less, so the autopkgtest no longer proves heuristic-only operation at
+  install time — `.agents/packaging.md`, the plan §2.1 rewrite and the `import-all` comment all
+  state that narrower scope explicitly and name where the guarantee now lives (the unit suite's
+  mocked-unavailable-backend cases) instead of quietly inheriting it. Build-Depends (under
+  `<!nocheck>`) and the CI install list still exercise the MILP path, so build-time and
+  install-time now agree rather than covering opposite configurations. The factual correction it
+  carries is true (verified against `packages.debian.org`), and it explains a small historical
+  mystery: why S-01's pulp-without-cbc crash never surfaced on a Debian install.
+- **The changelog/version cut is mechanically sound**: 0.1.0 agrees in all three places,
+  `test_version.py` and the CI `dpkg-parsechangelog` check both enforce it, the 0.0.1 entry is
+  left as written by stated convention, and `trixie` as distribution matches both pipelines'
+  build target. The entry's content is another matter — W-02.
+- **The scoping feature's mechanics are built and tested to the project's usual standard.**
+  The tier precedence is unit-tested tier by tier, including both corners easy to get wrong
+  (`extra_selector` wins without any API call; a caller passing a `cluster_name` while the config
+  opted out changes nothing); the call-skipping claims are proven by fakes that *raise* if a
+  skipped call is made (`_NodeNamesClient`), not merely unasserted; `build_cluster_selector()`
+  is an exact match with string-literal escaping, verified by test; `cluster_name()` handles all
+  three response shapes (named, no-cluster-entry, unnamed) against a fake mirroring the
+  live-confirmed response; the discovery scan covers configured-name, fallback-probe,
+  silent-when-absent and values-across-metrics; and `labels.cluster`'s parsing, default,
+  explicit-null and label-collision cases are all pinned. `_FakeClient` growing
+  `cluster_name() -> None` keeps ~30 existing plan/apply/explain tests honestly on the
+  node-selector path rather than silently re-routing through the new tier.
+- **The two commits' documentation discipline is otherwise exemplary**: §3.4's tier list, the
+  §3.5 read-path row for `GET /cluster/status`, `30-metrics.md`'s precedence walk-through,
+  `50-pve-api.md`, the installation manual's privilege note, the configuration reference, the
+  verifying-metrics page (both prose and worked example) and the example config's
+  `labels.cluster` comment were all rewritten *twice* — once for the opt-in design, once for the
+  default — with the PDFs rebuilt and stamped each time, and the second commit's message
+  accurately says only the default moved, not the code paths. W-06 is about the one guard the
+  flip needed and did not get, not about awareness or effort.
+
+### 25.13 Assessment
+
+The pass covers the most heterogeneous range since the eleventh: a release cut, a packaging
+decision, three live-cluster fixes to one module, and a two-commit default change to how every
+Prometheus query is scoped. The code quality holds throughout — every incident-driven fix
+external-claim-checked against primary sources (two corroborated by pve-storage's own commits
+nearly verbatim, one privilege claim corroborated by pve-manager's own ACL declaration), every
+fix regression-tested on its failure mode, the node-pair pre-pass deterministic and
+parser-shared, and the scoping tier's precedence, escaping and call-skipping all pinned by tests
+that fail loudly if the guarantees drift. The Medium finding (W-06) is not carelessness but a
+calibration that did not travel: the discovery scan's silence and the idle-mode presentation were
+both *correct* when `labels.cluster` was an opt-in with a `null` default, and the commit that
+flipped the default rewrote seven documents without revisiting either. That is precisely the
+shape this review has learned to look for at defaults boundaries — the S-08/P-01 lesson in a new
+place: behaviour flipped, guards left behind. W-06's fix is two warnings (one at verification
+time, one at run time) that make the operator's chosen default as safe to ship as the tier it
+replaced; W-08 wants the same treatment for the privilege boundary (degrade or document). The
+remaining six findings are the documentation residue now characteristic of this codebase's
+otherwise-clean ranges — five stale claims and a stale formula, an afternoon of writing, with
+W-04's proposed warning-string cross-reference test still the structural fix that would retire
+the whole class. Fix W-06 (and the changelog, W-02, before the first upload) and the range is
+clean end to end.
+
+---
+
+## 26. Resolution of fourteenth-pass findings (W-01..W-09)
+
+All nine findings were real; all nine are fixed, not refuted.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| W-01 | Resolved | The Optional-dependencies sentence in `docs/manual/30-safety-and-status.md` no longer carries the stale `auto` not yet" parenthetical; it now says plainly that every `execution.mode` runs with the minimal dependency set. |
+| W-02 | Resolved | `debian/changelog`'s 0.1.0 entry relabelled: `execute.py` (not `state.py`) is phase 7, `auto` mode/time windows is phase 8, `forecast.py`'s seasonal-naive backtest is phase 9, and `explain` is its own bullet rather than a misattributed phase. Two new bullets record this range's own post-cut, still-unreleased features: the disk-size-resolution fixes and the cluster-name query-scoping default. |
+| W-03 | Resolved | `docs/internals/60-topology.md`'s stage-list header now says "six stages" and sketches the actual two-concurrent-phases-plus-join shape; its two remaining `_collect_vm_disks` references (the header and the lock section) are now `_join_vm_disks`/`_fetch_vm`; `topology.py`'s `_ClusterData` docstring now says "one argument bundle (plus `content_by_node`)" instead of the stale seven-parameter count. |
+| W-04 | Resolved | `docs/manual/25-show-load-and-verify-storages.md`'s Warnings-block paragraph now names the two new size-fallback warnings and the foreign-volume-undercount warning, alongside the existing dangling-reference case, each with its own one-line interpretation. |
+| W-05 | Resolved | `IMPLEMENTATION_PLAN.md` §3.5's expected-call-count formula recomputed (`GET /cluster/status`, the node-list tier's `GET /nodes`, and an explicit `\|extra content pairs\|` term for the per-`(node, storage)` amplification, with its worst-case bound stated); `docs/internals/60-topology.md`'s step 5 gained the same bound. |
+| W-06 | Resolved | `_check_sample_series()` now emits a **warning** (not silence) when `metrics.labels.cluster` is set (default included) and no series anywhere carries that label, naming the label and the fix. Silence is now reserved for the explicit `metrics.labels.cluster: null` opt-out. `IMPLEMENTATION_PLAN.md` §3.4 and `docs/internals/30-metrics.md` updated to match. |
+| W-07 | Resolved | `loadmodel.GroupLoad` gained `no_series_matched: bool`, set by `compute_group_load()` when a non-`None` selector was applied and all six raw queries plus the coverage query came back with zero series anywhere — distinct from an ordinary idle group. `gates.evaluate_group_gates()` and `cli.py`'s show-load human renderer both name the scoping mismatch explicitly ("the resolved query filter matched no series at all") instead of reporting the group as idle. `docs/manual/25-show-load-and-verify-storages.md` documents the new line. |
+| W-08 | Resolved | `cli._resolve_node_selector_for_run()` now catches `PveApiError` from `client.cluster_name()` narrowly, logs one warning naming the cause, and falls through to the node-list tier — equally correct scoping, per the recommendation, rather than failing the whole run (including read-only `show-load`) over a denied `Sys.Audit` call. `docs/manual/00-installation.md` and `docs/internals/50-pve-api.md` updated to describe the degrade. |
+| W-09 | Resolved | `config/drs.example.yaml`'s `extra_selector` comment block rewritten to describe both auto-derived tiers (cluster name by default, node list as fallback) instead of only the pre-flip node-scoping story, and its example value changed off the now-live-by-default `cluster="mycluster"`. `docs/manual/29-explain.md`'s worked example's `data source:` line changed to the default cluster-scoped form, with the node-list form kept as a captioned alternative for the `null` opt-out. |
+
+New/updated regression tests: `test_check_sample_series_warns_when_relied_on_cluster_label_absent`
+and a renamed `test_check_sample_series_silent_when_opted_out_and_no_cluster_label_anywhere`
+(`test_metrics.py`); `test_resolve_node_selector_for_run_degrades_to_nodes_on_a_denied_cluster_call`
+(`test_cli.py`); `test_compute_group_load_flags_a_selector_matching_no_series_at_all` plus two
+sibling tests pinning `no_series_matched` False in the ordinary-idle and real-data cases
+(`test_loadmodel.py`); `test_no_series_matched_reports_the_query_filter_not_idle` (`test_gates.py`);
+`test_show_load_human_output_names_a_selector_matching_nothing_not_idle` (`test_cli.py`).
+
+Verification: dev venv `python3 -m pytest` — **681 passed, 1 warning** (the same benign
+`ConvergenceWarning`), **98.66% line coverage**. `make check` clean (fmt, lint, typecheck, test,
+fixtures, docs-check — `IMPLEMENTATION_PLAN.pdf` rebuilt to 44 pages, internals PDF to 47, manual
+PDF to 38, all three stamps regenerated alongside their Markdown).
 
 ---
 

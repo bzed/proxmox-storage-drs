@@ -81,7 +81,14 @@ when no `state.json` entry exists for it, and either way the warning says
 which. `tpmstate0` and `unusedN` disks are never flagged this way: they
 genuinely emit no I/O metrics, so `ℓ 0.00` for them is correct, not a gap.
 A group with no measured I/O at all gets one `(idle: no measured I/O for
-this group this window)` line instead of per-disk warnings.
+this group this window)` line instead of per-disk warnings — unless every
+one of the six queries came back with literally zero series (as opposed to
+some series with a genuinely-zero rate), in which case the line reads `⚠
+the resolved query filter matched no series at all` instead: that is a
+scoping problem (`metrics.labels.cluster`/`.node`, or `extra_selector`),
+not an idle cluster, and `verify-metrics`'s cluster-label discovery scan
+(`docs/manual/20-verifying-metrics.md`) is the next place to look —
+REVIEW.md W-06/W-07.
 
 **A Prometheus outage does not fail this command.** Sizes and reserve
 status never depend on Prometheus at all; if the load fetch for a group
