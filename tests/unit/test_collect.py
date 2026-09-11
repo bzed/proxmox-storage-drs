@@ -341,6 +341,19 @@ def test_capture_bundle_rejects_a_device_label_value_that_is_not_a_real_device(
     assert matches[0]["result"] == ["scsi0"]  # the scrape target dropped, not passed through
 
 
+def test_capture_bundle_metric_names_are_not_validated_as_device_keys(tmp_path: Path) -> None:
+    """A regression on the fix above's own first cut: __name__ (metric
+    names, from verify_metrics()'s own check 1) is not the configured
+    device label and must not be run through the disk-bus-key filter at
+    all -- a metric name like "blockstat_rd_operations" does not match it
+    and was silently dropped entirely by an earlier version of this fix,
+    which made every metric look like it "does not exist" under replay."""
+    bundle = capture(tmp_path)
+    name_files = [v for v in bundle.prometheus_files.values() if v.get("label") == "__name__"]
+    assert name_files
+    assert set(name_files[0]["result"]) == set(METRIC_NAMES)
+
+
 def test_capture_bundle_prometheus_sample_timestamps_are_rebased(tmp_path: Path) -> None:
     """A live capture against the dev cluster found this the hard way: a
     range file's own start/end were rebased, but the individual sample

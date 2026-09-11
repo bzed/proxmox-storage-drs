@@ -545,16 +545,23 @@ def _label_value_for(label_kind: str, value: str, mapper: Mapper) -> str | None:
         return None if new_vmid is None else str(new_vmid)
     if label_kind == "node":
         return mapper.node(value) if value in mapper.known_nodes else None
-    # device: passes through unchanged, but only if it actually looks like
-    # one of the enumerated bus keys (section 3.5's regex) -- label_values()
-    # is a *global* Prometheus query, not scoped to the blockstat
-    # measurement, so when the configured device label is literally
-    # "instance" (verify-metrics' own check 4 warning: it collides with
-    # Prometheus's unrelated scrape-target label of the same name) it can
-    # just as easily return a scrape target ("127.0.0.1:8098") as a real
-    # device name -- confirmed on a live cluster. Fail closed rather than
-    # pass through anything shaped like a device that is not actually one.
-    return value if DISK_KEY_RE.match(value) else None
+    if label_kind == "device":
+        # Passes through unchanged, but only if it actually looks like one
+        # of the enumerated bus keys (section 3.5's regex) -- label_values()
+        # is a *global* Prometheus query, not scoped to the blockstat
+        # measurement, so when the configured device label is literally
+        # "instance" (verify-metrics' own check 4 warning: it collides with
+        # Prometheus's unrelated scrape-target label of the same name) it
+        # can just as easily return a scrape target ("127.0.0.1:8098") as a
+        # real device name -- confirmed on a live cluster. Fail closed
+        # rather than pass through anything shaped like a device that is
+        # not actually one.
+        return value if DISK_KEY_RE.match(value) else None
+    # "other" -- e.g. __name__ (metric names, from verify_metrics()'s check
+    # 1): not an identifier, not the configured device label, and the
+    # disk-bus-key shape has no bearing on it at all -- passes through
+    # unchanged.
+    return value
 
 
 def _anonymize_prometheus_series(
@@ -797,7 +804,14 @@ def _label_kind_for(label_name: str, labels: Any) -> str:
         return "vmid"
     if label_name == labels.node:
         return "node"
-    return "device"  # the device label, __name__, or anything else: passes through
+    if label_name == labels.device:
+        return "device"
+    # __name__ (metric names, from verify_metrics()'s own check 1) or
+    # anything else: not an identifier at all, and specifically *not* the
+    # configured device label, so the disk-bus-key validation
+    # "device" gets below must not apply to it -- section 16.3 only ever
+    # anonymizes/validates the three *configured* labels.
+    return "other"
 
 
 def _anonymize_query_text(query: str, mapper: Mapper, rate_expr_map: dict[str, str]) -> str:
