@@ -224,3 +224,31 @@ collapsing to `.total` in the first place (its own docstring) — alongside
 which disks are pinned and which VMs that leaves fragmented across more
 than one storage. See `40-cli-and-logging.md` and
 `docs/manual/30-safety-and-status.md`.
+
+## `best_single_disk_alternative()`: why `explain` says nothing moved
+
+Added after dogfooding against a real cluster where the gate decided `ACT`
+(every disk eligible, nothing pinned) and the solver's own optimum was
+still to move nothing — the exact "kappa outweighs the fix" shape the
+whole-VM co-relocation fix above exists to handle when it goes the *other*
+way: here, only a two-disk VM's split could meaningfully help, and
+`objective.kappa_vm_affinity`'s penalty for that split legitimately cost
+more than the imbalance was worth. `plan`'s one-line verdict cannot tell
+this case apart from "the solver never tried" from the outside.
+
+`best_single_disk_alternative()` closes that gap for `explain` specifically
+(never called from `plan`'s own path — it exists purely to explain a
+decision already made, not to make one): it evaluates every
+`(movable disk, other group storage)` pair with the same
+`evaluate_assignment()` the solver itself uses — section 5.3's one-move
+neighbourhood, exhaustively rather than sampled, since a group's
+disk-count x storage-count is always small enough for `explain` (unlike
+`plan`, which must stay fast enough to run every cycle) to afford it — and
+returns the one with the lowest resulting objective total, i.e. the move
+closest to having been worth taking. `cli._render_no_moves_lines()` prints
+its `ObjectiveBreakdown` alongside the baseline's, term by term, so an
+operator can see exactly which term(s) rejected it and, if they disagree
+with that tradeoff, which weight to change. See
+`docs/manual/29-explain.md`'s "`no moves made: ...`" section for the
+rendered example and `IMPLEMENTATION_PLAN.md` section 9.5's "As built,
+added later" note.

@@ -67,6 +67,43 @@ instead of collapsing to only `.total` in the first place. Only printed
 when the gate said `ACT`; a `NO ACTION` group solved nothing this run, so
 there is no objective to show.
 
+## `no moves made: ...` / `closest alternative: ...`
+
+Only printed when the gate said `ACT` *and* the solver's own optimum still
+moves nothing — every disk eligible, nothing pinned, yet the objective is
+lowest at the current assignment. This is a real, expected outcome, not a
+bug: it happens when the only move (or moves) that would meaningfully
+improve the spread costs more, in `moves`/`bytes`/`fragmentation`, than the
+imbalance it fixes is worth under the configured weights. Without this
+section, that case is indistinguishable from "the solver didn't try" —
+`plan`'s one-line verdict says `ACT` either way.
+
+`explain` finds the single-disk move closest to being worth taking —
+every movable disk against every other storage in the group, evaluated
+with the same objective the solver itself minimizes (section 5.3's
+one-move neighbourhood) — and shows the term-by-term arithmetic that
+rejected it:
+
+```
+  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + reserve 0 = 0.576
+  no moves made: the objective is lowest at the current assignment
+  closest alternative: 110:scsi1 VM-krbd → VM
+    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, reserve 0→0
+    total 0.576 → 0.8  (worse by 0.223 -- rejected)
+```
+
+Read left to right: moving `110:scsi1` from `VM-krbd` to `VM` would cut
+the imbalance term from `0.576` to `0.043` — a real improvement — but
+`110` is a two-disk VM with its other disk staying put, so the move splits
+it across two storages, and `objective.kappa_vm_affinity`'s fragmentation
+penalty (`0` → `0.5`) for that outweighs the gain. If this is a tradeoff
+you want to accept rather than reject, lowering `objective.kappa_vm_affinity`
+(or `objective.beta_move_count`/`gamma_move_bytes_per_tib`, whichever term
+dominates the rejection) is the knob — not a reason to suspect the solver.
+
+Omitted entirely when there is nothing to compare against (every disk
+pinned, or a one-storage group) or when the plan actually moved something.
+
 ## `measured load:`
 
 The section 4 input every number above derives from — identical to
@@ -161,12 +198,17 @@ found nothing to balance this run.
 
 `--json` emits everything `plan --json` does (`docs/manual/27-plan.md`'s
 own field list) plus `objective` (the five terms above, `null` when the
-gate said `NO ACTION`), `storages`/`disks` (the measured-load section
-above, identical shape to `show-load --json`'s own fields of the same
-name), `pinned_disks` (`disk_key`, `vmid`, `device`, `current_storage`,
-`size_bytes`, `load`, `load_per_tib`, `reason`, `action_hint` — `null` for
-a standing policy exclusion, same rule as the human report's `→` line),
-`fragmentation` (a list of
+gate said `NO ACTION`), `rejected_alternative` (`null` unless the
+"`no moves made`" case above applies, otherwise `disk_key`, `vmid`,
+`device`, `from_storage`, `to_storage`, `baseline` and `objective` — each
+the same five-term breakdown `objective` above serializes, for the
+current assignment and the candidate respectively — and `worse_by`, the
+difference between the two totals), `storages`/`disks` (the measured-load
+section above, identical shape to `show-load --json`'s own fields of the
+same name), `pinned_disks` (`disk_key`, `vmid`, `device`,
+`current_storage`, `size_bytes`, `load`, `load_per_tib`, `reason`,
+`action_hint` — `null` for a standing policy exclusion, same rule as the
+human report's `→` line), `fragmentation` (a list of
 `{vmid, vm_name, blockers}`, each blocker an object with `device`,
 `disk_key`, `reason`), and `pinned_load` (`null` for an idle group,
 otherwise `pinned_load`, `total_load`, `fraction` and `warn_fraction`).

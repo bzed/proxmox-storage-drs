@@ -1653,6 +1653,32 @@ the per-pin `→` action hints shown above); `show-load` also names each pin inl
 `[pinned: <reason>]`. Read every "pinned block"/"plan output" reference above as `explain`'s
 output, not `plan`'s or `apply`'s.
 
+**As built, added later:** none of the above covers the case where the gate decides to ACT and
+every disk is eligible (nothing pinned), yet the solver's own optimum is still to move nothing --
+found dogfooding against a real cluster, where a two-disk VM sitting entirely on the busier
+storage was the only lever, and `objective.kappa_vm_affinity`'s fragmentation penalty for splitting
+it legitimately outweighed the imbalance it would fix. `plan`'s one-line verdict gives no way to
+tell that apart from "the solver didn't try" from the outside. `explain` now reports it: when
+`decision.act` is true and the final assignment moves nothing, it evaluates every single-disk move
+(`heuristic.best_single_disk_alternative()` — every movable disk against every other group storage,
+via the same `evaluate_assignment()` the solver itself uses, section 5.3's one-move neighbourhood)
+and names the one closest to being worth it, with the section 5.4 term-by-term arithmetic that
+rejected it:
+
+```
+  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + reserve 0 = 0.576
+  no moves made: the objective is lowest at the current assignment
+  closest alternative: 110:scsi1 VM-krbd → VM
+    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, reserve 0→0
+    total 0.576 → 0.8  (worse by 0.223 -- rejected)
+```
+
+`--json` carries the same information as `rejected_alternative` (`null` unless this case applies),
+alongside `disk_key`/`vmid`/`device`/`from_storage`/`to_storage`, `baseline` and `objective` (each
+the five-term breakdown `objective` above already serializes), and `worse_by`. `plan`/`apply` still
+print none of it, for the same reason as everything else in this section (V-02, above) — it is
+narration for a human, not a machine-checked verdict.
+
 ---
 
 ## 10. Forecasting

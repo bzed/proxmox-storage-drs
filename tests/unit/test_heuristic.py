@@ -19,7 +19,9 @@ import pytest
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.heuristic import (
     _repair,
+    best_single_disk_alternative,
     evaluate_assignment,
+    group_average_utilization,
     run_heuristic,
     seed_assignment,
 )
@@ -496,3 +498,62 @@ def test_descend_relocates_a_whole_multi_disk_vm_neither_single_moves_nor_swaps_
     assert result.breakdown.moves == 2
     assert result.breakdown.fragmentation_term == pytest.approx(0.0)  # never split
     assert result.breakdown.total < before_total  # the whole run improved
+
+
+# ------------------------------------------------ best_single_disk_alternative
+
+
+def test_best_single_disk_alternative_picks_the_lowest_total_candidate() -> None:
+    """``explain``'s "why didn't anything move?" answer, found needed the
+    same way as the whole-VM-co-relocation fix above: a real cluster where
+    a 2-disk VM sitting entirely on the busier storage is the only lever,
+    and moving its *smaller* disk alone gets closest to the balance a
+    bigger move (or the VM's other disk) would overshoot or fragment its
+    way out of. Hand-verified: baseline l1 spread is 0.5 (0.25 + 0.25 from
+    u* = 0.75); moving `2:scsi1` (load 0.1) alone leaves s1=0.6/s2=0.9, l1
+    0.3, plus 0.25 (one move) + 0.05 (1 TiB) + 0.5 (fragments VM 2) = 1.1
+    total -- worse than doing nothing (0.5), but the least-worse of the
+    three single-disk moves available (moving `1:scsi0` gives 1.8; moving
+    `2:scsi0` gives 2.1)."""
+    vm1 = make_disk("1:scsi0", 1.0, 0.5, "s1")
+    vm2_big = make_disk("2:scsi0", 1.0, 0.9, "s2")
+    vm2_small = make_disk("2:scsi1", 1.0, 0.1, "s2")
+    storages = (make_storage("s1"), make_storage("s2"))
+    group = Group(name="g", storages=storages, disks=(vm1, vm2_big, vm2_small))
+    loads = {"1:scsi0": 0.5, "2:scsi0": 0.9, "2:scsi1": 0.1}
+    u_star = group_average_utilization(group, loads)
+    baseline = evaluate_assignment(
+        group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0, u_star
+    )
+    assert baseline.total == pytest.approx(0.5)
+
+    candidate = best_single_disk_alternative(group, loads, DEFAULT_OBJECTIVE, 0, u_star, baseline)
+
+    assert candidate is not None
+    assert candidate.disk_key == "2:scsi1"
+    assert candidate.vmid == 2
+    assert candidate.device == "scsi1"
+    assert candidate.from_storage == "s2"
+    assert candidate.to_storage == "s1"
+    assert candidate.baseline is baseline
+    assert candidate.breakdown.total == pytest.approx(1.1)
+    assert candidate.worse_by == pytest.approx(0.6)
+
+
+def test_best_single_disk_alternative_returns_none_with_only_one_storage() -> None:
+    disk = make_disk("1:scsi0", 1.0, 0.5, "s1")
+    group = Group(name="g", storages=(make_storage("s1"),), disks=(disk,))
+    loads = {"1:scsi0": 0.5}
+    baseline = evaluate_assignment(group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0, 0.5)
+
+    assert best_single_disk_alternative(group, loads, DEFAULT_OBJECTIVE, 0, 0.5, baseline) is None
+
+
+def test_best_single_disk_alternative_returns_none_when_every_disk_is_pinned() -> None:
+    disk = make_disk("1:scsi0", 1.0, 0.5, "s1", pinned="locked: test")
+    storages = (make_storage("s1"), make_storage("s2"))
+    group = Group(name="g", storages=storages, disks=(disk,))
+    loads = {"1:scsi0": 0.5}
+    baseline = evaluate_assignment(group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0, 0.25)
+
+    assert best_single_disk_alternative(group, loads, DEFAULT_OBJECTIVE, 0, 0.25, baseline) is None
