@@ -2647,7 +2647,13 @@ def test_render_explain_json_includes_objective_pins_fragmentation_and_pinned_lo
     # not just a `dict[str, object]` mypy accepts.
     out = json.loads(
         json.dumps(
-            cli._render_group_explain_json(group, group_plan, warn_fraction=0.25, min_free_bytes=0)
+            cli._render_group_explain_json(
+                group,
+                group_plan,
+                warn_fraction=0.25,
+                min_free_bytes=0,
+                objective=resolved.config.objective,
+            )
         )
     )
     assert out["objective"] is not None
@@ -2668,6 +2674,102 @@ def test_render_explain_json_includes_objective_pins_fragmentation_and_pinned_lo
     pinned_by_key = {d["disk_key"]: d for d in out["pinned_disks"]}
     assert pinned_by_key["101:scsi1"]["action_hint"] == "clear snapshots to unblock"
     assert pinned_by_key["102:scsi0"]["action_hint"] == "re-check next run once the lock releases"
+
+
+def test_render_group_explain_human_shows_the_closest_alternative_when_act_but_nothing_moved(
+    tmp_path: Path,
+) -> None:
+    """Found needed dogfooding against a real cluster: the gate said ACT
+    (44.5% imbalance) and the solver's own "optimal" verdict was to move
+    nothing, with no other line anywhere explaining why. `_make_group_plan`
+    with an empty ``moves`` tuple reproduces exactly that shape -- act,
+    but the group's own final breakdown reflects the seeded (unmoved)
+    assignment, section 5.4's "do nothing" outcome."""
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    group_plan = _make_group_plan(group, resolved, moves=())
+    text = "\n".join(cli._render_group_explain_human(group, group_plan, resolved))
+    assert "no moves made: the objective is lowest at the current assignment" in text
+    assert "closest alternative: 101:scsi0 san-a → san-b" in text
+    assert "rejected" in text
+
+
+def test_render_group_explain_json_includes_rejected_alternative_when_act_but_nothing_moved(
+    tmp_path: Path,
+) -> None:
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    group_plan = _make_group_plan(group, resolved, moves=())
+    out = json.loads(
+        json.dumps(
+            cli._render_group_explain_json(
+                group,
+                group_plan,
+                warn_fraction=0.25,
+                min_free_bytes=0,
+                objective=resolved.config.objective,
+            )
+        )
+    )
+    alt = out["rejected_alternative"]
+    assert alt is not None
+    assert alt["disk_key"] == "101:scsi0"
+    assert alt["vmid"] == 101
+    assert alt["device"] == "scsi0"
+    assert alt["from_storage"] == "san-a"
+    assert alt["to_storage"] == "san-b"
+    assert alt["objective"]["total"] > alt["baseline"]["total"]
+    assert alt["worse_by"] == pytest.approx(alt["objective"]["total"] - alt["baseline"]["total"])
+
+
+def test_render_group_explain_json_omits_rejected_alternative_when_gate_did_not_act(
+    tmp_path: Path,
+) -> None:
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    group_plan = _make_group_plan(group, resolved, moves=(), act=False)
+    out = json.loads(
+        json.dumps(
+            cli._render_group_explain_json(
+                group,
+                group_plan,
+                warn_fraction=0.25,
+                min_free_bytes=0,
+                objective=resolved.config.objective,
+            )
+        )
+    )
+    assert out["rejected_alternative"] is None
+
+
+def test_render_group_explain_json_omits_rejected_alternative_once_a_move_is_scheduled(
+    tmp_path: Path,
+) -> None:
+    """Unlike the other two cases above, this needs a hand-built
+    ``final_breakdown`` -- `_make_group_plan`'s own ``final_breakdown`` is
+    always derived from the seeded (unmoved) assignment regardless of the
+    ``moves`` tuple it is given (a test-harness simplification), so it can
+    never exercise "a real move was actually scheduled" on its own."""
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    group_plan = _make_group_plan(group, resolved, moves=())
+    assert group_plan.final_breakdown is not None
+    moved_breakdown = dataclasses.replace(
+        group_plan.final_breakdown, moved_disk_keys=frozenset({"101:scsi0"})
+    )
+    group_plan = dataclasses.replace(group_plan, final_breakdown=moved_breakdown)
+    out = json.loads(
+        json.dumps(
+            cli._render_group_explain_json(
+                group,
+                group_plan,
+                warn_fraction=0.25,
+                min_free_bytes=0,
+                objective=resolved.config.objective,
+            )
+        )
+    )
+    assert out["rejected_alternative"] is None
 
 
 def test_render_explain_json_always_includes_query_provenance(tmp_path: Path) -> None:

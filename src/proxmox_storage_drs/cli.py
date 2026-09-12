@@ -39,6 +39,7 @@ from proxmox_storage_drs.config import (
     ForecastConfig,
     MetricsConfig,
     MigrationConfig,
+    ObjectiveConfig,
     ResolvedConfig,
     load_config,
 )
@@ -64,6 +65,7 @@ from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
 from proxmox_storage_drs.heuristic import (
     Assignment,
     ObjectiveBreakdown,
+    best_single_disk_alternative,
     evaluate_assignment,
     group_average_utilization,
     raw_spread,
@@ -1238,6 +1240,63 @@ def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
     )
 
 
+def _objective_breakdown_json(breakdown: ObjectiveBreakdown) -> dict[str, float]:
+    """The one implementation ``explain --json``'s ``objective`` and
+    ``rejected_alternative.{baseline,objective}`` fields all share (AGENTS.md
+    section 5) -- so a third caller never has to guess which five keys a
+    breakdown serializes to."""
+    return {
+        "imbalance_term": breakdown.imbalance_term,
+        "move_count_term": breakdown.move_count_term,
+        "bytes_moved_term": breakdown.bytes_moved_term,
+        "fragmentation_term": breakdown.fragmentation_term,
+        "reserve_penalty_term": breakdown.reserve_penalty_term,
+        "total": breakdown.total,
+    }
+
+
+def _render_no_moves_lines(
+    group: Group, group_plan: "_GroupPlan", objective: ObjectiveConfig, min_free_bytes: int
+) -> list[str]:
+    """Only called when the gate decided to ACT but the solver's optimal
+    assignment moves nothing -- an operator reading `plan`'s one-line
+    verdict has no way to tell that apart from "the solver didn't try"
+    without this. Shows the single-disk move closest to being worth taking
+    and the term-by-term arithmetic that rejected it (section 5.4)."""
+    assert group_plan.group_load is not None and group_plan.final_breakdown is not None
+    candidate = best_single_disk_alternative(
+        group,
+        group_plan.group_load.load_by_disk_key(),
+        objective,
+        min_free_bytes,
+        group_plan.group_load.average_utilization,
+        group_plan.final_breakdown,
+    )
+    if candidate is None:
+        return [
+            "  no moves made: no alternative exists to compare against "
+            "(every disk is pinned, or the group has only one storage)"
+        ]
+    b, c = candidate.baseline, candidate.breakdown
+    return [
+        "  no moves made: the objective is lowest at the current assignment",
+        f"  closest alternative: {candidate.disk_key} {candidate.from_storage} → "
+        f"{candidate.to_storage}",
+        "    "
+        + ", ".join(
+            [
+                f"imbalance {b.imbalance_term:.3g}→{c.imbalance_term:.3g}",
+                f"moves {b.move_count_term:.3g}→{c.move_count_term:.3g}",
+                f"bytes {b.bytes_moved_term:.3g}→{c.bytes_moved_term:.3g}",
+                f"fragmentation {b.fragmentation_term:.3g}→{c.fragmentation_term:.3g}",
+                f"reserve {b.reserve_penalty_term:.3g}→{c.reserve_penalty_term:.3g}",
+            ]
+        ),
+        f"    total {b.total:.3g} → {c.total:.3g}  "
+        f"(worse by {candidate.worse_by:.3g} -- rejected)",
+    ]
+
+
 def _render_pinned_load_lines(
     group: Group,
     load_by_key: dict[str, float],
@@ -1309,6 +1368,15 @@ def _render_group_explain_human(
     extra: list[str] = []
     if group_plan.final_breakdown is not None:
         extra.append(_render_objective_breakdown_line(group_plan.final_breakdown))
+        if group_plan.decision.act and not group_plan.final_breakdown.moved_disk_keys:
+            extra.extend(
+                _render_no_moves_lines(
+                    group,
+                    group_plan,
+                    resolved.config.objective,
+                    resolved.config.snapshot_reserve.min_free_bytes,
+                )
+            )
     # The measured load every number above derives from -- show-load's own
     # per-storage/per-disk picture, section 4 (AGENTS.md section 5: one
     # implementation, reused rather than a second rendering of it).
@@ -1369,7 +1437,11 @@ def _render_explain_human(
 
 
 def _render_group_explain_json(
-    group: Group, group_plan: "_GroupPlan", warn_fraction: float, min_free_bytes: int
+    group: Group,
+    group_plan: "_GroupPlan",
+    warn_fraction: float,
+    min_free_bytes: int,
+    objective: ObjectiveConfig,
 ) -> dict[str, object]:
     out = _render_group_plan_json(
         group,
@@ -1434,18 +1506,34 @@ def _render_group_explain_json(
         disks_out.append(disk_entry)
     out["disks"] = disks_out
     breakdown = group_plan.final_breakdown
-    out["objective"] = (
-        {
-            "imbalance_term": breakdown.imbalance_term,
-            "move_count_term": breakdown.move_count_term,
-            "bytes_moved_term": breakdown.bytes_moved_term,
-            "fragmentation_term": breakdown.fragmentation_term,
-            "reserve_penalty_term": breakdown.reserve_penalty_term,
-            "total": breakdown.total,
-        }
-        if breakdown is not None
-        else None
-    )
+    out["objective"] = _objective_breakdown_json(breakdown) if breakdown is not None else None
+    out["rejected_alternative"] = None
+    if (
+        group_plan.decision is not None
+        and group_plan.decision.act
+        and breakdown is not None
+        and not breakdown.moved_disk_keys
+        and group_plan.group_load is not None
+    ):
+        candidate = best_single_disk_alternative(
+            group,
+            load_by_key,
+            objective,
+            min_free_bytes,
+            group_plan.group_load.average_utilization,
+            breakdown,
+        )
+        if candidate is not None:
+            out["rejected_alternative"] = {
+                "disk_key": candidate.disk_key,
+                "vmid": candidate.vmid,
+                "device": candidate.device,
+                "from_storage": candidate.from_storage,
+                "to_storage": candidate.to_storage,
+                "baseline": _objective_breakdown_json(candidate.baseline),
+                "objective": _objective_breakdown_json(candidate.breakdown),
+                "worse_by": candidate.worse_by,
+            }
     out["pinned_disks"] = [
         {
             "disk_key": d.key,
@@ -1494,7 +1582,13 @@ def _render_explain_json(
     warn_fraction = resolved.config.report.warn_pinned_load_fraction
     min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     groups_out = [
-        _render_group_explain_json(group, group_plans[group.name], warn_fraction, min_free_bytes)
+        _render_group_explain_json(
+            group,
+            group_plans[group.name],
+            warn_fraction,
+            min_free_bytes,
+            resolved.config.objective,
+        )
         for group in topology.groups
     ]
     window = resolved.config.window

@@ -246,6 +246,71 @@ def evaluate_assignment(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RejectedCandidate:
+    """One single-disk move, evaluated and found not worth taking --
+    ``explain``'s answer to "the gate wanted to act; why didn't anything
+    move?" (found needed for real, dogfooding against a live cluster: a
+    two-disk VM sitting entirely on one storage means the *only* move that
+    meaningfully improves spread also fragments that VM across two
+    storages, and ``objective.kappa_vm_affinity``'s penalty for that can
+    legitimately outweigh the improvement. The solver is correct to reject
+    it -- this is not a bug -- but an operator reading `explain` deserves
+    to see the arithmetic that made "do nothing" win, not silence)."""
+
+    disk_key: str
+    vmid: int
+    device: str
+    from_storage: str
+    to_storage: str
+    baseline: ObjectiveBreakdown
+    breakdown: ObjectiveBreakdown
+
+    @property
+    def worse_by(self) -> float:
+        return self.breakdown.total - self.baseline.total
+
+
+def best_single_disk_alternative(
+    group: Group,
+    load_by_key: Mapping[str, float],
+    objective: ObjectiveConfig,
+    min_free_bytes: int,
+    average_utilization: float,
+    baseline: ObjectiveBreakdown,
+) -> RejectedCandidate | None:
+    """The single-disk move closest to being worth taking, among every
+    (movable disk, other group storage) pair -- section 5.3's neighbourhood
+    restricted to one move at a time, evaluated in full via
+    :func:`evaluate_assignment` rather than sampled or approximated: a
+    group's disk-count x storage-count is always small enough for this to
+    be cheap, which is exactly why `explain` (unlike `plan`, which must
+    stay fast enough to run every cycle) can afford to do it. Returns
+    ``None`` when the group has no movable disk or only one storage --
+    i.e. no alternative to compare against ever existed."""
+    best: RejectedCandidate | None = None
+    for disk in _movable_disks(group):
+        for storage in group.storages:
+            if storage.id == disk.current_storage:
+                continue
+            assignment = seed_assignment(group)
+            assignment[disk.key] = storage.id
+            breakdown = evaluate_assignment(
+                group, assignment, load_by_key, objective, min_free_bytes, average_utilization
+            )
+            if best is None or breakdown.total < best.breakdown.total:
+                best = RejectedCandidate(
+                    disk_key=disk.key,
+                    vmid=disk.vmid,
+                    device=disk.device,
+                    from_storage=disk.current_storage,
+                    to_storage=storage.id,
+                    baseline=baseline,
+                    breakdown=breakdown,
+                )
+    return best
+
+
 _RepairCandidate = tuple[float, Disk, str, bool, int]  # ratio, disk, target_id, worsens, used
 
 
