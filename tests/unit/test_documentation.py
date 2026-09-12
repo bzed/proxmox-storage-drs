@@ -22,6 +22,7 @@ where they belong.
 
 from __future__ import annotations
 
+import argparse
 import importlib.resources
 import json
 import re
@@ -167,6 +168,31 @@ def test_help_covers_every_global_option() -> None:
             if not re.search(rf"\*\*{re.escape(option)}\*\*", text):
                 missing.append(option)
     assert not missing, f"options missing from {MANPAGE_SRC.name} OPTIONS: {missing}"
+
+
+@needs_full_checkout
+def test_help_covers_every_subcommand_option() -> None:
+    """A subcommand's own options are options too.
+
+    ``collect-testdata`` is the only subcommand that has any today, and
+    before this test existed the manpage discharged them with "see
+    ``collect-testdata --help``" -- which is exactly the second, hand-kept
+    list of options `.agents/documentation.md` forbids, one indirection
+    further away.
+    """
+    text = _manpage_source_text()
+    missing = []
+    for action in cli.build_parser()._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for command, subparser in action.choices.items():
+            for sub_action in subparser._actions:
+                for option in sub_action.option_strings:
+                    if option in ("-h", "--help"):
+                        continue  # documented once, under the global options
+                    if not re.search(rf"\*\*{re.escape(option)}\*\*", text):
+                        missing.append(f"{command} {option}")
+    assert not missing, f"subcommand options missing from {MANPAGE_SRC.name}: {missing}"
 
 
 @needs_full_checkout

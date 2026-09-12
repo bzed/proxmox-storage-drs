@@ -1,4 +1,7 @@
 README.md
+IMPLEMENTATION_PLAN.md
+docs/manual
+docs/internals
 docs/IMPLEMENTATION_PLAN.pdf
 docs/internals.pdf
 docs/pve-storage-drs-manual.pdf

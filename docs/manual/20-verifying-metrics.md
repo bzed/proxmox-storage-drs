@@ -5,6 +5,11 @@ deployment, so `pve-storage-drs` never assumes the defaults in
 [`10-configuration.md`](10-configuration.md) are correct for your cluster —
 `verify-metrics` is what checks them against the live Prometheus instead.
 
+It also checks something the names alone cannot tell you: whether all six
+counters actually survived the transport. See
+[`05-metrics-pipeline.md`](05-metrics-pipeline.md) for why they might not
+have, and why that produces a wrong plan rather than an error.
+
 ## Running it
 
 ```sh
@@ -88,11 +93,15 @@ section 3.3):
 - **A label is missing or empty**: the sample series printed by check 2 is
   the fastest way to see what labels Prometheus actually has for that
   series — update `metrics.labels.*` to name the real ones.
-- **One metric is missing disks the others report**: check your Telegraf
-  configuration (and the PVE-side field it collects) for that specific
-  field emitting a non-numeric value for that disk at some point — that is
-  enough to make Telegraf drop it permanently for that series, even while
-  every other field for the same disk keeps working normally.
+- **One metric is missing disks the others report**: a transport dropped a
+  field. Check your Telegraf configuration (and the PVE-side field it
+  collects) for that specific field emitting a non-numeric value for that
+  disk at some point — that is enough to make Telegraf drop it permanently
+  for that series, even while every other field for the same disk keeps
+  working normally. This is a real defect in the pipeline, not noise, and it
+  will not resolve itself; [`05-metrics-pipeline.md`](05-metrics-pipeline.md)
+  explains the mechanism, which output plugins are prone to it, and the
+  gigapipe-on-ClickHouse setup that avoids the format bridge entirely.
 - **Coverage is low for specific disks**: check that Telegraf is actually
   scraping every node, and that `window.lookback` is not longer than your
   Prometheus retention.

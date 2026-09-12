@@ -120,8 +120,32 @@ Run `--replay` against your own bundle before sending it anywhere: "does
 question it answers, and it is also how the author verifies a submitted
 bundle reproduces what its `tests/corpus/*.submission.yaml` claims.
 
-## See also
+## Sending one to the project
 
-`tests/corpus/README.md` in the source tree: how a bundle becomes part of
-the project's own test suite, the scrub audit it goes through, and the
-consent terms for submitting one.
+**Bundles are wanted, and a pull request carrying one is as valuable as a
+pull request carrying code.** A bug report describes a failure; a bundle
+reproduces it offline, on a machine that has never seen your cluster, for as
+long as the project exists. It is also the only thing that can prove the
+MILP solver and the fallback heuristic still agree at a few hundred disks —
+the synthetic fixtures in `tests/fixtures/` top out at six.
+
+The terms, in short:
+
+- **Read the bundle first.** Not the audit's word for it — your own. The
+  scrub audit assumes the collector has a bug, which is the right assumption
+  to make about a privacy control, but a clean audit is not consent.
+- A bundle under **8 MiB unpacked** can be committed to the repository;
+  larger ones stay outside it and are exercised from a directory named in
+  `DRS_CORPUS_DIR`.
+- It needs a `<bundle-name>.submission.yaml` recording who collected it,
+  what it reproduces, that you reviewed it, and that you agree to it being
+  redistributed under AGPL-3.0-or-later. Accepting one makes it public
+  permanently, in git history.
+- If your cluster is one whose size and shape alone are confidential, send a
+  `--no-series` bundle, or just a description. A description is still worth
+  having.
+
+`tests/corpus/README.md` in the source tree
+(<https://github.com/bzed/proxmox-storage-drs>) is the full guide: the
+submission template, the four passes the suite runs over every committed
+bundle, and the consent terms in full.

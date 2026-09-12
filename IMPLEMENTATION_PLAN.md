@@ -451,6 +451,17 @@ Everything needed for true per-disk IOPS, throughput **and latency** is therefor
 an existing PVE → InfluxDB → Telegraf → Prometheus pipeline. **No new exporter or collector is
 required.**
 
+**Present at the source is not the same as present at the query endpoint.** Line protocol fixes a
+field's type at its first write and carries string fields; Prometheus/OpenMetrics has no string
+sample type. A transport between the two therefore *can* drop one of the six counters, for one
+series, permanently and silently — Telegraf with a `prometheus_remote_write`/`prometheus_client`
+output and no deliberate processor configuration being the common case. §3.3's step 2 exists
+because of this, and it is the reason every metric name here is configuration rather than a
+constant. A backend that ingests line protocol natively and serves PromQL itself — gigapipe on
+ClickHouse, which this project is dogfooded against and which both `tests/corpus/` bundles were
+captured from — has no such bridge to lose a field in. `docs/manual/05-metrics-pipeline.md` is the
+operator-facing version of this paragraph.
+
 **Verification status of the above.** The `vmstatus(undef, 1)` call, the `blockstat->{$drive_id}`
 assignment, the `s/drive-//r` prefix stripping and the `InfluxDB.pm` nesting behaviour were read
 from the `pve-manager` and `qemu-server` sources, not inferred from documentation. Independently,

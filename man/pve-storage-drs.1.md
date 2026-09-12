@@ -27,6 +27,16 @@ outright rather than merely penalized.
 The default mode is **dry-run**: **pve-storage-drs** prints the plan, the arithmetic behind it and the API
 calls it would issue, and changes nothing. Nothing is ever deleted automatically.
 
+The six per-disk counters every plan is computed from are QEMU `query-blockstats` figures that
+**pvestatd** already exports through PVE's InfluxDB external metric server; no exporter or
+collector is installed by this tool. Because InfluxDB line protocol carries string fields and
+fixes a field's type at its first write, while Prometheus has no string sample type, a transport
+between the two -- Telegraf with a Prometheus remote-write or OpenMetrics output being the
+prominent case -- can silently and permanently drop one counter for one disk while the other five
+keep working. That produces a wrong plan rather than an error, which is why **verify-metrics**
+cross-checks all six against each other and should be run before any plan is trusted. The operator
+manual's "Where the numbers come from" page has the mechanism and a tested reference setup.
+
 The configuration is read from */etc/pve/drs.yaml*, which is on the cluster filesystem and so is
 the same file on every node.
 
@@ -68,9 +78,15 @@ the same file on every node.
 **collect-testdata**
 : Capture an anonymized diagnostic bundle -- topology, the effective configuration with credentials
   and endpoints removed, and Prometheus metrics -- for the author to reproduce a problem offline.
-  Read-only and dry-run-only: **--mode confirm**/**auto** alongside it is a usage error. See
-  **--estimate**, **--range**, **--step**, **--no-series**, **--no-archive**, **--salt-file** and
-  **--new-salt** under **pve-storage-drs collect-testdata --help**, and the operator manual.
+  Read-only and dry-run-only: **--mode confirm**/**auto** alongside it is a usage error. Every
+  identifier is replaced by a pseudonym keyed to a salt that stays on the host; sizes, capacities
+  and load shapes are preserved, so a bundle is not anonymous against somebody who already knows
+  the cluster. Read it before sending it. Its own options are listed under **COLLECT-TESTDATA
+  OPTIONS** below. Exit status is *0* when every capture step succeeded and *1* when the bundle was
+  written but its manifest records a failed call.
+
+**help**
+: Alias for **--manual**.
 
 # OPTIONS
 
@@ -85,8 +101,8 @@ Global options are accepted before the command.
 : Restrict the run to one storage group. May be given more than once. Groups are independent, so
   this does not change the result for the groups selected. A name that does not match any group
   in the configuration is a hard failure (exit code 1), not a silently empty report. Applies to
-  **show-load**, **verify-storages**, **plan** and **apply**; **verify-metrics** validates the
-  configured metric/label names globally and is not restricted by this flag.
+  **show-load**, **verify-storages**, **plan**, **explain** and **apply**; **verify-metrics** and
+  **collect-testdata** are cluster-wide and are not restricted by this flag.
 
 **--mode** *dry-run*|*confirm*|*auto*
 : Override *execution.mode* for this run. Every override is logged; one that moves toward less
@@ -139,6 +155,40 @@ Global options are accepted before the command.
 : Print a usage summary with every option and its default, and exit. **pve-storage-drs** *command*
   **--help** does the same for one command.
 
+# COLLECT-TESTDATA OPTIONS
+
+Accepted only after the **collect-testdata** command. No other subcommand takes options of its own.
+
+**-o**, **--output** *DIR*
+: Write the bundle directory and its tarball to *DIR* instead of *support.bundle_dir*.
+
+**--estimate**
+: Print the query count and the estimated number of series sample points, then exit. Fetches
+  nothing. A real capture refuses outright, rather than starting, above *support.max_series_points*.
+
+**--range** *DURATION*
+: Range of the series capture, overriding *support.capture_range*. The default captures the
+  superset every supported forecaster could need, not only the configured one.
+
+**--step** *DURATION*
+: Resolution of the series capture, overriding *metrics.step*. Coarsening this is the other way to
+  bring an oversized capture under the limit.
+
+**--no-series**
+: Capture topology, instant queries and findings only. Much smaller, but the bundle cannot exercise
+  a seasonal forecaster. This is the form to send if the cluster's load shape is confidential.
+
+**--no-archive**
+: Write the bundle directory only, skipping the deterministic *.tar.gz*.
+
+**--salt-file** *PATH*
+: Use the anonymization salt at *PATH* instead of *support.salt_path*.
+
+**--new-salt**
+: Generate a fresh salt, replacing the persisted one. Logged at warning level: bundles made before
+  and after no longer share a pseudonym mapping, so the same cluster no longer compares against
+  itself.
+
 # CONFIGURATION
 
 */etc/pve/drs.yaml*, searched for in this order: **--config**, then **$PVE_STORAGE_DRS_CONFIG**, then the
@@ -181,8 +231,10 @@ and in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**, and prefer an API token over a 
   and deliberately not on */etc/pve*: it is rewritten on every run. Losing it is safe but resets
   the cooldowns.
 
-*/usr/share/doc/pve-storage-drs/*
-: The manual and the specification.
+*/usr/share/doc/pve-storage-drs/manual/*, */usr/share/doc/pve-storage-drs/internals/*
+: The operator manual and the internals guide, as uncompressed Markdown, one file per topic --
+  readable with **less**(1) on a node with no GUI. Typeset PDFs of both, and of the specification
+  (*IMPLEMENTATION_PLAN.md*), sit beside them in */usr/share/doc/pve-storage-drs/*.
 
 */var/lib/pve-storage-drs/anonymization-salt*
 : **collect-testdata**'s pseudonym key, generated on first use, mode 0600. Never written into a
@@ -195,7 +247,8 @@ and in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**, and prefer an API token over a 
 
 0
 : Success. A run that stopped at a gate, or found nothing worth moving, also exits 0 -- that is the
-  normal outcome for most invocations of the timer.
+  normal outcome for most unattended invocations. (No timer unit is shipped; write your own, or
+  run it from cron, on exactly one host -- */var/lib/pve-storage-drs/state.json* is node-local.)
 
 1
 : The run failed: configuration invalid, Prometheus or the Proxmox VE API unreachable, a migration
@@ -206,11 +259,15 @@ and in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**, and prefer an API token over a 
 
 # SEE ALSO
 
-*/usr/share/doc/pve-storage-drs/pve-storage-drs-manual.pdf*, the operator manual, which documents every
-configuration option in detail.
+*/usr/share/doc/pve-storage-drs/manual/* (or *pve-storage-drs-manual.pdf*), the operator manual,
+which documents every configuration option in detail. Start with *05-metrics-pipeline.md* if
+**verify-metrics** reported anything, and *35-logging.md* before writing a systemd unit.
 
-*/usr/share/doc/pve-storage-drs/IMPLEMENTATION_PLAN.pdf*, the specification, for the load model, the
-optimization problem and the migration ordering rules.
+*/usr/share/doc/pve-storage-drs/IMPLEMENTATION_PLAN.md* (or *.pdf*), the specification, for the load
+model, the optimization problem and the migration ordering rules.
+
+<https://github.com/bzed/proxmox-storage-drs> -- bug reports, and diagnostic bundles collected with
+**collect-testdata**, which are welcome as pull requests on the terms in *tests/corpus/README.md*.
 
 **pvesm**(1), **qm**(1), **pvecm**(1).
 

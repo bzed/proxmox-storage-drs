@@ -27,10 +27,11 @@ These hold regardless of `execution.mode`, and are not configurable away
 
 ## What this build actually implements
 
-`IMPLEMENTATION_PLAN.md` section 12 lays out ten phases, all ten now
+`IMPLEMENTATION_PLAN.md` section 12 lays out eleven phases, all eleven now
 implemented, including phase 10 (`collect-testdata`, `--replay` and the
-real-cluster test corpus of section 16). Dogfooding against a production
-cluster continues, and `REVIEW.md` tracks findings from that to
+real-cluster test corpus of section 16) and phase 11 (the section 2.3
+logging policy — see [`35-logging.md`](35-logging.md)). Dogfooding against a
+production cluster continues, and `REVIEW.md` tracks findings from that to
 resolution — being honest about exactly where a still-evolving tool stands
 matters more than a document that reads as finished and closed:
 
