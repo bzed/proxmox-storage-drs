@@ -257,18 +257,26 @@ def test_every_subcommand_is_registered() -> None:
     assert args.command == "show-load"
 
 
-def test_config_loaded_and_warnings_are_logged(
+def test_run_started_and_config_warnings_are_logged_at_info(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # "apply" is still a stub -- this test is about the config-load/warning
-    # log events, which fire before dispatch regardless of command; "plan"
-    # is real now and would need network mocking to use safely here.
+    """Section 2.3: ``run_started`` replaces ``config_loaded``, and a
+    configuration advisory is INFO (a fact about a file, equally true every
+    run) rather than a WARNING repeated every 15 minutes forever. Both are
+    part of the audit trail, so both need ``-v`` to be seen -- see
+    ``test_a_clean_read_only_run_is_silent`` for the other half of that."""
     path = write_config(tmp_path)
-    cli.main(["-c", str(path), "apply"])
+    cli.main(["-c", str(path), "-v", "--log-format", "json", "apply"])
     err_lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
-    events = [json.loads(ln)["event"] for ln in err_lines]
-    assert "config_loaded" in events
-    assert "config_warning" in events  # no saturation_load configured
+    records = [json.loads(ln) for ln in err_lines]
+    by_event = {r["event"]: r for r in records}
+    assert "config_loaded" not in by_event
+    assert by_event["run_started"]["command"] == "apply"
+    assert by_event["run_started"]["config_sha256"]
+    assert by_event["config_warning"]["level"] == "INFO"  # no saturation_load configured
+    # Emitted even though this run fails without a reachable cluster: "it
+    # exited 1 having issued nothing" is exactly what the summary is for.
+    assert by_event["run_summary"]["command"] == "apply"
 
 
 def test_verify_metrics_dispatches_and_renders_human(
@@ -3407,6 +3415,7 @@ def test_solve_group_uses_the_milp_result_when_available(
         time_limit_seconds: object,
         mip_gap: object,
         cooldown_storages: object = frozenset(),
+        probing: bool = False,
     ) -> object:
         calls.append(backend)
         return fake_result
@@ -3705,3 +3714,189 @@ def test_handle_collect_testdata_estimate_human_output(
     out = capsys.readouterr().out
     assert "groups:" in out
     assert "estimated series sample points" in out
+
+
+# --------------------------------------------------------- logging policy (2.3)
+
+CORPUS_BUNDLE = Path(__file__).resolve().parents[2] / "tests" / "corpus" / "bzed-dev-cluster-24h"
+
+
+def test_a_clean_read_only_run_is_silent(capsys: pytest.CaptureFixture[str]) -> None:
+    """Section 2.3's headline property, and the defect that prompted it: a
+    run in which nothing went wrong prints its report and nothing else.
+    Replayed from the committed corpus bundle so it needs no cluster."""
+    assert cli.main(["--replay", str(CORPUS_BUNDLE), "plan"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.strip()
+
+
+def test_quiet_changes_nothing_about_the_report(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["--replay", str(CORPUS_BUNDLE), "plan"]) == 0
+    default_report = capsys.readouterr().out
+    assert cli.main(["--replay", str(CORPUS_BUNDLE), "--quiet", "plan"]) == 0
+    assert capsys.readouterr().out == default_report
+
+
+def test_v_logs_the_decision_trail(capsys: pytest.CaptureFixture[str]) -> None:
+    """Section 2.1's requirement, which was unimplemented: every gate
+    decision with its computed value *and* the threshold it was compared
+    against, plus the load it was computed from."""
+    assert cli.main(["--replay", str(CORPUS_BUNDLE), "-v", "--log-format", "json", "plan"]) == 0
+    records = [json.loads(ln) for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
+    by_event = {r["event"]: r for r in records}
+    assert {"run_started", "load_digest", "gate_decision", "run_summary"} <= set(by_event)
+    gate = by_event["gate_decision"]
+    assert gate["imbalance_fraction"] is not None
+    assert gate["imbalance_threshold"] is not None  # the threshold, not only the verdict
+    assert by_event["load_digest"]["disks"] > 0
+
+
+def test_log_format_auto_emits_json_when_stderr_is_not_a_tty(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(["--replay", str(CORPUS_BUNDLE), "-v", "plan"]) == 0
+    err = capsys.readouterr().err
+    assert err.startswith("{")
+    json.loads(err.splitlines()[0])
+
+
+def test_log_format_text_emits_no_json(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["--replay", str(CORPUS_BUNDLE), "-v", "--log-format", "text", "plan"]) == 0
+    err = capsys.readouterr().err
+    assert err
+    assert not err.lstrip().startswith("{")
+    assert "run started: plan" in err
+
+
+def test_json_report_on_stdout_stays_parseable_at_every_verbosity(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The stream-separation property, asserted rather than assumed: no
+    combination of level and format may put a log line on stdout."""
+    for extra_args in ([], ["-v"], ["-vv"], ["--quiet"], ["--log-format", "text"]):
+        assert cli.main(["--replay", str(CORPUS_BUNDLE), *extra_args, "--json", "plan"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "groups" in payload
+
+
+def test_a_failing_run_reports_its_failure_exactly_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Section 2.3: in text format the log record *is* the human line, so
+    the separate `pve-storage-drs: ...` print is dropped rather than
+    reporting one failure twice on one stream."""
+
+    from proxmox_storage_drs.exceptions import DrsError
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise DrsError("prometheus is unreachable")
+
+    monkeypatch.setattr(cli, "build_pve_client", lambda *a, **k: FAKE_CLIENT)
+    monkeypatch.setattr(cli, "build_topology", boom)
+    path = write_config(tmp_path)
+
+    assert cli.main(["-c", str(path), "--log-format", "text", "plan"]) == 1
+    text_err = capsys.readouterr().err
+    assert text_err.count("prometheus is unreachable") == 1
+
+    assert cli.main(["-c", str(path), "--log-format", "json", "plan"]) == 1
+    json_err = capsys.readouterr().err
+    # JSON callers still get the plain line; the record is for the journal.
+    assert json_err.count("prometheus is unreachable") == 2
+    assert any(
+        json.loads(ln)["event"] == "command_failed"
+        for ln in json_err.splitlines()
+        if ln.startswith("{")
+    )
+
+
+def _stub_execute_plan(monkeypatch: pytest.MonkeyPatch, status: str = "moved") -> None:
+    """`execute_plan()` replaced by one that reports every scheduled move as
+    `status`, so an `auto` run reaches its own reporting and logging without
+    `execute.py` calling into the "fake-client" sentinel."""
+    from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
+
+    def fake_execute_plan(*args: object, **kwargs: object) -> ExecutionResult:
+        schedule_result = args[2]
+        return ExecutionResult(
+            tuple(
+                MoveOutcome(m.disk_key, m.from_storage, m.to_storage, status, "ok", upid="UPID:t")
+                for m in schedule_result.order  # type: ignore[attr-defined]
+            ),
+            False,
+            None,
+        )
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fake_execute_plan)
+
+
+def test_apply_dry_run_keeps_the_ordinary_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`dry-run` changes nothing, so it has nothing to audit and stays as
+    quiet as every other read-only command (section 2.3)."""
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_apply_auto_logs_its_audit_trail_without_being_asked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The requirement section 2.1 always stated and nothing implemented:
+    "in auto mode this log is the only record a human will see". No `-v`
+    here -- an audit trail an operator has to remember to switch on is not
+    an audit trail, so `auto` raises its own floor (section 2.3)."""
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    _stub_execute_plan(monkeypatch)
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--log-format", "json", "--mode", "auto", "apply"]) == 0
+    records = [json.loads(ln) for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
+    events = {r["event"] for r in records}
+    assert {"run_started", "load_digest", "gate_decision", "run_summary"} <= events
+    summary = next(r for r in records if r["event"] == "run_summary")
+    assert summary["mode"] == "auto"
+    assert "moves_issued" in summary and "bytes_moved" in summary
+
+
+def test_quiet_discards_even_an_auto_runs_audit_trail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented cost of --quiet under a timer: the operator may
+    insist on silence, and gets it."""
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    _stub_execute_plan(monkeypatch)
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    argv = ["-c", str(path), "--quiet", "--mode", "auto", "apply"]
+    assert cli.main(argv) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_solve_group_tells_optimize_whether_it_is_probing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only `_solve_group()` knows whether a backend was named by the
+    operator or reached by `auto`'s cascade, so it is what has to tell
+    `optimize.solve()` -- which decides whether a missing optional solver is
+    a warning or a DEBUG statement of fact (section 2.3)."""
+    group = _one_disk_group()
+    loads = {"101:scsi0": 1.0}
+    seen: list[bool] = []
+
+    def fake_solve(*args: object, **kwargs: object) -> None:
+        seen.append(bool(kwargs["probing"]))
+        return None
+
+    # The real heuristic runs afterwards, exactly as in
+    # `test_solve_group_auto_cascades_cpsat_then_cbc_then_heuristic`: a
+    # lone disk has nothing to improve, so it returns quickly.
+    monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", fake_solve)
+
+    for backend, expected in (("auto", True), ("cpsat", False), ("cbc", False)):
+        seen.clear()
+        resolved = _resolved_config(tmp_path, solver={"backend": backend})
+        cli._solve_group(group, loads, resolved, 0, frozenset())
+        assert seen, f"optimize.solve() was never called for backend {backend!r}"
+        assert all(probing is expected for probing in seen), backend

@@ -202,7 +202,7 @@ def _lp_variable(pulp: Any, name: str, **kwargs: Any) -> Any:
         return pulp.LpVariable(name, **kwargs)
 
 
-def _pulp_solve(pulp: Any, prob: Any, solver_cmd: Any) -> int | None:
+def _pulp_solve(pulp: Any, prob: Any, solver_cmd: Any, probing: bool = False) -> int | None:
     """``prob.solve(solver_cmd)``, returning ``None`` instead of raising
     when the CBC binary itself cannot be executed -- `pulp` can still be
     importable with no working `cbc` on `PATH` behind it (a non-Debian
@@ -216,11 +216,7 @@ def _pulp_solve(pulp: Any, prob: Any, solver_cmd: Any) -> int | None:
     try:
         return int(prob.solve(solver_cmd))
     except pulp.PulpSolverError as exc:
-        logger.warning(
-            "solver.backend=cbc could not run the CBC solver: %s",
-            exc,
-            extra={"event": "optimize_backend_unavailable", "backend": "cbc"},
-        )
+        _log_backend_unavailable("cbc", f"the CBC solver itself failed: {exc}", probing)
         return None
 
 
@@ -251,8 +247,15 @@ def solve(
     time_limit_seconds: float,
     mip_gap: float,
     cooldown_storages: frozenset[str] = frozenset(),
+    probing: bool = False,
 ) -> OptimizeResult | None:
     """Solve one group with ``backend`` (``"cpsat"`` or ``"cbc"``).
+
+    ``probing`` says this backend was chosen by ``solver.backend: auto``'s
+    cascade rather than named by the operator, which is what decides
+    whether a missing optional dependency is worth a warning: ``auto``
+    *means* "use the best solver installed here", so probing for CP-SAT and
+    not finding it is that option working, not degrading (section 2.3).
 
     Returns ``None`` -- never raises -- when ``backend``'s library is not
     importable, or when the lexicographic solve cannot produce even one
@@ -291,6 +294,7 @@ def solve(
         time_limit_seconds,
         mip_gap,
         cooldown_storages,
+        probing,
     )
 
     if outcome is None:
@@ -306,6 +310,34 @@ def solve(
         backend=backend,
         status=status,
     )
+
+
+def _log_backend_unavailable(backend: str, detail: str, probing: bool) -> None:
+    """One implementation of section 2.3's level rule for a solver backend
+    that could not run.
+
+    Under ``solver.backend: auto`` this is a probe: the cascade is asking
+    which optional dependency is installed, and "not this one" is the
+    answer it exists to get -- DEBUG, and worded as a statement of fact
+    rather than as a thwarted request, since the operator requested nothing.
+    Under an explicitly configured backend the operator named this solver
+    and is not getting it, which is a WARNING they need in order to notice
+    that `auto`-like behaviour happened anyway.
+    """
+    if probing:
+        logger.debug(
+            "solver backend %s is not available (%s); trying the next one",
+            backend,
+            detail,
+            extra={"event": "optimize_backend_unavailable", "backend": backend, "probing": True},
+        )
+    else:
+        logger.warning(
+            "solver.backend=%s was configured but is not usable: %s",
+            backend,
+            detail,
+            extra={"event": "optimize_backend_unavailable", "backend": backend, "probing": False},
+        )
 
 
 def _no_feasible_solution(backend: str, group: Group, stage: str) -> None:
@@ -552,14 +584,12 @@ def _solve_cpsat(
     time_limit_seconds: float,
     mip_gap: float,
     cooldown_storages: frozenset[str] = frozenset(),
+    probing: bool = False,
 ) -> tuple[Assignment, str] | None:
     try:
         from ortools.sat.python import cp_model
     except ImportError:
-        logger.warning(
-            "solver.backend=cpsat requested but ortools is not importable",
-            extra={"event": "optimize_backend_unavailable", "backend": "cpsat"},
-        )
+        _log_backend_unavailable("cpsat", "ortools is not importable", probing)
         return None
 
     pinned_by_storage = _pinned_by_storage(group)
@@ -787,14 +817,12 @@ def _solve_cbc(
     time_limit_seconds: float,
     mip_gap: float,
     cooldown_storages: frozenset[str] = frozenset(),
+    probing: bool = False,
 ) -> tuple[Assignment, str] | None:
     try:
         import pulp
     except ImportError:
-        logger.warning(
-            "solver.backend=cbc requested but pulp is not importable",
-            extra={"event": "optimize_backend_unavailable", "backend": "cbc"},
-        )
+        _log_backend_unavailable("cbc", "pulp is not importable", probing)
         return None
 
     pinned_by_storage = _pinned_by_storage(group)
@@ -829,7 +857,7 @@ def _solve_cbc(
         cooldown_storages,
     )
     prob1 += pulp.lpSum(slack1.values())
-    status1 = _pulp_solve(pulp, prob1, stage1_solver_cmd)
+    status1 = _pulp_solve(pulp, prob1, stage1_solver_cmd, probing)
     if status1 is None:
         return None
     if pulp.LpStatus[status1] not in ("Optimal",):
@@ -867,7 +895,7 @@ def _solve_cbc(
         y2,
     )
     prob2 += pulp.lpSum(terms)
-    status2 = _pulp_solve(pulp, prob2, solver_cmd)
+    status2 = _pulp_solve(pulp, prob2, solver_cmd, probing)
     if status2 is None:
         return None
     if pulp.LpStatus[status2] not in ("Optimal",):

@@ -105,11 +105,53 @@ the one place in the codebase where the implementation and
 AGENTS.md section 7 rule 2 is why the plan text itself was corrected in the
 same commit rather than left to silently diverge from the code.
 
-`configure_logging()` is called exactly once, from `main()`, after the
-`--version`/`--manual` early exits (which must not touch logging
-configuration at all) and before any config-dependent code runs, so that a
-config-loading failure is itself logged consistently with everything after
-it.
+`configure_logging()` is called exactly once, from `main()` via
+`_start_logging_and_announce_run()`, after the `--version`/`--manual` early
+exits (which must not touch logging configuration at all) — and, since the
+section 2.3 rework, *after* `load_config()` rather than before it. That
+ordering is deliberate and slightly counter-intuitive, so it is worth
+stating why: the mandatory `INFO` floor depends on the effective execution
+mode, which is not known until the config is read, and `apply_mode_override()`
+itself logs, so it has to run after the level it should be logged at has
+been decided. The one thing that moves *before* logging exists as a result —
+a config file that could not be read or parsed — is reported with a plain
+`print()` to stderr, which is what it always was: a usage failure, not an
+event in a run that never started.
+
+## Levels, the mandatory floor, and why the handler is on root
+
+`IMPLEMENTATION_PLAN.md` section 2.3 is the policy; `logging_setup.py` is
+three small pure functions plus the installer, so that every part of that
+policy is testable without running a command:
+
+- `resolve_level()` — the `--quiet` < default < `-v` < `-vv` ladder, with
+  `--log-level` winning over all of it.
+- `floor_for_command()` — `INFO`, and only for `apply` in `confirm`/`auto`.
+  This is the "a run that can change the cluster logs what it did whether or
+  not anyone asked" rule, and it is a *floor* rather than an override
+  precisely so `--quiet` can still win.
+- `resolve_format()` — `auto` resolves to `text` at a TTY and `json`
+  everywhere else. A systemd unit therefore gets JSON without the unit
+  saying anything, and an operator at a terminal gets prose without passing
+  a flag; that one rule is the entire fix for "why is my terminal full of
+  JSON".
+
+**The handler goes on the root logger, and the package logger carries only
+a level.** The obvious-looking alternative — handler on
+`proxmox_storage_drs`, `propagate = False` — was tried first and is wrong
+twice over: it hides every record from pytest's `caplog` (whose handler sits
+on root) and from any application embedding this package, and it needs a
+*second* handler on root anyway for third-party records to be visible at
+`-vv`. Setting levels instead gets the same separation with one handler:
+our records are filtered by the package logger's level and then propagate to
+root's handler, while `urllib3` and friends are filtered by root's own
+level, which stays at `WARNING` unless `-vv` lowered it.
+
+Because `logging` is process-global, `tests/conftest.py` restores the
+package logger's level and root's handlers around every test. Without it a
+test that runs a command leaks its verbosity into whatever runs next — which
+showed up exactly once, as a `caplog`-based topology test that passed alone
+and failed in the suite.
 
 ## `JsonFormatter`: what ends up in one log line
 
@@ -120,6 +162,19 @@ folded into the JSON payload — this is what lets any module call
 have `event`/`threshold` appear as top-level JSON keys with no formatter
 changes required. `sort_keys=True` keeps output byte-stable for anything
 that diffs log lines in a test or a log-aggregation pipeline.
+
+Two constraints on what may go in `extra=`. First, **every record carries an
+`event`** — the names are an interface (`jq 'select(.event=="move_started")'`
+is a supported way to use this tool), and `test_logging_setup.py` parses
+`src/` with `ast` to prove no call site forgot one. Second, `extra=` may not
+shadow a standard `LogRecord` attribute: `{"message": ...}` raises
+`KeyError: "Attempt to overwrite 'message' in LogRecord"` at runtime, which
+is how the `deadlock` record's payload key came to be `detail`.
+
+`TextFormatter` is the `auto`-at-a-TTY counterpart: `LEVEL: message` for
+anything above `INFO`, and bare prose at `INFO`, because prefixing every
+line of a requested narrative with `INFO:` is noise rather than
+information.
 
 ## `--manual`: preferring `man(1)`, falling back only when necessary
 
