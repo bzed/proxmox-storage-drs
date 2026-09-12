@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -37,6 +38,7 @@ from proxmox_storage_drs.config import (
     ExcludeConfig,
     ExecutionConfig,
     ForecastConfig,
+    GatesConfig,
     MetricsConfig,
     MigrationConfig,
     ObjectiveConfig,
@@ -72,7 +74,12 @@ from proxmox_storage_drs.heuristic import (
     run_heuristic,
 )
 from proxmox_storage_drs.loadmodel import GroupLoad, compute_disk_load_series, compute_group_load
-from proxmox_storage_drs.logging_setup import configure_logging
+from proxmox_storage_drs.logging_setup import (
+    LOG_FORMATS,
+    LOG_LEVELS,
+    configure_logging,
+    floor_for_command,
+)
 from proxmox_storage_drs.metrics import (
     PrometheusClient,
     VerifyMetricsReport,
@@ -113,7 +120,11 @@ from proxmox_storage_drs.timewindow import current_deadline
 from proxmox_storage_drs.topology import Disk, Group, Storage, Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds, parse_duration_seconds
 
-logger = logging.getLogger(__name__)
+# Explicitly named, not `__name__`: this module is `__main__` whenever it is
+# executed rather than imported, and a journalctl filter keyed on a logger
+# name that changes with how the process was started is not a filter
+# (IMPLEMENTATION_PLAN.md section 2.3).
+logger = logging.getLogger("proxmox_storage_drs.cli")
 
 # Section 9.1: dry-run < confirm < auto. Used only to classify a --mode
 # override as an escalation (warn) or a de-escalation (info) -- section 11.3.
@@ -184,12 +195,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="count",
         default=0,
-        help="More detail on stderr. Repeatable.",
+        help=(
+            "-v logs this run's decision trail (gate, plan, payback, every move); "
+            "-vv adds per-query detail and third-party library logs."
+        ),
     )
     parser.add_argument(
         "--quiet",
         action="store_true",
-        help="Warnings and errors only. Intended for the systemd timer.",
+        help=(
+            "Errors only. On an 'auto' run this also discards the audit trail such a "
+            "run otherwise logs unconditionally -- the only record of what was moved."
+        ),
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        default=None,
+        help="Set the log level explicitly. Wins over -v and --quiet.",
+    )
+    parser.add_argument(
+        "--log-format",
+        choices=LOG_FORMATS,
+        default="auto",
+        help="auto selects human-readable text at a terminal and JSON anywhere else.",
     )
     parser.add_argument(
         "--version",
@@ -270,6 +299,133 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+# --------------------------------------------------------------- run summary
+
+
+@dataclasses.dataclass
+class _RunStats:
+    """What ``run_summary`` reports, accumulated as the run goes.
+
+    Carried on the ``argparse.Namespace`` every handler already receives
+    rather than in a module global: there is exactly one of these per
+    process, but "one per process" is what a global *means*, and a
+    namespace attribute keeps it testable and keeps two runs in one pytest
+    session from sharing it.
+    """
+
+    groups: int = 0
+    moves_issued: int = 0
+    moves_succeeded: int = 0
+    moves_failed: int = 0
+    bytes_moved: int = 0
+
+
+def _run_stats(args: argparse.Namespace) -> _RunStats:
+    """The run's stats object, creating it if a caller (a test, or a handler
+    invoked directly) never went through ``main()``."""
+    stats = getattr(args, "run_stats", None)
+    if stats is None:
+        stats = _RunStats()
+        args.run_stats = stats
+    return stats
+
+
+def _accumulate_move_stats(args: argparse.Namespace, group: Group, result: ExecutionResult) -> None:
+    """Fold one group's execution into ``run_summary``'s counters.
+
+    Counts *launches*, not plan entries: `MoveOutcome.upid is not None` is
+    the same "was this actually issued" test `execution.max_migrations_per_run`
+    uses (REVIEW.md T-06), so the summary cannot disagree with the budget
+    about how many migrations a run performed.
+    """
+    stats = _run_stats(args)
+    stats.groups += 1
+    size_by_key = {d.key: d.size_bytes for d in group.disks}
+    for outcome in result.outcomes:
+        if outcome.upid is None:
+            continue
+        stats.moves_issued += 1
+        if outcome.status == "moved":
+            stats.moves_succeeded += 1
+            stats.bytes_moved += size_by_key.get(outcome.disk_key, 0)
+        elif outcome.status == "failed":
+            stats.moves_failed += 1
+
+
+def _start_logging_and_announce_run(
+    args: argparse.Namespace, resolved: ResolvedConfig, configured_mode: str
+) -> str:
+    """Configure logging for this run and emit ``run_started``. Returns the
+    log format actually selected (section 2.3).
+
+    Logging is configured only once the effective mode is known, because
+    that mode decides whether this run owes an audit trail regardless of
+    what the operator asked for (section 2.3's mandatory floor). The mode is
+    computed here rather than taken from `apply_mode_override()`, which is
+    called afterwards, because that call *logs* -- and must land at the
+    level this one picks.
+    """
+    intended_mode = args.mode if args.mode is not None else configured_mode
+    log_format = configure_logging(
+        args.verbose,
+        args.quiet,
+        log_level=args.log_level,
+        log_format=args.log_format,
+        floor=floor_for_command(args.command, intended_mode),
+    )
+    logger.info(
+        "run started: %s (%s)",
+        args.command,
+        intended_mode,
+        extra={
+            "event": "run_started",
+            "command": args.command,
+            "mode": intended_mode,
+            "version": __version__,
+            "config_path": resolved.path,
+            "config_sha256": resolved.sha256,
+            "replay": args.replay,
+        },
+    )
+    for warning in resolved.warnings:
+        # INFO, not WARNING: an advisory about a file is equally true on
+        # every run until someone edits it, and repeating it at warning
+        # level every 15 minutes trains operators to ignore warnings
+        # (section 2.3). `verify-storages` reports it where it is actionable.
+        logger.info(warning, extra={"event": "config_warning"})
+    return log_format
+
+
+def _log_run_summary(
+    args: argparse.Namespace, effective_mode: str, exit_code: int, started_at: float
+) -> None:
+    """Section 2.3's closing record: one line saying what this run did.
+
+    Emitted for every command, including failures -- "it exited 1 after
+    issuing two moves, one of which failed" is exactly the sentence an
+    operator reconstructing an unattended run needs, and it cannot be
+    recovered from the per-move records alone if the run died between them.
+    """
+    stats = _run_stats(args)
+    logger.info(
+        "run finished: %s exit=%d",
+        args.command,
+        exit_code,
+        extra={
+            "event": "run_summary",
+            "command": args.command,
+            "mode": effective_mode,
+            "exit_code": exit_code,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+            "groups": stats.groups,
+            "moves_issued": stats.moves_issued,
+            "moves_succeeded": stats.moves_succeeded,
+            "moves_failed": stats.moves_failed,
+            "bytes_moved": stats.bytes_moved,
+        },
+    )
 
 
 # ------------------------------------------------------------- mode override
@@ -1717,6 +1873,10 @@ def _solve_group(
             solver.time_limit_seconds,
             solver.mip_gap,
             cooldown_storages,
+            # Under `auto` this call is a probe for whichever optional
+            # solver is installed, and a missing one is the expected
+            # answer, not a warning (section 2.3).
+            probing=solver.backend == "auto",
         )
         if result is not None:
             return _SolveOutcome(
@@ -1902,6 +2062,124 @@ def _compute_one_move_cost(
     )
 
 
+def _log_load_digest(group: Group, group_load: GroupLoad) -> None:
+    """Section 2.3's ``load_digest``: what section 4 measured, compactly
+    enough to put in a journal on every run and still reconstruct which
+    storage was hot and how much of the group was measured at all."""
+    logger.info(
+        "group %s: load %.3f across %d disks",
+        group.name,
+        sum(s.load for s in group_load.storages),
+        len(group_load.disks),
+        extra={
+            "event": "load_digest",
+            "group": group.name,
+            "idle": group_load.idle,
+            "total_load": sum(s.load for s in group_load.storages),
+            "average_utilization": group_load.average_utilization,
+            "utilization": {s.storage_id: s.utilization for s in group_load.storages},
+            "disks": len(group_load.disks),
+            "disks_flagged": sum(1 for d in group_load.disks if d.flagged_reason is not None),
+        },
+    )
+
+
+def _log_gate_decision(group: Group, decision: GateDecision, gates: GatesConfig) -> None:
+    """Section 2.3's ``gate_decision``: the computed values *and* the
+    thresholds they were compared against. Section 2.1's own wording --
+    "each gate decision with its computed value and threshold" -- because
+    "did not act" is only answerable months later if both halves are
+    recorded, not just the verdict."""
+    logger.info(
+        "group %s: %s -- %s",
+        group.name,
+        "ACT" if decision.act else "NO ACTION",
+        decision.reason,
+        extra={
+            "event": "gate_decision",
+            "group": group.name,
+            "act": decision.act,
+            "reason": decision.reason,
+            "reserve_override": decision.reserve_override,
+            "drift_fraction": decision.drift_fraction,
+            "imbalance_fraction": decision.imbalance_fraction,
+            "drift_threshold": gates.drift_threshold,
+            "imbalance_threshold": gates.imbalance_threshold,
+        },
+    )
+
+
+def _log_plan_selected(
+    group: Group,
+    solve_outcome: "_SolveOutcome",
+    schedule_result: ScheduleResult,
+    final_breakdown: ObjectiveBreakdown,
+    group_load: GroupLoad,
+) -> None:
+    """Section 2.3's ``plan_selected``, and ``deadlock`` when section 8's
+    scheduler could not order part of the plan."""
+    logger.info(
+        "group %s: %s plan, %d move(s)",
+        group.name,
+        solve_outcome.backend,
+        len(schedule_result.order),
+        extra={
+            "event": "plan_selected",
+            "group": group.name,
+            "backend": solve_outcome.backend,
+            "solver_status": solve_outcome.status,
+            "moves": len(schedule_result.order),
+            "move_disk_keys": [m.disk_key for m in schedule_result.order],
+            "objective": _objective_breakdown_json(final_breakdown),
+            "before_spread": _spread_fraction(
+                solve_outcome.initial_breakdown.utilization, group_load.average_utilization
+            ),
+            "after_spread": _spread_fraction(
+                final_breakdown.utilization, group_load.average_utilization
+            ),
+        },
+    )
+    if schedule_result.deadlocked:
+        logger.warning(
+            "group %s: %s",
+            group.name,
+            schedule_result.deadlocked_msg,
+            extra={
+                "event": "deadlock",
+                "group": group.name,
+                "deadlocked": list(schedule_result.deadlocked),
+                # `detail`, not `message`: the latter is a reserved
+                # LogRecord attribute and `extra=` refuses to shadow it.
+                "detail": schedule_result.deadlocked_msg,
+            },
+        )
+
+
+def _log_payback_verdict(group: Group, payback: PaybackResult, required_ratio: float) -> None:
+    """Section 2.3's ``payback_verdict``: section 7's arithmetic, not just
+    its yes/no -- an operator asking "why did it refuse to move anything"
+    needs the ratio it computed and the one it needed."""
+    logger.info(
+        "group %s: payback ratio %.3g (need %.3g) -> %s",
+        group.name,
+        payback.ratio,
+        required_ratio,
+        "accepted" if payback.accepted else "rejected",
+        extra={
+            "event": "payback_verdict",
+            "group": group.name,
+            "accepted": payback.accepted,
+            "aggregate_ok": payback.aggregate_ok,
+            "benefit_load_seconds": payback.benefit_load_seconds,
+            "total_cost_load_seconds": payback.total_cost_load_seconds,
+            "ratio": payback.ratio,
+            "required_ratio": required_ratio,
+            "rejected_moves": list(payback.rejected_moves),
+            "deferred_moves": list(payback.deferred_moves),
+        },
+    )
+
+
 def _plan_group(
     group: Group,
     resolved: ResolvedConfig,
@@ -1933,8 +2211,15 @@ def _plan_group(
         # Section 6: gating (and so planning) cannot proceed without a
         # load to gate on -- unlike show-load's size/reserve report,
         # nothing here is safe to show without it.
+        logger.warning(
+            "group %s: load model unavailable: %s",
+            group.name,
+            exc,
+            extra={"event": "load_unavailable", "group": group.name},
+        )
         return _GroupPlan(load_error=str(exc))
 
+    _log_load_digest(group, group_load)
     reserve_statuses: dict[str, ReserveStatus] = {
         storage.id: compute_reserve_status(storage, group.disks, min_free_bytes)
         for storage in group.storages
@@ -1945,6 +2230,7 @@ def _plan_group(
         resolved.config.gates,
         last_load=last_loads_by_group.get(group.name),
     )
+    _log_gate_decision(group, decision, resolved.config.gates)
     if not decision.act:
         return _GroupPlan(group_load=group_load, decision=decision)
 
@@ -2007,6 +2293,8 @@ def _plan_group(
     payback_result = evaluate_plan_payback(
         move_costs, benefit, resolved.config.migration.payback_ratio
     )
+    _log_plan_selected(group, solve_outcome, schedule_result, final_breakdown, group_load)
+    _log_payback_verdict(group, payback_result, resolved.config.migration.payback_ratio)
     return _GroupPlan(
         group_load=group_load,
         decision=decision,
@@ -2813,6 +3101,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     on_inflight_finished=on_inflight_finished,
                 )
             execution_results[group.name] = result
+            _accumulate_move_stats(args, group, result)
             if mode == "auto":
                 # `_run_auto_group()` already recorded every attempt's own
                 # executed moves into `state_box` as it went (T-02), each
@@ -3146,25 +3435,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"pve-storage-drs: {usage_error}", file=sys.stderr)
         return 2
 
-    configure_logging(args.verbose, args.quiet)
-
     config_path, require_connection = _replay_config_path(args)
     try:
         resolved = load_config(config_path, require_connection=require_connection)
     except ConfigError as exc:
+        # Before `configure_logging()` deliberately: a config this run could
+        # not read is a usage failure, reported on stderr in plain text, not
+        # an event in a run that never started.
         print(f"pve-storage-drs: {exc}", file=sys.stderr)
         return 1
 
-    logger.info(
-        "configuration loaded",
-        extra={"event": "config_loaded", "path": resolved.path, "sha256": resolved.sha256},
-    )
-    for warning in resolved.warnings:
-        logger.warning(warning, extra={"event": "config_warning"})
+    configured_mode = resolved.config.execution.mode
+    log_format = _start_logging_and_announce_run(args, resolved, configured_mode)
 
-    effective_mode = resolved.config.execution.mode
+    started_at = time.monotonic()
+    effective_mode = configured_mode
     if args.mode is not None:
-        effective_mode = apply_mode_override(resolved.config.execution.mode, args.mode)
+        effective_mode = apply_mode_override(configured_mode, args.mode)
     if args.replay and effective_mode != "dry-run":
         print(
             f"pve-storage-drs: --replay only ever runs dry-run; refusing effective mode "
@@ -3173,13 +3460,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
+    args.run_stats = _RunStats()
     handler = _COMMAND_HANDLERS[args.command]
     try:
-        return handler(resolved, args, effective_mode)
+        exit_code = handler(resolved, args, effective_mode)
     except DrsError as exc:
         logger.error(str(exc), extra={"event": "command_failed", "command": args.command})
-        print(f"pve-storage-drs: {exc}", file=sys.stderr)
-        return 1
+        if log_format == "json":
+            # In text format the record above *is* this line; printing both
+            # would report one failure twice on one stream (section 2.3).
+            print(f"pve-storage-drs: {exc}", file=sys.stderr)
+        exit_code = 1
+    _log_run_summary(args, effective_mode, exit_code, started_at)
+    return exit_code
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via the entry point

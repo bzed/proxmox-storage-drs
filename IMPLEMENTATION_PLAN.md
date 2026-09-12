@@ -230,7 +230,10 @@ is a deliberate, visible change to `debian/.gitlab-ci.yml`, not a default.
 
 ### 2.3 Logging
 
-**As built, and why this section exists.** The first implementation got the plumbing right and the
+**Status: implemented** (phase 11). The event catalogue below is the built one; the three level
+corrections and the retraction at the end of this section have all landed.
+
+**Why this section exists.** The first implementation got the plumbing right and the
 policy wrong. Streams are correct (report on stdout, log on stderr — verified), `--mode` overrides
 are logged exactly as section 11.3 requires, and the JSON formatter is sound. But a plain
 `pve-storage-drs explain` on a healthy cluster prints this to stderr before a single line of its
@@ -324,25 +327,25 @@ and the record carries it. Exit codes are unaffected either way.
 
 Event names are an interface — `journalctl ... | jq 'select(.event=="move_started")'` is a
 supported way to use this tool — so they are specified here rather than left to whoever writes the
-call. **Every log record carries an `event`.** Records marked *new* do not exist yet and are the
-substance of this section's implementation work.
+call. **Every log record carries an `event`** -- enforced by a test that parses `src/` with `ast`, so a
+call site cannot silently add an unnameable member.
 
 | Event | Level | When | State |
 |---|---|---|---|
-| `run_started` | INFO | Once per invocation: command, effective mode, config path + sha256, version | *new* (replaces `config_loaded`) |
-| `run_summary` | INFO | Once per invocation: groups visited, moves issued/succeeded/failed, bytes moved, wall time, exit code | *new* |
-| `gate_decision` | INFO | Per group: `act`, the computed drift/imbalance fractions and the thresholds they were compared against | *new* — section 2.1 requires it |
-| `load_digest` | INFO | Per group: total load, per-storage `u_s`, disk count, how many disks were coverage-rejected | *new* — section 2.1 requires it |
-| `plan_selected` | INFO | Per acting group: backend, solver status, move count, the five objective terms, before/after spread | *new* — section 2.1 requires it |
-| `payback_verdict` | INFO | Per acting group: benefit, cost, ratio, the configured minimum, and the accept/reject outcome | *new* — section 2.1 requires it |
-| `move_started` | INFO | Immediately after `move_disk` returns, carrying **the UPID**, disk key, source, target, bytes | *new* — section 2.1 requires it |
-| `move_finished` | INFO | Per move: UPID, outcome (`moved`/`failed`/`replan_needed`/`draining`), duration | *new* |
-| `replan` | INFO | Section 9.2's re-plan loop fired: which group, which attempt, why | *new* |
-| `deadlock` | WARNING | Section 8's scheduler could not order a move set | *new* |
+| `run_started` | INFO | Once per invocation: command, effective mode, config path + sha256, version | built (replaced `config_loaded`) |
+| `run_summary` | INFO | Once per invocation: groups visited, moves issued/succeeded/failed, bytes moved, wall time, exit code | built |
+| `gate_decision` | INFO | Per group: `act`, the computed drift/imbalance fractions and the thresholds they were compared against | built — section 2.1 required it; nothing implemented it |
+| `load_digest` | INFO | Per group: total load, per-storage `u_s`, disk count, how many disks were coverage-rejected | built — section 2.1 required it; nothing implemented it |
+| `plan_selected` | INFO | Per acting group: backend, solver status, move count, the five objective terms, before/after spread | built — section 2.1 required it; nothing implemented it |
+| `payback_verdict` | INFO | Per acting group: benefit, cost, ratio, the configured minimum, and the accept/reject outcome | built — section 2.1 required it; nothing implemented it |
+| `move_started` | INFO | Immediately after `move_disk` returns, carrying **the UPID**, disk key, source, target, bytes | built — section 2.1 required it; nothing implemented it |
+| `move_finished` | INFO | Per move: UPID, outcome (`moved`/`failed`/`replan_needed`/`draining`), duration | built |
+| `replan` | INFO | Section 9.2's re-plan loop fired: which group, which attempt, why | built |
+| `deadlock` | WARNING | Section 8's scheduler could not order a move set | built |
 | `mode_override` | INFO / WARNING | `--mode` differs from the config; WARNING when it escalates (section 11.3) | as built, correct |
-| `config_warning` | INFO | Configuration advisories (e.g. a storage with no `saturation_load`) | **level change** — see below |
-| `storage_pattern_expanded` | DEBUG | A `/regex/` storage id matched a set | **level change** (was INFO) |
-| `optimize_backend_unavailable` | DEBUG under `auto`, WARNING when that backend was explicitly configured | An optional solver dependency is not importable | **level + wording change** — see below |
+| `config_warning` | INFO | Configuration advisories (e.g. a storage with no `saturation_load`) | built: INFO |
+| `storage_pattern_expanded` | DEBUG | A `/regex/` storage id matched a set | built: DEBUG |
+| `optimize_backend_unavailable` | DEBUG under `auto`, WARNING when that backend was explicitly configured | An optional solver dependency is not importable | built: DEBUG under `auto`, WARNING otherwise |
 | `solver_fallback` | WARNING | A configured backend produced no plan and the heuristic took over | as built, correct |
 | `forecast_fallback`, `forecast_backtest_failed` | WARNING | Section 10's forecaster degraded to the quantile | as built, correct |
 | `vm_locked`, `orphaned_volumes`, `orphan_check_failed` | WARNING | Section 9.4's hazards | as built, correct |
@@ -350,7 +353,7 @@ substance of this section's implementation work.
 | `inflight_found`, `inflight_reconciled`, `inflight_check_failed`, `cluster_task_scan_failed` | WARNING (INFO for `inflight_reconciled`) | Section 13's crash recovery | as built, correct |
 | `apply_lock_held` | INFO | Another instance holds the lock; exit 0 quietly (section 11.2) | as built, correct |
 | `salt_rotated` | WARNING | `--new-salt` discarded an existing mapping (section 16.3) | as built, correct |
-| `command_failed` | ERROR | The run is exiting non-zero | as built; stop double-printing it |
+| `command_failed` | ERROR | The run is exiting non-zero | built: printed once, per the format in use |
 
 Three level corrections deserve their reasons stated, since each one is a judgement that could
 otherwise be quietly reverted:
@@ -383,8 +386,9 @@ one more thing to test, rotate and get wrong. An operator who wants a file gets 
 
 #### Verification
 
-The current tests cover the formatter's mechanics and nothing about policy, which is why the policy
-drifted. The following are required, in `tests/unit/test_logging_setup.py` and `test_cli.py`:
+The tests that existed before phase 11 covered the formatter's mechanics and nothing about policy,
+which is why the policy drifted. These now exist, in `tests/unit/test_logging_setup.py`,
+`test_cli.py`, `test_execute.py` and `test_optimize.py`:
 
 - A clean read-only run against a `--replay` bundle (section 16) emits **nothing on stderr** at the
   default level, and its report on stdout is byte-identical to the same run with `--quiet`.
@@ -2185,7 +2189,7 @@ Each phase is independently testable and useful on its own.
 | 8 | `auto` mode + time windows | Unattended operation |
 | 9 | `forecast.py` beyond p95 | Seasonal-naive validated by backtest |
 | 10 | `anonymize.py`, `collect.py`, `replay.py`, `tests/corpus/` (§16) | A bundle collected from a live cluster replays to the same plan the live run produced; the scrub audit and the determinism test pass on it |
-| 11 | Logging policy (§2.3) | A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
+| 11 | Logging policy (§2.3) | **Done.** A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.

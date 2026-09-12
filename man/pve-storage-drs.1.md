@@ -97,12 +97,29 @@ Global options are accepted before the command.
 : Emit the machine-readable report instead of the human-readable one.
 
 **-v**, **--verbose**
-: More detail on stderr. Repeatable. **explain** is the one command where this also adds a line to
-  the report itself, on stdout: the exact query (node-scoping filter, window and rate settings) the
-  run was computed from.
+: **-v** logs this run's decision trail on stderr -- the gate decision and the thresholds it was
+  compared against, the measured load, the plan and its objective terms, the payback arithmetic, and
+  every migration with its PVE task UPID. **-vv** adds per-query detail and third-party library
+  logs. **explain** is the one command where **-v** also adds a line to the report itself, on
+  stdout: the exact query (node-scoping filter, window and rate settings) the run was computed from.
+
+: By default nothing is logged below warning level, so a run in which nothing went wrong prints
+  only its report. An **apply** run in **confirm** or **auto** mode is the exception: it logs the
+  decision trail above whether or not **-v** was given, because in those modes that log is the only
+  record of what was migrated and why.
 
 **--quiet**
-: Warnings and errors only. Intended for the systemd timer.
+: Errors only. On an **auto** run this also discards the audit trail described under **-v**, which
+  is the only record of what that run moved -- prefer the default over **--quiet** under a timer.
+
+**--log-level** *error|warning|info|debug*
+: Set the log level explicitly. Wins over both **-v** and **--quiet**, including over the mandatory
+  audit trail an **apply** run in **confirm**/**auto** mode otherwise emits.
+
+**--log-format** *auto|text|json*
+: **auto** (the default) writes human-readable text when stderr is a terminal and one JSON object
+  per line anywhere else -- a pipe, a redirect, or journald under systemd. **text** and **json**
+  force one or the other. The report on stdout is unaffected; see **--json** for that.
 
 **--version**
 : Print the version and exit.

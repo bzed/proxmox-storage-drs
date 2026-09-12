@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import logging
 import sys
 
 import pytest
@@ -560,3 +561,42 @@ def test_gamma_trap_assertion_fires_end_to_end_for_a_sub_kilobyte_disk() -> None
             time_limit_seconds=5.0,
             mip_gap=0.0,
         )
+
+
+# ------------------------------------------- backend probing (section 2.3)
+
+
+def test_a_missing_optional_solver_is_not_a_warning_under_auto(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The defect that prompted IMPLEMENTATION_PLAN.md section 2.3, in the
+    operator's own words: "solver.backend=cpsat requested but ortools is not
+    importable", at warning level, once per group, on every run of a cluster
+    whose config says `solver.backend: auto` and never mentioned cpsat.
+
+    Under `auto` this call is the cascade asking which optional dependency
+    is installed, and "not this one" is the answer it exists to get.
+    """
+    from proxmox_storage_drs.optimize import _log_backend_unavailable
+
+    with caplog.at_level(logging.DEBUG, logger="proxmox_storage_drs.optimize"):
+        _log_backend_unavailable("cpsat", "ortools is not importable", probing=True)
+    record = caplog.records[-1]
+    assert record.levelno == logging.DEBUG
+    assert record.probing is True  # type: ignore[attr-defined]
+    # ... and it no longer claims the operator asked for this backend.
+    assert "requested" not in record.getMessage()
+
+
+def test_an_explicitly_configured_solver_that_is_missing_still_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other half: an operator who wrote `solver.backend: cpsat` and is
+    silently not getting cpsat needs to hear about it."""
+    from proxmox_storage_drs.optimize import _log_backend_unavailable
+
+    with caplog.at_level(logging.DEBUG, logger="proxmox_storage_drs.optimize"):
+        _log_backend_unavailable("cpsat", "ortools is not importable", probing=False)
+    record = caplog.records[-1]
+    assert record.levelno == logging.WARNING
+    assert "solver.backend=cpsat" in record.getMessage()

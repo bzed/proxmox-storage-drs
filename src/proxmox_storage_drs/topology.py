@@ -391,7 +391,7 @@ def _expand_and_validate_groups(
         warnings.extend(group_warnings)
     _check_cross_group_uniqueness(expanded_by_group)
     for expansion in all_expansions:
-        logger.info(
+        logger.debug(
             "group %s: storage pattern %s matched %s",
             expansion.group_name,
             expansion.pattern,

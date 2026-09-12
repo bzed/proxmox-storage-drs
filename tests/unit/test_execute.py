@@ -12,6 +12,7 @@ actual wait.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -1670,3 +1671,36 @@ def test_concurrent_orphan_detection_after_a_move_fails_while_polled() -> None:
     result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
     assert result.outcomes[0].status == "failed"
     assert result.outcomes[0].orphaned_volumes == ("san-c:vm-201-disk-0",)
+
+
+# ------------------------------------------------------- logging (section 2.3)
+
+
+def test_every_issued_move_is_logged_with_its_upid(caplog: pytest.LogCaptureFixture) -> None:
+    """IMPLEMENTATION_PLAN.md section 2.1 has always required "every
+    `move_disk` issued with its UPID" and nothing implemented it: an
+    unattended run recorded that it started and nothing about what it did
+    to the cluster. The UPID is what ties a PVE task in the cluster's own
+    task log back to the plan that decided to issue it."""
+    client, _api = client_with({})
+    with caplog.at_level(logging.INFO, logger="proxmox_storage_drs.execute"):
+        result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "moved"
+
+    started = [r for r in caplog.records if getattr(r, "event", None) == "move_started"]
+    finished = [r for r in caplog.records if getattr(r, "event", None) == "move_finished"]
+    assert len(started) == 1 and len(finished) == 1
+    assert started[0].upid == UPID  # type: ignore[attr-defined]
+    assert started[0].disk_key == "101:scsi0"  # type: ignore[attr-defined]
+    assert started[0].from_storage == "san-a"  # type: ignore[attr-defined]
+    assert started[0].to_storage == "san-b"  # type: ignore[attr-defined]
+    assert finished[0].upid == UPID  # type: ignore[attr-defined]
+    assert finished[0].status == "moved"  # type: ignore[attr-defined]
+
+
+def test_a_dry_run_issues_no_move_and_logs_none(caplog: pytest.LogCaptureFixture) -> None:
+    client, _api = client_with({})
+    with caplog.at_level(logging.INFO, logger="proxmox_storage_drs.execute"):
+        result = run(client, default_group(), (make_move(),), mode="dry-run")
+    assert result.outcomes[0].status == "would_move"
+    assert [r for r in caplog.records if getattr(r, "event", None) == "move_started"] == []

@@ -1071,14 +1071,22 @@ def test_pattern_matched_storage_skips_the_images_content_check(tmp_path: Path) 
     assert {s.id for s in topology.groups[0].storages} == {"san-a", "san-b", "san-iso"}
 
 
-def test_pattern_expansion_is_logged_at_info(
+def test_pattern_expansion_is_logged_at_debug(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """DEBUG, not INFO (IMPLEMENTATION_PLAN.md section 2.3): which storages
+    a pattern matched is a detail of building the topology, already visible
+    in every report that lists storages, and it was firing once per group
+    per topology build on every run."""
     config = make_config(tmp_path, groups=[{"name": "g1", "storages": [{"id": "/san-.*/"}]}])
     client = _cluster_client([_rbd_def("san-a"), _rbd_def("san-b")])
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         build_topology(client, config)
     assert any(
-        r.levelno == logging.INFO and "san-a" in r.message and "san-b" in r.message
+        r.levelno == logging.DEBUG and "san-a" in r.message and "san-b" in r.message
         for r in caplog.records
     )
+    with caplog.at_level(logging.INFO):
+        caplog.clear()
+        build_topology(client, config)
+    assert [r for r in caplog.records if r.levelno >= logging.INFO] == []

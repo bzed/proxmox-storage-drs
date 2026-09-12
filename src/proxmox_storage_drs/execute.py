@@ -533,9 +533,52 @@ def _execute_one_move(
     # for the next startup's `crashrecovery.reconcile_inflight()` to find.
     if on_inflight_started is not None:
         on_inflight_started(upid)
+    # Section 2.1/2.3: "every `move_disk` issued with its UPID". This is the
+    # one record that makes an unattended run reconstructable afterwards --
+    # it is what lets an operator tie a PVE task in the cluster's own task
+    # log back to the plan that decided to issue it.
+    logger.info(
+        "move started: %s %s -> %s (%s)",
+        move.disk_key,
+        move.from_storage,
+        move.to_storage,
+        upid,
+        extra={
+            "event": "move_started",
+            "upid": upid,
+            "disk_key": move.disk_key,
+            "vmid": disk.vmid,
+            "device": disk.device,
+            "node": preflight.node,
+            "from_storage": move.from_storage,
+            "to_storage": move.to_storage,
+            "size_bytes": disk.size_bytes,
+        },
+    )
+    # `clock.now()`, not `time.monotonic()`: the injected fake clock tests
+    # use advances this instantly (`.agents/testing.md`), so the duration
+    # this record reports is the one the wait loop itself measured.
+    started_at = clock.now()
     source = storages_by_id[move.from_storage]
     status, detail = _wait_for_move_completion(
         client, preflight.node, disk.vmid, upid, source, preflight.volid, execution, clock
+    )
+    logger.info(
+        "move finished: %s -> %s (%s)",
+        move.disk_key,
+        status,
+        upid,
+        extra={
+            "event": "move_finished",
+            "upid": upid,
+            "disk_key": move.disk_key,
+            "from_storage": move.from_storage,
+            "to_storage": move.to_storage,
+            "size_bytes": disk.size_bytes,
+            "status": status,
+            "detail": detail,
+            "duration_seconds": round((clock.now() - started_at).total_seconds(), 3),
+        },
     )
     # Deliberately *not* wrapped in try/finally: a "draining" source is
     # still tracked by its own content-listing poll, not by `upid` (see
@@ -1023,6 +1066,23 @@ def _poll_inflight_once(
         status, detail = result
         if on_inflight_finished is not None:
             on_inflight_finished(im.upid)
+        logger.info(
+            "move finished: %s -> %s (%s)",
+            im.move.disk_key,
+            status,
+            im.upid,
+            extra={
+                "event": "move_finished",
+                "upid": im.upid,
+                "disk_key": im.move.disk_key,
+                "from_storage": im.move.from_storage,
+                "to_storage": im.move.to_storage,
+                "size_bytes": im.disk.size_bytes,
+                "status": status,
+                "detail": detail,
+                "concurrent": True,
+            },
+        )
         orphans: tuple[str, ...] = ()
         if status == "failed":
             orphans = _detect_orphan_volumes(client, im.node, im.move.to_storage, im.disk.vmid)
@@ -1284,6 +1344,28 @@ def _advance_pending(
         # function's own comment on why.
         if on_inflight_started is not None:
             on_inflight_started(upid)
+        # Section 2.3's `move_started`, same record the sequential executor
+        # emits: every `move_disk` issued, by either path, is in the journal
+        # with its UPID.
+        logger.info(
+            "move started: %s %s -> %s (%s)",
+            candidate.disk_key,
+            candidate.from_storage,
+            candidate.to_storage,
+            upid,
+            extra={
+                "event": "move_started",
+                "upid": upid,
+                "disk_key": candidate.disk_key,
+                "vmid": disk.vmid,
+                "device": disk.device,
+                "node": pf.node,
+                "from_storage": candidate.from_storage,
+                "to_storage": candidate.to_storage,
+                "size_bytes": disk.size_bytes,
+                "concurrent": True,
+            },
+        )
         inflight.append(
             _InflightMove(
                 move=candidate,
