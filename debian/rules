@@ -31,6 +31,22 @@ ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	sha256sum --check docs/pve-storage-drs-manual.pdf.sha256
 endif
 
+# The Markdown sources of the manual, the internals guide and the
+# specification are shipped beside the three PDFs (debian/*.docs): a PVE node
+# has no GUI and often no way to get a PDF off it, so `less
+# /usr/share/doc/pve-storage-drs/manual/20-verifying-metrics.md` has to work on
+# the machine that actually has the problem.  Leaving them uncompressed is the
+# point -- a directory of mixed .md and .md.gz (dh_compress's 4 kB threshold
+# splits these files almost exactly in half) is not something you can grep
+# without thinking about it first.
+#
+# .pdf for the same reason and one more: dh_compress does compress them by
+# default, and a `.pdf.gz` is not openable by any PDF viewer -- so the one
+# audience the PDFs exist for has to know to gunzip first.  The compression
+# buys nothing either way, since a PDF's content streams are already deflated.
+override_dh_compress:
+	dh_compress -X.md -X.pdf
+
 override_dh_auto_clean:
 	dh_auto_clean
 	rm -f man/pve-storage-drs.1

@@ -5,12 +5,16 @@
 - **Proxmox VE 9.2**, or a management host with network access to a PVE 9.x
   cluster's API (tcp/8006) — the tool does not need to run on a cluster
   member.
-- **A Prometheus** already receiving PVE's per-disk `blockstat` metrics via
-  the InfluxDB output plugin and Telegraf. If your cluster's dashboards
-  already show per-VM disk I/O, this is already true; `pve-storage-drs
-  verify-metrics` (page 2) confirms it before you rely on it. No new exporter
-  or collector is required — see `IMPLEMENTATION_PLAN.md` section 3.1 if you
-  want the detail of where the data comes from.
+- **A Prometheus-compatible backend** already receiving PVE's per-disk
+  `blockstat` metrics via the InfluxDB external metric server — plain
+  Prometheus, VictoriaMetrics, or gigapipe on ClickHouse, which is what this
+  project is dogfooded against. If your cluster's dashboards already show
+  per-VM disk I/O, the export side is already on. That is not the same as
+  all six counters having survived the trip, which is a real and silent
+  failure mode: read [`05-metrics-pipeline.md`](05-metrics-pipeline.md)
+  before writing the `metrics` block, and run `pve-storage-drs
+  verify-metrics` before relying on any plan. No new exporter or collector
+  is required.
 - **A PVE user or API token** with read access to VM and storage inventory
   and permission to call `move_disk`. An API token is preferred for
   unattended operation (`execution.mode: auto`); a username/password pair
@@ -74,8 +78,14 @@ apt install pve-storage-drs
 ```
 
 This installs the `pve-storage-drs` executable, its manpage, the example
-configuration at `/usr/share/doc/pve-storage-drs/examples/drs.example.yaml`, and this
-manual and the specification as PDFs under `/usr/share/doc/pve-storage-drs/`.
+configuration at `/usr/share/doc/pve-storage-drs/examples/drs.example.yaml`,
+and the whole documentation set under `/usr/share/doc/pve-storage-drs/`:
+this manual as `manual/*.md`, the internals guide as `internals/*.md` and
+the specification as `IMPLEMENTATION_PLAN.md`, each also as a typeset PDF.
+The Markdown is deliberately left uncompressed — a cluster node has no GUI
+and often no way to get a PDF off it, so `less
+/usr/share/doc/pve-storage-drs/manual/20-verifying-metrics.md` has to work
+on the machine that has the problem.
 
 `coinor-cbc` and `python3-pulp` are `Depends`: `apt install pve-storage-drs`
 always gets a real MILP solver, no separate step needed. The tool still
@@ -130,11 +140,14 @@ actively conflicting (they degrade to "slow and redundant" instead).
 
 ## First steps after installing
 
-1. `pve-storage-drs -c /etc/pve/drs.yaml verify-metrics` — confirms the
-   configured metric and label names actually exist in your Prometheus. See
-   [`20-verifying-metrics.md`](20-verifying-metrics.md).
+1. Read [`05-metrics-pipeline.md`](05-metrics-pipeline.md) — where the six
+   per-disk counters come from, and how a Telegraf-to-Prometheus transport
+   can drop one of them without ever logging an error.
 2. Read [`10-configuration.md`](10-configuration.md) and adjust the storage
    groups, thresholds and weights for your cluster.
-3. See [`30-safety-and-status.md`](30-safety-and-status.md) for exactly which
-   commands this build supports end to end today, and which still report
-   "not implemented yet".
+3. `pve-storage-drs -c /etc/pve/drs.yaml verify-metrics` — confirms the
+   configured metric and label names actually exist in your backend, and
+   cross-checks the six metrics against each other. See
+   [`20-verifying-metrics.md`](20-verifying-metrics.md).
+4. See [`30-safety-and-status.md`](30-safety-and-status.md) for exactly which
+   commands this build supports end to end today.

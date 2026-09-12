@@ -38,9 +38,9 @@ Depends:
 Suggests:
  python3-statsmodels,
 Description: storage I/O load balancer for Proxmox VE
- pve-storage-drs equalizes disk I/O load across configurable groups of shared storages
- in a Proxmox VE cluster by live-migrating individual VM disks between the
- storages of a group. It is the storage counterpart to the built-in Dynamic
+ pve-storage-drs equalizes disk I/O load across configurable groups of shared
+ storages in a Proxmox VE cluster by live-migrating individual VM disks between
+ the storages of a group. It is the storage counterpart to the built-in Dynamic
  Load Balancer, which balances guests across nodes and has no notion of the
  LUNs behind them.
  .
