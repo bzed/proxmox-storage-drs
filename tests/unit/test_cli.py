@@ -3743,7 +3743,11 @@ def test_v_logs_the_decision_trail(capsys: pytest.CaptureFixture[str]) -> None:
     decision with its computed value *and* the threshold it was compared
     against, plus the load it was computed from."""
     assert cli.main(["--replay", str(CORPUS_BUNDLE), "-v", "--log-format", "json", "plan"]) == 0
-    records = [json.loads(ln) for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
+    records = [
+        json.loads(ln, parse_constant=_strict_json_constant)
+        for ln in capsys.readouterr().err.splitlines()
+        if ln.startswith("{")
+    ]
     by_event = {r["event"]: r for r in records}
     assert {"run_started", "load_digest", "gate_decision", "run_summary"} <= set(by_event)
     gate = by_event["gate_decision"]
@@ -3769,14 +3773,25 @@ def test_log_format_text_emits_no_json(capsys: pytest.CaptureFixture[str]) -> No
     assert "run started: plan" in err
 
 
+def _strict_json_constant(constant: str) -> object:
+    """What Go's `encoding/json`, serde_json and Loki do with a bare
+    ``Infinity``/``NaN`` literal: refuse it. Python accepts them by default,
+    which is exactly why an earlier version of the test below passed while
+    the tool emitted JSON no other parser could read."""
+    raise ValueError(f"invalid JSON literal: {constant}")
+
+
 def test_json_report_on_stdout_stays_parseable_at_every_verbosity(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The stream-separation property, asserted rather than assumed: no
-    combination of level and format may put a log line on stdout."""
+    """Two properties at once: no combination of level and format may put a
+    log line on stdout, and what lands there is JSON a *strict* parser
+    accepts -- section 7's payback ratio is `+inf` whenever a plan has no
+    moves to pay for, which is every run whose gate acts and whose solver
+    then decides to move nothing."""
     for extra_args in ([], ["-v"], ["-vv"], ["--quiet"], ["--log-format", "text"]):
         assert cli.main(["--replay", str(CORPUS_BUNDLE), *extra_args, "--json", "plan"]) == 0
-        payload = json.loads(capsys.readouterr().out)
+        payload = json.loads(capsys.readouterr().out, parse_constant=_strict_json_constant)
         assert "groups" in payload
 
 
