@@ -451,16 +451,21 @@ Everything needed for true per-disk IOPS, throughput **and latency** is therefor
 an existing PVE → InfluxDB → Telegraf → Prometheus pipeline. **No new exporter or collector is
 required.**
 
-**Present at the source is not the same as present at the query endpoint.** Line protocol fixes a
-field's type at its first write and carries string fields; Prometheus/OpenMetrics has no string
-sample type. A transport between the two therefore *can* drop one of the six counters, for one
-series, permanently and silently — Telegraf with a `prometheus_remote_write`/`prometheus_client`
-output and no deliberate processor configuration being the common case. §3.3's step 2 exists
-because of this, and it is the reason every metric name here is configuration rather than a
-constant. A backend that ingests line protocol natively and serves PromQL itself — gigapipe on
-ClickHouse, which this project is dogfooded against and which both `tests/corpus/` bundles were
-captured from — has no such bridge to lose a field in. `docs/manual/05-metrics-pipeline.md` is the
-operator-facing version of this paragraph.
+**Present at the source is not the same as present at the query endpoint.** The InfluxDB protocol
+`InfluxDB.pm` emits carries string fields and fixes a field's type at its first write;
+Prometheus/OpenMetrics has no string sample type. A transport between the two therefore *can* drop
+one of the six counters, for one series, permanently and silently — Telegraf with a
+`prometheus_remote_write`/`prometheus_client` output and no deliberate processor configuration being
+the common case. §3.3's step 2 exists because of this, and it is the reason every metric name here
+is configuration rather than a constant.
+
+A backend that ingests **the InfluxDB protocol exactly as PVE exports it** and serves PromQL itself
+removes the bridge entirely — no Telegraf, no output plugin, nothing in the path that can drop a
+field on type grounds. **gigapipe on ClickHouse** is that backend here: it is what this project is
+dogfooded against and what both `tests/corpus/` bundles were captured from. gigapipe also ingests
+OpenTelemetry, but that path is untested by this project and is not a route around §3.2 — PVE's OTel
+metric server bakes the drive id into the metric name regardless of what consumes it.
+`docs/manual/05-metrics-pipeline.md` is the operator-facing version of all of this.
 
 **Verification status of the above.** The `vmstatus(undef, 1)` call, the `blockstat->{$drive_id}`
 assignment, the `s/drive-//r` prefix stripping and the `InfluxDB.pm` nesting behaviour were read
