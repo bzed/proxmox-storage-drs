@@ -247,10 +247,14 @@ OpenMetrics output is the prominent example**, because it is what most people bu
 needs deliberate processor configuration to avoid this. `verify-metrics` cross-checks the six
 metrics against each other precisely to catch it.
 
-A backend that ingests line protocol natively and serves PromQL itself has no such bridge to lose
-a field in. **[gigapipe](https://github.com/metrico/gigapipe) on ClickHouse** is the well-tested
-setup here, and the one this project is dogfooded against. Plain Prometheus and VictoriaMetrics
-work too; `prometheus.url` is the only setting that distinguishes them.
+A backend that ingests **the InfluxDB protocol exactly as PVE exports it** and serves PromQL itself
+has no such bridge to lose a field in — no Telegraf, no output plugin, nothing in the path that can
+drop a field on type grounds. **[gigapipe](https://github.com/metrico/gigapipe) on ClickHouse** is
+the well-tested setup here, and the one this project is dogfooded against; point `prometheus.url`
+at its query endpoint. (It also ingests OpenTelemetry, but that path is untested here, and PVE's
+OTel metric server is the wrong source for this tool regardless — it bakes the drive id into the
+metric name instead of a label.) Plain Prometheus and VictoriaMetrics work too; `prometheus.url` is
+the only setting that distinguishes them.
 
 ---
 

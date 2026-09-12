@@ -103,8 +103,8 @@ inputs.influxdb_listener  →  (no processors)  →  outputs.prometheus_remote_w
 ```
 
 `outputs.prometheus_client` and any other OpenMetrics-shaped output behave
-the same way, as does any other bridge from line protocol into a Prometheus
-data model. **Unless the pipeline is configured deliberately** — converting
+the same way, as does any other bridge from PVE's InfluxDB output into a
+Prometheus data model. **Unless the pipeline is configured deliberately** — converting
 the string fields, or dropping them explicitly with a processor so you know
 what you lost — it will silently discard fields, and you will find out from
 a plan that does not make sense rather than from a log line.
@@ -134,11 +134,13 @@ field pinned to a string type, it stays dropped. Re-check with
 **[gigapipe](https://github.com/metrico/gigapipe) with ClickHouse as the
 database**, fed directly from PVE's InfluxDB output.
 
-gigapipe accepts InfluxDB line protocol on the ingest side and serves the
-Prometheus HTTP query API — `/api/v1/query`, `/api/v1/query_range`,
-`/api/v1/label/<name>/values`, which is the entire surface this tool uses —
-on the read side. PVE writes to it natively and `pve-storage-drs` reads from
-it natively, with no format bridge in between to lose a field type.
+gigapipe accepts **the InfluxDB protocol exactly as PVE exports it** on the
+ingest side, and serves the Prometheus HTTP query API — `/api/v1/query`,
+`/api/v1/query_range`, `/api/v1/label/<name>/values`, which is the entire
+surface this tool uses — on the read side. So PVE's own metric server writes
+to it directly and `pve-storage-drs` reads from it directly: there is no
+Telegraf, no output plugin and no format bridge anywhere in the path, and so
+nothing that can drop a field on type grounds.
 
 It is the backend this project is dogfooded against. Both bundles in
 `tests/corpus/` were captured from a cluster running it and record it as
@@ -147,6 +149,12 @@ gigapipe-shaped data on every `make check`.
 
 To use it, point `prometheus.url` at gigapipe's query endpoint. Nothing else
 in this manual changes.
+
+gigapipe also ingests OpenTelemetry, but **that path is untested here** and
+is not the way to use it with this tool. Feeding it from PVE's OpenTelemetry
+metric server instead of the InfluxDB one would reintroduce the
+device-in-the-metric-name problem described above, whatever the backend does
+with it afterwards.
 
 ## Other backends
 

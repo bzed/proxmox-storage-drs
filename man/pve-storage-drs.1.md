@@ -29,13 +29,15 @@ calls it would issue, and changes nothing. Nothing is ever deleted automatically
 
 The six per-disk counters every plan is computed from are QEMU `query-blockstats` figures that
 **pvestatd** already exports through PVE's InfluxDB external metric server; no exporter or
-collector is installed by this tool. Because InfluxDB line protocol carries string fields and
-fixes a field's type at its first write, while Prometheus has no string sample type, a transport
-between the two -- Telegraf with a Prometheus remote-write or OpenMetrics output being the
-prominent case -- can silently and permanently drop one counter for one disk while the other five
-keep working. That produces a wrong plan rather than an error, which is why **verify-metrics**
-cross-checks all six against each other and should be run before any plan is trusted. The operator
-manual's "Where the numbers come from" page has the mechanism and a tested reference setup.
+collector is installed by this tool. Because the InfluxDB protocol PVE exports carries string
+fields and fixes a field's type at its first write, while Prometheus has no string sample type, a
+transport between the two -- Telegraf with a Prometheus remote-write or OpenMetrics output being
+the prominent case -- can silently and permanently drop one counter for one disk while the other
+five keep working. That produces a wrong plan rather than an error, which is why **verify-metrics**
+cross-checks all six against each other and should be run before any plan is trusted. A backend
+that ingests PVE's InfluxDB output as-is and serves PromQL itself has no such bridge; gigapipe on
+ClickHouse is the tested example, and is what this tool is dogfooded against. The operator manual's
+"Where the numbers come from" page has the mechanism in full.
 
 The configuration is read from */etc/pve/drs.yaml*, which is on the cluster filesystem and so is
 the same file on every node.
