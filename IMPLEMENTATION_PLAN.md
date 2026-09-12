@@ -195,14 +195,10 @@ the *invocation* cadence is independent of `execution.time_windows`, which const
 The drift and imbalance gates (§6) make frequent invocation cheap — most runs exit at a gate having
 issued only read queries.
 
-**Logging.** Structured JSON lines to **stderr** (captured by journald) plus an optional file sink.
-Logging goes to stderr rather than stdout specifically so that `--json`'s machine-readable plan
-report (section 9.5) can be safely captured from stdout alone; a systemd service unit captures both
-streams into the same journal, so nothing is lost when run under the timer. Every run must log, at
-minimum: each gate decision with its computed value and threshold; the load vector digest; the
-chosen plan and its objective breakdown; the payback arithmetic; every `move_disk` issued with its
-UPID; and every abort, re-plan and deadlock. In `auto` mode this log is the only record a human will
-see, so it must be sufficient to reconstruct why any migration happened.
+**Logging.** Structured lines to **stderr**, never stdout, so that `--json`'s machine-readable
+report (section 9.5) can be captured from stdout alone with nothing interleaved. What is logged, at
+which level, in which format, and the audit trail an `auto` run owes a human afterwards are all
+specified in **section 2.3**.
 
 ### 2.2 Packaging and continuous integration
 
@@ -231,6 +227,185 @@ The Salsa build having no network is the load-bearing part: it is what proves th
 from trixie alone. If a Python module ever has to be fetched during a build, the answer is to
 vendor it into the source package; enabling `--enable-network` for sbuild is the fallback, and it
 is a deliberate, visible change to `debian/.gitlab-ci.yml`, not a default.
+
+### 2.3 Logging
+
+**As built, and why this section exists.** The first implementation got the plumbing right and the
+policy wrong. Streams are correct (report on stdout, log on stderr — verified), `--mode` overrides
+are logged exactly as section 11.3 requires, and the JSON formatter is sound. But a plain
+`pve-storage-drs explain` on a healthy cluster prints this to stderr before a single line of its
+own report:
+
+```
+{"event": "config_loaded", "level": "INFO", ...}
+{"event": "config_warning", "level": "WARNING", ... "no saturation_load configured ..."}
+{"event": "config_warning", "level": "WARNING", ... "no saturation_load configured ..."}
+{"event": "storage_pattern_expanded", "level": "INFO", ...}
+{"event": "optimize_backend_unavailable", "level": "WARNING", ... "solver.backend=cpsat requested but ortools is not importable"}
+```
+
+Five machine-readable lines, on every run, for a run in which nothing whatsoever went wrong. Worse,
+the requirement that actually matters — "in `auto` mode this log is the only record a human will
+see" — is **not implemented at all**: `gates.py`, `loadmodel.py`, `schedule.py` and `payback.py`
+contain no logging calls of any kind, and `execute.py` never logs the UPID of a `move_disk` it
+issued. A timer running `apply --mode auto` today records that it started and nothing about what it
+did to the cluster. The policy below replaces the "Logging." paragraph of section 2.1.
+
+#### The two audiences, and the one rule that separates them
+
+A person at a terminal and a journal read three weeks later want opposite things. The person wants
+**silence unless something is wrong** — their report is the output, the log is not. The journal
+wants **every decision that changed the cluster**, in a form `journalctl` can filter and a script
+can parse. Both are served by the same records at different levels and in different formats; no
+record exists for only one of them.
+
+The rule that follows, and the one to apply when adding any new log call: **a log record is a fact
+about this run's decisions or a problem with this run. A fact about static configuration belongs in
+a report, not in a log that repeats it every 15 minutes forever.**
+
+#### Levels
+
+| Level | Contents | Seen by default |
+|---|---|---|
+| `ERROR` | The run failed and is exiting non-zero | yes |
+| `WARNING` | Something degraded but the run continued: a fallback, a skipped move, a lock waited out, an orphaned volume, corrupt state | yes |
+| `INFO` | The audit trail — every decision that changed, or was allowed to change, the cluster | only where mandated below, or with `-v` |
+| `DEBUG` | Per-query, per-candidate, per-poll detail. Third-party library logs | `-vv` only |
+
+The ladder is `--quiet` (`ERROR`) < default (`WARNING`) < `-v` (`INFO`) < `-vv` (`DEBUG`), with one
+mandatory exception:
+
+**A run that can change the cluster logs its audit trail whether or not anyone asked for it.**
+When the effective mode is `confirm` or `auto`, `apply` raises its own floor to `INFO`. This is not
+a convenience: section 2.1's "in `auto` mode this log is the only record a human will see" cannot be
+satisfied by an option the operator has to remember to pass, and an unattended timer that silently
+migrated 400 GiB is not acceptable output regardless of how the unit file was written. `--quiet`
+still wins — an operator may insist on silence — but the manual must state plainly that `--quiet`
+on an `auto` timer discards the only record of what was moved and why.
+
+Read-only commands (`plan`, `explain`, `show-load`, `verify-metrics`, `verify-storages`,
+`collect-testdata`) and `apply --mode dry-run` keep the `WARNING` default: they change nothing, so
+there is nothing to audit, and their report already says everything.
+
+#### Format
+
+`--log-format {auto,text,json}`, default `auto`: **`text` when stderr is a TTY, `json` otherwise.**
+A person gets `WARNING: <message>`; journald, a pipe and a redirect all get the JSON object that is
+already implemented. This is the whole fix for "JSON in my terminal", it needs no flag in the common
+case, and it falls out correctly for a systemd unit without the unit having to know anything. Both
+explicit values override the sniffing, in both directions, for the operator whose terminal wants
+JSON or whose pipeline wants text.
+
+`--log-level {error,warning,info,debug}` sets the level explicitly and wins over `-v`/`--quiet`.
+Automation states a level; it should not have to count `v`s to get one.
+
+#### Where the handler is attached
+
+On the `proxmox_storage_drs` logger, **not the root logger**. Today the handler goes on root at the
+run's level, which means `-v` (`DEBUG`) also turns on `urllib3`, `proxmoxer` and `statsmodels`
+debug output — a wall of unrelated text that is not what an operator asking for detail about *this*
+tool meant. Third-party loggers stay at `WARNING` and are raised only by `-vv`, which is what `-vv`
+is for.
+
+Every module keeps `logging.getLogger(__name__)` with one exception: **`cli.py` must use the
+explicit name `proxmox_storage_drs.cli`**, because `__name__` there is `__main__` whenever the
+module is executed rather than imported, and a `journalctl` filter keyed on a logger name that
+changes with how the process was started is not a filter. (Observed in the field: the same event
+appearing as both `"logger": "__main__"` and `"logger": "proxmox_storage_drs.cli"`.)
+
+#### An error is one fact, logged once
+
+A failing command currently emits the `command_failed` record *and* a human `pve-storage-drs: <msg>`
+line — the same failure twice, in two formats, on the same stream. In `text` format the log record
+*is* the human line and the separate print is dropped; in `json` format the human line is dropped
+and the record carries it. Exit codes are unaffected either way.
+
+#### The event catalogue
+
+Event names are an interface — `journalctl ... | jq 'select(.event=="move_started")'` is a
+supported way to use this tool — so they are specified here rather than left to whoever writes the
+call. **Every log record carries an `event`.** Records marked *new* do not exist yet and are the
+substance of this section's implementation work.
+
+| Event | Level | When | State |
+|---|---|---|---|
+| `run_started` | INFO | Once per invocation: command, effective mode, config path + sha256, version | *new* (replaces `config_loaded`) |
+| `run_summary` | INFO | Once per invocation: groups visited, moves issued/succeeded/failed, bytes moved, wall time, exit code | *new* |
+| `gate_decision` | INFO | Per group: `act`, the computed drift/imbalance fractions and the thresholds they were compared against | *new* — section 2.1 requires it |
+| `load_digest` | INFO | Per group: total load, per-storage `u_s`, disk count, how many disks were coverage-rejected | *new* — section 2.1 requires it |
+| `plan_selected` | INFO | Per acting group: backend, solver status, move count, the five objective terms, before/after spread | *new* — section 2.1 requires it |
+| `payback_verdict` | INFO | Per acting group: benefit, cost, ratio, the configured minimum, and the accept/reject outcome | *new* — section 2.1 requires it |
+| `move_started` | INFO | Immediately after `move_disk` returns, carrying **the UPID**, disk key, source, target, bytes | *new* — section 2.1 requires it |
+| `move_finished` | INFO | Per move: UPID, outcome (`moved`/`failed`/`replan_needed`/`draining`), duration | *new* |
+| `replan` | INFO | Section 9.2's re-plan loop fired: which group, which attempt, why | *new* |
+| `deadlock` | WARNING | Section 8's scheduler could not order a move set | *new* |
+| `mode_override` | INFO / WARNING | `--mode` differs from the config; WARNING when it escalates (section 11.3) | as built, correct |
+| `config_warning` | INFO | Configuration advisories (e.g. a storage with no `saturation_load`) | **level change** — see below |
+| `storage_pattern_expanded` | DEBUG | A `/regex/` storage id matched a set | **level change** (was INFO) |
+| `optimize_backend_unavailable` | DEBUG under `auto`, WARNING when that backend was explicitly configured | An optional solver dependency is not importable | **level + wording change** — see below |
+| `solver_fallback` | WARNING | A configured backend produced no plan and the heuristic took over | as built, correct |
+| `forecast_fallback`, `forecast_backtest_failed` | WARNING | Section 10's forecaster degraded to the quantile | as built, correct |
+| `vm_locked`, `orphaned_volumes`, `orphan_check_failed` | WARNING | Section 9.4's hazards | as built, correct |
+| `state_corrupt`, `state_read_failed` | WARNING | Section 11.2's state file is unusable | as built, correct |
+| `inflight_found`, `inflight_reconciled`, `inflight_check_failed`, `cluster_task_scan_failed` | WARNING (INFO for `inflight_reconciled`) | Section 13's crash recovery | as built, correct |
+| `apply_lock_held` | INFO | Another instance holds the lock; exit 0 quietly (section 11.2) | as built, correct |
+| `salt_rotated` | WARNING | `--new-salt` discarded an existing mapping (section 16.3) | as built, correct |
+| `command_failed` | ERROR | The run is exiting non-zero | as built; stop double-printing it |
+
+Three level corrections deserve their reasons stated, since each one is a judgement that could
+otherwise be quietly reverted:
+
+- **`optimize_backend_unavailable` under `auto` is not a warning.** `solver.backend: auto` *means*
+  "use the best solver installed here"; probing for CP-SAT and not finding it is that option
+  working, not degrading. Today it logs at WARNING once per group per run, forever, on every
+  cluster that did not install the optional dependency — and its message says
+  `solver.backend=cpsat requested`, which is false: `auto` requested it, not the operator.
+  `cli._solve_group()` already suppresses its *own* fallback warning under `auto`; the inner probe
+  must learn the same distinction, and must say `not available` rather than `requested but ...`
+  when nobody requested it.
+- **`config_warning` is an advisory about a file, not an event in a run.** "Storage X has no
+  `saturation_load`" is equally true on every run until someone edits the config; repeating it at
+  WARNING every 15 minutes trains operators to ignore warnings. It drops to INFO (so the audit
+  trail still records what configuration was in force) and `verify-storages` — the command whose
+  entire job is auditing storage configuration — reports it where an operator will act on it.
+- **`storage_pattern_expanded` is a detail of topology building**, emitted once per group per
+  topology build (twice per `collect-testdata` run). Which storages a pattern matched is already in
+  every report that lists storages. DEBUG.
+
+#### What this does *not* add
+
+Section 2.1 previously promised "plus an optional file sink". No such sink, and no `logging` section
+in the configuration schema, was ever implemented. **The promise is retracted rather than built**:
+`StandardOutput=`/`StandardError=` in a unit file, a shell redirect, or `systemd-cat` already put
+this stream anywhere an operator wants it, and a second, in-process copy of that mechanism would be
+one more thing to test, rotate and get wrong. An operator who wants a file gets it from the shell.
+*(Flagged explicitly because it is a removal from the specification, not an omission.)*
+
+#### Verification
+
+The current tests cover the formatter's mechanics and nothing about policy, which is why the policy
+drifted. The following are required, in `tests/unit/test_logging_setup.py` and `test_cli.py`:
+
+- A clean read-only run against a `--replay` bundle (section 16) emits **nothing on stderr** at the
+  default level, and its report on stdout is byte-identical to the same run with `--quiet`.
+- `apply --mode auto` emits `gate_decision`, `plan_selected`, `payback_verdict`, `move_started`
+  (with a UPID), `move_finished` and `run_summary` **without** `-v`, and `apply --mode dry-run`
+  does not.
+- `--quiet` suppresses the mandatory `INFO` floor, and `--log-level` overrides both `-v` and
+  `--quiet`.
+- `--log-format text` on a non-TTY emits no JSON; `--log-format json` on a TTY emits only JSON.
+- Third-party loggers are not raised by `-v` (only by `-vv`).
+- `--json` on stdout parses as a single JSON document with every log level and format combination —
+  the stream separation property, asserted rather than assumed.
+- Every `logger.*()` call in `src/` passes an `event` in `extra=` (a repository-wide grep test, in
+  the spirit of `tests/unit/test_documentation.py`), so the catalogue above cannot silently gain an
+  unnamed member.
+
+#### The timer
+
+Section 2.1 assumes a systemd timer and `--quiet`'s help text names one, but `debian/` ships no
+unit. When it lands it must set `StandardError=journal`, rely on `auto` mode's mandatory `INFO`
+floor rather than passing `-v`, and must **not** pass `--quiet` — for the reason given above.
 
 ---
 
@@ -1895,8 +2070,10 @@ Accepted before the subcommand, and shown by `pve-storage-drs --help` with their
 | `--group NAME` | all groups | Restrict the run to one group; repeatable. Groups are independent (§5), so this changes nothing about the result for the groups selected |
 | `--mode {dry-run,confirm,auto}` | `execution.mode` | Override the execution mode for this run only |
 | `--json` | off | Emit the machine-readable report of §9.5 instead of the human one |
-| `-v`, `--verbose` | normal | More detail on stderr. Repeatable |
-| `--quiet` | normal | Warnings and errors only, for the systemd timer |
+| `-v`, `--verbose` | warnings only | `-v` adds this run's decision trail (`INFO`), `-vv` adds per-query detail and third-party library logs (`DEBUG`) — §2.3 |
+| `--quiet` | warnings only | Errors only. Note that on an `auto` run this discards the audit trail §2.3 otherwise logs unconditionally |
+| `--log-level {error,warning,info,debug}` | — | Set the level explicitly; wins over `-v`/`--quiet` (§2.3) |
+| `--log-format {auto,text,json}` | `auto` | `auto` = human text when stderr is a TTY, JSON otherwise (§2.3) |
 | `--version` | — | Version, then exit |
 | `--manual` | — | Show `pve-storage-drs(1)` (§8.5 of `AGENTS.md`) |
 | `--replay PATH` | live cluster | Run against a `collect-testdata` bundle at `PATH` instead of the live cluster, with no network access at all — §16.5 |
@@ -2008,9 +2185,14 @@ Each phase is independently testable and useful on its own.
 | 8 | `auto` mode + time windows | Unattended operation |
 | 9 | `forecast.py` beyond p95 | Seasonal-naive validated by backtest |
 | 10 | `anonymize.py`, `collect.py`, `replay.py`, `tests/corpus/` (§16) | A bundle collected from a live cluster replays to the same plan the live run produced; the scrub audit and the determinism test pass on it |
+| 11 | Logging policy (§2.3) | A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
+
+Phase 11 is last only because it was found last — dogfooding the finished tool, where the noise on
+a clean run and the silence on an `auto` run are both obvious in a way they never were while the
+engine underneath was still being built.
 
 ---
 
