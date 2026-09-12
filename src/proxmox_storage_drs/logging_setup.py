@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sys
 from datetime import datetime, timezone
 from typing import IO
@@ -51,6 +52,37 @@ LOG_LEVELS = ("error", "warning", "info", "debug")
 LOG_FORMATS = ("auto", "text", "json")
 
 
+def json_safe(value: object) -> object:
+    """Replace every non-finite float with ``None``, recursively.
+
+    Python's JSON encoder emits bare ``Infinity``/``NaN`` literals, which
+    **RFC 8259 does not define**: Go's `encoding/json`, Rust's `serde_json`
+    and Loki all reject such a line outright, and `jq` -- the consumer
+    section 2.3 names explicitly -- silently reads it back as `1.79e308`,
+    a different number. Either way the "machine-readable" half of this
+    tool's output is not.
+
+    Found by running ``apply --mode auto`` against a real cluster: section
+    7's payback ratio is `+inf` whenever a plan's total cost is zero, which
+    is not an edge case at all -- it is every run whose gate acts and whose
+    solver then decides to move nothing. ``None`` (JSON ``null``) is also
+    the honest reading of that number: with no moves to pay for, the ratio
+    is not infinite so much as not applicable, which is what the
+    accompanying ``total_cost_load_seconds: 0`` already says.
+
+    Shared by this module's own formatter and ``cli.py``'s ``--json``
+    reports (AGENTS.md section 5), because the requirement -- everything
+    this tool prints as JSON is JSON -- is the same for both.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
+
+
 class JsonFormatter(logging.Formatter):
     """Render one :class:`logging.LogRecord` as one JSON line."""
 
@@ -63,10 +95,13 @@ class JsonFormatter(logging.Formatter):
         }
         for key, value in record.__dict__.items():
             if key not in _STANDARD_RECORD_ATTRS and key not in payload:
-                payload[key] = value
+                payload[key] = json_safe(value)
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
-        return json.dumps(payload, default=str, sort_keys=True)
+        # `allow_nan=False` so this can never regress quietly: a non-finite
+        # value that slipped past `json_safe()` raises here rather than
+        # writing a line no strict parser can read.
+        return json.dumps(payload, default=str, sort_keys=True, allow_nan=False)
 
 
 class TextFormatter(logging.Formatter):

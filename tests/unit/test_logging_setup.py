@@ -23,6 +23,7 @@ from proxmox_storage_drs.logging_setup import (
     TextFormatter,
     configure_logging,
     floor_for_command,
+    json_safe,
     resolve_format,
     resolve_level,
 )
@@ -291,3 +292,44 @@ def test_every_log_call_carries_an_event() -> None:
             if "event" not in keys:
                 offenders.append(f"{path.name}:{node.lineno}")
     assert offenders == [], f"log calls with no event= in extra: {offenders}"
+
+
+# ------------------------------------------------ RFC 8259 (non-finite floats)
+
+
+def _strict(constant: str) -> object:
+    raise ValueError(f"invalid JSON literal: {constant}")
+
+
+def test_json_safe_replaces_non_finite_floats_recursively() -> None:
+    payload = {
+        "ratio": float("inf"),
+        "nested": {"nan": float("nan"), "neg": float("-inf"), "fine": 1.5},
+        "seq": [float("inf"), 2.0],
+    }
+    assert json_safe(payload) == {
+        "ratio": None,
+        "nested": {"nan": None, "neg": None, "fine": 1.5},
+        "seq": [None, 2.0],
+    }
+
+
+def test_a_non_finite_extra_still_produces_valid_json() -> None:
+    """Found live: section 7's payback ratio is `+inf` for any plan with no
+    moves to pay for, and Python writes that as a bare ``Infinity`` literal
+    RFC 8259 does not define -- `jq` reads it back as 1.79e308 (a different
+    number) and a strict parser refuses the line outright."""
+    logger = logging.getLogger("proxmox_storage_drs.test.nonfinite")
+    logger.setLevel(logging.INFO)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonFormatter())
+    logger.handlers = [handler]
+    logger.propagate = False
+
+    logger.info("payback", extra={"event": "payback_verdict", "ratio": float("inf")})
+
+    rendered = stream.getvalue()
+    assert "Infinity" not in rendered
+    payload = json.loads(rendered, parse_constant=_strict)  # strict: would raise
+    assert payload["ratio"] is None

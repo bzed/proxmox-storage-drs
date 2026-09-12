@@ -79,6 +79,7 @@ from proxmox_storage_drs.logging_setup import (
     LOG_LEVELS,
     configure_logging,
     floor_for_command,
+    json_safe,
 )
 from proxmox_storage_drs.metrics import (
     PrometheusClient,
@@ -398,6 +399,20 @@ def _start_logging_and_announce_run(
     return log_format
 
 
+def _dump_report_json(payload: object) -> str:
+    """Serialize one ``--json`` report. The single place section 9.5's
+    machine-readable output is written (AGENTS.md section 5).
+
+    ``json_safe()`` because section 7's payback ratio is `+inf` for any
+    plan with no moves to pay for, and Python writes that as a bare
+    ``Infinity`` literal RFC 8259 does not define -- `jq` reads it back as
+    a different number and a strict parser refuses the line outright.
+    ``allow_nan=False`` turns any future non-finite value into a loud
+    failure here rather than a quietly unparseable report.
+    """
+    return json.dumps(json_safe(payload), indent=2, sort_keys=True, allow_nan=False)
+
+
 def _log_run_summary(
     args: argparse.Namespace, effective_mode: str, exit_code: int, started_at: float
 ) -> None:
@@ -651,7 +666,7 @@ def _handle_verify_metrics(resolved: ResolvedConfig, args: argparse.Namespace, m
         client, resolved.config.metrics, resolved.config.window, now=_now_for(args).timestamp()
     )
     if args.json:
-        print(json.dumps(_render_verify_metrics_json(report), indent=2, sort_keys=True))
+        print(_dump_report_json(_render_verify_metrics_json(report)))
     else:
         print(_render_verify_metrics_human(report))
     return 0 if report.ok else 1
@@ -873,12 +888,10 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
             load_errors[group.name] = str(exc)
     if args.json:
         print(
-            json.dumps(
+            _dump_report_json(
                 _render_show_load_json(
                     topology, resolved.config, group_loads, load_errors, last_loads_by_group
                 ),
-                indent=2,
-                sort_keys=True,
             )
         )
     else:
@@ -2362,7 +2375,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
 
     if args.json:
         print(
-            json.dumps(
+            _dump_report_json(
                 _render_plan_json(
                     topology,
                     group_loads,
@@ -2373,8 +2386,6 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                     final_breakdowns,
                     load_errors,
                 ),
-                indent=2,
-                sort_keys=True,
             )
         )
     else:
@@ -2438,10 +2449,8 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
 
     if args.json:
         print(
-            json.dumps(
+            _dump_report_json(
                 _render_explain_json(topology, group_plans, resolved, node_selector),
-                indent=2,
-                sort_keys=True,
             )
         )
     else:
@@ -3144,7 +3153,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
 
     if args.json:
         print(
-            json.dumps(
+            _dump_report_json(
                 _render_apply_json(
                     topology,
                     group_loads,
@@ -3156,8 +3165,6 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     load_errors,
                     execution_results,
                 ),
-                indent=2,
-                sort_keys=True,
             )
         )
     else:
@@ -3279,11 +3286,7 @@ def _handle_verify_storages(resolved: ResolvedConfig, args: argparse.Namespace, 
     client = _pve_client_for(resolved, args)
     topology = _filter_groups(build_topology(client, resolved.config), args.group)
     if args.json:
-        print(
-            json.dumps(
-                _render_verify_storages_json(topology, resolved.config), indent=2, sort_keys=True
-            )
-        )
+        print(_dump_report_json(_render_verify_storages_json(topology, resolved.config)))
     else:
         print(_render_verify_storages_human(topology, resolved.config))
     return 0
@@ -3328,7 +3331,7 @@ def _handle_collect_testdata(resolved: ResolvedConfig, args: argparse.Namespace,
     if args.estimate:
         if args.json:
             print(
-                json.dumps(
+                _dump_report_json(
                     {
                         "group_count": estimate.group_count,
                         "disk_count": estimate.disk_count,
@@ -3338,8 +3341,6 @@ def _handle_collect_testdata(resolved: ResolvedConfig, args: argparse.Namespace,
                         "step_seconds": estimate.step_seconds,
                         "refused": estimate.exceeds(resolved.config.support.max_series_points),
                     },
-                    indent=2,
-                    sort_keys=True,
                 )
             )
         else:
@@ -3362,7 +3363,7 @@ def _handle_collect_testdata(resolved: ResolvedConfig, args: argparse.Namespace,
         collect.write_tarball(options.output_dir, f"{options.output_dir}.tar.gz")
 
     if args.json:
-        print(json.dumps(bundle.manifest, indent=2, sort_keys=True))
+        print(_dump_report_json(bundle.manifest))
     else:
         counts = bundle.manifest["counts"]
         print(f"bundle: {options.output_dir}")
