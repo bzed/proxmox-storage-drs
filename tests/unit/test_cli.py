@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 import yaml
 
-from proxmox_storage_drs import __version__, cli, replay
+from proxmox_storage_drs import __version__, cli, collect, replay
 from proxmox_storage_drs.config import MetricsConfig, ResolvedConfig, load_config
 from proxmox_storage_drs.execute import MoveOutcome
 from proxmox_storage_drs.heuristic import ObjectiveBreakdown
@@ -2322,6 +2322,7 @@ def _make_group_plan(
     act: bool = True,
     rejected_moves: tuple[str, ...] = (),
     aggregate_ok: bool = True,
+    deadlocked: tuple[str, ...] = (),
 ) -> cli._GroupPlan:
     from proxmox_storage_drs.gates import GateDecision
     from proxmox_storage_drs.payback import MoveCost, PaybackResult
@@ -2356,7 +2357,9 @@ def _make_group_plan(
         ),
     )
     schedule_result = ScheduleResult(
-        order=moves, deadlocked=(), final_assignment={d.key: d.current_storage for d in group.disks}
+        order=moves,
+        deadlocked=deadlocked,
+        final_assignment={d.key: d.current_storage for d in group.disks},
     )
     move_costs = tuple(
         MoveCost(m.disk_key, 100.0, 0.0, 100.0, m.disk_key in rejected_moves, False) for m in moves
@@ -2700,6 +2703,21 @@ def test_render_group_explain_human_shows_the_closest_alternative_when_act_but_n
     assert "no moves made: the objective is lowest at the current assignment" in text
     assert "closest alternative: 101:scsi0 san-a → san-b" in text
     assert "rejected" in text
+
+
+def test_render_group_explain_human_names_a_total_deadlock_not_the_objective(
+    tmp_path: Path,
+) -> None:
+    """X-10: the final assignment equals the seed both when the solver's
+    own optimal choice was to move nothing, and when order_moves() staged
+    away every move it *did* propose (total deadlock). The two are not the
+    same fact and must not share the "objective is lowest" wording."""
+    resolved = _resolved_config(tmp_path)
+    group = _fragmented_group()
+    group_plan = _make_group_plan(group, resolved, moves=(), deadlocked=("101:scsi0",))
+    text = "\n".join(cli._render_group_explain_human(group, group_plan, resolved))
+    assert "the objective is lowest at the current assignment" not in text
+    assert "staged away by the scheduler (1 deadlocked)" in text
 
 
 def test_render_group_explain_json_includes_rejected_alternative_when_act_but_nothing_moved(
@@ -3685,6 +3703,21 @@ def test_main_replay_mode_confirm_is_refused_after_config_load(tmp_path: Path) -
     assert cli.main(["--replay", str(bundle_dir), "--mode", "confirm", "show-load"]) == 2
 
 
+def test_main_replay_mode_auto_refusal_precedes_the_run_announcement(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """X-10: `--replay ... --mode auto <cmd>` used to log `run_started` and
+    an escalating `mode_override` WARNING *before* refusing to start the
+    run it had just announced (verified live in REVIEW.md section 29) --
+    backwards. The refusal must come first, with nothing logged at all."""
+    bundle_dir = _write_real_bundle(tmp_path)
+    with caplog.at_level(logging.DEBUG):
+        exit_code = cli.main(["--replay", str(bundle_dir), "--mode", "auto", "plan"])
+    assert exit_code == 2
+    assert caplog.records == []  # neither run_started nor mode_override fired
+    assert "refusing effective mode 'auto'" in capsys.readouterr().err
+
+
 def test_main_replay_apply_refused_even_with_a_real_bundle(tmp_path: Path) -> None:
     bundle_dir = _write_real_bundle(tmp_path)
     assert cli.main(["--replay", str(bundle_dir), "apply"]) == 2
@@ -3714,6 +3747,50 @@ def test_handle_collect_testdata_estimate_human_output(
     out = capsys.readouterr().out
     assert "groups:" in out
     assert "estimated series sample points" in out
+
+
+def test_handle_collect_testdata_actual_capture_does_not_repeat_the_topology_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """X-05: cli.py used to build one bare topology (for the estimate
+    check) and then unconditionally call `collect.capture_bundle()`, which
+    builds a *second*, recorded one -- doubling every PVE read call (every
+    VM config, every content listing, every status call) on an actual
+    capture, contradicting section 16.2's "one planning run's worth of API
+    calls, not a multiple of it". After the fix, the non---estimate path
+    never calls `cli.build_topology` at all; only `capture_bundle()`'s own
+    topology pass runs (exercised, and its call count pinned, separately
+    in test_collect.py)."""
+    topology_calls = 0
+
+    def counting_build_topology(*_a: object, **_k: object) -> Topology:
+        nonlocal topology_calls
+        topology_calls += 1
+        return _sample_topology()
+
+    monkeypatch.setattr(cli, "build_topology", counting_build_topology)
+    monkeypatch.setattr(cli, "build_pve_client", lambda *a, **k: FAKE_CLIENT)
+
+    fake_bundle = collect.Bundle(
+        manifest={
+            "counts": {"groups": 0, "storages": 0, "vms": 0, "disks": 0},
+            "calls": [],
+        },
+        config_yaml={},
+        findings={},
+        pve_files={},
+        prometheus_files={},
+        salt_fingerprint="deadbeef",
+        ok=True,
+    )
+    monkeypatch.setattr(collect, "capture_bundle", lambda *a, **k: fake_bundle)
+    monkeypatch.setattr(collect, "write_bundle_dir", lambda *a, **k: None)
+    monkeypatch.setattr(collect, "write_tarball", lambda *a, **k: None)
+
+    path = write_config(tmp_path, support={"salt_path": str(tmp_path / "salt")})
+    exit_code = cli.main(["-c", str(path), "--json", "collect-testdata"])
+    assert exit_code == 0
+    assert topology_calls == 0  # the redundant cli.py-side pass is gone
 
 
 # --------------------------------------------------------- logging policy (2.3)

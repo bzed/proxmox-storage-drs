@@ -284,7 +284,10 @@ a convenience: section 2.1's "in `auto` mode this log is the only record a human
 satisfied by an option the operator has to remember to pass, and an unattended timer that silently
 migrated 400 GiB is not acceptable output regardless of how the unit file was written. `--quiet`
 still wins — an operator may insist on silence — but the manual must state plainly that `--quiet`
-on an `auto` timer discards the only record of what was moved and why.
+on an `auto` timer discards the only record of what was moved and why. `--quiet` is the *only*
+escape: an explicit `--log-level warning`/`error` on a `confirm`/`auto` run is raised back up to
+the floor rather than silently discarding the audit trail too (as built, REVIEW.md X-06 — this was,
+for a time, a second, undocumented way to lose it).
 
 Read-only commands (`plan`, `explain`, `show-load`, `verify-metrics`, `verify-storages`,
 `collect-testdata`) and `apply --mode dry-run` keep the `WARNING` default: they change nothing, so
@@ -300,15 +303,25 @@ explicit values override the sniffing, in both directions, for the operator whos
 JSON or whose pipeline wants text.
 
 `--log-level {error,warning,info,debug}` sets the level explicitly and wins over `-v`/`--quiet`.
-Automation states a level; it should not have to count `v`s to get one.
+Automation states a level; it should not have to count `v`s to get one. The one exception is the
+mandatory floor above: a level below it on a `confirm`/`auto` run is raised back up, not honoured.
 
 #### Where the handler is attached
 
-On the `proxmox_storage_drs` logger, **not the root logger**. Today the handler goes on root at the
-run's level, which means `-v` (`DEBUG`) also turns on `urllib3`, `proxmoxer` and `statsmodels`
-debug output — a wall of unrelated text that is not what an operator asking for detail about *this*
-tool meant. Third-party loggers stay at `WARNING` and are raised only by `-vv`, which is what `-vv`
-is for.
+**As built (REVIEW.md X-06):** the single handler is attached to the **root** logger, not to
+`proxmox_storage_drs` — the opposite of what an earlier draft of this section specified, and a
+deliberate choice, not a drift: `handler`-on-package plus `propagate = False` was tried first and
+hides every record from pytest's `caplog` and from anything embedding this package as a library,
+since neither talks to a handler nested under `proxmox_storage_drs` that never propagates up.
+`root.handlers = [handler]` sidesteps that. The separation this section actually needs —
+`-v`/`-vv` raising *this tool's* verbosity without also turning on `urllib3`/`proxmoxer`/
+`statsmodels` debug output — comes from the *levels* instead of from which logger owns the handler:
+`proxmox_storage_drs`'s own logger carries the run's level, root (which every third-party logger
+inherits from, having no handler or level of its own) stays clamped to `WARNING` except under
+`-vv`. A record from either still reaches the one handler by propagating up to root, so nothing is
+emitted twice and nothing is silently dropped. The behavioural requirements below (third-party
+loggers quiet until `-vv`, no duplicate emission) hold either way; this is the mechanism that
+delivers them.
 
 Every module keeps `logging.getLogger(__name__)` with one exception: **`cli.py` must use the
 explicit name `proxmox_storage_drs.cli`**, because `__name__` there is `__main__` whenever the
@@ -395,8 +408,9 @@ which is why the policy drifted. These now exist, in `tests/unit/test_logging_se
 - `apply --mode auto` emits `gate_decision`, `plan_selected`, `payback_verdict`, `move_started`
   (with a UPID), `move_finished` and `run_summary` **without** `-v`, and `apply --mode dry-run`
   does not.
-- `--quiet` suppresses the mandatory `INFO` floor, and `--log-level` overrides both `-v` and
-  `--quiet`.
+- `--quiet` suppresses the mandatory `INFO` floor; `--log-level` overrides both `-v` and `--quiet`
+  for the ladder itself, but a level below the floor on a `confirm`/`auto` run is raised back up to
+  it rather than suppressing the audit trail (X-06 of REVIEW.md section 29).
 - `--log-format text` on a non-TTY emits no JSON; `--log-format json` on a TTY emits only JSON.
 - Third-party loggers are not raised by `-v` (only by `-vv`).
 - `--json` on stdout parses as a single JSON document with every log level and format combination —
@@ -2622,9 +2636,13 @@ selected. With the defaults that is `max(24h, 7d, 48h) = 7d`.
 
 This is cheap in *queries* and expensive in *bytes*, which is the right way round. Each range query
 returns every disk in the group as one response, so the query count is
-`6 · |groups| · (1 range + 3 instant) + 3 label_values`, tens of queries for any cluster — while
-the payload is `6 · |disks| · capture_range / metrics.step` samples, about 12000 samples per disk
-at the defaults, or roughly 2.4 million samples for a 200-disk cluster. So:
+`6 · |groups| · (range_chunks + 3 instant) + 3 label_values`, where `range_chunks = ⌈capture_range /
+1 day⌉` is the day-sized chunking above (7 at the 7 d default, not 1 — as built, REVIEW.md X-09:
+the printed estimate treated a multi-day range as a single range query per group per metric,
+undercounting the real HTTP request count by roughly the chunk count). Still tens to low hundreds
+of queries for any cluster — while the payload is `6 · |disks| · capture_range / metrics.step`
+samples, about 12000 samples per disk at the defaults, or roughly 2.4 million samples for a
+200-disk cluster. So:
 
 - the collector **prints the estimate and the query count before it fetches anything**, derived
   from the topology pass it has already done;
@@ -2726,7 +2744,7 @@ invert by brute force over a name list.
 | Tag, pool | `tag-<8 hex>`, `pool-<8 hex>` | Pseudonymized rather than dropped because `exclude.tags` filters on them; the same mapping rewrites `exclude.tags` in `config.yaml` so the exclusion replays |
 | UPID | rebuilt from anonymized parts | `UPID:{node}:{pid}:{pstart}:{starttime}:{type}:{id}:{user}:`, the grammar confirmed against a real cluster in `crashrecovery.py`. Node, id and user are mapped; `pid`/`pstart` are replaced with fixed constants (they identify a process on a named host and nothing the engine reads) |
 | Username / realm | `user-<8 hex>@realm` | Only ever seen inside a UPID |
-| Metric name | canonical `drs_rd_operations`, `drs_wr_bytes`, … | A deployment may prefix metric names with an organization's own string. The bundle's `config.yaml` names the canonical forms, so the mapping is self-consistent |
+| Metric name | **as built (REVIEW.md X-08): not anonymized, carried verbatim** | The operator's own configured names (`config.metrics.read_ops` etc.) reach the bundle in `config.yaml`, the query text and every `label_values` capture, unchanged. This table used to promise canonical `drs_rd_operations`/`drs_wr_bytes`/… names instead; that mapping was never built. The as-built behaviour leaks nothing (the names are already the operator's own config, already in `config.yaml`) and is self-consistent by construction rather than by a second mapping that could drift from it |
 | Prometheus label name | the configured `vmid`/`device`/`node` label names are kept verbatim; every other label is **dropped** | Label *names* are chosen by the operator's Telegraf config and can be identifying (`customer`, `datacenter`), but the three configured ones must survive or the bundle cannot be joined. They are already in `config.yaml`, so they leak nothing the config does not |
 | Device name (`scsi0`, `efidisk0`, `tpmstate0`, `unused3`) | **not anonymized** | A closed enumerated set (§3.5's bus regex) carrying no identity, and §3.6's movability rules and §3.7's pinning read them directly. Mapping them would destroy the behaviour the bundle exists to reproduce |
 | VM name, description, notes, comment, snapshot name | **dropped** | Free text, nothing reads it. `show-load` under replay prints the vmid where it would print a name |
@@ -2890,26 +2908,46 @@ The central difficulty is that **a real bundle has no known-correct answer**. No
 Four kinds of assertion that do hold:
 
 1. **The scrub audit** — cheap, and it runs on every bundle in the corpus on every `make check`,
-   before anything else. It walks every file and fails on: any key not in `anonymize.py`'s
-   allowlist (the same allowlist the collector uses, so the two cannot drift); any value matching
-   an IPv4 or IPv6 literal, an email address, an `iqn.`/`naa.`/`wwn.` prefix, a PEM block, a
-   64-hex-or-longer run, a `.com`/`.net`/`.org`/`.local` hostname, or a JWT-shaped string; any node
-   or storage name not matching the pseudonym grammar; any absolute timestamp outside the synthetic
-   epoch window. It is a second line of defence that assumes the collector has a bug, which is the
-   only useful assumption to make about a privacy control.
-2. **Invariants, not optima.** For every bundle and every variant: `Σ r_s = 0` in the final
-   assignment whenever a reserve-feasible assignment exists; §8.1's transient predicate holds at
-   every step of the emitted order; every move in the plan is to a storage (C2) permits for that
-   disk's format and group; §7.3's per-move duration rule and saturation guard hold for every
-   accepted move; the objective the scheduler was handed equals the objective recomputed from the
-   final assignment. These are the safety properties of `AGENTS.md` §6 and they are checkable
-   without knowing the optimum.
+   before anything else. It walks every `pve/` and `prometheus/` file, every key (X-03: this used
+   to be true of only the five top-level `pve/` files; a `prometheus/` series' `metric` dict is
+   checked against the bundle's own configured label names, read from its `config.yaml`) and fails
+   on: any key not in `anonymize.py`'s allowlist (the same allowlist the collector uses, so the two
+   cannot drift); any value matching an IPv4 or IPv6 literal, an email address, an
+   `iqn.`/`naa.`/`wwn.` prefix, a PEM block, a 64-hex-or-longer run, a JWT-shaped string, a
+   public-suffix hostname (`.com`/`.net`/`.org`/`.local`/`.internal`/`.corp`/`.lan`/`.home`/
+   `.example`/`.test` — X-02's own reproduction found the original four-suffix list missed a
+   transport failure's own `.internal`/`.corp`/`.example` endpoint), or an unredacted transport
+   `host='...'` literal (X-02's own backstop for the same class); any node or storage name not
+   matching the pseudonym grammar; any absolute timestamp outside the synthetic epoch window.
+   `manifest.json`/`findings.json` have no `anonymize.py` allowlist of their own (hand-authored
+   bundle metadata, not a captured PVE/Prometheus object shape) and get the value-pattern checks
+   only. It is a second line of defence that assumes the collector has a bug, which is the only
+   useful assumption to make about a privacy control.
+2. **Invariants, not optima** — reconstructed from what `plan --json`'s own group report already
+   records per variant (X-07): every move in the plan is to a storage (C2) permits for that group;
+   no accepted move carries `exceeds_max_duration: true` (§7.3's duration rule); a disk payback
+   rejected or deferred never also appears as an accepted move (§7.3's saturation guard,
+   structurally). These are checkable without knowing the optimum, and they are what
+   `check_invariants()` actually asserts. Three properties this bullet used to claim as checked and
+   is not: `Σ r_s = 0` in the final assignment and §8.1's per-step transient predicate both need the
+   emitted *order*, which no `plan --json` field carries; "the objective the scheduler was handed
+   equals the objective recomputed from the final assignment" needs the five-term breakdown, which
+   today only `explain --json` emits. A real and deliberate gap, named here rather than discovered
+   later (the same shape as this section's own pattern-expansion gap above) — either sweep
+   `explain --json` too or add the missing fields to `plan --json`'s group report to close it.
 3. **MILP versus heuristic, on real data.** Run the same bundle through CP-SAT, CBC and the
-   heuristic and assert the MILP objective is `≤` the heuristic's, and that both MILP backends
-   agree to within the §5.5 tolerance. This is the cross-check §14 can only perform on six disks,
-   and it is the single highest-value thing a real bundle buys: a heuristic that beats the MILP
-   means the two have drifted apart on the shared feasibility or objective functions, which
-   `AGENTS.md` §5 exists to prevent and which no synthetic fixture of this size can detect.
+   heuristic and assert neither MILP backend's `after_spread` (`plan --json`'s already-computed
+   post-plan spread fraction) is worse than the heuristic's. This is the cross-check §14 can only
+   perform on six disks, and it is the single highest-value thing a real bundle buys: a heuristic
+   that beats the MILP means the two have drifted apart on the shared feasibility or objective
+   functions, which `AGENTS.md` §5 exists to prevent and which no synthetic fixture of this size
+   can detect. **CBC-versus-CP-SAT agreement is not checked** (X-07): a first attempt comparing
+   `after_spread` against `solver.mip_gap` as a relative tolerance produced real disagreement on a
+   committed bundle under `--full-matrix` (cbc 0.0016 vs. cpsat 0.0034-0.0112 across several
+   variants) that was legitimate under `mip_gap` on the *objective* the solvers actually optimize —
+   `mip_gap` bounds suboptimality of the five-term objective, not of any one derived quantity taken
+   in isolation, and a tiny baseline spread turns a small absolute gap into a large relative one.
+   Getting this right needs the objective breakdown itself, the same gap named in check 2 above.
 4. **Regression.** `<name>.expected.json` records, per variant, the gate verdict, the plan (as a
    sorted list of moves), the order, the objective breakdown, the payback arithmetic and the
    findings. It is generated by `validate_corpus.py` and asserted current by

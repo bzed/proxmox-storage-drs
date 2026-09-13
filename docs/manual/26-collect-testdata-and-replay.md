@@ -21,8 +21,10 @@ union of every forecaster's own history requirement, not just the one
 `forecast.model` you have configured — so a bundle captured today can still
 reproduce a Holt-Winters misfit tomorrow.
 
-Before fetching anything, it estimates the size of the capture from the
-topology it has already read:
+`--estimate` sizes the capture first: it reads the full PVE inventory (the
+same read pass a real capture or a `plan` run makes — every VM config, every
+content listing, every status call) to size the series capture, but fetches
+nothing from Prometheus:
 
 ```sh
 pve-storage-drs -c /etc/pve/drs.yaml collect-testdata --estimate
@@ -31,9 +33,13 @@ pve-storage-drs -c /etc/pve/drs.yaml collect-testdata --estimate
 ```
 groups: 2   disks: 47
 range: 7d  step: 5m
-estimated Prometheus queries: 42
+estimated Prometheus queries: 117
 estimated series sample points: 573104
 ```
+
+(The query count includes the day-sized chunking `--estimate` itself performs at capture time — 7
+range-query chunks per group per metric at the 7 d default, not 1 — so it is the real HTTP request
+count, not a logical-query count that understates it.)
 
 Above `support.max_series_points` (default 5,000,000) the real capture
 refuses outright, naming the flags that bring it under the limit:
@@ -41,7 +47,7 @@ refuses outright, naming the flags that bring it under the limit:
 | Option | Effect |
 |---|---|
 | `-o`, `--output DIR` | Where the bundle directory and its `.tar.gz` are written (default `support.bundle_dir`). |
-| `--estimate` | Print the estimate above and exit; fetches nothing. |
+| `--estimate` | Read the full PVE inventory (one planning run's worth of API calls), print the estimate above, and exit; fetches nothing from Prometheus. |
 | `--range DURATION` | Override the series capture range (default `support.capture_range`). |
 | `--step DURATION` | Override the series resolution (default `metrics.step`). |
 | `--no-series` | Topology, instant queries and findings only — no per-disk time series, so the bundle cannot exercise a seasonal forecaster, but is much smaller. |
@@ -70,6 +76,12 @@ meant to be opened in an editor:
   snapshot names, storage comments — is dropped outright. Device keys
   (`scsi0`, `efidisk0`, ...) are not identifiers and are kept as-is, since
   the movability rules read them directly.
+- `manifest.json` carries the **PVE and Prometheus server versions**
+  (`capture.pve_version`/`capture.prometheus_version`, `null` if that one
+  call failed) — not identifiers, so they need no anonymization, and they
+  are the one piece of "what was this captured against" a bundle's own
+  files otherwise leave to `tests/corpus/*.submission.yaml`, which only
+  the committed corpus carries.
 - **The mapping is stable per salt**, so a second bundle from the same host
   names the same objects the same way — useful for comparing a before/after
   pair — until `--new-salt` rotates it.
@@ -91,6 +103,8 @@ pve-storage-drs --replay ./drs-testdata-cluster-3f8a91c2 plan --json
 substitutes both the PVE and Prometheus clients at the one place each is
 constructed — so `verify-metrics`, `verify-storages`, `show-load`, `plan`
 and `explain` all run **unchanged**, with **no network access at all**.
+`PATH` is the **unpacked bundle directory**, not the `.tar.gz` it was sent
+as — `tar -xzf drs-testdata-cluster-3f8a91c2.tar.gz` first.
 
 - The configuration is the bundle's own `config.yaml`, unless `-c` is also
   given — that is how you run the operator's cluster through a solver

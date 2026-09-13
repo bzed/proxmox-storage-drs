@@ -42,6 +42,19 @@ def test_storage_resources() -> None:
     assert api.calls == [("GET", "cluster/resources", {"type": "storage"})]
 
 
+def test_version() -> None:
+    api = fake_api({"version": {"version": "8.2.1", "release": "8.2"}})
+    client = PveClient(api)
+    assert client.version() == "8.2.1"
+    assert api.calls == [("GET", "version", {})]
+
+
+def test_version_missing_key_is_none() -> None:
+    api = fake_api({"version": {"release": "8.2"}})
+    client = PveClient(api)
+    assert client.version() is None
+
+
 def test_storage_definitions() -> None:
     api = fake_api({"storage": [{"storage": "san-a", "type": "lvm", "saferemove": 1}]})
     client = PveClient(api)

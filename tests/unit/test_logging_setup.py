@@ -91,12 +91,29 @@ def test_quiet_still_wins_over_the_mandatory_floor(capsys: pytest.CaptureFixture
     assert capsys.readouterr().err == ""
 
 
-def test_explicit_log_level_also_overrides_the_floor(capsys: pytest.CaptureFixture[str]) -> None:
+def test_explicit_log_level_below_the_floor_does_not_escape_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """X-06: `--quiet` is the mandatory floor's one documented escape hatch
+    -- an explicit `--log-level` less verbose than the floor (`warning`,
+    `error`) used to count as opting out too, silently discarding an
+    unattended `apply --mode auto` run's only record. It no longer does."""
     configure_logging(
         0, False, log_level="error", log_format="json", floor=floor_for_command("apply", "auto")
     )
     logging.getLogger("proxmox_storage_drs.test.floorlevel").info("issued", extra={"event": "x"})
-    assert capsys.readouterr().err == ""
+    assert "issued" in capsys.readouterr().err
+
+
+def test_explicit_log_level_above_the_floor_still_works(capsys: pytest.CaptureFixture[str]) -> None:
+    """A `--log-level` *more* verbose than the mandatory floor is unaffected
+    by it -- the floor only ever raises the effective level, never lowers
+    one already above it."""
+    configure_logging(
+        0, False, log_level="debug", log_format="json", floor=floor_for_command("apply", "auto")
+    )
+    logging.getLogger("proxmox_storage_drs.test.floorlevel2").debug("detail", extra={"event": "x"})
+    assert "detail" in capsys.readouterr().err
 
 
 # ------------------------------------------------------------------ format

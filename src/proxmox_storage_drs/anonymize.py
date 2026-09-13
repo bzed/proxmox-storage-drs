@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from typing import Mapping as MappingType
 
+from proxmox_storage_drs.exceptions import BundleError
 from proxmox_storage_drs.topology import DISK_KEY_RE, parse_disk_spec
 
 # --------------------------------------------------------------- allowlists
@@ -185,6 +186,29 @@ def _pseudonym_int(salt: bytes, kind: str, value: str, modulus: int) -> int:
     return int.from_bytes(digest.digest(), "big") % modulus
 
 
+def _check_no_pseudonym_collision(salt: bytes, kind: str, values: Iterable[str]) -> None:
+    """32-bit (8 hex char) truncation makes a same-``kind`` collision
+    astronomically unlikely for real cluster sizes (~n^2/2^33) but not
+    impossible, and nothing checked for one outside ``Mapper.vmid()``'s own
+    linear probing (X-09) -- two nodes or two storages colliding would
+    silently merge into one record in the bundle (same file name, same
+    ``groups[].storages[].id``) rather than failing loudly. ``values`` is
+    always a small, finite, already-known set (``known_nodes``/
+    ``known_storages``), so this costs nothing worth measuring."""
+    seen: dict[str, str] = {}
+    for value in values:
+        digest = pseudonym(salt, kind, value)
+        collision = seen.get(digest)
+        if collision is not None and collision != value:
+            raise BundleError(
+                f"anonymization collision: {kind}s {value!r} and {collision!r} hash to the "
+                f"same pseudonym ({digest!r}) -- capture refused rather than silently merging "
+                "them in the bundle. This should not happen for a real cluster's node/storage "
+                "count; if it does, rotate the salt (--new-salt) and try again."
+            )
+        seen[digest] = value
+
+
 def salt_fingerprint(salt: bytes) -> str:
     """A value two bundles can compare to prove they share a mapping,
     without revealing the salt or letting anyone test a guess against it
@@ -286,6 +310,11 @@ class Mapper:
 
     def __post_init__(self) -> None:
         self.time_offset_seconds = week_aligned_offset_seconds(self.capture_start_epoch)
+        # X-09: turns a ~n^2/2^33 silent merge into a loud, named refusal --
+        # see _check_no_pseudonym_collision(). Vmid collisions are already
+        # impossible by construction (register_vmids()'s own linear probe).
+        _check_no_pseudonym_collision(self.salt, "node", self.known_nodes)
+        _check_no_pseudonym_collision(self.salt, "storage", self.known_storages)
 
     # -------------------------------------------------------------- clock
 

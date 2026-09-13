@@ -128,6 +128,27 @@ presentation of a selector matching nothing as an idle group; every run now hard
 `Sys.Audit` for `GET /cluster/status`). One Info: the content-listing read-path amplification,
 and §3.5's stale expected-call-count formula, unquantified.
 
+A **fifteenth pass** (section 29) reviews everything after the W-fixes: the 0.1.1 changelog, the
+cluster-label removal (recorded as section 27) and the cross-metric fix (section 28), and then the
+largest single addition since the engine itself — plan §16's `collect-testdata`/`--replay`
+diagnostic-bundle subsystem (`anonymize.py`, `collect.py`, `replay.py`, the `support{}` config
+block, `tests/corpus/` and its scrub audit, and two real-cluster corpus bundles), the §9.5
+closest-rejected-move addition to `explain`, the §2.3 logging policy (phase 11), the non-finite
+JSON fix, and the README quickstart/metrics-transport documentation work. Ten findings
+(X-01..X-10) are identified: four Medium — `exclude.disks` is carried verbatim into a bundle's
+`config.yaml`, leaking real vmids through the one §16.3 rule that names it explicitly; the
+manifest call-log's `detail` can carry endpoint hostnames past both the redactor and the scrub
+audit (verified empirically); the scrub audit applies its key allowlist to only five of the bundle's
+file classes while the plan (and the script's own docstring) claim every file, every key; and the
+0.1.1 changelog headline describes the cluster-scoping feature that section 27 removed, while
+recording none of the range's actual features. Three Low: `collect-testdata` runs the whole PVE
+topology read pass twice against §16.2's "one planning run's worth" claim; §2.3's handler-placement
+paragraph says the opposite of what was built, and `--log-level` quietly bypasses the mandatory
+audit-trail floor that plan and manual say only `--quiet` escapes; and `validate_corpus.py`
+implements only one of §16.6's five promised invariant assertions and neither MILP-agreement check.
+One Low on three §16.3 bundle promises never built (no `extra_selector` manifest flag, no PVE/
+Prometheus version strings, no metric-name canonicalization), and two Info.
+
 ---
 
 ## 0. Overall assessment
@@ -3745,6 +3766,547 @@ New regression tests (`test_metrics.py`): `test_disk_keys_seen_skips_series_miss
 
 Verification: `make check` clean — **666 passed**, **98.65% line coverage**; all three PDFs
 rebuilt.
+
+---
+
+## 29. Fifteenth-pass review — `collect-testdata`/`--replay` (§16), the corpus, phase-11 logging, and the dogfooding fixes
+
+Reviewed commit range `31f03e4..HEAD` (the W-01..W-09 fixes are recorded in section 26; the
+cluster-label removal and the cross-metric fix, which this range also contains, are already
+recorded as sections 27 and 28 and are not re-reviewed here). Twenty-nine non-merge commits,
+≈8,600 inserted lines of code, tests and documentation (plus ≈736,000 lines of committed corpus
+data), the largest single addition to the tool since the engine itself:
+
+- `6ca584a` — plan §16 written ahead of the code (the specification habit this review has
+  endorsed since the F-passes): the bundle layout, the superset capture, the anonymization rules,
+  the command, `--replay`, and `tests/corpus/`.
+- `ff68910` — `config.py`/schema gain the `support{}` block; `proxmox.host`/`prometheus.url`
+  become schema-optional with the presence check moved to `load_config(require_connection=...)`,
+  so a bundle's credential-free `config.yaml` validates.
+- `74812e5`, `87529a3`, `492b281`, `7937177` — `anonymize.py` (pure), `collect.py` (capture,
+  recording clients, manifest, deterministic writer), `replay.py` (the two replay clients), the
+  CLI wiring (`collect-testdata`, the global `--replay`), and `tests/corpus/validate_corpus.py`.
+- `f7cbcf1` and eight `fix/collect-testdata-*` commits — the docs, and the eight real bugs the
+  first live capture against the dev cluster found (pattern-expanded storages lost from
+  `config.yaml`, anonymized selectors issued to the real Prometheus, sort-order-dependent query
+  text, un-rebased sample timestamps, a dropped node label, a device-label collision with
+  Prometheus's own `instance` scrape label, metric names validated as device keys, and real names
+  in the manifest call log).
+- `f7946db`, `9d4dd51`, `8dc3934`, `8f237ff` — the two committed corpus bundles (7.3 MB and
+  4.6 MB, both under the 8 MiB ceiling), the docs marking phase 10 landed, and the
+  move-count-as-proxy fix in `check_milp_vs_heuristic` (the false positive the 7-day bundle found).
+- `72fb157` — `explain`'s closest-rejected-move section (`heuristic.best_single_disk_alternative()`).
+- `59ff95c`, `44471e8` — plan §2.3 (the logging policy re-plan) and its implementation, phase 11.
+- `687322e` — `json_safe()`: no `Infinity`/`NaN` in any log record or `--json` report.
+- `0be3d44`, `3215cfe` — the README quickstart, `docs/manual/05-metrics-pipeline.md`, shipping the
+  Markdown sources in the package, and the manpage's previously-hand-maintained `collect-testdata`
+  option list.
+- `2bcd2c3`, `7386477` — the 0.1.1 version/changelog cut (pre-dating most of the above; see X-04).
+
+### 29.1 Verification run
+
+- Dev venv `python3 -m pytest`: **804 passed, 1 warning** (the same benign statsmodels
+  `ConvergenceWarning` noted since the eleventh pass), **95.94% line coverage** — a drop from the
+  98.6% of the last three passes, accounted for by the new modules landing at `collect.py` 85%,
+  `replay.py` 86%, `anonymize.py` 95% (the aggregate floor of 85% still clears; per-module floors
+  do not exist). `make check` clean end to end: fmt-check, flake8, mypy (in its own
+  `.venv-typecheck/`), test-with-coverage, the §14 fixture `--check`, **corpus-check** (the new
+  gate: scrub audit + invariants + MILP-vs-heuristic + regression `--check` over both committed
+  bundles, passing), and docs-check over all three PDF stamps plus the manpage.
+- **The full capture → write → replay round trip was exercised at the CLI level** against the
+  committed `bzed-dev-cluster-24h` bundle: `--replay ... plan/explain/show-load/verify-metrics/
+  verify-storages` all complete, `--replay ... apply` and `--replay ... --mode auto <cmd>` exit 2
+  as §16.5 requires, and `tests/unit/test_replay.py`'s never-constructs-a-`requests.Session`
+  assertions hold on this tree.
+- **The X-02 leak was reproduced empirically, not inferred**: a `requests.RequestException`
+  raised against `https://prometheus.internal.example.invalid:9090/...` renders as
+  `HTTPSConnectionPool(host='prometheus.internal.example.invalid', port=9090): Max retries
+  exceeded ...`; that string, run through `_redact_free_text()` with a node named `pve01`
+  configured, comes out as `... host='node-<8hex>.corp.example' ...` — the node name is mapped,
+  **the DNS domain is not**, and `_check_value_patterns()` (the scrub audit's own checker, invoked
+  directly) returns **zero violations** for it, because `_PUBLIC_SUFFIX_HOSTNAME_RE` matches only
+  `.com|.net|.org|.local`. A `.example`/`.internal`/`.corp`/`.lan`/bare host passes all nine
+  value checks.
+- **X-01 was confirmed against the shipped bundles' shape**: both committed `config.yaml`s carry
+  `exclude: {disks: []}` — the leak is latent in the code path
+  (`collect.py`'s `"disks": list(exclude.disks)`), not present in the corpus, which is exactly why
+  neither the audit nor this suite can currently see it.
+- **The determinism claim of §16.1 was checked as specified**: `test_write_bundle_dir_is_
+  deterministic` runs the *collector* twice against the same fakes and salt (fixed `now`), not
+  merely the writer, and compares every file byte-for-byte — the claim is tested at the strength
+  the plan states.
+- **`debian/` packaging kept step**: `debian/copyright` gained the `tests/corpus/*` stanza the
+  same month the first bundle landed (§16.6); `debian/pve-storage-drs.docs` now ships the
+  Markdown sources of all three documents beside the PDFs, with `override_dh_compress` keeping
+  both uncompressed; the manpage's `OPTIONS` documents all eight `collect-testdata` options plus
+  `--replay`/`--log-format`/`--log-level`, and the new `test_help_covers_every_subcommand_option`
+  extends the options-coverage test from the global parser down to subcommands (closing the second
+  hand-kept list `.agents/documentation.md` forbids).
+- The §15.1 traceability, example-config and manual rows for all four `support.*` knobs landed in
+  the implementing commit, as §16.7 requires; the corpus README carries §16.3's honesty statement
+  ("safe to hand to the author, not safe to publish") for the author's side.
+
+### 29.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| X-01 | Medium | `collect.py` | `exclude.disks` (`"vmid:device"` strings) is carried verbatim into the bundle's `config.yaml` — §16.3 explicitly lists it among the identifiers that must move with the mapping, so a real vmid leaks into the one file an operator is told to read before sending, and the exclusion silently stops matching anything at replay |
+| X-02 | Medium | `collect.py`, `pve.py`, `metrics.py` | A transport-level failure during capture (connection refused, timeout, DNS) writes the endpoint's hostname/FQDN into `manifest.json`'s call-log `detail` via the exception's own text — `_redact_free_text` maps only vmids/node names/storage names, and the scrub audit's hostname pattern covers only `.com/.net/.org/.local` (reproduced end to end) |
+| X-03 | Medium | `tests/corpus/validate_corpus.py` | The scrub audit applies its key allowlist to only the five top-level `pve/` files; every per-VM/per-storage file, every `prometheus/` file, `manifest.json` and `findings.json` get value-pattern checks only — while §16.6 and the script's own docstring claim "every file, every key, checked against anonymize.py's allowlist". X-01 is a live collector bug this audit could not see |
+| X-04 | Medium | `debian/changelog` | The unreleased 0.1.1 entry's second bullet describes the cluster-scoping feature section 27 removed — `metrics.labels.cluster` default-on, the discovery scan, the W-06/W-07/W-08 behaviours — and advises "set that key to null", which the current schema rejects outright; and it records none of the range's actual post-cut features (`collect-testdata`, `--replay`, `support{}`, the corpus, the logging policy and its two new global options, the JSON fix, the cross-metric check, `explain`'s rejected-alternative) |
+| X-05 | Low | `cli.py`, `collect.py`, `docs/manual/26-*.md` | Every `collect-testdata` run performs the full PVE topology read pass twice — once bare for the estimate, once again through the recording client inside `capture_bundle()` — contradicting §16.2's "the cost is one planning run's worth of API calls, not a multiple of it"; and manual 26's `--estimate` row says "exits; fetches nothing" when it performs that entire PVE inventory read (only Prometheus is skipped) |
+| X-06 | Low | `logging_setup.py`, plan §2.3 | §2.3's "Where the handler is attached" mandates the handler on the `proxmox_storage_drs` logger, "not the root logger"; the built code puts one handler on root with the package logger carrying only a level — a deliberate, well-argued deviation (the commit message explains caplog/embedding/no-duplicate-emission) that was never written back into a plan section marked "Status: implemented". Same subsystem: `--log-level warning|error` silently bypasses the mandatory `INFO` audit-trail floor, which plan and manual both describe as yielding to `--quiet` alone |
+| X-07 | Low | `tests/corpus/validate_corpus.py`, plan §16.6 | §16.6's "What the suite asserts" promises five invariant properties (Σ r_s = 0, §8.1's transient predicate at every step, (C2) format/group legality, §7.3's per-move duration and saturation guards, objective re-equality) plus "both MILP backends agree to within the §5.5 tolerance"; `check_invariants()` implements only group-storage membership and no MILP-vs-MILP check exists at all — the plan presents as running on every `make check` what is in fact left to the pipeline's own internal enforcement |
+| X-08 | Low | `collect.py`, plan §16.1/§16.3 | Three §16 bundle promises were never built: the manifest does not flag the `extra_selector` rewrite ("says so in the manifest" — §16.3); no PVE/Prometheus version strings are captured anywhere in a bundle (§16.1's "versions", §16.3's preserved list — they exist only in `submission.yaml` on the corpus side); and metric names are carried verbatim rather than canonicalized to `drs_*` (the per-kind table's "Metric name" row describes a mapping that does not exist — the built behaviour is self-consistent and leaks nothing, but it is not what the plan says) |
+| X-09 | Info | `anonymize.py`, `collect.py` | Anonymization small print: the 8-hex (32-bit) pseudonym truncation has collision handling only for vmids — two storages/nodes colliding would silently merge bundle records (~n²/2³³, tiny but undetected); `counts.dropped_records` undercounts (the `None` returns of `_anonymize_disk_value`/`_anonymize_vm_config` and the unknown-node pruning of storage `nodes` fields never increment it); and `--estimate`'s query count treats a multi-day range as one query — day-sized chunking (§16.2) means the real HTTP request count at the 7 d default is ≈7× the range-side figure printed |
+| X-10 | Info | `replay.py`, `cli.py`, `heuristic.py`, `validate_corpus.py` | Assorted: `--replay bundle.tar.gz` — the form a bundle is actually sent in — fails with "not a bundle directory" and no "unpack it first" hint, and manual 26 never says to unpack; `explain`'s new "no moves made: the objective is lowest at the current assignment" line asserts what it does not verify (a fully deadlocked plan also moves nothing); the non-full-matrix sweep records cpsat as "not installed" on machines where it is installed; and a `--replay ... --mode auto` run announces itself (run_started, and a mode_override WARNING at the default level) before the exit-2 refusal that says it will not start |
+
+### 29.3 X-01 — `exclude.disks` is carried verbatim into a bundle's `config.yaml`
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/collect.py:1346-1354` (`_anonymized_config_dict`)
+
+§16.3, "The configuration in the bundle": "**Every identifier is mapped with the same mapping as
+the data**: `groups[].name`, `groups[].storages[].id`, `exclude.vmids`, `exclude.storages`,
+`exclude.disks` and `exclude.tags`. A knob the engine compares against a captured value must move
+together with it or the exclusion silently stops applying, which is a quiet behaviour change in a
+file that claims to reproduce a run." The implementation maps four of the six: `exclude.vmids`
+through `mapper.vmid()` (dropping unregistered ones), `exclude.storages` through
+`mapper.storage()`, `exclude.tags` through `mapper.tag()` — and then `"disks": list(exclude.disks)`
+carries the entries **verbatim**. An `exclude.disks` entry is a `"vmid:device"` string
+(`docs/manual/10-configuration.md` §`exclude.disks`, `config/drs.example.yaml`), so:
+
+- **Privacy:** the real vmid — an identifier §16.3's own per-kind table pseudonymizes everywhere
+  else it appears, and whose mapping is the whole point of `exclude.vmids` two lines above — is
+  written into the bundle in the clear. It is not an incidental number: an operator who excluded
+  `101:scsi1` made a deliberate, meaningful choice about a specific VM, in the one file the manual
+  tells them to read before sending. The scrub audit cannot see it (`config.yaml` gets only the
+  credential-words check; `"101:scsi1"` matches none of the nine value patterns), and the
+  committed bundles are clean only because their operators never configured `exclude.disks`.
+- **Behaviour:** at replay, `topology.py` compares `config.exclude.disks` against disk keys built
+  from *pseudonymized* vmids — `101:scsi1` matches nothing, and the exclusion silently stops
+  applying. This is precisely the "quiet behaviour change in a file that claims to reproduce a
+  run" the quoted sentence exists to forbid.
+
+**Recommendation:** map the vmid component through `mapper.vmid()` (device keys pass through
+unchanged, per §16.3's device rule), dropping entries whose vmid was never registered — the exact
+shape of the `exclude.vmids` line above it. A one-line addition to the capture test asserting a
+configured `exclude.disks` round-trips pseudonymized would pin it; extending the scrub audit's
+`config.yaml` check to reject a `vmid:device`-shaped string under `exclude.disks` that is not a
+registered pseudonym (X-03's fix) would catch a regression of it mechanically.
+
+### 29.4 X-02 — a transport failure during capture writes the endpoint hostname into the manifest
+
+**Severity:** Medium
+**Files:** `collect.py:203-217` (`_guarded`), `collect.py:334-346`
+(`RecordingPrometheusClient._get`), `collect.py:1417-1434` (manifest call log),
+`pve.py:239-244`, `metrics.py:242-254`
+
+The call log exists to record failures ("failures are recorded, never rendered as absence",
+§16.2) — and it is exactly a failure that leaks. `_guarded()` and `RecordingPrometheusClient._get`
+store `str(exc)` as the call's `detail`; for the transport-level failures the log is for,
+`pve.py`'s `f"...: request failed: {exc}"` and `metrics.py`'s
+`f"Prometheus request to {path} failed: {exc}"` embed the `requests` exception's own text, which
+begins `HTTPSConnectionPool(host='<hostname>', port=...)` — the *configured endpoint*, whose
+presence in a bundle §16.3 is otherwise careful to prevent (`proxmox.host`, `prometheus.url` and
+every auth field are dropped from `config.yaml` precisely because a hostname is an identifier).
+`_build_manifest` runs every `detail` through `_redact_free_text()`, but that function substitutes
+only registered vmids, known node names and known storage names — an endpoint hostname shares a
+substring with a node name only by coincidence (and then only the node part is mapped, leaving the
+domain: see 29.1). The scrub audit is the designated backstop and does not catch it either: its
+hostname pattern covers four suffixes, `.com|.net|.org|.local`, and a Prometheus or PVE host in
+`.example`/`.internal`/`.corp`/`.lan` — or a bare hostname — passes all nine value checks, which
+29.1 demonstrated directly.
+
+This needs a connection failure during capture to fire, which is not exotic: a Prometheus restart
+mid-capture, a API-timeout on a large `/content` listing, a DNS blip. And the manifest is shipped
+to a third party by design.
+
+**Recommendation:** three cheap layers, any two of which suffice. (a) In `_build_manifest`,
+strip `https?://…` (and `host='…'`/`url: …` fragments) from `detail` before redaction — or record
+the exception *class* plus the outcome and keep the full text for stderr, where §2.3's log already
+carries it locally and no bundle is involved. (b) Teach the scrub audit a `host=`/URL-shaped
+pattern that is not suffix-dependent. (c) A capture test that fails one call with a
+`requests.ConnectionError` whose message embeds a `.example` host, asserting the manifest stays
+clean — the test the current suite lacks for the whole `detail` channel.
+
+### 29.5 X-03 — the scrub audit checks keys against the allowlist for five files only
+
+**Severity:** Medium
+**Files:** `tests/corpus/validate_corpus.py:132-138` (`_PVE_ALLOWLISTS`), `:165-181`
+(`_scrub_json_file`), `:201-217` (`_scrub_pve_dir`); plan §16.6; the module docstring
+
+§16.6, check 1: the scrub audit "walks every file and fails on: **any key not in
+`anonymize.py`'s allowlist** (the same allowlist the collector uses, so the two cannot drift)";
+`validate_corpus.py`'s own docstring opens "every file, every key, checked against
+`anonymize.py`'s allowlists". The implementation applies a key allowlist to exactly five files —
+the top-level `cluster-resources-{vm,storage}.json`, `storage-definitions.json`, `nodes.json` and
+`cluster-tasks.json`. Everything else — all of `vm-config/`, `vm-snapshots/`,
+`vm-status-current/`, `storage-status/`, `storage-content/`, every `prometheus/` payload,
+`manifest.json` and `findings.json` — is passed `allowlist=None` and receives only the nine
+value-pattern checks. The per-kind allowlists for those files (`VM_CONFIG_EXTRA_FIELDS` +
+`DISK_KEY_RE`, `VM_SNAPSHOT_FIELDS`, `VM_STATUS_CURRENT_FIELDS`, `STORAGE_CONTENT_FIELDS`,
+`STORAGE_STATUS_FIELDS`) exist in `anonymize.py` and are simply never consulted by the audit.
+
+The gap is the audit's own reason for existing. It "assumes the collector has a bug, which is the
+only useful assumption to make about a privacy control" (§16.6) — and a collector bug of exactly
+the assumed shape (a future edit that stops filtering, or filters by a denylist, before writing
+`vm-config/<vmid>.json`) would produce extra keys in precisely the files that carry the richest
+free text (a VM config's `description`, `sshkeys`, `net0` are all one failed filter away), with
+the audit green. X-01 is a present-tense demonstration of the class: a real identifier reaching a
+bundle through a channel the audit does not model. The `prometheus/` side has the same shape one
+level down: §16.3's table drops every label except the three configured ones, and nothing checks
+that either.
+
+**Recommendation:** the per-file allowlists already exist; wire them in — a mapping from bundle
+path pattern to `anonymize.py` constant (`vm-config` → `filter_vm_config_fields`'s key set,
+`vm-snapshots` → `VM_SNAPSHOT_FIELDS`, and so on), failing on any extra key, exactly as the five
+top-level files already do. For `prometheus/instant|range` files the structural keys are fixed
+(`query`/`result`/`start`/`end`/`step`) and the `metric` dicts can be checked against the three
+label names the bundle's own `config.yaml` carries. Then fix the docstring to match whatever
+scope is actually enforced. This is the W-04 lesson (the structural test that retires the class)
+applied to privacy instead of warnings.
+
+### 29.6 X-04 — the 0.1.1 changelog describes a feature that no longer exists
+
+**Severity:** Medium
+**Files:** `debian/changelog:3-23` (last touched by `7386477`, before `77370cf`)
+
+The 0.1.1 entry's second bullet, in full, is a description of the cluster-scoping feature:
+"verify-metrics now reports every cluster-naming label value it sees across your metrics, and
+plan/show-load/apply/explain scope every query by this cluster's own name by default
+(`metrics.labels.cluster`, default `cluster`) ... set that key to null to opt back out" — and a
+third bullet walks through the W-06/W-07/W-08 fixes built on it, including "A denied
+`GET /cluster/status` ... degrades to the node-list scoping tier". Section 27 then removed the
+entire tier: `metrics.labels.cluster` no longer exists in the schema (a config carrying it now
+fails `additionalProperties: false`), the discovery scan is gone, `cluster_name()` and its
+`Sys.Audit` privilege are gone. An operator reading the entry for the release they are about to
+install would be told to configure a key the release rejects, and told about behaviours
+(`verify-metrics` cluster-label reporting, the 403 degrade) that are not in it. Meanwhile the
+entry records none of what the release actually adds beyond the size fixes: no
+`collect-testdata`, no `--replay`, no `support{}` block (four new config knobs), no corpus, no
+`--log-format`/`--log-level`, no `json_safe` fix, no cross-metric consistency check, no
+`explain`'s rejected-alternative, no quickstart/metrics-pipeline documentation.
+
+This is W-02's family one release later, with the aggravation that the entry does not merely
+mislabel history — it instructs the reader to use a key that errors. The convention the W-02
+resolution itself recorded ("a changelog entry should summarize everything since the previous
+entry, not just the most recent commit") was applied once, in `7386477`, and then not again
+across the twenty-seven commits that followed it.
+
+**Recommendation:** while 0.1.1 is still unreleased: delete the cluster-scoping bullet and the
+parts of the W-fixes bullet that describe removed behaviour (W-07's `no_series_matched` reporting
+survives — keep that half), and add the missing features. The structural fix is the same one
+W-02 got: when a feature is *removed* before its release, the changelog entry that announced it
+is part of the removal commit's blast radius, alongside the seven documents section 27 did rewrite.
+
+### 29.7 X-05 — `collect-testdata` walks the PVE read path twice; `--estimate` is not side-effect-free
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/cli.py:3315-3316` (`_handle_collect_testdata`),
+`collect.py:1017` (`capture_bundle`), `docs/manual/26-collect-testdata-and-replay.md:44`
+
+§16.2: "This is the same read path a `plan` run performs (§3.5's 'expected call count per run'),
+so the cost is one planning run's worth of API calls, not a multiple of it." The implementation
+runs it twice on every invocation: `_handle_collect_testdata()` builds a topology with the bare
+client (for the estimate), and `capture_bundle()` immediately builds it *again* through the
+`RecordingPveClient` — two full inventory passes (every VM config, every content listing, every
+status call) on a production API, per capture. The plan's own intent — "derived from the topology
+pass it has already done" — describes passing the first topology (or the recording client) into
+the estimate. Relatedly, manual 26's `--estimate` row reads "Print the estimate above and exit;
+**fetches nothing**": the estimate requires the complete PVE inventory read described above; only
+Prometheus is untouched. An operator reassuring themselves with `--estimate` before touching a
+busy cluster is told something false about what it does to that cluster's API.
+
+**Recommendation:** build the recording client first and derive both the estimate and the capture
+from its one topology pass (the recording client exists to make exactly this reuse safe); until
+then, `--estimate`'s row should say "reads the full PVE inventory (one planning run's worth of
+API calls); fetches nothing from Prometheus". The per-call amplification is bounded and read-only,
+which is why this is Low — but §3.5's call-count formula was just recomputed for W-05, and this
+doubles it again for one command.
+
+### 29.8 X-06 — §2.3's handler-placement text says the opposite of the build, and `--log-level` escapes the mandatory floor
+
+**Severity:** Low
+**Files:** `logging_setup.py:203-205, 219-229`; `IMPLEMENTATION_PLAN.md` §2.3 ("Where the handler
+is attached"); `docs/manual/35-logging.md:53-56`
+
+Two drifts in one subsystem, both defensible builds over stale/aspirational text:
+
+1. §2.3, verbatim: "On the `proxmox_storage_drs` logger, **not the root logger**." The built code
+   attaches its single handler to *root* and puts the run's level on the package logger
+   (`root.handlers = [handler]`, `package.setLevel(level)`, `propagate = True`), with a comment
+   explaining why: handler-on-package plus `propagate = False` was tried and hides records from
+   pytest's `caplog` and from anything embedding the package. The behavioural requirements
+   (third-party loggers stay at `WARNING` under `-v`, raised only by `-vv`; no record emitted
+   twice) are met and tested — but the plan section is banner-marked "Status: implemented", and
+   its one structural instruction is the opposite of the implementation. AGENTS.md §7's rule —
+   plan and code change together, and if the plan was wrong, fix the plan in the same commit —
+   was followed for the three level corrections and the file-sink retraction (both called out in
+   §2.3 itself) but not for this paragraph.
+2. The mandatory `INFO` floor exists because "an unattended timer that silently migrated 400 GiB
+   is not acceptable output regardless of how the unit file was written" (§2.3), and both plan and
+   manual name exactly one escape hatch: `--quiet`. The build grants a second, undocumented one:
+   `configure_logging()` treats *any* explicit `--log-level` as opting out
+   (`explicitly_lowered = quiet or log_level is not None`), so `apply --mode auto --log-level
+   warning` runs unattended with no audit trail, and neither §2.3, `--log-level`'s help text
+   ("Wins over -v and --quiet") nor manual 35 mentions the floor interaction. The code's own
+   docstring documents the choice; nothing operator-facing does.
+
+**Recommendation:** (1) rewrite the placement paragraph to describe the built design (one root
+handler; the package logger carries the level; third-party floors at root do the separation) with
+the caplog/embedding rationale, exactly as §2.3 already does for its other as-built corrections.
+(2) Either let the floor win over `--log-level` values *below* it for `confirm`/`auto` (matching
+the documented "only `--quiet` escapes"), or keep the build and add one sentence to §2.3, the
+`--log-level` help text and manual 35's timer paragraph naming `--log-level error|warning` as the
+second way to discard an `auto` run's only record.
+
+### 29.9 X-07 — `validate_corpus.py` implements one of §16.6's five invariant assertions
+
+**Severity:** Low
+**Files:** `tests/corpus/validate_corpus.py:360-383` (`check_invariants`), `:386-438`
+(`check_milp_vs_heuristic`); plan §16.6
+
+§16.6 presents four kinds of assertion the corpus provides, and the plan's phrasing is that they
+run: "The scrub audit — ... runs on every bundle in the corpus on every `make check`"; "2.
+**Invariants, not optima.** For every bundle and every variant: `Σ r_s = 0` ... §8.1's transient
+predicate holds at every step of the emitted order; every move ... (C2) permits ...; §7.3's
+per-move duration rule and saturation guard hold for every accepted move; the objective the
+scheduler was handed equals the objective recomputed from the final assignment." The built
+`check_invariants()` verifies one thing — that each move's target is in the group's configured
+storage list — which is a weak slice of (C2) and none of the other four. Check 3 as built
+compares `after_spread` (the `8f237ff` fix, an improvement on its own terms) but drops both
+promises the plan still makes around it: "the MILP objective is `≤` the heuristic's" and "both
+MILP backends agree to within the §5.5 tolerance" — no cbc-vs-cpsat comparison exists anywhere.
+
+The pragmatic defence — the replayed pipeline enforces these properties internally, so a
+completing plan already satisfies them — is true and is presumably why nothing caught the gap,
+but it is the wrong shape for a check whose value is catching the *engine's own* drift: an
+`order_moves()` that stopped checking the transient invariant would still produce plans, and
+`validate_corpus.py` would still pass, on every bundle, forever. That is the AGENTS.md §6
+higher-bar class of invariant, and the corpus was sold as the place real data checks it.
+
+**Recommendation:** most of the data is already in `plan --json`'s report — each move entry
+carries `size_bytes`, `duration_mirror_seconds`/`duration_wipe_seconds`, `exceeds_max_duration`
+and the per-move cost, and the `payback` block carries the rejections and deferrals, so the §7.3
+duration/saturation assertions are reconstructible from what the corpus already records per
+variant; Σ r_s and §8.1's per-step transient walk need the *order*, and the objective-recompute
+needs the breakdown, which today only `explain --json` emits — either sweep that too (the corpus
+already runs the identical pipeline) or add the two fields to `plan --json`'s group report. Also
+add the cbc-vs-cpsat `after_spread` agreement check (the §5.5 tolerance only matters for the
+objective, which either path then provides). If some assertions are deliberately out of scope,
+say so in §16.6 the way it already says so for pattern expansion ("a real and deliberate gap
+named here rather than discovered later").
+
+### 29.10 X-08 — three §16 bundle promises that were never built (Low)
+
+**Files:** `collect.py:1268-1270, 1379-1436`; plan §16.1, §16.3
+
+- **The `extra_selector` manifest flag.** §16.3: "`metrics.extra_selector` is rewritten, not
+  carried ... the collector replaces it with the equivalent anonymized node alternation ... and
+  **the manifest flags that it did**. A bundle from a cluster whose selector does something the
+  default tier cannot express is therefore not byte-faithful to its live queries, and says so in
+  the manifest instead of quietly producing a plan from differently-scoped data." The built
+  `config.yaml` sets `extra_selector: null` — functionally the right outcome (the default tier
+  then builds the node alternation from the replayed node list, and the query keys line up) — but
+  the manifest carries no flag, so the one honesty signal the plan promises for a
+  non-node-shaped original selector ("`cluster="prod"`", "`customer="acme"`") does not exist.
+  An author has no way to tell a bundle whose live queries were scoped differently from one whose
+  were not.
+- **PVE and Prometheus version strings.** §16.1's manifest line ("schema, versions, what was
+  captured, what failed, counts") and §16.3's preserved list both include them; nothing in the
+  bundle carries either (the manifest's only version is `generated_by`). They live in
+  `submission.yaml` on the corpus side — which §16.6 does specify — but a bundle sent to the
+  author without a submission file carries no version information at all, and §16.3's claim
+  about the bundle itself is simply untrue as built.
+- **Metric-name canonicalization.** §16.3's per-kind table maps "Metric name" to "canonical
+  `drs_rd_operations`, `drs_wr_bytes`, ..."; the build carries the operator's configured names
+  verbatim everywhere (config, query text, `label_values` captures) — self-consistent, leak-free
+  (the names are the operator's own config, already in `config.yaml`), and arguably better than
+  the table, but the table describes a mapping that does not exist.
+
+**Recommendation:** either build the three (the manifest flag is one line in
+`_anonymized_config_dict`'s caller plus one manifest key; the version strings are two extra
+captured calls — `GET /version` and `/api/v1/status/buildinfo` — both already in the spirit of
+the superset capture) or correct §16.1/§16.3 the way the plan already corrects itself elsewhere
+("as built" notes). What should not stand is a §16 that reads as a description of the shipped
+bundle format while the bundle format silently differs in three places.
+
+### 29.11 X-09 — anonymization small print (Info)
+
+Three independent observations, none worth a finding on its own:
+
+- **32-bit pseudonym truncation has no collision handling outside vmids.** `pseudonym()` returns
+  8 hex chars; only `register_vmids()` probes on collision (it needs to — its range is 899,900).
+  Two storages (or nodes, or groups) hashing to the same 8 hex would silently merge in the
+  bundle: same `storage-content/<node>/<stor>.json` filename, same `groups[].storages[].id`,
+  a topology with one storage where the cluster had two. At ~n²/2³³ this is negligible for real
+  cluster sizes and would fail visibly at replay (impossible sizes) rather than quietly — but a
+  `Mapper.__post_init__`-time collision check across the registered sets costs three lines and
+  turns "negligible" into "impossible".
+- **`counts.dropped_records` undercounts.** §16.3: "it drops the containing record, logs a
+  warning and **counts it in the manifest**." `Mapper.vmid()`/`volume_id()`/`upid()` increment
+  `dropped_records`, but `_anonymize_disk_value()`'s unknown-storage `None` (a whole disk
+  reference dropped from a VM config), `_anonymize_vm_config()`'s dropped disk values, the
+  unknown-node entries pruned from storage-definition `nodes` fields, and
+  `_anonymize_storage_resources()`'/`_anonymize_vm_resources()`' `continue`s never do. The number
+  in the manifest is a lower bound presented as a count.
+- **`--estimate`'s query count understates HTTP requests at the default range.** §16.2's own
+  formula ("the query count is `6 · |groups| · (1 range + 3 instant) + 3 label_values`") treats a
+  7 d range as one query; the same section's day-sized chunking means the collector issues
+  ≈7 range *requests* per (group, metric) at the defaults, plus `verify-metrics`' own extra
+  instant queries and `label_values("__name__")`. The printed "estimated Prometheus queries" is
+  therefore ~5-7× below the request count an operator taxing a busy Prometheus actually cares
+  about, while the sample-point estimate (the one the refusal threshold uses) is exact.
+
+### 29.12 X-10 — assorted rough edges (Info)
+
+- **`--replay` a tarball.** The transport form a bundle actually arrives in (`.tar.gz`, per
+  §16.1) is not the form `--replay` takes: `load_manifest()` reports "not a bundle directory (no
+  manifest.json)" with no hint to unpack, and manual 26 never says to. One sentence in the manual
+  and one clause in the error close it.
+- **`explain`'s "no moves made: the objective is lowest at the current assignment"** is an
+  inference, not a verified fact: it is printed whenever the *final* assignment equals the seed,
+  which also happens when `order_moves()` staged away every proposed move (total deadlock) — in
+  that case the objective was *not* lowest at the current assignment, and the line misattributes
+  the scheduler's decision to the solver. Cheap guard: only print the "objective is lowest"
+  wording when `solve_outcome`'s own breakdown equals the baseline, else name the staging.
+- **`validate_corpus.py`'s skip reason lies in the narrow sweep**: without `--full-matrix`, cpsat
+  is recorded as `"cpsat not installed"` on machines where it *is* installed (it is merely not
+  being swept) — and that string is what the committed `expected.json` files carry. "not swept
+  without --full-matrix" would be true in both cases.
+- **`run_started` (and a `mode_override` WARNING) precede the replay-mode refusal**:
+  `_start_logging_and_announce_run()` runs before `main()` checks `--replay ... --mode auto` and
+  exits 2 — verified live: `--replay <bundle> --mode auto plan` prints a `mode_override` WARNING
+  record to stderr (visible at the default level, since it "escalates") and then refuses to
+  start the run it just announced an escalation for. Cosmetic, but backwards: the refusal should
+  come first.
+
+### 29.13 What this pass confirms
+
+- **The §16 architecture is the right shape, built to the project's standards.** The pure/IO
+  split the plan mandates holds (`anonymize.py` has no I/O beyond the two salt helpers; the
+  collector's recording clients are the only network touch); the allowlist constants are one
+  implementation shared by collector and audit so they cannot drift *where the audit uses them*;
+  the pseudonym construction (kind-separated HMAC, per-host salt, fingerprint instead of salt,
+  `machine-id` explicitly rejected) matches §16.3's cryptanalysis; vmid probing is
+  order-independent by construction and tested for it; and the unmapped-means-dropped rule is
+  followed everywhere it was written down (X-01's `exclude.disks` is the one place the rule was
+  specified and not applied).
+- **The replay design earns its safety claims.** Both replay clients are real subclasses of the
+  clients they replace, with inert transports and a `_NeverSession` whose `get` raises;
+  `move_disk`/`task_status` refuse in the clients *and* `apply`/escalated `--mode` are refused in
+  `main()` *and* collect-testdata refuses `--mode confirm|auto` — three independent layers, each
+  unit-tested, including tests that assert no `requests.Session` is ever constructed on the
+  replay path. A key miss is a loud, named `BundleError` quoting the query and range (§16.5), and
+  the superset-then-trim range design is the right answer to the forecaster-matrix problem.
+- **The eight live-capture fixes are the process working.** Every one is a real bug found by the
+  first capture against a real cluster, fixed with a regression test reproducing it, and each fix
+  is in the direction of failing closed (a device label that is not a device key is dropped; a
+  metric name is never validated as one; the node selector is rebuilt independently rather than
+  text-substituted, precisely because sorting real names and pseudonyms can disagree — the kind
+  of reasoning this review has been endorsing since F-23).
+- **Phase 11's logging policy is built and tested at the policy level, not just the formatter
+  level** — the exact gap §2.3 opens by describing. The clean-run-silence, the unasked-for audit
+  trail on `apply --mode confirm|auto`, `--quiet`'s documented cost, `--log-format auto`'s
+  TTY/pipe split, the `-v`/`-vv` third-party boundary, stream separation under `--json`, the
+  one-fact-one-line error rule, and the ast-walk test that makes the event catalogue an
+  interface are all present as tests. `json_safe()` closes a real RFC 8259 defect (a `+inf`
+  payback ratio on every no-move ACT run) in both output channels at once, with
+  `allow_nan=False` as the tripwire against regression.
+- **The corpus gate is wired where the plan says**: `make check` runs scrub + invariants +
+  MILP-vs-heuristic + regression `--check` over the committed bundles (passing on this tree), the
+  full matrix is `make corpus`'s own target with `DRS_CORPUS_DIR` for outsized bundles, an empty
+  corpus is a clean pass, and the submission-file requirement is enforced (an unattributed
+  directory fails). Both committed bundles are under the 8 MiB ceiling, carry submission files
+  with honest `what_this_reproduces` prose (including naming the bugs they found), and — the
+  detail that makes the corpus credible — the 7-day bundle's own commit history shows it
+  immediately falsifying the `check_milp_vs_heuristic` move-count proxy and getting the
+  after_spread comparison in return.
+- **The documentation range is unusually self-critical**: the quickstart marks its own
+  data-moving steps and says out loud that no repository and no timer unit exist; the new
+  metrics-pipeline page documents the InfluxDB-line-protocol-to-Prometheus type trap that
+  §3.3's cross-metric check exists for, names the tested backend, and marks the OTel path
+  untested; and the manpage's hand-maintained option list — the exact defect class
+  `.agents/documentation.md` forbids — was discharged into the coverage test.
+
+### 29.14 Assessment
+
+This range adds the first genuinely new *subsystem* since the engine was finished, plus its own
+specification (§16, written first), its own test corpus discipline, a re-planned and implemented
+logging policy, and a documentation push that reads like the dogfooding it came from. The
+engineering quality holds at the standard the last five passes established: allowlist-not-denylist
+with a shared implementation, fail-closed on every unmapped value, deterministic writers asserted
+by running the collector twice, replay safety in three independently-tested layers, and eight
+incident fixes each landing with the test that reproduces the incident.
+
+The four Medium findings are all in the new subsystem's *boundary* — the places where the bundle
+meets an operator who configured something (X-01), where the cluster fails mid-capture (X-02),
+where the audit's claims meet its coverage (X-03), and where the release notes meet the code
+(X-04). Three of the four are the same shape at heart: a privacy control whose *written* contract
+is stronger than its *enforced* one. §16.3's governing rule names the right principle — "a field
+reaches the bundle only if `anonymize.py` names it" — and X-01/X-02/X-03 are each a channel that
+rule was not extended to cover (a config list, an exception string, the audit's own scope). The
+fixes are small and local: one dict comprehension, one scrub step, one allowlist wiring, one
+changelog edit. Fix those four and the first bundle a stranger sends is as safe as §16.3 says it
+is; fix X-07's missing assertions too and the corpus checks what the plan has been promising it
+checks all along.
+
+---
+
+## 30. Resolution of fifteenth-pass findings (X-01..X-10)
+
+All ten findings were real. Nine are fixed outright; X-07 is fixed where it could be fixed safely
+and the rest of its promise is retracted, with the reason stated, rather than left standing as an
+unbacked claim or shipped as a check that would have been flaky on the first real bundle to
+exercise it.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| X-01 | Resolved | New `collect._anonymize_exclude_disk_key()` maps the vmid component of an `exclude.disks` entry through `mapper.vmid()` (device passes through unchanged), dropping an entry whose vmid was never registered — the same shape `exclude.vmids` already had. `_anonymized_config_dict()`'s `"disks"` list uses it instead of carrying `exclude.disks` verbatim. |
+| X-02 | Resolved | `collect._redact_free_text()` strips `https?://…` and `host='…'` fragments (replacing the latter with `host='<redacted>'`) before the existing vmid/node/storage substitution — the channel a transport failure's own exception text used to leak an endpoint hostname through. The scrub audit's public-suffix pattern gained `.internal`/`.corp`/`.lan`/`.home`/`.example`/`.test` (the four it had missed `.example`/`.internal`/`.corp` demonstrated live in 29.1) plus a dedicated `host='...'` literal check as a second, independent backstop. |
+| X-03 | Resolved | The scrub audit's key allowlist, previously wired to five top-level `pve/` files only, now covers `vm-config/` (via a new `extra_key_ok` predicate parameter to `_scrub_json_file()`, permitting `topology.DISK_KEY_RE`-matched keys alongside `VM_CONFIG_EXTRA_FIELDS`), `vm-snapshots/`, `vm-status-current/`, `storage-status/`, `storage-content/`, and every `prometheus/instant|range|label-values` file (new `_scrub_prometheus_dir()`: fixed top-level keys per query kind, plus each series' `metric` dict checked against the bundle's own configured label names read from `config.yaml`). `manifest.json`/`findings.json` are documented as governed by `_redact_free_text()` instead of a key allowlist (they are hand-authored bundle metadata, not a captured PVE/Prometheus object shape) rather than silently left unclaimed. |
+| X-04 | Resolved | `debian/changelog`'s unreleased 0.1.1 entry rewritten: the cluster-scoping bullet and the removed-behaviour half of the W-fixes bullet are gone (W-07's `no_series_matched` reporting, which survived section 27's removal, is kept); new bullets added for `collect-testdata`/`--replay`/`support{}`, the corpus, the phase 11 logging policy, `json_safe()`, the cross-metric consistency check, `explain`'s rejected-alternative section, and the quickstart/metrics-pipeline documentation. |
+| X-05 | Resolved | `cli._handle_collect_testdata()` restructured: the bare, unrecorded `build_topology()` call now runs only inside the `--estimate` branch (where a topology is unavoidably needed to size the capture); the ordinary capture path no longer builds one before `collect.capture_bundle()` builds its own, recorded one — one PVE read pass per invocation, not two, as §16.2 states. Manual 26's `--estimate` row and prose corrected to say what it actually reads (the full PVE inventory; Prometheus only is skipped). |
+| X-06 | Resolved | §2.3's "Where the handler is attached" rewritten as an "As built" note describing the real design (one handler on root; the package logger carries the level; the caplog/embedding rationale) instead of a stale instruction the code never followed. `logging_setup.configure_logging()` changed so the mandatory `INFO` floor for `apply --mode confirm/auto` is no longer escaped by an explicit `--log-level` below it — `--quiet` is now the *only* documented escape, matching what §2.3 already said elsewhere; `--log-level`'s CLI help, the manpage entry and manual 35 updated to state the interaction. |
+| X-07 | Partially resolved, rest retracted with reason stated | `check_invariants()` gained two of the promised assertions, reconstructed from data `plan --json` already carries: no accepted move may carry `exceeds_max_duration: true` (§7.3's duration rule), and payback's own `rejected_moves`/`deferred_moves` must never overlap the accepted `moves` (§7.3's saturation guard, structurally). `Σ r_s = 0`, §8.1's per-step transient predicate and the objective-recompute equality remain unchecked — they need the emitted order or the five-term breakdown, which today only `explain --json` emits — and §16.6/the module docstring now say so explicitly instead of implying they run. A first attempt at the MILP-vs-MILP agreement check (comparing `after_spread` against `solver.mip_gap` as a relative tolerance) was built, run against the committed corpus under `--full-matrix`, and **found to be wrong**: it flagged real, legitimate cbc/cpsat disagreement (`mip_gap` bounds the five-term objective, not one derived metric in isolation) as a violation. It was removed rather than shipped, and §16.6/the source both now name this as the same objective-breakdown gap, with the false-positive numbers that falsified the naive approach recorded so the next attempt does not repeat it. |
+| X-08 | Resolved | The manifest gained `capture.extra_selector_rewritten` (set whenever `metrics.extra_selector` was configured — the honesty signal §16.3 promised but never emitted) and `capture.pve_version`/`capture.prometheus_version` (new `PveClient.version()`/`RecordingPveClient.version()`, `PrometheusClient.buildinfo()`, both `None` on a failed call, neither an identifier so neither needs anonymization). §16.3's per-kind table corrected for metric-name canonicalization: the built behaviour (verbatim, self-consistent, leak-free) is now documented as-built rather than as a `drs_*` mapping that was never implemented — building that mapping instead would have made the bundle worse, per the pass's own assessment. |
+| X-09 | Resolved | `Mapper.__post_init__()` now calls a new `_check_no_pseudonym_collision()` over `known_nodes`/`known_storages`, raising `BundleError` on a same-kind collision instead of silently merging two bundle records (vmid collisions were already impossible by construction). `dropped_records` now also counts: `_anonymize_disk_value()`'s unknown-storage drop, an unknown node pruned from a storage definition's `nodes` list, and the unknown-node `continue`s in `_anonymize_storage_resources()`/`_anonymize_vm_resources()` (malformed-API-shape `continue`s, not identifier drops, are deliberately left uncounted). `estimate_capture()`'s `query_count` now multiplies the range-query term by the day-sized chunk count instead of treating a multi-day range as one query, and both the manual's worked example and §16.2's own formula were recomputed to match. |
+| X-10 | Resolved | `replay.load_manifest()` now names `tar -xzf` when the given path ends `.tar.gz`/`.tgz`; manual 26 states the bundle directory (not the tarball) is what `--replay` takes. `cli._render_no_moves_lines()` only prints "the objective is lowest at the current assignment" when `schedule_result.deadlocked` is empty; a total-deadlock case now names the staging failure instead. `validate_corpus.py`'s narrow (non-`--full-matrix`) sweep distinguishes "not installed" from "not swept without --full-matrix" by checking `_available_backends()` independently of which backends the narrow sweep actually runs. `cli.main()`'s `--replay ... --mode auto <cmd>` refusal moved before `_start_logging_and_announce_run()`/`apply_mode_override()`, so nothing is logged before a run that will not start. |
+
+New/updated regression tests: `test_capture_bundle_config_yaml_maps_exclude_disks_vmid`,
+`test_capture_bundle_manifest_scrubs_a_transport_failures_own_hostname`,
+`test_capture_bundle_manifest_flags_an_extra_selector_rewrite`,
+`test_capture_bundle_manifest_carries_pve_and_prometheus_versions` (+ the failed-call case),
+`test_estimate_capture_query_count_accounts_for_day_chunking`,
+`test_anonymize_storage_definitions_counts_a_pruned_unknown_node` and three siblings for the other
+`dropped_records` gaps (`test_collect.py`); `test_node_pseudonym_collision_is_refused` and
+`test_storage_pseudonym_collision_is_refused` (`test_anonymize.py`); `test_version`/
+`test_version_missing_key_is_none` (`test_pve.py`), `test_buildinfo_returns_the_version_string`/
+`test_buildinfo_missing_key_is_none` (`test_metrics.py`);
+`test_handle_collect_testdata_actual_capture_does_not_repeat_the_topology_pass` (`test_cli.py`);
+`test_explicit_log_level_below_the_floor_does_not_escape_it`/
+`test_explicit_log_level_above_the_floor_still_works` (`test_logging_setup.py`);
+`test_render_group_explain_human_names_a_total_deadlock_not_the_objective`,
+`test_main_replay_mode_auto_refusal_precedes_the_run_announcement` (`test_cli.py`);
+`test_load_manifest_names_the_tarball_still_needs_unpacking` (`test_replay.py`); a new
+`tests/unit/test_validate_corpus.py` (skipped outside a full checkout, matching
+`test_documentation.py`'s own pattern) pinning the X-02/X-03 scrub-audit wiring directly, since
+`tests/corpus/validate_corpus.py` is exercised end-to-end but had no unit tests of its own before
+this pass.
+
+Verification: dev venv `python3 -m pytest` — **832 passed**, **96.19% line coverage** (the new
+`collect.py`/`replay.py` branches added by this pass keep both modules above the aggregate floor;
+no per-module floor exists, noted since the fourteenth pass). `make check` clean end to end: fmt,
+lint, typecheck (`mypy src tests tools` — the X-01..X-10 fixes surfaced four pre-existing
+implicit-reexport gaps in test code reaching through a module's own re-imported names, e.g.
+`cli.collect.X`/`vc.anonymize.X`; fixed by importing each name directly rather than chaining
+through it), test-with-coverage, fixtures, corpus-check (scrub audit + invariants +
+MILP-vs-heuristic + regression `--check`, both committed bundles, passing — including under
+`--full-matrix`, which is what surfaced and then falsified the MILP-vs-MILP attempt above), and
+docs-check (`IMPLEMENTATION_PLAN.pdf` rebuilt to 59 pages, the manual PDF to 46, the manpage
+regenerated; `docs/internals/*` unchanged, since nothing this pass touched was already documented
+incorrectly there).
 
 ---
 

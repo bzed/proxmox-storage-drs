@@ -213,7 +213,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--log-level",
         choices=LOG_LEVELS,
         default=None,
-        help="Set the log level explicitly. Wins over -v and --quiet.",
+        help=(
+            "Set the log level explicitly. Wins over -v and --quiet, except that on an "
+            "'auto'/'confirm' apply run a level below the mandatory audit-trail floor "
+            "(info) is raised back up to it -- --quiet is the only way to discard that "
+            "record."
+        ),
     )
     parser.add_argument(
         "--log-format",
@@ -1427,12 +1432,26 @@ def _objective_breakdown_json(breakdown: ObjectiveBreakdown) -> dict[str, float]
 def _render_no_moves_lines(
     group: Group, group_plan: "_GroupPlan", objective: ObjectiveConfig, min_free_bytes: int
 ) -> list[str]:
-    """Only called when the gate decided to ACT but the solver's optimal
-    assignment moves nothing -- an operator reading `plan`'s one-line
-    verdict has no way to tell that apart from "the solver didn't try"
-    without this. Shows the single-disk move closest to being worth taking
-    and the term-by-term arithmetic that rejected it (section 5.4)."""
+    """Only called when the gate decided to ACT but the *final* assignment
+    moves nothing -- an operator reading `plan`'s one-line verdict has no
+    way to tell that apart from "the solver didn't try" without this.
+    Shows the single-disk move closest to being worth taking and the
+    term-by-term arithmetic that rejected it (section 5.4).
+
+    X-10: a final assignment equal to the seed also happens when
+    `order_moves()` staged away every move the solver *did* propose (total
+    deadlock, `schedule_result.deadlocked` non-empty) -- there the
+    objective was not lowest at the current assignment at all; the
+    scheduler just could not reach anything else safely. The wording below
+    only claims "objective is lowest" when nothing was deadlocked."""
     assert group_plan.group_load is not None and group_plan.final_breakdown is not None
+    deadlocked_count = (
+        len(group_plan.schedule_result.deadlocked) if group_plan.schedule_result else 0
+    )
+    deadlock_headline = (
+        f"  no moves made: every proposed move was staged away by the scheduler "
+        f"({deadlocked_count} deadlocked) -- not because the objective is lowest doing nothing"
+    )
     candidate = best_single_disk_alternative(
         group,
         group_plan.group_load.load_by_disk_key(),
@@ -1442,13 +1461,20 @@ def _render_no_moves_lines(
         group_plan.final_breakdown,
     )
     if candidate is None:
+        if deadlocked_count:
+            return [deadlock_headline]
         return [
             "  no moves made: no alternative exists to compare against "
             "(every disk is pinned, or the group has only one storage)"
         ]
+    headline = (
+        deadlock_headline
+        if deadlocked_count
+        else "  no moves made: the objective is lowest at the current assignment"
+    )
     b, c = candidate.baseline, candidate.breakdown
     return [
-        "  no moves made: the objective is lowest at the current assignment",
+        headline,
         f"  closest alternative: {candidate.disk_key} {candidate.from_storage} → "
         f"{candidate.to_storage}",
         "    "
@@ -3313,22 +3339,28 @@ def _handle_collect_testdata(resolved: ResolvedConfig, args: argparse.Namespace,
     live cluster and is refused outright under ``--replay`` (``main()``)."""
     del mode
     client = build_pve_client(resolved.config.proxmox)
-    topology = build_topology(client, resolved.config)
-
-    range_seconds = (
-        parse_duration_seconds(args.range)
-        if args.range
-        else collect.capture_range_seconds(resolved.config, None)
-    )
     step_seconds = parse_duration_seconds(args.step) if args.step else None
-    estimate = collect.estimate_capture(
-        topology,
-        resolved.config,
-        range_seconds=range_seconds,
-        step_seconds=step_seconds or resolved.config.metrics.step_seconds,
-        no_series=args.no_series,
-    )
+
     if args.estimate:
+        # estimate_capture() needs a topology, which needs the full PVE
+        # inventory read (every VM config, every content listing, every
+        # status call) -- there is no cheaper way to size a capture, so
+        # this is genuinely one read pass, not a fetch-nothing preview
+        # (X-05; docs/manual/26-collect-testdata-and-replay.md's
+        # --estimate row says so).
+        topology = build_topology(client, resolved.config)
+        range_seconds = (
+            parse_duration_seconds(args.range)
+            if args.range
+            else collect.capture_range_seconds(resolved.config, None)
+        )
+        estimate = collect.estimate_capture(
+            topology,
+            resolved.config,
+            range_seconds=range_seconds,
+            step_seconds=step_seconds or resolved.config.metrics.step_seconds,
+            no_series=args.no_series,
+        )
         if args.json:
             print(
                 _dump_report_json(
@@ -3347,6 +3379,13 @@ def _handle_collect_testdata(resolved: ResolvedConfig, args: argparse.Namespace,
             print(_render_collect_testdata_human(estimate, resolved.config))
         return 0
 
+    # Not --estimate: capture_bundle() below builds its own topology
+    # through the *recording* client (so the read pass is captured into
+    # the bundle) and runs the identical estimate/refusal check itself
+    # before issuing a single Prometheus query. Building a second, bare
+    # topology here first used to cost the cluster's API a second full
+    # inventory read for nothing -- section 16.2's "one planning run's
+    # worth of API calls, not a multiple of it" (X-05, fixed).
     prom_client = PrometheusClient(resolved.config.prometheus)
     options = collect.CaptureOptions(
         output_dir=args.output or resolved.config.support.bundle_dir,
@@ -3447,19 +3486,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     configured_mode = resolved.config.execution.mode
+    # X-10: this refusal used to run *after* `_start_logging_and_announce_run()`
+    # and `apply_mode_override()`, so `--replay ... --mode auto <cmd>` printed
+    # `run_started` and an escalating `mode_override` WARNING -- announcing a
+    # run it was about to refuse to start. Computed here, before either logs
+    # a thing, from the same `args.mode or configured_mode` rule
+    # `apply_mode_override()` itself applies -- no log call yet, so nothing to
+    # reorder around.
+    intended_effective_mode = args.mode if args.mode is not None else configured_mode
+    if args.replay and intended_effective_mode != "dry-run":
+        print(
+            f"pve-storage-drs: --replay only ever runs dry-run; refusing effective mode "
+            f"{intended_effective_mode!r} (section 16.5)",
+            file=sys.stderr,
+        )
+        return 2
+
     log_format = _start_logging_and_announce_run(args, resolved, configured_mode)
 
     started_at = time.monotonic()
     effective_mode = configured_mode
     if args.mode is not None:
         effective_mode = apply_mode_override(configured_mode, args.mode)
-    if args.replay and effective_mode != "dry-run":
-        print(
-            f"pve-storage-drs: --replay only ever runs dry-run; refusing effective mode "
-            f"{effective_mode!r} (section 16.5)",
-            file=sys.stderr,
-        )
-        return 2
 
     args.run_stats = _RunStats()
     handler = _COMMAND_HANDLERS[args.command]

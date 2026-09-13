@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Regression pins for the X-02/X-03 fixes to `tests/corpus/validate_corpus.py`'s
+scrub audit: the per-file key allowlist used to apply to five top-level
+`pve/` files only, and the hostname value-pattern check missed a
+`.example`/`.internal`/`.corp`/`.lan` suffix and an unredacted `host='...'`
+transport-failure literal. See REVIEW.md section 29 (X-02, X-03).
+
+`tests/corpus/` sits beside, not inside, the installed package (like
+`config/`/`man/`/`docs/` -- `.agents/packaging.md`), so this module is
+skipped when it is not present (Debian's isolated `dh_auto_test` copy)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from proxmox_storage_drs import anonymize
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+VALIDATE_CORPUS_SRC = REPO_ROOT / "tests" / "corpus" / "validate_corpus.py"
+
+needs_full_checkout = pytest.mark.skipif(
+    not VALIDATE_CORPUS_SRC.is_file(),
+    reason="needs the full source checkout (tests/corpus/), not just the installed package",
+)
+
+if VALIDATE_CORPUS_SRC.is_file():
+    from tests.corpus import validate_corpus as vc
+
+
+@needs_full_checkout
+def test_scrub_json_file_flags_a_key_not_in_the_allowlist(tmp_path: Path) -> None:
+    path = tmp_path / "storage-status.json"
+    path.write_text(json.dumps({"total": 1, "used": 1, "path": "/dev/sdb"}), encoding="utf-8")
+    violations = vc._scrub_json_file(path, anonymize.STORAGE_STATUS_FIELDS)
+    assert any("path" in v for v in violations)
+
+
+@needs_full_checkout
+def test_scrub_json_file_extra_key_ok_permits_a_disk_key(tmp_path: Path) -> None:
+    path = tmp_path / "vm-config.json"
+    path.write_text(json.dumps({"lock": "backup", "scsi0": "stor-aaaaaaaa:vm-101-disk-0"}), "utf-8")
+    violations = vc._scrub_json_file(path, anonymize.VM_CONFIG_EXTRA_FIELDS, vc._is_disk_config_key)
+    assert violations == []
+
+
+@needs_full_checkout
+def test_scrub_json_file_extra_key_ok_still_flags_a_non_disk_key(tmp_path: Path) -> None:
+    path = tmp_path / "vm-config.json"
+    path.write_text(json.dumps({"lock": "backup", "sshkeys": "ssh-rsa AAAA..."}), encoding="utf-8")
+    violations = vc._scrub_json_file(path, anonymize.VM_CONFIG_EXTRA_FIELDS, vc._is_disk_config_key)
+    assert any("sshkeys" in v for v in violations)
+
+
+@needs_full_checkout
+def test_scrub_pve_dir_now_checks_vm_snapshots_storage_content_and_status(
+    tmp_path: Path,
+) -> None:
+    """X-03: before the fix, every one of these four subdirectories got
+    the value-pattern pass only -- a leaked extra key went undetected."""
+    pve_dir = tmp_path / "pve"
+    (pve_dir / "vm-snapshots").mkdir(parents=True)
+    (pve_dir / "vm-snapshots" / "101.json").write_text(
+        json.dumps([{"name": "current", "description": "prod db, do not touch"}]),
+        encoding="utf-8",
+    )
+    (pve_dir / "vm-status-current").mkdir(parents=True)
+    (pve_dir / "vm-status-current" / "101.json").write_text(
+        json.dumps({"lock": None, "pid": 12345}), encoding="utf-8"
+    )
+    (pve_dir / "storage-content" / "node-aaaaaaaa").mkdir(parents=True)
+    (pve_dir / "storage-content" / "node-aaaaaaaa" / "stor-bbbbbbbb.json").write_text(
+        json.dumps([{"volid": "x", "vmid": 1, "size": 1, "notes": "leaked"}]), encoding="utf-8"
+    )
+    (pve_dir / "storage-status" / "node-aaaaaaaa").mkdir(parents=True)
+    (pve_dir / "storage-status" / "node-aaaaaaaa" / "stor-bbbbbbbb.json").write_text(
+        json.dumps({"total": 1, "used": 1, "path": "/dev/sdb"}), encoding="utf-8"
+    )
+    violations = vc._scrub_pve_dir(pve_dir)
+    joined = "\n".join(violations)
+    assert "description" in joined
+    assert "pid" in joined
+    assert "notes" in joined
+    assert "path" in joined
+
+
+@needs_full_checkout
+def test_scrub_prometheus_dir_flags_a_metric_label_outside_the_configured_set(
+    tmp_path: Path,
+) -> None:
+    """X-03: `prometheus/` files previously got the value-pattern pass
+    only -- a `metric` dict carrying a label outside the bundle's own
+    `metrics.labels` set (e.g. a future edit that stops filtering) went
+    undetected."""
+    bundle_dir = tmp_path / "bundle"
+    (bundle_dir / "prometheus" / "instant").mkdir(parents=True)
+    (bundle_dir / "prometheus" / "instant" / "q1.json").write_text(
+        json.dumps(
+            {
+                "query": "blockstat_rd_operations",
+                "result": [
+                    {
+                        "metric": {"vmid": "101", "instance": "scsi0", "nodename": "leak"},
+                        "value": [0, "1"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = bundle_dir / "config.yaml"
+    config_path.write_text(
+        "metrics:\n  labels:\n    vmid: vmid\n    device: instance\n    node: nodename\n",
+        encoding="utf-8",
+    )
+    violations = vc._scrub_prometheus_dir(bundle_dir / "prometheus", config_path)
+    assert violations == []  # "nodename" IS the configured node label -- clean
+
+    # Now the bundle's own config renames the node label; the captured
+    # file above still carries the old one, which must now be flagged.
+    config_path.write_text(
+        "metrics:\n  labels:\n    vmid: vmid\n    device: instance\n    node: host\n",
+        encoding="utf-8",
+    )
+    violations = vc._scrub_prometheus_dir(bundle_dir / "prometheus", config_path)
+    assert any("nodename" in v for v in violations)
+
+
+@needs_full_checkout
+def test_check_value_patterns_flags_internal_corp_and_lan_hostnames() -> None:
+    """X-02: reproduced in 29.1 -- a `.example`/`.internal`/`.corp`/`.lan`
+    host passed every value check before this fix."""
+    # A real pseudonymized FQDN (Mapper.node()'s own "node-<8hex>.<8hex>
+    # .invalid" shape) must NOT be flagged.
+    assert vc._check_value_patterns("p", "node-1a2b3c4d.5e6f7a8b.invalid", "detail") == []
+    for host in (
+        "prometheus.corp",
+        "pve01.internal",
+        "backup.lan",
+        "db.example",
+    ):
+        assert vc._check_value_patterns("p", f"connecting to {host} failed", "detail")
+
+
+@needs_full_checkout
+def test_check_value_patterns_flags_an_unredacted_transport_host_literal() -> None:
+    text = "HTTPSConnectionPool(host='pve01.corp', port=8006): Max retries exceeded"
+    assert vc._check_value_patterns("p", text, "detail")
