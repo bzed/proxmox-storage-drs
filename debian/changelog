@@ -1,3 +1,26 @@
+pve-storage-drs (0.1.2) trixie; urgency=medium
+
+  * REVIEW.md sixteenth-pass fixes (findings Y-01..Y-07), verifying the
+    fifteenth pass's own X-01..X-10 fixes: a diagnostic bundle's
+    `manifest.json` no longer risks a mangled PVE/Prometheus version string
+    (the vmid-redaction pass could rewrite a digit run inside it, e.g.
+    `pve-manager/8.2.11` with vmid 11 registered); the corpus scrub audit's
+    own backstop for an unredacted transport-failure hostname no longer
+    flags the collector's *correctly* redacted `host='<redacted>'`
+    sentinel, which would otherwise have failed the corpus gate on the
+    first real bundle to hit a connection blip; and the corpus's narrow
+    sweep now reports a skipped solver backend as "not swept without
+    --full-matrix" unconditionally, rather than a label that depended on
+    whether the CI/build environment happened to have that solver
+    installed. Three documentation corrections: the collect-testdata
+    worked example's sample-points figure, IMPLEMENTATION_PLAN.md section
+    16.6's regression-file field list, and its estimate-printing claim, all
+    brought in line with as-built behaviour.
+  * README.md gains an AI-disclaimer section, naming the models used for
+    planning, implementation and automated review.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Sun, 13 Sep 2026 19:31:16 +0200
+
 pve-storage-drs (0.1.1) trixie; urgency=medium
 
   * Disk-size resolution (topology.py) fixed against three live-cluster

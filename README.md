@@ -453,3 +453,13 @@ Test data is a contribution in its own right — see
 GNU Affero General Public License v3.0 or later — see [`LICENSE`](LICENSE).
 
 Copyright © 2026 Bernd Zeimetz <bernd@bzed.de>
+
+## AI disclaimer
+
+This project was built with AI assistance at every stage. Planning and architecture — including
+`IMPLEMENTATION_PLAN.md` itself — were done with Anthropic's
+[Claude Opus 5](https://www.anthropic.com/claude), and the code, tests and documentation were
+written with Anthropic's [Claude Sonnet 5](https://www.anthropic.com/claude). The result went
+through two independent rounds of review: one by a human maintainer, and one by
+[Z.ai](https://z.ai)'s GLM 5.3 model acting as a second, automated reviewer. `REVIEW.md` is the
+standing record of both.
