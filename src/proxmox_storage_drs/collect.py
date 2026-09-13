@@ -1495,10 +1495,17 @@ def _build_manifest(
             # X-08: not identifiers, carried verbatim (section 16.1/16.3).
             # `None` when the version call itself failed or the response
             # had no `version` key -- see the `calls` log below for why.
-            "pve_version": _redact_free_text(pve_version, mapper) if pve_version else None,
-            "prometheus_version": (
-                _redact_free_text(prometheus_version, mapper) if prometheus_version else None
-            ),
+            # Y-06: deliberately *not* run through `_redact_free_text()` --
+            # that helper's registered-vmid substitution matches any whole
+            # digit run, so a version string like `pve-manager/9.2.11` with
+            # vmid 11 registered would silently come out as
+            # `pve-manager/9.2.<pseudonym>`, a wrong value, not a leak (the
+            # wrong direction to be wrong in for a provenance field). A
+            # machine-generated version string contains no vmids, node
+            # names or storage names to begin with, so the substitution
+            # buys nothing and only risks corrupting it.
+            "pve_version": pve_version,
+            "prometheus_version": prometheus_version,
             # X-08: config.yaml's own extra_selector is always rewritten to
             # the default tier's equivalent, never carried verbatim
             # (section 16.3) -- for a selector that does something the

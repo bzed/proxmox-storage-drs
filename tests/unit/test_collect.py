@@ -561,6 +561,38 @@ def test_capture_bundle_manifest_carries_pve_and_prometheus_versions(tmp_path: P
     assert bundle.manifest["capture"]["prometheus_version"] == "2.45.0"
 
 
+def test_capture_bundle_manifest_version_is_not_mangled_by_vmid_redaction(tmp_path: Path) -> None:
+    """Y-06: the manifest's version fields are machine-generated provenance,
+    not free text -- routing them through ``_redact_free_text()`` used to
+    rewrite any digit run matching a registered vmid, so with vmid 101
+    registered a real ``"pve-manager/8.2.101"`` string came out as
+    ``"pve-manager/8.2.<pseudonym>"``, a silently wrong value in a field
+    whose whole purpose is honest provenance."""
+    api = fake_api(
+        {
+            "cluster/resources": lambda type: (VM_RESOURCES if type == "vm" else STORAGE_RESOURCES),
+            "storage": STORAGE_DEFS,
+            "nodes": [{"node": "node1"}],
+            "cluster/tasks": [],
+            "nodes/node1/storage/san-a/status": STORAGE_STATUS["san-a"],
+            "nodes/node1/storage/san-b/status": STORAGE_STATUS["san-b"],
+            "nodes/node1/storage/san-a/content": CONTENT_SAN_A,
+            "nodes/node1/storage/san-b/content": CONTENT_SAN_B,
+            "nodes/node1/qemu/101/config": VM_CONFIGS[101],
+            "nodes/node1/qemu/101/snapshot": VM_SNAPSHOTS[101],
+            "nodes/node1/qemu/101/status/current": {},
+            "version": {"version": "pve-manager/8.2.101"},
+        }
+    )
+    client = PveClient(api)
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    bundle = collect.capture_bundle(
+        client, make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    assert bundle.manifest["capture"]["pve_version"] == "pve-manager/8.2.101"
+
+
 def test_capture_bundle_manifest_flags_an_extra_selector_rewrite(tmp_path: Path) -> None:
     """X-08: section 16.3 promises the manifest "flags" a non-node-shaped
     `metrics.extra_selector` being rewritten to the default tier's own

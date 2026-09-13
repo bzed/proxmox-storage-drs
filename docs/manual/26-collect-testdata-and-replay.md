@@ -34,7 +34,7 @@ pve-storage-drs -c /etc/pve/drs.yaml collect-testdata --estimate
 groups: 2   disks: 47
 range: 7d  step: 5m
 estimated Prometheus queries: 117
-estimated series sample points: 573104
+estimated series sample points: 568512
 ```
 
 (The query count includes the day-sized chunking `--estimate` itself performs at capture time — 7
