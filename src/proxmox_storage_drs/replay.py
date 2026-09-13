@@ -47,7 +47,17 @@ from proxmox_storage_drs.pve import PveClient
 def load_manifest(bundle_dir: str | Path) -> dict[str, Any]:
     path = Path(bundle_dir) / "manifest.json"
     if not path.is_file():
-        raise BundleError(f"{bundle_dir}: not a bundle directory (no manifest.json)")
+        # X-10: a bundle is transported as `write_tarball()`'s own
+        # `.tar.gz` (section 16.1) -- the form `--replay` cannot take
+        # directly -- so name that explicitly rather than leaving an
+        # operator to guess why an apparently-real bundle path has no
+        # manifest.json.
+        hint = (
+            f" -- unpack it first: tar -xzf {bundle_dir}"
+            if str(bundle_dir).endswith((".tar.gz", ".tgz"))
+            else ""
+        )
+        raise BundleError(f"{bundle_dir}: not a bundle directory (no manifest.json){hint}")
     try:
         manifest: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:

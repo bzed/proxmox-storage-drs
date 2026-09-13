@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from proxmox_storage_drs import anonymize as a
+from proxmox_storage_drs.exceptions import BundleError
 
 SALT_A = b"a" * 32
 SALT_B = b"b" * 32
@@ -189,6 +190,38 @@ def test_vmid_collision_is_resolved_by_linear_probing(monkeypatch: pytest.Monkey
     mapper.register_vmids([1, 2])
     assert mapper.vmid(1) == 100 + 500
     assert mapper.vmid(2) == 100 + 501  # probed to the next free slot
+
+
+def test_node_pseudonym_collision_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """X-09: `vmid`'s own linear probing makes a collision impossible, but
+    nothing did the equivalent for node/storage names -- two of them
+    hashing to the same 8-hex pseudonym would otherwise silently merge
+    into one record in the bundle (same file name, same
+    `groups[].storages[].id`). Refused loudly at `Mapper` construction
+    instead."""
+    real_pseudonym = a.pseudonym
+
+    def colliding_pseudonym(salt: bytes, kind: str, value: str) -> str:
+        if kind == "node":
+            return "deadbeef"
+        return real_pseudonym(salt, kind, value)
+
+    monkeypatch.setattr(a, "pseudonym", colliding_pseudonym)
+    with pytest.raises(BundleError, match="anonymization collision"):
+        make_mapper(nodes=frozenset({"pve01", "pve02"}))
+
+
+def test_storage_pseudonym_collision_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_pseudonym = a.pseudonym
+
+    def colliding_pseudonym(salt: bytes, kind: str, value: str) -> str:
+        if kind == "storage":
+            return "deadbeef"
+        return real_pseudonym(salt, kind, value)
+
+    monkeypatch.setattr(a, "pseudonym", colliding_pseudonym)
+    with pytest.raises(BundleError, match="anonymization collision"):
+        make_mapper(storages=frozenset({"san-a", "san-b"}))
 
 
 # ----------------------------------------------------------------- node/tag

@@ -131,8 +131,9 @@ Global options are accepted before the command.
   is the only record of what that run moved -- prefer the default over **--quiet** under a timer.
 
 **--log-level** *error|warning|info|debug*
-: Set the log level explicitly. Wins over both **-v** and **--quiet**, including over the mandatory
-  audit trail an **apply** run in **confirm**/**auto** mode otherwise emits.
+: Set the log level explicitly. Wins over both **-v** and **--quiet** -- except that on an
+  **apply** run in **confirm**/**auto** mode, a level below the mandatory audit-trail floor
+  (**info**) is raised back up to it. **--quiet** is the only way to discard that record.
 
 **--log-format** *auto|text|json*
 : **auto** (the default) writes human-readable text when stderr is a terminal and one JSON object

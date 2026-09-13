@@ -24,6 +24,7 @@ from proxmox_storage_drs import config as config_module
 from proxmox_storage_drs.exceptions import BundleError, PveApiError
 from proxmox_storage_drs.metrics import PrometheusClient
 from proxmox_storage_drs.pve import PveClient
+from proxmox_storage_drs.topology import build_topology
 from tests.unit.fakes import FakePrometheusSession, fake_api
 
 CAPTURE_NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)  # an arbitrary Tuesday noon
@@ -76,7 +77,9 @@ def make_config(tmp_path: Path, **overrides: Any) -> config_module.ResolvedConfi
     return config_module.load_config(str(path), env={})
 
 
-def make_pve_client(error_on: str | None = None) -> PveClient:
+def make_pve_client(
+    error_on: str | None = None, error_message: str = "simulated failure"
+) -> PveClient:
     responses: dict[str, Any] = {
         "cluster/resources": lambda type: (VM_RESOURCES if type == "vm" else STORAGE_RESOURCES),
         "storage": STORAGE_DEFS,
@@ -89,8 +92,9 @@ def make_pve_client(error_on: str | None = None) -> PveClient:
         "nodes/node1/qemu/101/config": VM_CONFIGS[101],
         "nodes/node1/qemu/101/snapshot": VM_SNAPSHOTS[101],
         "nodes/node1/qemu/101/status/current": {},
+        "version": {"version": "8.2.1"},
     }
-    error = PveApiError("simulated failure") if error_on else None
+    error = PveApiError(error_message) if error_on else None
     api = fake_api(responses, error=None)
     client = PveClient(api)
     if error_on:
@@ -167,6 +171,7 @@ def make_prometheus_client() -> PrometheusClient:
             "label/nodename/values": ["node1"],
             "api/v1/query_range": _range_answer,
             "api/v1/query": _instant_answer,
+            "api/v1/status/buildinfo": {"version": "2.45.0"},
         }
     )
     return PrometheusClient(config_module.PrometheusConfig(url="http://localhost:9090"), session)
@@ -200,6 +205,35 @@ def test_capture_range_seconds_auto_is_the_union_maximum(tmp_path: Path) -> None
 def test_capture_range_seconds_override_wins(tmp_path: Path) -> None:
     resolved = make_config(tmp_path)
     assert collect.capture_range_seconds(resolved.config, 3600.0) == 3600.0
+
+
+def test_estimate_capture_query_count_accounts_for_day_chunking(tmp_path: Path) -> None:
+    """X-09: the printed query count used to treat a multi-day range as one
+    range query per (group, metric); the collector actually issues one HTTP
+    request per day-sized chunk (`_issue_range_chunks`), so the 7 d default
+    was really ~7x more range requests than the estimate said."""
+    resolved = make_config(tmp_path)
+    topology = build_topology(make_pve_client(), resolved.config)
+    one_day = 86400.0
+    seven_days = 7 * one_day
+    estimate_1d = collect.estimate_capture(
+        topology, resolved.config, range_seconds=one_day, step_seconds=300.0, no_series=False
+    )
+    estimate_7d = collect.estimate_capture(
+        topology, resolved.config, range_seconds=seven_days, step_seconds=300.0, no_series=False
+    )
+    # One group, six raw metrics: each extra day of range adds one more
+    # chunked range request per metric.
+    assert estimate_7d.query_count - estimate_1d.query_count == 6 * 6
+    # --no-series never issues a range query at all, chunked or not -- its
+    # query count is unaffected by the range.
+    estimate_no_series_1d = collect.estimate_capture(
+        topology, resolved.config, range_seconds=one_day, step_seconds=300.0, no_series=True
+    )
+    estimate_no_series_7d = collect.estimate_capture(
+        topology, resolved.config, range_seconds=seven_days, step_seconds=300.0, no_series=True
+    )
+    assert estimate_no_series_1d.query_count == estimate_no_series_7d.query_count
 
 
 # ----------------------------------------------------------------------- capture
@@ -285,6 +319,37 @@ def test_capture_bundle_manifest_call_log_is_anonymized(tmp_path: Path) -> None:
     assert any("stor-" in d for d in descriptions)
 
 
+def test_capture_bundle_manifest_scrubs_a_transport_failures_own_hostname(
+    tmp_path: Path,
+) -> None:
+    """X-02: a transport-level failure's own exception text embeds the
+    *configured* endpoint (`requests`' own `HTTPSConnectionPool(host=
+    '<endpoint>', ...)` framing) -- exactly the identifier section 16.3
+    drops `proxmox.host`/`prometheus.url` from config.yaml to avoid, and
+    node/storage substitution alone does not catch it (a `.example`/
+    `.internal`/`.corp` domain shares no substring with any known node or
+    storage name). Reproduced with the same shape a live DNS/connection
+    failure actually produces."""
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    client = make_pve_client(
+        error_on="cluster/tasks",
+        error_message=(
+            "cluster/tasks: request failed: HTTPSConnectionPool("
+            "host='pve01.internal.example.invalid', port=8006): "
+            "Max retries exceeded with url: /api2/json/cluster/tasks"
+        ),
+    )
+    bundle = collect.capture_bundle(
+        client, make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    manifest_text = json.dumps(bundle.manifest)
+    assert "pve01.internal.example.invalid" not in manifest_text
+    failed = [c for c in bundle.manifest["calls"] if c["outcome"] == "http_error"]
+    assert failed
+    assert any("host='<redacted>'" in str(c["detail"]) for c in failed)
+
+
 def test_capture_bundle_config_yaml_drops_credentials(tmp_path: Path) -> None:
     bundle = capture(tmp_path)
     assert "host" not in bundle.config_yaml["proxmox"]
@@ -308,6 +373,25 @@ def test_capture_bundle_config_yaml_expands_storage_patterns(tmp_path: Path) -> 
     storages = bundle.config_yaml["groups"][0]["storages"]
     assert len(storages) == 2  # san-a, san-b both matched the pattern
     assert all(s["id"].startswith("stor-") for s in storages)
+
+
+def test_capture_bundle_config_yaml_maps_exclude_disks_vmid(tmp_path: Path) -> None:
+    """X-01: `exclude.disks` entries are `"vmid:device"` (section 16.3's own
+    per-kind table lists it among the identifiers that must move with the
+    mapping) -- a verbatim carry leaks the real vmid into the one file the
+    manual tells an operator to read before sending, and silently stops
+    matching anything at replay, since replayed disk keys are built from
+    pseudonymized vmids (topology.py's `f"{vmid}:{device}"`)."""
+    bundle = capture(tmp_path, exclude={"disks": ["101:scsi0", "999:scsi1", "not-a-vmid:scsi2"]})
+    assert bundle.ok
+    disks = bundle.config_yaml["exclude"]["disks"]
+    # 101 was registered (it is the one VM in the fixture topology); 999 was
+    # never seen and is dropped, per the "unmapped means dropped" rule.
+    assert len(disks) == 1
+    new_vmid, _, device = disks[0].partition(":")
+    assert device == "scsi0"
+    assert new_vmid != "101"  # the real vmid never reaches the bundle
+    assert new_vmid.isdigit()
 
 
 def test_capture_bundle_prometheus_series_vmid_is_remapped(tmp_path: Path) -> None:
@@ -468,6 +552,37 @@ def test_capture_bundle_manifest_never_carries_real_date(tmp_path: Path) -> None
     assert "synthetic_now_epoch" in bundle.manifest["capture"]
 
 
+def test_capture_bundle_manifest_carries_pve_and_prometheus_versions(tmp_path: Path) -> None:
+    """X-08: section 16.1's manifest line ("schema, versions, what was
+    captured...") and section 16.3's preserved list both promise PVE and
+    Prometheus version strings; neither was ever captured."""
+    bundle = capture(tmp_path)
+    assert bundle.manifest["capture"]["pve_version"] == "8.2.1"
+    assert bundle.manifest["capture"]["prometheus_version"] == "2.45.0"
+
+
+def test_capture_bundle_manifest_flags_an_extra_selector_rewrite(tmp_path: Path) -> None:
+    """X-08: section 16.3 promises the manifest "flags" a non-node-shaped
+    `metrics.extra_selector` being rewritten to the default tier's own
+    equivalent -- the one honesty signal for a bundle whose live queries
+    were scoped differently from what it replays."""
+    default_bundle = capture(tmp_path)
+    assert default_bundle.manifest["capture"]["extra_selector_rewritten"] is False
+
+    custom_bundle = capture(tmp_path / "custom", metrics={"extra_selector": 'cluster="prod"'})
+    assert custom_bundle.manifest["capture"]["extra_selector_rewritten"] is True
+
+
+def test_capture_bundle_manifest_version_is_none_on_a_failed_call(tmp_path: Path) -> None:
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    client = make_pve_client(error_on="version")
+    bundle = collect.capture_bundle(
+        client, make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    assert bundle.manifest["capture"]["pve_version"] is None
+
+
 # --------------------------------------------------------------------- writer
 
 
@@ -574,3 +689,53 @@ def test_anonymize_query_text_is_a_noop_with_no_known_rate_expression() -> None:
     mapper = anonymize.Mapper(salt=b"x" * 32, capture_start_epoch=CAPTURE_NOW.timestamp())
     query = "blockstat_rd_operations"
     assert collect._anonymize_query_text(query, mapper, {}) == query
+
+
+# ------------------------------------------------------- dropped_records (X-09)
+
+
+def _mapper(
+    nodes: frozenset[str] = frozenset(), storages: frozenset[str] = frozenset()
+) -> anonymize.Mapper:
+    return anonymize.Mapper(
+        salt=b"x" * 32,
+        capture_start_epoch=CAPTURE_NOW.timestamp(),
+        known_nodes=nodes,
+        known_storages=storages,
+    )
+
+
+def test_anonymize_storage_definitions_counts_a_pruned_unknown_node() -> None:
+    """X-09: `manifest.json`'s `counts.dropped_records` is documented as
+    counting every dropped identifier (section 16.3); an unknown node
+    silently pruned from a storage definition's `nodes` list was not."""
+    mapper = _mapper(nodes=frozenset({"pve01"}), storages=frozenset({"san-a"}))
+    out = collect._anonymize_storage_definitions(
+        [{"storage": "san-a", "type": "rbd", "nodes": "pve01,pve-unknown"}], mapper
+    )
+    assert out[0]["nodes"] == mapper.node("pve01")
+    assert mapper.dropped_records == 1
+
+
+def test_anonymize_storage_resources_counts_an_unknown_node() -> None:
+    mapper = _mapper(nodes=frozenset(), storages=frozenset({"san-a"}))
+    out = collect._anonymize_storage_resources(
+        [{"storage": "san-a", "status": "available", "node": "pve-unknown"}], mapper
+    )
+    assert out == []
+    assert mapper.dropped_records == 1
+
+
+def test_anonymize_vm_resources_counts_an_unknown_node() -> None:
+    mapper = _mapper(nodes=frozenset(), storages=frozenset())
+    out = collect._anonymize_vm_resources(
+        [{"vmid": 101, "node": "pve-unknown", "status": "running", "type": "qemu"}], mapper
+    )
+    assert out == []
+    assert mapper.dropped_records == 1
+
+
+def test_anonymize_disk_value_counts_an_unknown_storage() -> None:
+    mapper = _mapper(nodes=frozenset(), storages=frozenset())
+    assert collect._anonymize_disk_value("san-unknown:vm-101-disk-0,size=10G", mapper) is None
+    assert mapper.dropped_records == 1

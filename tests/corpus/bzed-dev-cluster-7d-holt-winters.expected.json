@@ -282,7 +282,7 @@
     },
     {
       "report": null,
-      "skipped": "cpsat not installed",
+      "skipped": "not swept without --full-matrix",
       "variant": {
         "beta": 0.0,
         "forecast_model": "quantile",

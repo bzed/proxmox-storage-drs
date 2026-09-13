@@ -7,13 +7,20 @@ See IMPLEMENTATION_PLAN.md section 16.6 and tests/corpus/README.md.
 Four passes, in the order they run, over every bundle in ``tests/corpus/*/``
 plus every bundle found under the colon-separated ``DRS_CORPUS_DIR``:
 
-1. **Scrub audit** -- every file, every key, checked against
-   ``anonymize.py``'s own allowlists (the same ones the collector uses, so
-   this cannot drift from what it permits) plus a battery of regexes for
-   the shapes a real secret or identifier takes (IP literal, email,
-   ``iqn.``/``naa.``/``wwn.``, PEM block, a 64+-hex run, a public-suffix
-   hostname, a JWT). Runs on every discovered bundle, always -- this is the
-   privacy control, and it assumes the collector has a bug.
+1. **Scrub audit** -- every ``pve/`` and ``prometheus/`` file, every key,
+   checked against ``anonymize.py``'s own allowlists (the same ones the
+   collector uses, so this cannot drift from what it permits; a
+   ``prometheus/`` series' ``metric`` dict is checked against the bundle's
+   own configured label names, read from its ``config.yaml``) plus a
+   battery of regexes for the shapes a real secret or identifier takes (IP
+   literal, email, ``iqn.``/``naa.``/``wwn.``, PEM block, a 64+-hex run, a
+   public-suffix hostname, an unredacted transport-failure ``host='...'``
+   literal, a JWT). ``manifest.json``/``findings.json`` are hand-authored
+   bundle metadata with no ``anonymize.py`` allowlist of their own (they
+   are governed by ``collect._redact_free_text()`` instead, on the
+   collector side) -- the regex battery is what checks them here. Runs on
+   every discovered bundle, always -- this is the privacy control, and it
+   assumes the collector has a bug.
 2. **Invariants** -- the plan pipeline runs, through ``--replay``, exactly
    as an operator would run it; every accepted move must target a storage
    the group actually permits, and the pipeline must complete without
@@ -48,7 +55,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent
@@ -56,6 +63,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from proxmox_storage_drs import anonymize, cli  # noqa: E402
 from proxmox_storage_drs.exceptions import DrsError  # noqa: E402
+from proxmox_storage_drs.topology import DISK_KEY_RE  # noqa: E402
 
 # ------------------------------------------------------------- discovery
 
@@ -103,8 +111,13 @@ _PEM_RE = re.compile(r"-----BEGIN [A-Z ]+-----")
 _HEX64_RE = re.compile(r"\b[0-9a-fA-F]{64,}\b")
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
 _PUBLIC_SUFFIX_HOSTNAME_RE = re.compile(
-    r"\b[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.(?:com|net|org|local)\b"
+    r"\b[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\."
+    r"(?:com|net|org|local|internal|corp|lan|home|example|test)\b"
 )
+# X-02: a transport-level failure's own exception text survives collect.py's
+# stripping only if a future edit removes it -- this pattern is the audit's
+# own backstop for exactly that regression, independent of domain suffix.
+_TRANSPORT_HOST_LITERAL_RE = re.compile(r"host='[^']*'")
 _PSEUDONYM_RE = re.compile(
     r"^(node|stor|group|tag|pool|user)-[0-9a-f]{8}(\.[0-9a-f]{8}\.invalid)?$"
 )
@@ -124,6 +137,7 @@ _VALUE_CHECKS = (
     ("64+ hex run", _HEX64_RE),
     ("JWT-shaped string", _JWT_RE),
     ("public-suffix hostname", _PUBLIC_SUFFIX_HOSTNAME_RE),
+    ("unredacted transport host", _TRANSPORT_HOST_LITERAL_RE),
 )
 
 # Allowlists keyed by the file's own position in the bundle layout (section
@@ -135,6 +149,22 @@ _PVE_ALLOWLISTS: dict[str, frozenset[str]] = {
     "storage-definitions.json": anonymize.STORAGE_DEFINITION_FIELDS,
     "nodes.json": anonymize.NODE_LIST_FIELDS,
     "cluster-tasks.json": anonymize.CLUSTER_TASK_FIELDS,
+}
+
+# X-03: the five top-level files above were, until this fix, the *only*
+# files checked against a key allowlist -- every per-VM/per-storage file
+# got value-pattern checks only, despite section 16.6 and this module's own
+# docstring claiming "every file, every key". These two dicts extend the
+# same mechanism to the rest of ``pve/`` (``vm-config/`` is handled
+# separately in ``_scrub_pve_dir``: its allowlist is not a fixed set, see
+# ``_is_disk_config_key``).
+_PVE_FLAT_ALLOWLISTS: dict[str, frozenset[str]] = {
+    "vm-snapshots": anonymize.VM_SNAPSHOT_FIELDS,
+    "vm-status-current": anonymize.VM_STATUS_CURRENT_FIELDS,
+}
+_PVE_NESTED_ALLOWLISTS: dict[str, frozenset[str]] = {
+    "storage-status": anonymize.STORAGE_STATUS_FIELDS,
+    "storage-content": anonymize.STORAGE_CONTENT_FIELDS,
 }
 
 
@@ -162,7 +192,18 @@ def _check_value_patterns(path: str, value: str, field_name: str) -> list[str]:
     return violations
 
 
-def _scrub_json_file(path: Path, allowlist: frozenset[str] | None) -> list[str]:
+def _scrub_json_file(
+    path: Path,
+    allowlist: frozenset[str] | None,
+    extra_key_ok: Callable[[str], bool] | None = None,
+) -> list[str]:
+    """``allowlist`` (when given) is checked against every top-level dict in
+    the file (or every item of a top-level list of dicts); ``extra_key_ok``
+    is an escape hatch for an allowlist that is not a fixed set of names --
+    today only ``vm-config/*.json``, whose disk keys vary per VM (section
+    3.5's bus regex, ``anonymize.DISK_KEY_RE`` -- the same predicate
+    ``anonymize.filter_vm_config_fields`` applies on the collector side, so
+    the two still cannot drift)."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -172,13 +213,19 @@ def _scrub_json_file(path: Path, allowlist: frozenset[str] | None) -> list[str]:
         items = data if isinstance(data, list) else [data]
         for item in items:
             if isinstance(item, dict):
-                extra = sorted(set(item) - allowlist)
+                extra = sorted(
+                    k for k in (set(item) - allowlist) if not (extra_key_ok and extra_key_ok(k))
+                )
                 if extra:
                     violations.append(f"{path}: key(s) not in the allowlist: {extra}")
     for field_path, value in _iter_strings(data, str(path.name)):
         field_name = field_path.rsplit(".", 1)[-1].split("[")[0]
         violations.extend(_check_value_patterns(f"{path}#{field_path}", value, field_name))
     return violations
+
+
+def _is_disk_config_key(key: str) -> bool:
+    return bool(DISK_KEY_RE.match(key))
 
 
 def _scrub_node_or_storage_ids(bundle_dir: Path) -> list[str]:
@@ -204,16 +251,93 @@ def _scrub_pve_dir(pve_dir: Path) -> list[str]:
         path = pve_dir / name
         if path.is_file():
             violations.extend(_scrub_json_file(path, allowlist))
-    for sub in ("vm-config", "vm-snapshots", "vm-status-current"):
+    vm_config_dir = pve_dir / "vm-config"
+    if vm_config_dir.is_dir():
+        for path in sorted(vm_config_dir.glob("*.json")):
+            violations.extend(
+                _scrub_json_file(path, anonymize.VM_CONFIG_EXTRA_FIELDS, _is_disk_config_key)
+            )
+    for sub, allowlist in _PVE_FLAT_ALLOWLISTS.items():
         subdir = pve_dir / sub
         if subdir.is_dir():
             for path in sorted(subdir.glob("*.json")):
-                violations.extend(_scrub_json_file(path, None))
-    for sub in ("storage-status", "storage-content"):
+                violations.extend(_scrub_json_file(path, allowlist))
+    for sub, allowlist in _PVE_NESTED_ALLOWLISTS.items():
         subdir = pve_dir / sub
         if subdir.is_dir():
             for path in sorted(subdir.rglob("*.json")):
-                violations.extend(_scrub_json_file(path, None))
+                violations.extend(_scrub_json_file(path, allowlist))
+    return violations
+
+
+# X-03/X-02: ``prometheus/`` structure (section 16.1's per-kind table).
+# Top-level shape is fixed per query kind; the ``metric`` dict inside each
+# series is checked against the *configured* label names, read from the
+# bundle's own config.yaml, since a bundle can rename them.
+_PROMETHEUS_TOP_FIELDS: dict[str, frozenset[str]] = {
+    "instant": frozenset({"query", "result"}),
+    "range": frozenset({"query", "start", "end", "step", "result"}),
+    "label-values": frozenset({"label", "result"}),
+}
+_PROMETHEUS_SERIES_FIELDS = frozenset({"metric", "value", "values"})
+
+
+def _configured_label_names(config_path: Path) -> frozenset[str]:
+    if not config_path.is_file():
+        return frozenset()
+    import yaml
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    labels = raw.get("metrics", {}).get("labels", {})
+    return frozenset(v for v in labels.values() if isinstance(v, str))
+
+
+def _scrub_prometheus_series(path: Path, data: Any, label_names: frozenset[str]) -> list[str]:
+    violations: list[str] = []
+    result = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(result, list):
+        return violations
+    for i, series in enumerate(result):
+        if not isinstance(series, dict):
+            continue
+        extra = sorted(set(series) - _PROMETHEUS_SERIES_FIELDS)
+        if extra:
+            violations.append(f"{path}: result[{i}] key(s) not allowed: {extra}")
+        metric = series.get("metric")
+        if isinstance(metric, dict) and label_names:
+            extra_labels = sorted(set(metric) - label_names)
+            if extra_labels:
+                violations.append(
+                    f"{path}: result[{i}].metric label(s) not in the configured set "
+                    f"{sorted(label_names)}: {extra_labels}"
+                )
+    return violations
+
+
+def _scrub_prometheus_dir(prom_dir: Path, config_path: Path) -> list[str]:
+    label_names = _configured_label_names(config_path)
+    violations: list[str] = []
+    known_dirs = set()
+    for kind, top_allowlist in _PROMETHEUS_TOP_FIELDS.items():
+        subdir = prom_dir / kind
+        if not subdir.is_dir():
+            continue
+        known_dirs.add(subdir)
+        for path in sorted(subdir.glob("*.json")):
+            violations.extend(_scrub_json_file(path, top_allowlist))
+            if kind == "label-values":
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            violations.extend(_scrub_prometheus_series(path, data, label_names))
+    # Anything under prometheus/ outside the three known kinds still gets
+    # the value-pattern pass (unchanged from before this fix), rather than
+    # being silently skipped by an unrecognised layout.
+    for path in sorted(prom_dir.rglob("*.json")):
+        if path.parent not in known_dirs:
+            violations.extend(_scrub_json_file(path, None))
     return violations
 
 
@@ -227,15 +351,25 @@ def _scrub_config_yaml(config_path: Path) -> list[str]:
 
 
 def scrub_audit(bundle: Bundle) -> list[str]:
-    """Section 16.6, check 1. Returns every violation found; empty means clean."""
+    """Section 16.6, check 1. Returns every violation found; empty means clean.
+
+    Every ``pve/`` and ``prometheus/`` file is checked against a key
+    allowlist derived from ``anonymize.py`` (X-03: this used to be true of
+    only the five top-level ``pve/`` files; every per-VM/per-storage file
+    and every ``prometheus/`` file got the value-pattern pass only).
+    ``manifest.json`` and ``findings.json`` are hand-authored bundle
+    metadata, not a captured PVE/Prometheus object shape -- they have no
+    ``anonymize.py`` allowlist to check keys against, and are governed
+    instead by ``collect._redact_free_text()`` on the collector side; here
+    they get the same value-pattern pass as everything else, which is what
+    actually catches a redaction miss in free text (X-02)."""
     violations: list[str] = []
     pve_dir = bundle.directory / "pve"
     if pve_dir.is_dir():
         violations.extend(_scrub_pve_dir(pve_dir))
     prom_dir = bundle.directory / "prometheus"
     if prom_dir.is_dir():
-        for path in sorted(prom_dir.rglob("*.json")):
-            violations.extend(_scrub_json_file(path, None))
+        violations.extend(_scrub_prometheus_dir(prom_dir, bundle.directory / "config.yaml"))
     for name in ("manifest.json", "findings.json"):
         path = bundle.directory / name
         if path.is_file():
@@ -313,7 +447,13 @@ def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]
     import yaml
 
     raw_config = yaml.safe_load((bundle.directory / "config.yaml").read_text(encoding="utf-8"))
-    backends = _available_backends() if full_matrix else ["heuristic", "cbc"]
+    # X-10: `backends` (what this run actually sweeps) and `available`
+    # (what is actually importable) used to be conflated -- the narrow
+    # sweep hardcodes cpsat out regardless of whether ortools is
+    # installed, so every narrow run's `expected.json` claimed "cpsat not
+    # installed" even on a machine where it is, just not being swept.
+    available = _available_backends()
+    backends = available if full_matrix else ["heuristic", "cbc"]
     spread_metrics = _SPREAD_METRICS if full_matrix else _SPREAD_METRICS[:1]
     forecast_models = _FORECAST_MODELS if full_matrix else _FORECAST_MODELS[:1]
     beta_sweep = _BETA_SWEEP if full_matrix else _BETA_SWEEP[:1]
@@ -321,6 +461,11 @@ def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]
     results = []
     for backend in ("heuristic", "cbc", "cpsat"):
         if backend not in backends:
+            reason = (
+                f"{backend} not installed"
+                if backend not in available
+                else "not swept without --full-matrix"
+            )
             for spread_metric in spread_metrics:
                 for forecast_model in forecast_models:
                     for beta in beta_sweep:
@@ -330,9 +475,7 @@ def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]
                             "forecast_model": forecast_model,
                             "beta": beta,
                         }
-                        results.append(
-                            VariantResult(variant, None, skipped=f"{backend} not installed")
-                        )
+                        results.append(VariantResult(variant, None, skipped=reason))
             continue
         for spread_metric in spread_metrics:
             for forecast_model in forecast_models:
@@ -359,8 +502,27 @@ def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]
 
 def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
     """Section 16.6, check 2 -- the safety properties a real bundle can
-    check without knowing the optimum. Every accepted move must target a
-    storage this bundle's own config actually names in that group."""
+    check without knowing the optimum, reconstructed from what
+    ``plan --json``'s own group report already records per variant (X-07:
+    this used to check only the first of these). Three checks, none
+    requiring the emitted order or the objective breakdown that only
+    ``explain --json`` carries -- Sigma r_s = 0, section 8.1's per-step
+    transient predicate and the objective-recompute equality stay a named,
+    deliberate gap (see section 16.6's own note) rather than a claim this
+    function does not back:
+
+    1. **(C2) group/storage legality.** Every accepted move targets a
+       storage this bundle's own config actually names in that group.
+    2. **Section 7.3's duration rule.** No accepted move carries
+       ``exceeds_max_duration: true`` -- the pipeline's own payback/
+       scheduling stage must never hand ``order_moves()`` a move it has
+       already flagged as exceeding ``migration.max_single_move_duration``.
+    3. **Section 7.3's saturation guard, structurally.** A disk payback
+       rejected or deferred must not also appear as an accepted move --
+       the two lists (``payback.rejected_moves``/``deferred_moves`` and
+       ``moves``) are supposed to partition the candidate set, never
+       overlap.
+    """
     import yaml
 
     raw_config = yaml.safe_load((bundle.directory / "config.yaml").read_text(encoding="utf-8"))
@@ -373,6 +535,7 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
             continue
         for group_report in result.report.get("groups", []):
             allowed = allowed_by_group.get(group_report["name"], set())
+            accepted_keys = {m["disk_key"] for m in group_report.get("moves", [])}
             for move in group_report.get("moves", []):
                 if move["to_storage"] not in allowed:
                     violations.append(
@@ -380,6 +543,23 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
                         f"{move['to_storage']!r} is not in group "
                         f"{group_report['name']!r}'s configured storages"
                     )
+                if move.get("exceeds_max_duration"):
+                    violations.append(
+                        f"{bundle.name} [{result.variant}]: accepted move "
+                        f"{move['disk_key']!r} in group {group_report['name']!r} exceeds "
+                        "migration.max_single_move_duration -- section 7.3's duration rule"
+                    )
+            payback = group_report.get("payback") or {}
+            rejected_or_deferred = set(payback.get("rejected_moves", [])) | set(
+                payback.get("deferred_moves", [])
+            )
+            overlap = accepted_keys & rejected_or_deferred
+            if overlap:
+                violations.append(
+                    f"{bundle.name} [{result.variant}]: group {group_report['name']!r} "
+                    f"accepted move(s) {sorted(overlap)} also appear in payback's own "
+                    "rejected/deferred list"
+                )
     return violations
 
 
@@ -436,6 +616,22 @@ def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> lis
                         "the MILP should never do worse"
                     )
     return violations
+
+
+# X-07: "both MILP backends agree to within the section 5.5 tolerance" (the
+# other half of check 3) does not have a cbc-vs-cpsat check here. A first
+# attempt comparing `after_spread` against `solver.mip_gap` as a relative
+# tolerance produced real, non-spurious disagreement on a committed bundle
+# under --full-matrix: cbc 0.0016 vs cpsat 0.0034-0.0112 across several
+# variants, all `mip_gap`-legitimate on the *objective* the solvers actually
+# optimize, but a >5x difference in the derived `after_spread` metric alone
+# -- `mip_gap` bounds suboptimality of the five-term objective, not of any
+# one term taken in isolation, and a tiny baseline spread turns a small
+# absolute gap into a huge relative one. Getting this right needs the
+# objective breakdown itself, which today only `explain --json` emits (see
+# `check_invariants`'s own docstring) -- a real and deliberate gap, named
+# here rather than shipped as a check that would have been flaky on the
+# first real bundle to exercise it.
 
 
 # ------------------------------------------------------------- regression

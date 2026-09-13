@@ -286,6 +286,15 @@ class PrometheusClient:
         data: list[str] = self._get(f"/api/v1/label/{label_name}/values", {})
         return data
 
+    def buildinfo(self) -> str | None:
+        """``GET /api/v1/status/buildinfo``: the running Prometheus's own
+        version (section 16.1/16.3's manifest "versions" field -- X-08).
+        Not an identifier, so it needs no anonymization; ``None`` if the
+        response has no ``version`` key."""
+        data = self._get("/api/v1/status/buildinfo", {})
+        value = data.get("version") if isinstance(data, dict) else None
+        return str(value) if value is not None else None
+
 
 # -------------------------------------------------------------- parsing
 

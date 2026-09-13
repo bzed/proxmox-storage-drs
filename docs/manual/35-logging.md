@@ -20,7 +20,10 @@ Two rules cover almost everything:
 
 `--log-level error|warning|info|debug` states a level outright and wins over
 both `-v` and `--quiet` — for automation that would rather name a level than
-count `v`s.
+count `v`s. The one exception is the mandatory floor below ("Unattended runs
+log this without being asked"): `--log-level warning`/`error` on a
+`confirm`/`auto` apply run is raised back up to `info` rather than silently
+discarding the audit trail. `--quiet` is the only flag that discards it.
 
 ## The decision trail
 

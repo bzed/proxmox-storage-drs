@@ -8,25 +8,61 @@ pve-storage-drs (0.1.1) trixie; urgency=medium
     exact size is now queried from its own VM's node rather than an
     arbitrary node reporting the storage active, since only the node with
     the volume's LV active can report it.
-  * Query scoping (metrics.py/cli.py): verify-metrics now reports every
-    cluster-naming label value it sees across your metrics, and
-    plan/show-load/apply/explain scope every query by this cluster's own
-    name by default (metrics.labels.cluster, default "cluster") rather
-    than by node list; set that key to null to opt back out on a
-    Prometheus with no such label.
-  * REVIEW.md fourteenth-pass fixes (findings W-01..W-09): the
-    cluster-scoping default above silently matched zero series on a
-    Prometheus without that label, misreporting a busy cluster as idle --
-    verify-metrics now warns when the label is relied on but absent, and
-    show-load/gates.py name the scoping mismatch explicitly instead of
-    calling the group idle (W-06/W-07). A denied GET /cluster/status
-    (missing Sys.Audit) no longer fails the whole run; it degrades to the
-    node-list scoping tier with a logged warning instead (W-08). Plus six
-    documentation-residue fixes: changelog phase mislabelling, a stale
-    topology stage count and dead function name, the operator manual's
-    warnings paragraph (now covers all four size-resolution warnings),
-    the read-path call-count formula, and two examples left on the
-    pre-default node-scoped selector (W-01..W-05, W-09).
+  * REVIEW.md fourteenth-pass fixes (findings W-01..W-09), and the
+    operator correction that followed: a cluster-naming-label query-scoping
+    tier was added on this pass's own mistaken assumption that such a label
+    is a fixed deployment convention -- it was not, and has been removed
+    again in full (metrics.labels.cluster, its discovery scan, and the
+    degrade-on-denied-Sys.Audit handling are all gone; querying stays
+    scoped by node list, or by metrics.extra_selector when set). What
+    survives from W-07: show-load/gates.py still name a query filter that
+    matched no series at all explicitly, instead of reporting the group
+    idle. Plus five documentation-residue fixes that still apply:
+    changelog phase mislabelling, a stale topology stage count and dead
+    function name, the operator manual's warnings paragraph (now covers
+    all four size-resolution warnings), and the read-path call-count
+    formula (W-01..W-05).
+  * New: `collect-testdata` captures an anonymized diagnostic bundle from a
+    real cluster (PVE inventory plus a Prometheus superset, salted
+    HMAC pseudonyms for every vmid/node/storage/tag, timestamps rebased off
+    the real date) for the author to debug against; `--replay <bundle>`
+    reruns any read-only subcommand against a captured bundle with no
+    network access at all (apply and escalated --mode are refused). Four
+    new `support.*` config knobs govern it. See
+    docs/manual/26-collect-testdata-and-replay.md and
+    IMPLEMENTATION_PLAN.md section 16.
+  * New: tests/corpus/, a suite of real (anonymized) cluster bundles
+    exercised by `make check` (scrub audit, safety invariants,
+    MILP-vs-heuristic comparison, plan regression) and by `make corpus`
+    (the full solver/forecast/backend matrix) -- the largest-scale
+    correctness check this project has, run against real cluster shapes
+    instead of only tests/fixtures/*.yaml's synthetic ones.
+  * Logging policy re-plan and implementation (IMPLEMENTATION_PLAN.md
+    section 2.3): a clean run is silent by default; apply --mode
+    confirm|auto always emits its unattended audit trail regardless of
+    verbosity (only --quiet suppresses it); -v/-vv name third-party
+    library noise without promoting it past WARNING; --json keeps the
+    report on stdout and every log record on stderr; --log-format/
+    --log-level are new global options.
+  * json_safe(): --json output and every log record now reject
+    Infinity/NaN (RFC 8259) instead of emitting them -- fixes a real
+    +inf payback ratio on every no-move ACT run.
+  * verify-metrics gains a cross-metric consistency check: Telegraf's
+    Prometheus-compatible output silently drops a field the moment it
+    observes one non-numeric value for it, which can hit exactly one of
+    the six configured metrics for one disk while the coverage check's own
+    read_ops-only probe stays clean -- found on a second production
+    cluster's metrics pipeline switch, fixed the same day (REVIEW.md
+    section 28).
+  * explain gains a closest-rejected-move section: when a group's
+    objective is lowest doing nothing, explain now also reports the best
+    single-disk move that was considered and rejected, and by how much it
+    would have made things worse.
+  * New docs: a real quickstart (docs/manual/00-installation.md) and
+    docs/manual/05-metrics-pipeline.md, documenting the
+    InfluxDB-line-protocol-to-Prometheus type trap and naming the tested
+    metrics-transport backend; the Markdown sources of all three documents
+    now ship alongside their PDFs.
 
  -- Bernd Zeimetz <bzed@debian.org>  Fri, 11 Sep 2026 10:41:49 +0200
 

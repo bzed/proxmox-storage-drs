@@ -228,6 +228,20 @@ def test_label_values_returns_bare_list() -> None:
     assert client.label_values("__name__") == ["a", "b"]
 
 
+def test_buildinfo_returns_the_version_string() -> None:
+    session = FakeSession(
+        {"/api/v1/status/buildinfo": success({"version": "2.45.0", "revision": "abc123"})}
+    )
+    client = PrometheusClient(PROM_CONFIG, session=session)
+    assert client.buildinfo() == "2.45.0"
+
+
+def test_buildinfo_missing_key_is_none() -> None:
+    session = FakeSession({"/api/v1/status/buildinfo": success({"revision": "abc123"})})
+    client = PrometheusClient(PROM_CONFIG, session=session)
+    assert client.buildinfo() is None
+
+
 def test_non_200_status_raises_metrics_error() -> None:
     session = FakeSession({"/api/v1/query": FakeResponse(500, {}, "boom")})
     client = PrometheusClient(PROM_CONFIG, session=session)

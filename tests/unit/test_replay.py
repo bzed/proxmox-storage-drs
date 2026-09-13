@@ -46,6 +46,16 @@ def test_load_manifest_missing_directory_is_a_bundle_error(tmp_path: Path) -> No
         replay.load_manifest(tmp_path / "does-not-exist")
 
 
+def test_load_manifest_names_the_tarball_still_needs_unpacking(tmp_path: Path) -> None:
+    """X-10: `.tar.gz` (write_tarball()'s own transport form, section 16.1)
+    is not a form `--replay` accepts directly -- the error should say so
+    rather than leaving an operator to guess."""
+    tarball = tmp_path / "bundle.tar.gz"
+    tarball.touch()
+    with pytest.raises(BundleError, match="unpack it first"):
+        replay.load_manifest(tarball)
+
+
 def test_bundle_reference_now_matches_manifest(tmp_path: Path) -> None:
     bundle_dir = write_bundle(tmp_path)
     manifest = replay.load_manifest(bundle_dir)

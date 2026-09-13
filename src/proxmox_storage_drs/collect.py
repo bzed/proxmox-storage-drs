@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import re
 import tarfile
 from dataclasses import dataclass, field
@@ -161,9 +162,15 @@ def estimate_capture(
     disk_count = sum(len(group.disks) for group in topology.groups)
     group_count = len(topology.groups)
     # verify-metrics' own instant query per metric, the two quantile
-    # reductions per metric per group, one range query per metric per group.
-    query_count = 3 * _METRICS_PER_DISK + group_count * (1 * _METRICS_PER_DISK) * (
-        1 if no_series else 2
+    # reductions per metric per group, one range query per metric per group
+    # -- chunked into `_CHUNK_SECONDS`-sized sub-queries (`_issue_range_chunks`),
+    # each a real HTTP request of its own, which this used to leave out: at
+    # the 7 d default that alone made the printed count ~7x below what an
+    # operator sizing the load against a busy Prometheus actually cares
+    # about (X-09).
+    range_chunks = 1 if no_series else max(1, math.ceil(range_seconds / _CHUNK_SECONDS))
+    query_count = 3 * _METRICS_PER_DISK + group_count * _METRICS_PER_DISK * (
+        1 if no_series else (1 + range_chunks)
     )
     query_count += 3  # label_values for vmid/device/node
     points_per_disk = 0 if no_series else int(range_seconds / max(step_seconds, 1.0))
@@ -234,6 +241,10 @@ class RecordingPveClient(PveClient):
 
     def vm_resources(self) -> list[dict[str, Any]]:
         return _guarded(self._log, "vm_resources", self._inner.vm_resources) or []
+
+    def version(self) -> str | None:
+        result: str | None = _guarded(self._log, "version", self._inner.version)
+        return result
 
     def cluster_tasks(self) -> list[dict[str, Any]]:
         return _guarded(self._log, "cluster_tasks", self._inner.cluster_tasks) or []
@@ -390,9 +401,16 @@ def _anonymize_storage_definitions(
             continue
         filtered["storage"] = mapper.storage(storage_id)
         if isinstance(filtered.get("nodes"), str):
-            filtered["nodes"] = ",".join(
-                mapper.node(n) for n in filtered["nodes"].split(",") if n in mapper.known_nodes
-            )
+            kept_nodes = []
+            for n in filtered["nodes"].split(","):
+                if n in mapper.known_nodes:
+                    kept_nodes.append(mapper.node(n))
+                else:
+                    # X-09: an unknown node pruned from this list is a
+                    # dropped identifier like any other -- it just wasn't
+                    # counted.
+                    mapper.dropped_records += 1
+            filtered["nodes"] = ",".join(kept_nodes)
         out.append(filtered)
     return sorted(out, key=lambda item: str(item["storage"]))
 
@@ -406,6 +424,7 @@ def _anonymize_storage_resources(raw: list[dict[str, Any]], mapper: Mapper) -> l
         if not isinstance(storage_id, str) or not isinstance(node, str):
             continue
         if node not in mapper.known_nodes:
+            mapper.dropped_records += 1  # X-09: an unknown node is a dropped identifier
             continue
         filtered["storage"] = mapper.storage(storage_id)
         filtered["node"] = mapper.node(node)
@@ -448,6 +467,11 @@ def _anonymize_cluster_tasks(raw: list[dict[str, Any]], mapper: Mapper) -> list[
 def _anonymize_disk_value(value: str, mapper: Mapper) -> str | None:
     storage_id, volume_name, params = parse_disk_spec(value)
     if storage_id not in mapper.known_storages:
+        # X-09: mapper.volume_id() (below) counts its own drops, but this
+        # early return short-circuits before ever reaching it (it also
+        # covers the cdrom-media branch, which never calls volume_id() at
+        # all), so it needs its own increment.
+        mapper.dropped_records += 1
         return None
     new_storage = mapper.storage(storage_id)
     if params.get("media") == "cdrom":
@@ -461,6 +485,26 @@ def _anonymize_disk_value(value: str, mapper: Mapper) -> str | None:
     kept = filter_disk_value_params(params)
     rebuilt = ",".join(f"{k}={v}" for k, v in kept.items())
     return f"{new_volid},{rebuilt}" if rebuilt else new_volid
+
+
+def _anonymize_exclude_disk_key(value: str, mapper: Mapper) -> str | None:
+    """``"vmid:device"`` -- an ``exclude.disks`` entry (section 16.3), the
+    same shape ``topology.py`` builds as ``f"{vmid}:{device}"`` and compares
+    exclusions against. The vmid is mapped like every other vmid in the
+    bundle (X-01: it was previously carried verbatim, leaking a real vmid
+    and silently breaking the exclusion at replay, since replayed disk keys
+    are built from pseudonymized vmids); the device component is not an
+    identifier and passes through unchanged, per the device rule in section
+    16.3's per-kind table. ``None`` (dropped, counted) for anything not
+    shaped that way or whose vmid was never registered."""
+    raw_vmid, sep, device = value.partition(":")
+    if not sep or not raw_vmid.isdigit() or not device:
+        mapper.dropped_records += 1
+        return None
+    new_vmid = mapper.vmid(int(raw_vmid))
+    if new_vmid is None:
+        return None
+    return f"{new_vmid}:{device}"
 
 
 def _anonymize_vm_config(raw: dict[str, Any], mapper: Mapper) -> dict[str, Any] | None:
@@ -523,8 +567,11 @@ def _anonymize_vm_resources(raw: list[dict[str, Any]], mapper: Mapper) -> list[d
         node = filtered.get("node")
         if not isinstance(vmid, int) or not isinstance(node, str):
             continue
-        new_vmid = mapper.vmid(vmid)
-        if new_vmid is None or node not in mapper.known_nodes:
+        new_vmid = mapper.vmid(vmid)  # counts its own drop
+        if new_vmid is None:
+            continue
+        if node not in mapper.known_nodes:
+            mapper.dropped_records += 1  # X-09: an unknown node is a dropped identifier
             continue
         filtered["vmid"] = new_vmid
         filtered["node"] = mapper.node(node)
@@ -1059,10 +1106,28 @@ def capture_bundle(
         log,
     )
 
+    # X-08: section 16.1's manifest line ("schema, versions, what was
+    # captured, what failed, counts") and section 16.3's preserved list
+    # both name PVE/Prometheus versions -- neither is an identifier, so
+    # both are carried verbatim, no mapping needed. Captured last, after
+    # everything the engine actually needs, since nothing reads these back.
+    pve_version = recording_pve.version()
+    prometheus_version = recording_prom.buildinfo()
+
     findings = _findings_to_json(verify_report, config, mapper)
     config_yaml = _anonymized_config_dict(config, mapper, topology)
     manifest = _build_manifest(
-        resolved, topology, estimate, log, salt_fingerprint(salt), capture_now, mapper, options
+        resolved,
+        topology,
+        estimate,
+        log,
+        salt_fingerprint(salt),
+        capture_now,
+        mapper,
+        options,
+        pve_version=pve_version,
+        prometheus_version=prometheus_version,
+        extra_selector_rewritten=config.metrics.extra_selector is not None,
     )
 
     return Bundle(
@@ -1132,6 +1197,18 @@ def _stitch_range_captures(
 
 # ---------------------------------------------------------------- findings
 
+# X-02: a transport-level failure's own exception text (``requests``'
+# ``ConnectionError``/``Timeout``/...) begins `HTTPSConnectionPool(host=
+# '<endpoint>', port=...)` or embeds a full `https?://<endpoint>/...` --
+# the *configured* `proxmox.host`/`prometheus.url`, which section 16.3
+# drops from config.yaml precisely because a hostname is an identifier.
+# Node/storage substitution below only maps the substring by coincidence
+# (and then only the node part, leaving any domain suffix bare), so these
+# run first and unconditionally: nothing shaped like a connection target
+# belongs in a bundle, known-node-or-not.
+_TRANSPORT_URL_RE = re.compile(r"https?://\S+")
+_TRANSPORT_HOST_RE = re.compile(r"host='[^']*'")
+
 
 def _redact_free_text(text: str, mapper: Mapper) -> str:
     """``verify_metrics()``'s own finding text, and this module's own call
@@ -1140,15 +1217,18 @@ def _redact_free_text(text: str, mapper: Mapper) -> str:
     are both written for a human reading them against a live cluster, so
     they embed real identifiers verbatim (a sample series' own label
     values, a per-disk coverage gap's ``vmid:device``, a node/storage name
-    in a call description). Section 16.3's allowlist principle applies to
-    free text too, not just structured fields. Rather than special-casing
-    every message shape the callers might ever produce, this substitutes
-    any *whole* number matching an already-registered real vmid, and any
-    occurrence of a real node or storage name, with its pseudonym --
-    broader than strictly necessary (a coincidental vmid-shaped number that
-    is not actually a vmid would also get rewritten), which is the safe
-    direction to be wrong in for a privacy control."""
-    result = text
+    in a call description, a transport failure's own connection target).
+    Section 16.3's allowlist principle applies to free text too, not just
+    structured fields. Rather than special-casing every message shape the
+    callers might ever produce, this strips anything URL- or
+    ``host='...'``-shaped, then substitutes any *whole* number matching an
+    already-registered real vmid, and any occurrence of a real node or
+    storage name, with its pseudonym -- broader than strictly necessary (a
+    coincidental vmid-shaped number that is not actually a vmid would also
+    get rewritten), which is the safe direction to be wrong in for a
+    privacy control."""
+    result = _TRANSPORT_URL_RE.sub("<url-redacted>", text)
+    result = _TRANSPORT_HOST_RE.sub("host='<redacted>'", result)
     for real_vmid, new_vmid in sorted(mapper.registered_vmids().items()):
         result = re.sub(rf"\b{real_vmid}\b", str(new_vmid), result)
     for real_node in sorted(mapper.known_nodes, key=len, reverse=True):
@@ -1345,7 +1425,11 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
         },
         "exclude": {
             "vmids": [v for v in (mapper.vmid(v) for v in exclude.vmids) if v is not None],
-            "disks": list(exclude.disks),
+            "disks": [
+                d
+                for d in (_anonymize_exclude_disk_key(entry, mapper) for entry in exclude.disks)
+                if d is not None
+            ],
             "storages": [mapper.storage(s) for s in exclude.storages if s in mapper.known_storages],
             "tags": [mapper.tag(t) for t in exclude.tags],
             "skip_vms_with_snapshots": exclude.skip_vms_with_snapshots,
@@ -1385,6 +1469,10 @@ def _build_manifest(
     capture_now: datetime,
     mapper: Mapper,
     options: CaptureOptions,
+    *,
+    pve_version: str | None = None,
+    prometheus_version: str | None = None,
+    extra_selector_rewritten: bool = False,
 ) -> dict[str, Any]:
     del resolved
     # The manifest deliberately never carries the real capture date --
@@ -1404,6 +1492,21 @@ def _build_manifest(
             "range_seconds": estimate.range_seconds,
             "step_seconds": estimate.step_seconds,
             "no_series": options.no_series,
+            # X-08: not identifiers, carried verbatim (section 16.1/16.3).
+            # `None` when the version call itself failed or the response
+            # had no `version` key -- see the `calls` log below for why.
+            "pve_version": _redact_free_text(pve_version, mapper) if pve_version else None,
+            "prometheus_version": (
+                _redact_free_text(prometheus_version, mapper) if prometheus_version else None
+            ),
+            # X-08: config.yaml's own extra_selector is always rewritten to
+            # the default tier's equivalent, never carried verbatim
+            # (section 16.3) -- for a selector that does something the
+            # default tier cannot express (e.g. `cluster="prod"`), that
+            # makes the bundle's queries not byte-faithful to the live
+            # ones. This is the "says so in the manifest" honesty signal
+            # section 16.3 promises for exactly that case.
+            "extra_selector_rewritten": extra_selector_rewritten,
         },
         "counts": {
             "groups": len(topology.groups),

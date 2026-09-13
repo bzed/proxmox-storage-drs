@@ -293,6 +293,16 @@ class PveClient:
         )
         return sorted({str(n["node"]) for n in result if n.get("node")})
 
+    def version(self) -> str | None:
+        """``GET /version``: the running PVE's own version string
+        (section 16.1/16.3's manifest "versions" field -- X-08). Not an
+        identifier, so it needs no anonymization; ``None`` if the response
+        has no ``version`` key rather than raising, since this is a
+        diagnostic nicety, not something anything else reads."""
+        result: dict[str, Any] = self._call("fetching PVE version", lambda: self._api.version.get())
+        value = result.get("version")
+        return str(value) if value is not None else None
+
     def storage_definitions(self) -> list[dict[str, Any]]:
         """``GET /storage``: every storage's full config, including ``saferemove``.
 

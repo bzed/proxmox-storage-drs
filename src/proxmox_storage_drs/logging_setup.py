@@ -200,8 +200,16 @@ def configure_logging(
     (section 2.3: "an error is one fact, logged once").
     """
     level = resolve_level(verbose_count, quiet, log_level)
-    explicitly_lowered = quiet or log_level is not None
-    if floor is not None and not explicitly_lowered:
+    # X-06: the mandatory floor's one documented escape hatch is `--quiet`
+    # ("an operator may insist on silence, at the documented cost of the
+    # only record of what moved") -- an explicit `--log-level` used to
+    # count as opting out too, so `apply --mode auto --log-level warning`
+    # ran unattended with no audit trail and no warning that it would.
+    # `--log-level` still *raises* verbosity past the floor freely (`min`
+    # is a no-op whenever the requested level is already at or below it);
+    # only a level *less* verbose than the floor gets clamped back up to
+    # it, exactly as an unset `--log-level` already would.
+    if floor is not None and not quiet:
         level = min(level, floor)
 
     resolved_format = resolve_format(log_format)
