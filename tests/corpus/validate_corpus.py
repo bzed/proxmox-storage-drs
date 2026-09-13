@@ -117,7 +117,12 @@ _PUBLIC_SUFFIX_HOSTNAME_RE = re.compile(
 # X-02: a transport-level failure's own exception text survives collect.py's
 # stripping only if a future edit removes it -- this pattern is the audit's
 # own backstop for exactly that regression, independent of domain suffix.
-_TRANSPORT_HOST_LITERAL_RE = re.compile(r"host='[^']*'")
+# Y-01: the negative lookahead excludes collect.py's own redaction sentinel
+# (`_TRANSPORT_HOST_RE.sub("host='<redacted>'", ...)`) -- without it, this
+# backstop matched the *correctly redacted* output of the fix it exists to
+# guard, and the first real bundle whose capture hit a transport failure
+# could never pass the corpus gate.
+_TRANSPORT_HOST_LITERAL_RE = re.compile(r"host='(?!<redacted>')[^']*'")
 _PSEUDONYM_RE = re.compile(
     r"^(node|stor|group|tag|pool|user)-[0-9a-f]{8}(\.[0-9a-f]{8}\.invalid)?$"
 )
@@ -452,6 +457,9 @@ def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]
     # sweep hardcodes cpsat out regardless of whether ortools is
     # installed, so every narrow run's `expected.json` claimed "cpsat not
     # installed" even on a machine where it is, just not being swept.
+    # Y-02: naively computing the skip reason from `available` fixed that
+    # but reintroduced the same conflation from the other side -- see the
+    # reason line below.
     available = _available_backends()
     backends = available if full_matrix else ["heuristic", "cbc"]
     spread_metrics = _SPREAD_METRICS if full_matrix else _SPREAD_METRICS[:1]
@@ -461,10 +469,20 @@ def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]
     results = []
     for backend in ("heuristic", "cbc", "cpsat"):
         if backend not in backends:
+            # Y-02: the reason is a property of the *sweep*, not of this
+            # machine's solver set. In narrow mode `backends` hardcodes
+            # cpsat out regardless of availability, so "not installed"
+            # would be true on some machines and false on others for the
+            # very same run -- exactly what made the committed
+            # `expected.json` files flip between "cpsat not installed" and
+            # "not swept without --full-matrix" depending on which venv
+            # last regenerated them (reproduced: pulp-only vs. ortools
+            # venvs disagree on the narrow sweep's own expected file).
+            # `--full-matrix` sweeps every `available` backend, so a
+            # narrow-mode skip is always "not swept"; only a full-matrix
+            # skip is ever genuinely "not installed".
             reason = (
-                f"{backend} not installed"
-                if backend not in available
-                else "not swept without --full-matrix"
+                f"{backend} not installed" if full_matrix else "not swept without --full-matrix"
             )
             for spread_metric in spread_metrics:
                 for forecast_model in forecast_models:

@@ -17,7 +17,8 @@ pve-storage-drs (0.1.1) trixie; urgency=medium
     scoped by node list, or by metrics.extra_selector when set). What
     survives from W-07: show-load/gates.py still name a query filter that
     matched no series at all explicitly, instead of reporting the group
-    idle. Plus five documentation-residue fixes that still apply:
+    idle. Plus five documentation-residue fixes that still apply: the
+    operator manual's stale "`auto` not yet" status-page parenthetical,
     changelog phase mislabelling, a stale topology stage count and dead
     function name, the operator manual's warnings paragraph (now covers
     all four size-resolution warnings), and the read-path call-count

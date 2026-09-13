@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from proxmox_storage_drs import anonymize
+from proxmox_storage_drs import anonymize, collect
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATE_CORPUS_SRC = REPO_ROOT / "tests" / "corpus" / "validate_corpus.py"
@@ -149,3 +149,51 @@ def test_check_value_patterns_flags_internal_corp_and_lan_hostnames() -> None:
 def test_check_value_patterns_flags_an_unredacted_transport_host_literal() -> None:
     text = "HTTPSConnectionPool(host='pve01.corp', port=8006): Max retries exceeded"
     assert vc._check_value_patterns("p", text, "detail")
+
+
+@needs_full_checkout
+def test_check_value_patterns_does_not_flag_the_collectors_own_sentinel() -> None:
+    """Y-01: `collect._redact_free_text()`'s own replacement,
+    `host='<redacted>'`, must not itself trip the backstop it satisfies --
+    composed, the two halves of X-02's fix used to contradict each other."""
+    assert vc._check_value_patterns("p", "HTTPSConnectionPool(host='<redacted>')", "detail") == []
+
+
+@needs_full_checkout
+def test_scrub_audit_passes_a_bundle_with_a_redacted_transport_failure(tmp_path: Path) -> None:
+    """Y-01, end to end: a bundle whose capture hit a real transport failure
+    (redacted correctly by X-02's collector-side fix) must pass the corpus
+    gate, not be flagged by the audit's own backstop for the regression the
+    fix closes. Reproduces the composition the two isolated X-02/Y-01 unit
+    tests could not see on their own."""
+    from tests.unit.test_collect import (
+        CAPTURE_NOW,
+        make_config,
+        make_prometheus_client,
+        make_pve_client,
+    )
+
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    client = make_pve_client(
+        error_on="cluster/tasks",
+        error_message=(
+            "cluster/tasks: request failed: HTTPSConnectionPool("
+            "host='pve01.internal.example.invalid', port=8006): "
+            "Max retries exceeded with url: /api2/json/cluster/tasks"
+        ),
+    )
+    bundle = collect.capture_bundle(
+        client, make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    out = tmp_path / "bundle-dir"
+    collect.write_bundle_dir(out, bundle)
+
+    corpus_bundle = vc.Bundle(
+        name="repro",
+        directory=out,
+        submission=tmp_path / "repro.submission.yaml",
+        expected=tmp_path / "repro.expected.json",
+    )
+    violations = vc.scrub_audit(corpus_bundle)
+    assert violations == []

@@ -149,6 +149,21 @@ implements only one of §16.6's five promised invariant assertions and neither M
 One Low on three §16.3 bundle promises never built (no `extra_selector` manifest flag, no PVE/
 Prometheus version strings, no metric-name canonicalization), and two Info.
 
+A **sixteenth pass** (section 31) verifies the X-01..X-10 fixes (recorded as section 30): all ten
+are real — every reproduction from the fifteenth pass re-runs clean, and X-07's partial fix is the
+honest shape its resolution claims. Seven new findings (Y-01..Y-07) come out of the fix range
+itself, all Low or Info: the two halves of X-02's fix contradict each other in composition (the
+scrub audit's new `host='…'` backstop flags the collector's own `host='<redacted>'` sentinel, so
+the first real transport-failure bundle can never pass the corpus gate — reproduced end to end);
+the skip-reason fix makes the committed `expected.json` files environment-dependent (an
+ortools-less `validate_corpus.py --check` now exits 1 "stale", reproduced on the system toolchain);
+and manual 26's corrected query-count example sits beside a sample-points figure that still does
+not derive from its own inputs. Four Info: §16.6's check-4 bullet still promises expected-file
+fields `plan --json` does not emit; §16.2's "prints the estimate before it fetches anything"
+remains unimplemented on the real-capture path; the manifest's new version strings pass through
+`_redact_free_text()`, whose vmid substitution can silently rewrite digits inside them; and the
+rewritten 0.1.1 changelog bullet says "five" documentation fixes and lists four.
+
 ---
 
 ## 0. Overall assessment
@@ -4307,6 +4322,290 @@ MILP-vs-heuristic + regression `--check`, both committed bundles, passing — in
 docs-check (`IMPLEMENTATION_PLAN.pdf` rebuilt to 59 pages, the manual PDF to 46, the manpage
 regenerated; `docs/internals/*` unchanged, since nothing this pass touched was already documented
 incorrectly there).
+
+---
+
+## 31. Sixteenth-pass review — verification of the X-01..X-10 fixes
+
+Reviewed commit range `b107c19..81df865`: one non-merge commit (`cd497ae`, merged as `81df865`),
+≈1,130 lines of code and tests plus section 30's own 562-line resolution record, across 29 files
+(`collect.py` +141, `validate_corpus.py` +244, `cli.py` +104, `anonymize.py`/`logging_setup.py`/
+`pve.py`/`metrics.py`/`replay.py` touched, six test files grown, one new
+`tests/unit/test_validate_corpus.py`, the plan, the changelog, manual 26/35, the manpage source
+and both PDF stamps).
+
+### 31.1 Verification run
+
+- Dev venv `python3 -m pytest`: **832 passed, 1 warning** (the same benign statsmodels
+  `ConvergenceWarning`), **96.19% line coverage** — exactly what section 30 reports. `make check`
+  clean end to end (fmt, lint, typecheck over `src tests tools` in the unchanged
+  `.venv-typecheck/`, test-with-coverage, fixtures, corpus-check over both committed bundles,
+  docs-check). The full-matrix corpus run section 30 used to falsify its MILP-vs-MILP attempt
+  was **not** re-run here (~108 variant plans, tens of minutes); the narrow corpus gate is green
+  on this tree.
+- **Every reproduction from the fifteenth pass was re-run against the fix, not inferred**:
+  - X-01: `"101:scsi1"` through `_anonymize_exclude_disk_key()` → `<pseudonym>:scsi1`; an
+    unregistered vmid and a malformed entry both drop (`None`, counted).
+  - X-02: the pass-15 exception string (`host='pve01.corp.example'`, a `.corp` domain) comes out
+    of `_redact_free_text()` as `host='<redacted>'` with the URL stripped, and the old
+    eight-pattern battery — which passed it before; section 29's own "nine value checks" was a
+    miscount, the ninth pattern is the one this fix adds — now flags the *unredacted* form via
+    both the extended suffix list and the new `host='…'` literal.
+  - X-06: `configure_logging(floor=INFO, log_level="error")` leaves the package logger at INFO;
+    `--quiet` still escapes to ERROR; `debug` (above the floor) still wins.
+  - X-10: `--replay <bundle> --mode auto plan` attaches a capturing handler to root, runs `main()`,
+    and exits 2 with **zero** log records — the refusal now precedes the announcement (verified
+    live; the fifteenth pass's same probe printed a `mode_override` WARNING first).
+  - X-05: `test_handle_collect_testdata_actual_capture_does_not_repeat_the_topology_pass` pins
+    `build_topology` to zero calls on the capture path (the recording client's own pass runs inside
+    `capture_bundle()`); `--estimate` keeps its one bare pass, and manual 26 now says so honestly.
+- The three invariant assertions X-07 added are visible in the code and pinned by
+  `tests/unit/test_validate_corpus.py`; §16.6's rewritten check 2/3 text matches what
+  `check_invariants()` actually does, and the falsified MILP-vs-MILP attempt is documented in both
+  the plan and a source comment with the numbers that killed it — the right way to record a
+  negative result.
+- The ten findings' status, one line each: **X-01 fixed** (vmid mapped, device kept, drops
+  counted), **X-02 fixed** (strip-then-substitute in `_redact_free_text`, plus two new audit
+  patterns — but see Y-01), **X-03 fixed** (per-file allowlists wired for all of `pve/`, Prometheus
+  top-level keys and `metric` label sets checked against the bundle's own configured labels,
+  manifest/findings honestly re-scoped to value-patterns-plus-redaction), **X-04 fixed** (the
+  0.1.1 entry now describes what ships, including an honest account of the cluster-label
+  add-and-remove), **X-05 fixed**, **X-06 fixed** (plan rewritten as-built; floor clamped; help,
+  manpage and manual all state the interaction), **X-07 partially fixed with the remainder
+  retracted and the reason stated** — the correct resolution shape for a check that would have
+  been flaky, **X-08 fixed** (manifest flag + both version calls; the metric-name table row now
+  documents the verbatim behaviour), **X-09 fixed** (collision refusal, drop counting, chunk-aware
+  estimate), **X-10 fixed** (tarball hint, deadlock-aware wording, honest skip reasons — but see
+  Y-02, environmental dependence, and Y-03's stale neighbour figure).
+
+### 31.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| Y-01 | Low | `collect.py`, `tests/corpus/validate_corpus.py` | The two halves of X-02's fix contradict each other in composition: the audit's new `_TRANSPORT_HOST_LITERAL_RE` flags every `host='…'` literal — including the collector's own `host='<redacted>'` sentinel — so a bundle whose capture hit a transport failure (redacted correctly, exactly as X-02's fix provides) fails the scrub audit with "value looks like unredacted transport host" (reproduced end to end: capture → write → `scrub_audit()` → 1 violation). The first real-world bundle with a connection blip mid-capture can never pass `make check`'s corpus gate |
+| Y-02 | Low | `tests/corpus/validate_corpus.py`, committed `*.expected.json` | The skip-reason fix makes the committed expected files environment-dependent: they record `"not swept without --full-matrix"` because they were generated with `ortools` importable, and on a solver-less environment the same `--check` now computes `"cpsat not installed"` and **exits 1 "stale"** (reproduced on the system toolchain: pulp 2.7.0, no ortools). The old always-"not installed" label was inaccurate but stable across environments; the accurate one flips with the venv. `make check` masks this only because its `test` target installs the solver extras before `corpus-check` runs |
+| Y-03 | Low | `docs/manual/26-collect-testdata-and-replay.md` | The corrected worked example fixed one line and left its neighbour stale: `estimated Prometheus queries: 117` now derives exactly (18 + 2·6·8 + 3), but the untouched `estimated series sample points: 573104` does not — the example's own inputs (`disks: 47`, `range: 7d`, `step: 5m`) give 47·6·2016 = **568,512**. The V-03 family again: a figure nobody re-derived when the block was edited |
+| Y-04 | Info | plan §16.6 (check 4) | The regression bullet still says `<name>.expected.json` "records, per variant, the gate verdict, the plan …, **the order, the objective breakdown**, the payback arithmetic and the findings" — `plan --json`'s group report carries neither an order field nor the objective breakdown (the exact gap X-07's own fix documents for checks 2 and 3), so the expected files cannot contain them. The honesty sweep fixed the sibling bullets and skipped this one |
+| Y-05 | Info | `collect.py`/`cli.py`, plan §16.2 | §16.2's "the collector **prints the estimate and the query count before it fetches anything**" remains unimplemented on the real-capture path: only `--estimate` prints; a full capture computes the estimate internally (for the refusal check) and proceeds silently. Pre-existing since phase 10, but the fix range edited the formula in the very sentence above it and left the print promise standing |
+| Y-06 | Info | `collect.py` | The manifest's new `capture.pve_version`/`prometheus_version` are run through `_redact_free_text()`, whose registered-vmid substitution rewrites whole digit runs anywhere in the text: with vmid 11 registered, `"pve-manager/9.2.11"` becomes `"pve-manager/9.2.<pseudonym>"` (verified). Safe direction (no leak), but the provenance field X-08 added can silently carry a wrong version; version strings are not free text and should skip the vmid pass |
+| Y-07 | Info | `debian/changelog` | The rewritten 0.1.1 W-fixes bullet opens "Plus **five** documentation-residue fixes that still apply:" and lists four (changelog phase mislabelling, topology stage count/dead name, warnings paragraph, call-count formula). W-01's status-page parenthetical — the fifth, still applied — is unnamed; either the count or the list is off by one |
+
+### 31.3 Y-01 — the audit flags the collector's own redaction sentinel
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/collect.py` (`_TRANSPORT_HOST_RE`), `tests/corpus/
+validate_corpus.py` (`_TRANSPORT_HOST_LITERAL_RE`), `tests/unit/test_collect.py`
+(`test_capture_bundle_manifest_scrubs_a_transport_failures_own_hostname`),
+`tests/unit/test_validate_corpus.py` (`test_check_value_patterns_flags_an_unredacted_transport_
+host_literal`)
+
+X-02's fix has two halves. The collector half replaces `host='[^']*'` with the literal
+`host='<redacted>'` (and `https?://\S+` with `<url-redacted>`). The audit half adds
+`_TRANSPORT_HOST_LITERAL_RE = host='[^']*'` as a backstop "for exactly that regression". Composed,
+the backstop matches the sentinel: `[^']*` happily matches `<redacted>`. Reproduced end to end
+(a `capture_bundle()` run with one scripted transport failure, written with `write_bundle_dir()`
+and put through the real `scrub_audit()`), it reports
+
+```
+manifest.json#...calls[67].detail: value looks like unredacted transport host:
+"cluster/tasks: request failed: HTTPSConnectionPool(host='<re..."
+```
+
+— a violation against the *correctly redacted* value. The two regression tests each pin their own
+half in isolation (the collector test asserts the sentinel *appears*; the audit test asserts a
+real hostname is flagged) and neither composes them, which is exactly how the contradiction
+survived: this is AGENTS.md §3's "a test that executes a line without asserting anything about
+the composition" — or rather, two such tests whose composition nobody ran.
+
+The direction of failure is safe (fail-closed: a false positive, not a miss), which is why this
+is Low. But the first submitted bundle whose capture hit a connection blip — the precise
+population X-02 was about — now cannot pass the corpus gate until someone edits the audit, and a
+false "unredacted" accusation against a correctly-redacted bundle trains exactly the
+alarm-fatigue §2.3's level policy argues against.
+
+**Recommendation:** make the backstop skip its own sentinel — `host='(?!<redacted>')[^']*'` (and
+decide whether `<url-redacted>` needs the same treatment for any future URL-shaped pattern) — and
+add the missing composition test: build the pass-15 failure bundle, run `scrub_audit()` on it,
+assert **zero** violations. That test is the one that would have caught this.
+
+### 31.4 Y-02 — the expected files now encode one environment's solver set
+
+**Severity:** Low
+**Files:** `tests/corpus/validate_corpus.py` (`run_variant_matrix`), `tests/corpus/
+bzed-dev-cluster-{24h,7d-holt-winters}.expected.json`
+
+Before the fix, a cpsat skipped variant was always labelled `"cpsat not installed"` — wrong on an
+ortools machine (X-10's point) but *identical* in every environment, so the committed expected
+files were stable. After the fix the label is accurate and environment-dependent, and the
+committed files (regenerated on an ortools machine) pin `"not swept without --full-matrix"`.
+Reproduced: on this host's system toolchain (pulp 2.7.0, no ortools — the exact shape of a fresh
+Debian checkout without the solver extras), `python3 tests/corpus/validate_corpus.py --check`
+reports both committed files **stale** and exits 1. Consequences:
+
+- `make corpus-check` standalone on a solver-less venv fails with a misleading message ("stale,
+  re-run without --check") that names no environment cause;
+- regenerating in that environment commits `"cpsat not installed"` — which then makes `make check`
+  (whose `test` target installs the extras first) fail in the *other* direction. The committed
+  answer flip-flops with whichever venv last regenerated it;
+- the Makefile's own "loud-not-swallowed solver install" warning exists because solver installs
+  fail; a failed extras install followed by `make check` now dies at corpus-check instead of at
+  the tests that needed the solver.
+
+**Recommendation:** the narrow sweep's skip reason should be a property of the *sweep*, not of the
+machine: record `"not swept without --full-matrix"` unconditionally in the narrow mode (it is
+true on every machine — cpsat is not being swept), and let `"not installed"` appear only in
+`--full-matrix` runs, where availability genuinely determines the row. Alternatively (heavier):
+pin availability in the expected file per environment the way CI does. The one-line fix restores
+the old cross-environment stability while keeping the accurate label where it is accurate.
+
+### 31.5 Y-03 — the corrected example's neighbour figure does not derive
+
+**Severity:** Low
+**Files:** `docs/manual/26-collect-testdata-and-replay.md` (`--estimate` worked example)
+
+The fix corrected the query-count line (42 → 117, which now derives exactly from
+`3·6 + |groups|·6·(1 + ⌈7d/1d⌉) + 3` with the example's `groups: 2`) and recomputed §16.2's
+formula — but the block's `estimated series sample points: 573104` was left untouched, and it
+does not derive from the example's own printed inputs: 47 disks × 6 metrics × (604800/300 = 2016
+points) = **568,512**. The manual even gained a new paragraph in this same edit explaining how
+the query count is computed — the sample-points line directly below it was still not re-derived.
+This is V-03's family (two stale `used` figures in `29-explain.md`'s worked example) a third
+time, and the same structural cure applies: worked examples that are executable assertions (or
+at least generated), not hand-maintained prose numbers.
+
+**Recommendation:** correct the figure (568,512), and when doing so check the neighbouring
+`disks: 47`/`range: 7d`/`step: 5m` triple is the intended one. The V-03 recommendation — build
+the example's exact inputs and assert the rendered output — retires the whole class and is
+cheaper here than anywhere else (the example *is* one call to `--estimate`).
+
+### 31.6 Y-07 — "five" fixes, four listed (Info)
+
+The rewritten 0.1.1 bullet: "Plus five documentation-residue fixes that still apply: changelog
+phase mislabelling, a stale topology stage count and dead function name, the operator manual's
+warnings paragraph (now covers all four size-resolution warnings), and the read-path call-count
+formula (W-01..W-05)." Four items are named; the fifth (W-01's "`auto` not yet" parenthetical on
+the status page — applied, still in place) is not. One word either way ("four", or name the
+fifth). Recorded because this entry was *just* rewritten for X-04 specifically to stop
+misdescribing its own range.
+
+### 31.7 Y-04, Y-05, Y-06 — three small plan/manual drifts left inside the fixed paragraphs (Info)
+
+- **Y-04, §16.6 check 4.** The X-07 fix rewrote checks 1-3 with honest as-built scope and named
+  their gaps — and left check 4 claiming the expected files record "the order, the objective
+  breakdown" alongside the plan and payback arithmetic. `plan --json`'s group report carries
+  neither (no `order` field; the five-term breakdown is `explain`-only — the very gap check 2
+  now names), so no expected file can contain them. One clause ("as built: the gate verdict, the
+  plan with per-move costs, the payback arithmetic and the findings") brings the fourth bullet
+  up to the honesty standard the fix established for the other three.
+- **Y-05, §16.2's estimate-print bullet.** "The collector **prints** the estimate and the query
+  count **before it fetches anything**" — on the real-capture path nothing is printed; the
+  estimate is computed internally for the refusal check only, and the operator sees output after
+  the fetch completes. Only `--estimate` prints. Either print the estimate (and the refusal
+  headroom) at the top of every capture — arguably what §16.2 always wanted, and it costs one
+  line now that the estimate rides the same topology pass — or soften the plan's "prints" to
+  "computes and enforces". Pre-existing since phase 10, but this fix range edited the formula in
+  the sentence directly above it.
+- **Y-06, version strings through the vmid redactor.** `_build_manifest` runs the new
+  `pve_version`/`prometheus_version` through `_redact_free_text()`, whose registered-vmid
+  substitution matches *any* whole digit run: with vmid 11 registered, `pve-manager/9.2.11`
+  renders as `pve-manager/9.2.272705` (verified). No leak — the wrong direction to be unsafe —
+  but the field X-08 added for honest provenance can silently lie about the version. Version
+  strings are not operator free text; passing them to the vmid pass buys nothing (they contain no
+  vmids) and risks this. Either skip `_redact_free_text` for these two fields (they are
+  machine-generated version strings, not free text — the same reasoning the metric-name row now
+  uses for carrying config names verbatim) or document the mangling.
+
+### 31.8 What this pass confirms
+
+- **All ten X-findings are genuinely fixed, and fixed the way section 30 claims** — every fix was
+  verified against the code *and* by re-running the fifteenth pass's reproductions, not by
+  reading the resolution table. The fixes follow the house style: the vmid mapping for
+  `exclude.disks` reuses the exact `exclude.vmids` shape; the transport redaction runs before
+  substitution so nothing shaped like a connection target survives; the per-file allowlists are
+  the *same constants* the collector filters with (so the two still cannot drift), including the
+  `extra_key_ok` escape hatch that reuses `anonymize.DISK_KEY_RE` rather than a second regex; and
+  the dropped-records counter now counts every identifier drop the plan's sentence covers.
+- **X-07's resolution is the best kind of partial fix.** The two added assertions are
+  reconstructed from data the corpus already records (no new report fields needed); the MILP-vs-
+  MILP attempt was built, *run against the real committed corpus*, found to produce legitimate-
+  disagreement false positives, removed, and documented with the falsifying numbers in both the
+  plan and the source — a negative result recorded so the next person does not rebuild it. The
+  remaining three invariant properties are named as unbuilt in §16.6 itself rather than left as
+  implied promises. This is exactly what "resolve or refute, and say which" should look like.
+- **X-04's changelog rewrite is honest in both directions**: it no longer advises configuring the
+  removed `metrics.labels.cluster` key, and it now *describes the add-and-remove* ("added on this
+  pass's own mistaken assumption … removed again in full") rather than silently omitting it —
+  turning the W-02/X-04 defect class into a one-sentence history the release notes can carry.
+- **The logging-floor fix chose the right direction**: the mandatory audit trail now yields only
+  to `--quiet`, exactly as plan, manual, manpage and `--help` all now say in one voice (verified
+  behaviourally at all three corners: below-floor clamped, `--quiet` escapes, above-floor wins).
+  The §2.3 handler-placement rewrite describes the built mechanism with its rationale instead of
+  prescribing the opposite — the AGENTS.md §7.6 debt paid in full.
+- **The scrub-audit extension is structurally sound**: value-pattern checks still run over
+  everything; the key allowlists apply where a captured object shape exists; Prometheus series
+  labels are validated against the bundle's *own configured* label names (so a renamed-label
+  bundle neither false-flags nor gets a pass it should not); files outside the three known
+  Prometheus kinds keep the old checks rather than being skipped; and manifest/findings are
+  honestly re-scoped in both the docstring and §16.6 instead of being quietly claimed. The one
+  defect found in it (Y-01) is a composition false-positive, not a coverage gap.
+- **The corpus-expected regeneration discipline held for the intended path** — both committed
+  files were regenerated in the same commit as the skip-reason change that altered them, and
+  `make check`'s default flow (extras installed by `test` before `corpus-check`) keeps the gate
+  green everywhere it actually runs. Y-02 is the residual environment coupling, not a broken
+  gate.
+
+### 31.9 Assessment
+
+The fix range is faithful: ten findings, ten real fixes (one honestly partial with the remainder
+retracted and the reason recorded), each carrying its regression test, each with the plan/manual
+text updated in the same commit, and both PDF stamps (plus the manpage source) kept current. The
+seven new findings are all Low or Info, and five of the seven are the classic residue of fixing
+a finding *around* its neighbours without re-examining them: the corrected example line beside a
+stale one (Y-03), the corrected plan bullet beside an uncorrected one (Y-04, Y-05), the new
+field routed through an old redactor without asking what that redactor does to it (Y-06), and
+the corrected count beside an unlisted item (Y-07). The two that are not that shape are
+composition defects the individual tests could not see: two halves of one fix that contradict
+when run together (Y-01), and an expected-file whose new accuracy made it environment-dependent
+(Y-02). Both have one-line fixes and both want the same test-shape upgrade: compose the pieces
+(`scrub_audit()` over a redacted-failure bundle; `--check` under a solver-less interpreter)
+rather than pinning each piece alone.
+
+Fix Y-01 and Y-02 (both mechanical), correct the three figures/counts (Y-03, Y-07, and Y-06's
+version handling), and align the two plan sentences (Y-04, Y-05) — none of it an afternoon — and
+the fifteenth pass's findings are closed end to end with nothing new standing in their place.
+
+---
+
+## 32. Resolution of sixteenth-pass findings (Y-01..Y-07)
+
+All seven findings were real. All seven are fixed.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| Y-01 | Resolved | `validate_corpus._TRANSPORT_HOST_LITERAL_RE` gained a negative lookahead excluding `collect.py`'s own `host='<redacted>'` sentinel (`host='(?!<redacted>')[^']*'`), so the backstop no longer flags the correctly-redacted output of the fix it exists to guard. New composition tests: `test_check_value_patterns_does_not_flag_the_collectors_own_sentinel` pins the regex directly, and `test_scrub_audit_passes_a_bundle_with_a_redacted_transport_failure` reproduces 31.3's exact end-to-end scenario (capture a transport failure → write the bundle → `scrub_audit()`) and asserts zero violations — the composition test the pass named as the one that would have caught this. |
+| Y-02 | Resolved | `run_variant_matrix()`'s skip reason is now a function of `full_matrix` alone, not of `_available_backends()` in narrow mode: a narrow-sweep skip is always `"not swept without --full-matrix"` (true on every machine, since the narrow sweep hardcodes cpsat out regardless of availability); `"<backend> not installed"` is only ever computed under `--full-matrix`, where `backends == available` and the two conditions coincide exactly. The committed `expected.json` files (which already recorded the now-unconditional narrow-mode reason) needed no regeneration; verified stable across both the ortools-backed dev venv and a simulated solver-less run of the narrow sweep. |
+| Y-03 | Resolved | Manual 26's stale `estimated series sample points: 573104` corrected to `568512` — `47 disks · 6 metrics · 2016 points (604800s / 300s)`, re-derived from the example's own printed inputs and matching `estimate_capture()`'s actual formula. |
+| Y-04 | Resolved | §16.6 check 4's bullet no longer claims the expected files record "the order, the objective breakdown" — reworded to "the plan (as a sorted list of moves with their per-move costs), the payback arithmetic and the findings", with an explicit cross-reference to the same as-built gap checks 2 and 3 already name, instead of being the one bullet the honesty sweep skipped. |
+| Y-05 | Resolved | §16.2's "the collector prints the estimate and the query count before it fetches anything" softened to describe what a real capture actually does: computes the estimate internally and enforces `support.max_series_points` against it, printing nothing before proceeding; only `--estimate` prints. No code change — the plan's claim was ahead of a real-capture feature that was never built, and printing it unconditionally was judged not worth the extra line of output on every capture for this pass; the gap is now named rather than implied away. |
+| Y-06 | Resolved | `_build_manifest()`'s `pve_version`/`prometheus_version` no longer pass through `_redact_free_text()` — they are machine-generated provenance strings with no vmids, node or storage names to redact, and the vmid pass's whole-digit-run substitution could silently corrupt a real version string containing a registered vmid's digits (`pve-manager/8.2.101` → `pve-manager/8.2.<pseudonym>` with vmid 101 registered). New regression: `test_capture_bundle_manifest_version_is_not_mangled_by_vmid_redaction`. |
+| Y-07 | Resolved | `debian/changelog`'s 0.1.1 entry now names all five documentation-residue fixes the `(W-01..W-05)` parenthetical already promised: the manual's stale `"auto" not yet` status-page parenthetical (W-01) is listed alongside the changelog phase mislabelling, the stale topology stage count/dead function name, the warnings paragraph and the call-count formula. |
+
+New/updated regression tests: `test_check_value_patterns_does_not_flag_the_collectors_own_sentinel`,
+`test_scrub_audit_passes_a_bundle_with_a_redacted_transport_failure` (`test_validate_corpus.py`);
+`test_capture_bundle_manifest_version_is_not_mangled_by_vmid_redaction` (`test_collect.py`).
+
+Verification: dev venv `python3 -m pytest` — **835 passed**, **96.19% line coverage** (three new
+tests, no coverage regression). `make check` clean end to end: fmt, lint, typecheck
+(`mypy src tests tools`), test-with-coverage, fixtures, corpus-check (both committed bundles clean
+under the narrow sweep `make check` runs — including the Y-01 composition test's own live
+`scrub_audit()` call, and the Y-02 fix verified to keep both committed `expected.json` files
+current with no regeneration needed), and docs-check (`IMPLEMENTATION_PLAN.pdf` rebuilt to the same
+59 pages, the manual PDF to the same 46, both stamps refreshed; `make man` reports nothing to do,
+since `man/pve-storage-drs.1.md` was untouched by this pass). A `--full-matrix --check` run was
+also attempted directly (not part of `make check`); it reports the same two committed bundles stale
+for a reason predating this pass entirely (reproduced identically on the pre-fix commit `81df865`,
+via `git stash`) — unrelated to Y-01..Y-07 and out of this pass's scope, consistent with section
+30's own note that the full-matrix sweep was not re-run there either.
 
 ---
 
