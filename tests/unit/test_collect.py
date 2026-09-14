@@ -505,6 +505,70 @@ def test_capture_bundle_preserves_the_node_label_when_present(tmp_path: Path) ->
         assert node_value.startswith("node-")
 
 
+def test_capture_bundle_findings_json_does_not_leak_unconfigured_labels(tmp_path: Path) -> None:
+    """A live capture found this the hard way: ``_check_sample_series()``'s
+    "info" finding dumps a sample series' *entire* raw label dict into free
+    text (``f"{name}: sample series labels {sample_labels}"``) for a human
+    reading it against their own live cluster. A real Telegraf ``host`` tag
+    is not one of the three labels this project's config assigns any
+    meaning to (vmid/device/node), so ``_redact_free_text()`` -- which only
+    knows how to rewrite those three -- passed it through unredacted into
+    ``findings.json``. The structured ``sample_series`` field next to it was
+    already correctly filtered to just vmid/device/node; the finding
+    message must be too."""
+
+    def instant_answer_with_extra_label(params: dict[str, str]) -> dict[str, Any]:
+        query = params["query"]
+        if query == "blockstat_rd_operations":
+            return {
+                "result": [
+                    {
+                        "metric": {
+                            "vmid": "101",
+                            "instance": "scsi0",
+                            "nodename": "node1",
+                            "host": "real-guest-hostname-01",
+                        },
+                        "value": [CAPTURE_NOW.timestamp(), "1.5"],
+                    }
+                ]
+            }
+        return _instant_answer(params)
+
+    session = FakePrometheusSession(
+        answers={
+            "label/__name__/values": METRIC_NAMES,
+            "label/vmid/values": ["101"],
+            "label/instance/values": ["scsi0"],
+            "label/nodename/values": ["node1"],
+            "api/v1/query_range": _range_answer,
+            "api/v1/query": instant_answer_with_extra_label,
+            "api/v1/status/buildinfo": {"version": "2.45.0"},
+        }
+    )
+    prom_client = PrometheusClient(
+        config_module.PrometheusConfig(url="http://localhost:9090"), session
+    )
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    bundle = collect.capture_bundle(
+        make_pve_client(), prom_client, resolved, options, now=CAPTURE_NOW
+    )
+
+    findings_text = json.dumps(bundle.findings)
+    assert "real-guest-hostname-01" not in findings_text
+
+    messages = [f["message"] for f in bundle.findings["verify_metrics"]["findings"]]
+    sample_messages = [
+        m for m in messages if m.startswith("blockstat_rd_operations: sample series")
+    ]
+    assert sample_messages
+    # vmid/device/node still make it through, anonymized -- just not the
+    # unconfigured "host" label.
+    assert "instance" in sample_messages[0]
+    assert "vmid" in sample_messages[0]
+
+
 def test_capture_bundle_no_series_skips_the_forecasting_range_series(tmp_path: Path) -> None:
     """--no-series must skip the big, per-group superset range captures --
     it does not (and need not) suppress verify_metrics()'s own two smaller,
