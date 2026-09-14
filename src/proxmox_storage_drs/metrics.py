@@ -153,8 +153,16 @@ def safe_range_step_seconds(step_seconds: float, rate_window_seconds: float) -> 
     quotient is 3600/13 = 276.923...) -- confirmed on the very deployment
     this workaround exists for, so this cannot skip the floor and still
     work. Not Prometheus-backend-specific by name: this workaround is keyed
-    purely on the ``step >= range`` symptom, so it costs nothing (a no-op)
-    against a correctly-behaving backend."""
+    purely on the ``step >= range`` symptom, and every *range* query path
+    (coverage, the forecaster's raw series) is a true no-op against a
+    correctly-behaving backend -- :func:`decimate_to_configured_step`
+    recovers the identical instants and values a plain ``step_seconds``
+    query would have returned. The one exception is
+    :func:`build_quantile_over_time_promql`'s own subquery, which cannot
+    decimate (an instant query returns one scalar): its inner expression is
+    evaluated on this denser, safe-step grid unconditionally, on *every*
+    backend healthy or not -- a small but real shift in the reduced
+    statistic, not a no-op there (REVIEW.md Z-04)."""
     if step_seconds < rate_window_seconds:
         return step_seconds
     divisor = int(step_seconds // rate_window_seconds) + 1
@@ -450,6 +458,12 @@ class VerifyMetricsReport:
     sample_series: dict[str, dict[str, str]]
     coverage_by_disk: dict[DiskKey, float]
     observed_spacing_seconds: float | None
+    # Z-02: the full (vmid, device) lists `_check_cross_metric_disk_consistency()`
+    # truncates to "top 5 (+N more)" for its own finding text -- carried here,
+    # untruncated and with real vmids, so `collect.py` can rebuild that
+    # finding's message from a registered-vmid-only view instead of leaking
+    # a foreign vmid the structured `coverage_by_disk` above already drops.
+    missing_disks_by_metric: dict[str, tuple[tuple[str, str], ...]]
 
     @property
     def ok(self) -> bool:
@@ -505,9 +519,26 @@ def _disk_keys_seen(
     return keys
 
 
+def format_cross_metric_finding(name: str, missing: Sequence[tuple[str, str]]) -> Finding:
+    """Builds :func:`_check_cross_metric_disk_consistency`'s one finding
+    shape from a ``(vmid, device)`` list -- a "top 5, +N more" note over
+    whatever ``missing`` it is handed. Factored out (rather than inlined at
+    the one call site below) so ``collect.py`` can rebuild the *identical*
+    message from a filtered, registered-vmid-only view of ``missing`` when
+    redacting a bundle's findings.json (Z-02), instead of reformatting the
+    clause by hand and risking disagreement with this, the live shape."""
+    shown = ", ".join(f"{vmid}:{device}" for vmid, device in missing[:5])
+    more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+    return Finding(
+        "warning",
+        f"{name}: no series for {len(missing)} disk(s) that other configured metrics "
+        f"do report ({shown}{more}) -- {_NUMERIC_DROP_HINT}",
+    )
+
+
 def _check_cross_metric_disk_consistency(
     keys_by_metric: dict[str, set[tuple[str, str]]],
-) -> list[Finding]:
+) -> tuple[list[Finding], dict[str, tuple[tuple[str, str], ...]]]:
     """Flags a disk reported by *some* of the six configured metrics but not
     others -- normally impossible, since all six come from one Telegraf
     ``blockstat`` collection per disk (the same assumption
@@ -521,30 +552,31 @@ def _check_cross_metric_disk_consistency(
     alone (checking only ``read_ops``) cannot: if the dropped field happens
     not to be ``read_ops``, coverage looks perfect while a real gap sits in
     one of the other five. Costs nothing extra: every input set here is
-    already fetched by ``_check_sample_series``'s own instant queries."""
+    already fetched by ``_check_sample_series``'s own instant queries.
+
+    Returns the findings *and* the full (untruncated) missing-disk lists by
+    metric name -- :class:`VerifyMetricsReport` carries the latter as
+    ``missing_disks_by_metric`` precisely so ``collect.py`` has the real
+    ``(vmid, device)`` pairs to filter and re-format (Z-02), the same
+    reason ``sample_series`` carries raw labels alongside the free-text
+    "sample series labels" finding."""
     all_keys: set[tuple[str, str]] = set()
     for keys in keys_by_metric.values():
         all_keys |= keys
     findings: list[Finding] = []
+    missing_by_metric: dict[str, tuple[tuple[str, str], ...]] = {}
     for name, keys in keys_by_metric.items():
         missing = sorted(all_keys - keys)
         if not missing:
             continue
-        shown = ", ".join(f"{vmid}:{device}" for vmid, device in missing[:5])
-        more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
-        findings.append(
-            Finding(
-                "warning",
-                f"{name}: no series for {len(missing)} disk(s) that other configured metrics "
-                f"do report ({shown}{more}) -- {_NUMERIC_DROP_HINT}",
-            )
-        )
-    return findings
+        missing_by_metric[name] = tuple(missing)
+        findings.append(format_cross_metric_finding(name, missing))
+    return findings, missing_by_metric
 
 
 def _check_sample_series(
     client: PrometheusClient, metrics: MetricsConfig
-) -> tuple[list[Finding], dict[str, dict[str, str]]]:
+) -> tuple[list[Finding], dict[str, dict[str, str]], dict[str, tuple[tuple[str, str], ...]]]:
     """Section 3.3 step 2/3/4: one sample series per metric, with its labels."""
     findings: list[Finding] = []
     samples: dict[str, dict[str, str]] = {}
@@ -582,8 +614,9 @@ def _check_sample_series(
                         "empty on the sample series",
                     )
                 )
-    findings.extend(_check_cross_metric_disk_consistency(keys_by_metric))
-    return findings, samples
+    cross_metric_findings, missing_by_metric = _check_cross_metric_disk_consistency(keys_by_metric)
+    findings.extend(cross_metric_findings)
+    return findings, samples, missing_by_metric
 
 
 def _check_device_label_collision(metrics: MetricsConfig) -> Finding | None:
@@ -812,7 +845,7 @@ def verify_metrics(
     selector = resolve_node_selector(metrics, None)
     findings: list[Finding] = []
     findings.extend(_check_metric_names_exist(client, metrics))
-    sample_findings, samples = _check_sample_series(client, metrics)
+    sample_findings, samples, missing_disks_by_metric = _check_sample_series(client, metrics)
     findings.extend(sample_findings)
     collision = _check_device_label_collision(metrics)
     if collision is not None:
@@ -829,4 +862,5 @@ def verify_metrics(
         sample_series=samples,
         coverage_by_disk=coverage,
         observed_spacing_seconds=spacing,
+        missing_disks_by_metric=missing_disks_by_metric,
     )

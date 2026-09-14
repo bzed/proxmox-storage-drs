@@ -289,6 +289,7 @@ def test_verify_metrics_dispatches_and_renders_human(
         sample_series={},
         coverage_by_disk={},
         observed_spacing_seconds=300.0,
+        missing_disks_by_metric={},
     )
     monkeypatch.setattr("proxmox_storage_drs.cli.verify_metrics", lambda *a, **k: fake_report)
     path = write_config(tmp_path)
@@ -306,6 +307,7 @@ def test_verify_metrics_json_output(
         sample_series={},
         coverage_by_disk={DiskKey(101, "scsi0"): 0.9},
         observed_spacing_seconds=None,
+        missing_disks_by_metric={},
     )
     monkeypatch.setattr("proxmox_storage_drs.cli.verify_metrics", lambda *a, **k: fake_report)
     path = write_config(tmp_path)

@@ -93,27 +93,27 @@
       },
       {
         "level": "info",
-        "message": "rd_operations: sample series labels {'host': 'data001', 'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu', 'service_name': 'unknown', 'vmid': '389722', '__name__': 'rd_operations'}"
+        "message": "rd_operations: sample series labels {'instance': 'ide2', 'nodename': 'node-9bcf256f', 'vmid': '389722'}"
       },
       {
         "level": "info",
-        "message": "wr_operations: sample series labels {'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu', 'service_name': 'unknown', 'vmid': '389722', '__name__': 'wr_operations', 'host': 'data001'}"
+        "message": "wr_operations: sample series labels {'instance': 'ide2', 'nodename': 'node-9bcf256f', 'vmid': '389722'}"
       },
       {
         "level": "info",
-        "message": "rd_bytes: sample series labels {'vmid': '389722', '__name__': 'rd_bytes', 'host': 'data001', 'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu', 'service_name': 'unknown'}"
+        "message": "rd_bytes: sample series labels {'instance': 'ide2', 'nodename': 'node-9bcf256f', 'vmid': '389722'}"
       },
       {
         "level": "info",
-        "message": "wr_bytes: sample series labels {'host': 'data001', 'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu', 'service_name': 'unknown', 'vmid': '389722', '__name__': 'wr_bytes'}"
+        "message": "wr_bytes: sample series labels {'instance': 'ide2', 'nodename': 'node-9bcf256f', 'vmid': '389722'}"
       },
       {
         "level": "info",
-        "message": "rd_total_time_ns: sample series labels {'vmid': '389722', '__name__': 'rd_total_time_ns', 'host': 'data001', 'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu', 'service_name': 'unknown'}"
+        "message": "rd_total_time_ns: sample series labels {'instance': 'ide2', 'nodename': 'node-9bcf256f', 'vmid': '389722'}"
       },
       {
         "level": "info",
-        "message": "wr_total_time_ns: sample series labels {'object': 'qemu', 'service_name': 'unknown', 'vmid': '389722', '__name__': 'wr_total_time_ns', 'host': 'data001', 'instance': 'ide2', 'measurement': 'blockstat', 'nodename': 'node-9bcf256f'}"
+        "message": "wr_total_time_ns: sample series labels {'instance': 'ide2', 'nodename': 'node-9bcf256f', 'vmid': '389722'}"
       },
       {
         "level": "warning",

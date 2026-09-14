@@ -148,7 +148,13 @@ their `prometheus_backend`, so the regression suite runs against real
 gigapipe-shaped data on every `make check`.
 
 To use it, point `prometheus.url` at gigapipe's query endpoint. Nothing else
-in this manual changes.
+in this manual changes — including at the `metrics.step`/`metrics.rate_window`
+default: a recently-updated gigapipe was found, live, to return zero series
+for a range query whose step reaches its `rate()` window's duration (exactly
+that default), and this tool works around it unconditionally on every
+backend rather than asking you to change your configuration for gigapipe's
+sake. See `metrics.step` in `docs/manual/10-configuration.md` for what the
+workaround changes about what actually gets fetched.
 
 gigapipe also ingests OpenTelemetry, but **that path is untested here** and
 is not the way to use it with this tool. Feeding it from PVE's OpenTelemetry

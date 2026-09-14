@@ -615,6 +615,27 @@ Notes for the implementer:
   that premise. Use `metrics.extra_selector` for a cluster-naming (or any other) label a deployment
   actually has.
 
+**As built (0.1.3): a gigapipe `step >= range` workaround.** Two live-confirmed deployments of a
+recently updated gigapipe backend silently return **zero series** for any `query_range`/subquery
+call on a range-vector function (`rate()` included) whenever the query's own `step` is `>=` the
+function's own range-vector duration — binary-searched to the exact second, independent of window
+length or absolute step size. This project's own defaults set `metrics.step == metrics.rate_window`
+(both `5m`) — idiomatic back-to-back tiling, and exactly the failing boundary — so a fresh install
+with untouched defaults can hit this on an affected backend with no misconfiguration at all.
+`metrics.py`'s `safe_range_step_seconds(step, rate_window)` computes the largest whole-second step
+strictly below `rate_window` that divides `step` as evenly as a whole-second value can (150s at the
+5m/5m default), and every `query_range`/subquery call this module issues — coverage, the forecaster's
+raw range series, the quantile-over-time reduction's subquery — uses that step instead, unconditionally
+(not only when the affected backend is detected: the symptom, zero series, is indistinguishable from
+genuinely absent data). `decimate_to_configured_step()` then recovers the originally configured grid by
+keeping every Nth point, so a range series' retained points are byte-identical to what a plain
+`metrics.step` query would have returned on an unaffected backend — the workaround is a true no-op
+there, except for `quantile_over_time`'s own inner evaluation, which cannot decimate (an instant query
+returns one scalar): it evaluates its subquery on the denser, safe-step grid on *every* backend, a
+small but real shift in the reduced statistic (REVIEW.md Z-04). `docs/internals/30-metrics.md` has the
+full mechanism; `collect-testdata --estimate` and `support.max_series_points` account for the doubled
+(or more, at a wider `metrics.step`/`rate_window` ratio) point count this stores (REVIEW.md Z-05).
+
 ### 3.5 PVE API
 
 **`pve.py` is built on `proxmoxer`, not a hand-rolled ticket/CSRF client.** `proxmoxer` implements
@@ -2262,7 +2283,7 @@ engine underneath was still being built.
 | A diagnostic bundle carries an identifier or a secret | Allowlist, never denylist: a field reaches a bundle only if `anonymize.py` names it, and an identifier with no mapping drops its whole record rather than passing through. The corpus scrub audit re-checks every committed bundle against the same allowlist plus IP/email/IQN/PEM/hex patterns, on the assumption that the collector has a bug (§16.3, §16.6) |
 | Two unrelated clusters produce the same pseudonyms | The salt is 32 bytes of `os.urandom()` persisted per host, never `/etc/machine-id` — which is routinely cloned by templates and golden images and would turn the mapping into a cross-bundle correlation key (§16.3) |
 | A bundle replays to a different plan than the live run | The replay clients key on the anonymized query text the engine itself regenerates, and a miss is a loud error naming the query and the range, never an empty result (§16.5). `collect-testdata` captures the superset of every forecaster's `required_range()`, not the configured model's (§16.2) |
-| A bundle looks complete but a permission silently emptied a response | Every captured call records its outcome (`ok`/`http_error`/`empty`/`refused`/`skipped`) and the bundle ships `verify-metrics`/`verify-storages` findings from capture time — the `Datastore.Allocate` false negative of §3.5 must be visible in the bundle, not inferred from it (§16.2) |
+| A bundle looks complete but a permission silently emptied a response | Every captured call records its outcome (`ok`/`http_error`/`empty`/`refused`/`skipped`) and the bundle ships `verify-metrics` findings from capture time (`verify-storages`'s own report replays from the topology/config the bundle already carries, needing no separate capture) — the `Datastore.Allocate` false negative of §3.5 must be visible in the bundle, not inferred from it (§16.2) |
 
 Overarching rule: **the reserve constraint is never traded against balance.** Stated precisely: with
 the lexicographic solve of (C5) this is exact — the reserve shortfall is minimized in a prior stage
@@ -2563,7 +2584,7 @@ attaching anything to an email.
 drs-testdata-cluster-3f8a91c2-2026-09-11/
   manifest.json            # schema, versions, what was captured, what failed, counts
   config.yaml              # the anonymized, credential-free effective configuration
-  findings.json            # verify-metrics and verify-storages output, as captured
+  findings.json            # verify-metrics output, as captured
   pve/
     cluster-resources-vm.json
     cluster-resources-storage.json
@@ -2663,10 +2684,14 @@ configuration difference between deployments and not a reason to hand back a sho
 `Datastore.Allocate` finding: a `/content` call that returns `200` and an empty list looks exactly
 like an empty storage. Every captured call carries its outcome in the manifest —
 `ok` / `http_error` / `empty` / `refused` / `skipped` — and the bundle additionally ships
-`findings.json`, the verbatim output of `verify-metrics` and `verify-storages` against the live
-cluster at capture time. An operator whose bundle records "every storage reported zero volumes" has
-a bundle that says so, and the author reading it sees a permissions finding instead of a cluster
-with no disks.
+`findings.json`, the verbatim output of `verify-metrics` against the live cluster at capture time.
+(`verify-storages`'s own report needs no separate capture: it is a pure function of the topology
+and config the bundle already carries in `pve/` and `config.yaml`, so `--replay <bundle>
+verify-storages` reproduces it byte-for-byte from data already there — storing it a second time in
+`findings.json` would be redundant, not additional coverage. `verify-metrics` is different because
+its report depends on a live Prometheus response that is otherwise gone the moment capture ends.)
+An operator whose bundle records "every storage reported zero volumes" has a bundle that says so,
+and the author reading it sees a permissions finding instead of a cluster with no disks.
 
 A capture in which some calls failed is still written, and the command exits `1` with the failures
 summarized. A partial bundle is useful; a bundle that pretends to be complete is not.

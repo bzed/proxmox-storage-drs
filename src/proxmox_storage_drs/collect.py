@@ -58,10 +58,13 @@ from proxmox_storage_drs.config import Config, ResolvedConfig
 from proxmox_storage_drs.exceptions import BundleError, MetricsError, PveApiError, TopologyError
 from proxmox_storage_drs.metrics import (
     RAW_METRIC_FIELDS,
+    DiskKey,
     PrometheusClient,
     VerifyMetricsReport,
+    build_node_selector,
     build_quantile_over_time_promql,
     build_rate_promql,
+    format_cross_metric_finding,
     raw_metric_name,
     resolve_node_selector,
     safe_range_step_seconds,
@@ -174,7 +177,18 @@ def estimate_capture(
         1 if no_series else (1 + range_chunks)
     )
     query_count += 3  # label_values for vmid/device/node
-    points_per_disk = 0 if no_series else int(range_seconds / max(step_seconds, 1.0))
+    # Z-05: a live capture actually issues (and stores, before any
+    # consumption-side decimation) the *safe* step's dense response
+    # whenever the gigapipe workaround triggers -- which at the default
+    # config (metrics.step == metrics.rate_window) is always. Estimating
+    # at the configured `step_seconds` verbatim understated the real,
+    # stored point count by exactly that factor (2x at the defaults, 13x
+    # at metrics.step=1h/rate_window=300s), so both the printed --estimate
+    # figure and support.max_series_points' refusal check (which compares
+    # against this same `sample_points`) passed captures the threshold was
+    # meant to stop.
+    query_step_seconds = safe_range_step_seconds(step_seconds, config.metrics.rate_window_seconds)
+    points_per_disk = 0 if no_series else int(range_seconds / max(query_step_seconds, 1.0))
     sample_points = disk_count * _METRICS_PER_DISK * points_per_disk
     return CaptureEstimate(
         group_count=group_count,
@@ -880,9 +894,15 @@ def _label_kind_for(label_name: str, labels: Any) -> str:
     return "other"
 
 
-def _anonymize_query_text(query: str, mapper: Mapper, rate_expr_map: dict[str, str]) -> str:
+def _anonymize_query_text(
+    query: str,
+    mapper: Mapper,
+    rate_expr_map: dict[str, str],
+    node_selector: str | None = None,
+    anon_node_selector: str | None = None,
+) -> str:
     """Rewrites captured PromQL text so it matches what a ``--replay`` run
-    reconstructs. Two cases:
+    reconstructs. Three cases, in order:
 
     - The text contains one of ``rate_expr_map``'s real-selector rate
       expressions (section 3.4's ``sum by (...) (rate(...))``, built with
@@ -893,14 +913,23 @@ def _anonymize_query_text(query: str, mapper: Mapper, rate_expr_map: dict[str, s
       substituting node names one at a time inside the text: sorting the
       real names and sorting their pseudonyms can disagree, and a replay
       run always builds its selector by sorting pseudonyms.
-    - No known rate expression appears at all -- ``verify_metrics()``'s
-      own checks never carry a node selector in the first place (it never
-      talks to the PVE API), so there is nothing node-shaped to rewrite,
-      and this is a no-op.
+    - Z-03: the text carries ``node_selector`` on its own, not wrapped in a
+      ``rate_expr_map`` shape at all -- ``_check_observed_spacing()``'s bare
+      ``f"{metric_name}{{{selector}}}"`` probe is the one caller that builds
+      a query this way. Not a ``rate_expr_map`` entry (there is no
+      ``rate()``/``sum by (...)`` wrapper to key on), so it needs its own
+      direct substring replacement of the already-fully-built selector
+      text -- the same "replace the whole self-consistent string, never
+      substitute node names one at a time" reasoning as the case above.
+    - Neither applies -- ``verify_metrics()``'s other checks never carry a
+      node selector in the first place (it never talks to the PVE API), so
+      there is nothing node-shaped to rewrite, and this is a no-op.
     """
     for real_expr, anon_expr in rate_expr_map.items():
         if real_expr in query:
             return query.replace(real_expr, anon_expr)
+    if node_selector and node_selector in query:
+        return query.replace(node_selector, anon_node_selector or "<node-selector-redacted>")
     return query
 
 
@@ -909,6 +938,8 @@ def _anonymize_captured_prometheus(
     config: Config,
     mapper: Mapper,
     rate_expr_map: dict[str, str],
+    node_selector: str | None = None,
+    anon_node_selector: str | None = None,
 ) -> dict[str, Any]:
     """Turns every ``(path, params, raw response)`` :class:`RecordingPrometheusClient`
     recorded -- from this module's own driver functions *and* from whatever
@@ -928,7 +959,9 @@ def _anonymize_captured_prometheus(
         # returns the raw `data` dict for these two endpoints (a bare list
         # only for label_values), and both call `.get("result", [])`.
         if path == "/api/v1/query":
-            query = _anonymize_query_text(params["query"], mapper, rate_expr_map)
+            query = _anonymize_query_text(
+                params["query"], mapper, rate_expr_map, node_selector, anon_node_selector
+            )
             series = raw_result.get("result", []) if isinstance(raw_result, dict) else []
             files[f"instant/{hash_query_text(query)}.json"] = {
                 "query": query,
@@ -937,7 +970,9 @@ def _anonymize_captured_prometheus(
                 ),
             }
         elif path == "/api/v1/query_range":
-            query = _anonymize_query_text(params["query"], mapper, rate_expr_map)
+            query = _anonymize_query_text(
+                params["query"], mapper, rate_expr_map, node_selector, anon_node_selector
+            )
             series = raw_result.get("result", []) if isinstance(raw_result, dict) else []
             range_captures.setdefault(query, []).append(
                 (
@@ -991,7 +1026,7 @@ def _capture_prometheus_files(
     mapper: Mapper,
     options: CaptureOptions,
     log: CaptureLog,
-) -> tuple[dict[str, Any], VerifyMetricsReport | None]:
+) -> tuple[dict[str, Any], VerifyMetricsReport | None, str | None, str | None]:
     verify_report: VerifyMetricsReport | None
     try:
         verify_report = verify_metrics(
@@ -1027,8 +1062,20 @@ def _capture_prometheus_files(
     # _anonymize_query_text() still does (on a query with no node
     # selector at all, e.g. verify_metrics()'s own unscoped checks) has no
     # ordering to get wrong in the first place.
-    anon_node_selector = resolve_node_selector(
-        config.metrics, sorted(mapper.node(n) for n in known_nodes)
+    #
+    # Z-03: this must call build_node_selector() directly, never
+    # resolve_node_selector() -- resolve_node_selector()'s tier-1
+    # precedence returns metrics.extra_selector verbatim whenever the
+    # operator set one, on *either* side, which would make the anonymized
+    # side identical to the real side (the real one, above, correctly
+    # goes through resolve_node_selector() so a live extra_selector query
+    # actually reaches Prometheus). Section 16.3 is explicit that
+    # extra_selector is rewritten to "the equivalent anonymized node
+    # alternation -- the selector section 3.4's default tier would have
+    # built" -- that is build_node_selector(), unconditionally, not
+    # whatever tier resolve_node_selector() would have picked.
+    anon_node_selector = build_node_selector(
+        config.metrics.labels.node, sorted(mapper.node(n) for n in known_nodes)
     )
     rate_expr_map = {
         build_rate_promql(
@@ -1060,8 +1107,10 @@ def _capture_prometheus_files(
         )
     _drive_label_values(recording_prom, config, log)
 
-    files = _anonymize_captured_prometheus(recording_prom, config, mapper, rate_expr_map)
-    return files, verify_report
+    files = _anonymize_captured_prometheus(
+        recording_prom, config, mapper, rate_expr_map, node_selector, anon_node_selector
+    )
+    return files, verify_report, node_selector, anon_node_selector
 
 
 def capture_bundle(
@@ -1112,7 +1161,7 @@ def capture_bundle(
     pve_files = _capture_pve_files(recording_pve, topology, known_nodes, mapper)
 
     recording_prom = RecordingPrometheusClient(prometheus_client, log)
-    prometheus_files, verify_report = _capture_prometheus_files(
+    prometheus_files, verify_report, node_selector, anon_node_selector = _capture_prometheus_files(
         recording_prom,
         topology,
         config,
@@ -1133,7 +1182,12 @@ def capture_bundle(
     pve_version = recording_pve.version()
     prometheus_version = recording_prom.buildinfo()
 
-    findings = _findings_to_json(verify_report, config, mapper)
+    # Z-03: `_check_observed_spacing()`'s own "no series" finding can embed
+    # the same selector-carrying metric text its query used (see
+    # `_anonymize_query_text`'s docstring) -- findings.json goes through the
+    # same node_selector/anon_node_selector substitution as the query files
+    # do, for the same reason.
+    findings = _findings_to_json(verify_report, config, mapper, node_selector, anon_node_selector)
     config_yaml = _anonymized_config_dict(config, mapper, topology)
     manifest = _build_manifest(
         resolved,
@@ -1229,7 +1283,12 @@ _TRANSPORT_URL_RE = re.compile(r"https?://\S+")
 _TRANSPORT_HOST_RE = re.compile(r"host='[^']*'")
 
 
-def _redact_free_text(text: str, mapper: Mapper) -> str:
+def _redact_free_text(
+    text: str,
+    mapper: Mapper,
+    node_selector: str | None = None,
+    anon_node_selector: str | None = None,
+) -> str:
     """``verify_metrics()``'s own finding text, and this module's own call
     log (built from the *real* PVE/Prometheus calls, since the recording
     clients run before ``mapper`` exists -- see :func:`capture_bundle`),
@@ -1245,10 +1304,16 @@ def _redact_free_text(text: str, mapper: Mapper) -> str:
     pseudonym -- broader than strictly necessary (a coincidental
     vmid-shaped number that is not actually a vmid would also get
     rewritten), which is the safe direction to be wrong in for a privacy
-    control.
+    control. Z-03: when ``node_selector`` is given (``metrics.extra_selector``
+    was set for this capture), any occurrence of that already-fully-built
+    selector text is also replaced with ``anon_node_selector`` -- the same
+    "replace the whole self-consistent string" rule
+    :func:`_anonymize_query_text` applies to query text, extended to free
+    text so a finding built from a selector-scoped query (e.g.
+    ``_check_observed_spacing``'s "no series" warning) cannot carry it either.
 
-    This is a *blocklist* over the three identifier kinds the tool itself
-    knows about -- it cannot redact a label this project never assigned any
+    This is a *blocklist* over the identifier kinds the tool itself knows
+    about -- it cannot redact a label this project never assigned any
     meaning to (a Telegraf ``host`` tag, ``service_name``, ``measurement``,
     ...). ``_check_sample_series()``'s "sample series labels" finding is
     exactly that shape -- a live series' *entire* raw label dict, dumped
@@ -1264,13 +1329,25 @@ def _redact_free_text(text: str, mapper: Mapper) -> str:
         result = result.replace(real_node, mapper.node(real_node))
     for real_storage in sorted(mapper.known_storages, key=len, reverse=True):
         result = result.replace(real_storage, mapper.storage(real_storage))
+    if node_selector and node_selector in result:
+        result = result.replace(node_selector, anon_node_selector or "<node-selector-redacted>")
     return result
 
 
 def _redact_finding_message(
-    message: str, mapper: Mapper, sample_series: dict[str, dict[str, str]]
-) -> str:
+    message: str,
+    mapper: Mapper,
+    sample_series: dict[str, dict[str, str]],
+    coverage_by_disk: dict[DiskKey, float] | None = None,
+    missing_disks_by_metric: dict[str, tuple[tuple[str, str], ...]] | None = None,
+    node_selector: str | None = None,
+    anon_node_selector: str | None = None,
+) -> str | None:
     """Bundle-safe rewrite of one ``verify_metrics()`` finding message.
+    Returns ``None`` when the message describes a disk this bundle must not
+    name at all (an unregistered vmid) -- callers must drop the finding
+    entirely, the same "unmapped means dropped" rule ``anonymize.py``
+    applies everywhere else.
 
     ``_check_sample_series()`` builds its "info" finding as
     ``f"{name}: sample series labels {sample_labels}"``, where
@@ -1279,25 +1356,60 @@ def _redact_finding_message(
     labels this project's config knows the meaning of. A real-world
     ``host`` tag (a Telegraf host, not necessarily a PVE node name) is a
     real identifier that ``_redact_free_text()`` has no way to recognize,
-    so it would otherwise reach ``findings.json`` unredacted.
+    so it would otherwise reach ``findings.json`` unredacted. Rather than
+    parsing an arbitrary dict repr back out of free text, this recognizes
+    that one message shape by its ``"{name}: sample series labels "``
+    prefix and rebuilds it from ``sample_series[name]`` -- the same
+    vmid/device/node-only view :func:`_findings_to_json` already computes
+    for the structured ``sample_series`` field, so the two can never
+    disagree.
 
-    Rather than parsing an arbitrary dict repr back out of free text, this
-    recognizes that one message shape by its ``"{name}: sample series
-    labels "`` prefix and rebuilds it from ``sample_series[name]`` -- the
-    same vmid/device/node-only view :func:`_findings_to_json` already
-    computes for the structured ``sample_series`` field, so the two can
-    never disagree. Every other message shape (coverage gaps, cross-metric
-    consistency, transport failures, ...) still goes through
-    :func:`_redact_free_text`."""
+    Z-02: ``_check_coverage()``'s per-disk warning and
+    ``_check_cross_metric_disk_consistency()``'s warning both embed a real
+    ``vmid`` straight from the Prometheus series -- *any* series, not just
+    ones from a managed disk group, so a foreign/deleted/ungrouped vmid
+    reaches these two message shapes even though the mapper never registers
+    it and the structured ``coverage_by_disk`` field correctly drops it.
+    Both are rebuilt the same way as the sample-series shape above: matched
+    by a prefix built from data the caller already has (the real
+    ``coverage_by_disk`` keys; ``missing_disks_by_metric``'s real
+    ``(vmid, device)`` pairs), then either re-emitted with the vmid mapped
+    to its pseudonym, or dropped outright when the vmid is not registered.
+
+    Every other message shape (transport failures, ...) still goes through
+    :func:`_redact_free_text`, including its own Z-03 selector
+    substitution."""
     for field_name, labels in sample_series.items():
         prefix = f"{field_name}: sample series labels "
         if message.startswith(prefix):
             return f"{prefix}{labels}"
-    return _redact_free_text(message, mapper)
+    for disk_key in coverage_by_disk or {}:
+        prefix = f"{disk_key.vmid}:{disk_key.device}: coverage "
+        if message.startswith(prefix):
+            new_vmid = mapper.vmid(disk_key.vmid)
+            if new_vmid is None:
+                return None
+            return f"{new_vmid}:{disk_key.device}: coverage {message[len(prefix):]}"
+    for name, missing in (missing_disks_by_metric or {}).items():
+        prefix = f"{name}: no series for "
+        if message.startswith(prefix):
+            filtered = sorted(
+                (str(mapper.vmid(int(vmid))), device)
+                for vmid, device in missing
+                if vmid.isdigit() and mapper.vmid(int(vmid)) is not None
+            )
+            if not filtered:
+                return None
+            return format_cross_metric_finding(name, filtered).message
+    return _redact_free_text(message, mapper, node_selector, anon_node_selector)
 
 
 def _findings_to_json(
-    report: VerifyMetricsReport | None, config: Config, mapper: Mapper
+    report: VerifyMetricsReport | None,
+    config: Config,
+    mapper: Mapper,
+    node_selector: str | None = None,
+    anon_node_selector: str | None = None,
 ) -> dict[str, Any]:
     if report is None:
         return {"verify_metrics": None}
@@ -1325,8 +1437,20 @@ def _findings_to_json(
                 anonymized_labels[k] = v  # device: passes through unchanged
         sample_series[field_name] = anonymized_labels
     findings = [
-        {"level": f.level, "message": _redact_finding_message(f.message, mapper, sample_series)}
+        {"level": f.level, "message": redacted}
         for f in report.findings
+        if (
+            redacted := _redact_finding_message(
+                f.message,
+                mapper,
+                sample_series,
+                report.coverage_by_disk,
+                report.missing_disks_by_metric,
+                node_selector,
+                anon_node_selector,
+            )
+        )
+        is not None
     ]
     coverage: dict[str, float] = {}
     for disk_key, value in report.coverage_by_disk.items():

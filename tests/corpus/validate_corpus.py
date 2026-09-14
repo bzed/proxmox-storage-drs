@@ -47,6 +47,7 @@ is ``make corpus``'s target and also walks ``DRS_CORPUS_DIR``.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
@@ -355,6 +356,68 @@ def _scrub_config_yaml(config_path: Path) -> list[str]:
     return []
 
 
+# Z-01: `_check_sample_series()`'s "sample series labels" finding dumps a
+# live series' entire raw label dict into free text. `collect.py`'s
+# `_redact_finding_message()` (bb9417b) rebuilds that one message from the
+# same vmid/device/node-only view the structured `sample_series` field next
+# to it already uses -- but nothing checked that a *committed* message
+# actually stayed within that view (an unmapped Telegraf `host` tag reached
+# two committed bundles this way, invisible to every value-pattern check
+# above: a bare hostname has no punctuation shape to match). This is a
+# dedicated structural check instead: a dict-repr label key set is
+# computable from the bundle's own config.yaml alone, no mapper needed, and
+# must be a subset of it.
+_SAMPLE_SERIES_LABELS_RE = re.compile(r"^(?P<metric>.+?): sample series labels (?P<labels>\{.*\})$")
+
+
+def _scrub_sample_series_message(
+    findings_path: Path, index: int, message: str, label_names: frozenset[str]
+) -> str | None:
+    """One "sample series labels" finding's own check -- factored out of
+    :func:`_scrub_findings_json` so that function stays a simple loop."""
+    match = _SAMPLE_SERIES_LABELS_RE.match(message)
+    if not match:
+        return None
+    try:
+        labels = ast.literal_eval(match.group("labels"))
+    except (ValueError, SyntaxError):
+        return f"{findings_path}: findings[{index}].message: unparseable label dict"
+    if not isinstance(labels, dict):
+        return None
+    extra = sorted(set(labels) - label_names)
+    if not extra:
+        return None
+    return (
+        f"{findings_path}: findings[{index}].message carries label(s) outside the "
+        f"configured set {sorted(label_names)}: {extra}"
+    )
+
+
+def _scrub_findings_json(findings_path: Path, config_path: Path) -> list[str]:
+    if not findings_path.is_file():
+        return []
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"{findings_path}: could not read/parse: {exc}"]
+    label_names = _configured_label_names(config_path)
+    if not label_names:
+        return []
+    verify_metrics = data.get("verify_metrics") if isinstance(data, dict) else None
+    findings = verify_metrics.get("findings") if isinstance(verify_metrics, dict) else None
+    if not isinstance(findings, list):
+        return []
+    violations: list[str] = []
+    for i, finding in enumerate(findings):
+        message = finding.get("message") if isinstance(finding, dict) else None
+        if not isinstance(message, str):
+            continue
+        violation = _scrub_sample_series_message(findings_path, i, message, label_names)
+        if violation:
+            violations.append(violation)
+    return violations
+
+
 def scrub_audit(bundle: Bundle) -> list[str]:
     """Section 16.6, check 1. Returns every violation found; empty means clean.
 
@@ -379,6 +442,9 @@ def scrub_audit(bundle: Bundle) -> list[str]:
         path = bundle.directory / name
         if path.is_file():
             violations.extend(_scrub_json_file(path, None))
+    violations.extend(
+        _scrub_findings_json(bundle.directory / "findings.json", bundle.directory / "config.yaml")
+    )
     violations.extend(_scrub_node_or_storage_ids(bundle.directory))
     violations.extend(_scrub_config_yaml(bundle.directory / "config.yaml"))
     return violations

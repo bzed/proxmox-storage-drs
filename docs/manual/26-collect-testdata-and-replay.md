@@ -34,12 +34,20 @@ pve-storage-drs -c /etc/pve/drs.yaml collect-testdata --estimate
 groups: 2   disks: 47
 range: 7d  step: 5m
 estimated Prometheus queries: 117
-estimated series sample points: 568512
+estimated series sample points: 1137024
 ```
 
 (The query count includes the day-sized chunking `--estimate` itself performs at capture time — 7
 range-query chunks per group per metric at the 7 d default, not 1 — so it is the real HTTP request
 count, not a logical-query count that understates it.)
+
+The sample-point figure is `47 disks · 6 metrics · 4032 points`, not the `2016` a plain
+`604800s / 300s` would suggest: at `metrics.step == metrics.rate_window` (both `5m` here, and
+the project's own default) a live capture issues, and stores, range queries at *half* the
+configured step to work around a gigapipe backend bug (`docs/internals/30-metrics.md`), doubling
+the points actually captured. `--estimate` accounts for this so the printed figure — and the
+`support.max_series_points` refusal below, which compares against the same number — matches what
+a real capture stores, not the configured step's naive arithmetic.
 
 Above `support.max_series_points` (default 5,000,000) the real capture
 refuses outright, naming the flags that bring it under the limit:

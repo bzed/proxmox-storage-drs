@@ -22,3 +22,15 @@ what_this_reproduces: >
   cpsat legitimately used more moves than the heuristic to reach a far better
   spread at objective.beta_move_count=0.0, which the old check misread as "the
   MILP did worse".
+repairs:
+  - date: 2026-09-14
+    what_leaked: >
+      findings.json's six "sample series labels" messages carried the real,
+      unmapped Telegraf host tag ('host': 'data001') that bb9417b's
+      _redact_finding_message() fix was meant to remove -- the fix corrected
+      only the uncommitted cluster-a bundle, not this already-committed one
+      (REVIEW.md Z-01).
+    fixed_by: bb9417b (collector fix, prior commit)
+    repaired_by: this commit (rebuilt each message from the structured
+      sample_series field beside it, per tests/corpus/README.md's repair
+      procedure; SHA256SUMS updated to match)

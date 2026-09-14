@@ -197,3 +197,114 @@ def test_scrub_audit_passes_a_bundle_with_a_redacted_transport_failure(tmp_path:
     )
     violations = vc.scrub_audit(corpus_bundle)
     assert violations == []
+
+
+@needs_full_checkout
+def test_scrub_findings_json_flags_a_sample_series_label_outside_the_configured_set(
+    tmp_path: Path,
+) -> None:
+    """Z-01: two committed corpus bundles carried a real, unmapped Telegraf
+    ``host`` tag inside `_check_sample_series()`'s "sample series labels"
+    message -- a dict-repr shape no value-pattern regex can catch (a bare
+    hostname has no punctuation to match). This is the structural check
+    that closes it: the message's own label key set must be a subset of
+    the bundle's configured label names."""
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(
+        json.dumps(
+            {
+                "verify_metrics": {
+                    "findings": [
+                        {
+                            "level": "info",
+                            "message": (
+                                "rd_operations: sample series labels {'host': 'data001', "
+                                "'instance': 'ide2', 'nodename': 'node-9bcf256f', "
+                                "'vmid': '389722'}"
+                            ),
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "metrics:\n  labels:\n    vmid: vmid\n    device: instance\n    node: nodename\n",
+        encoding="utf-8",
+    )
+    violations = vc._scrub_findings_json(findings_path, config_path)
+    assert len(violations) == 1
+    assert "host" in violations[0]
+
+
+@needs_full_checkout
+def test_scrub_findings_json_passes_the_allowlisted_view(tmp_path: Path) -> None:
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(
+        json.dumps(
+            {
+                "verify_metrics": {
+                    "findings": [
+                        {
+                            "level": "info",
+                            "message": (
+                                "rd_operations: sample series labels {'instance': 'ide2', "
+                                "'nodename': 'node-9bcf256f', 'vmid': '389722'}"
+                            ),
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "metrics:\n  labels:\n    vmid: vmid\n    device: instance\n    node: nodename\n",
+        encoding="utf-8",
+    )
+    assert vc._scrub_findings_json(findings_path, config_path) == []
+
+
+@needs_full_checkout
+def test_scrub_audit_catches_a_findings_json_label_leak_the_value_checks_miss(
+    tmp_path: Path,
+) -> None:
+    """End to end through `scrub_audit()`: a bare, unmapped `host` value
+    (no dot, no IP/email/hex/JWT shape) survives every existing
+    value-pattern check -- only the Z-01 structural check catches it."""
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "config.yaml").write_text(
+        "metrics:\n  labels:\n    vmid: vmid\n    device: instance\n    node: nodename\n",
+        encoding="utf-8",
+    )
+    (bundle_dir / "findings.json").write_text(
+        json.dumps(
+            {
+                "verify_metrics": {
+                    "findings": [
+                        {
+                            "level": "info",
+                            "message": (
+                                "rd_operations: sample series labels {'host': 'data001', "
+                                "'instance': 'ide2', 'nodename': 'node-9bcf256f', "
+                                "'vmid': '389722'}"
+                            ),
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    corpus_bundle = vc.Bundle(
+        name="repro",
+        directory=bundle_dir,
+        submission=tmp_path / "repro.submission.yaml",
+        expected=tmp_path / "repro.expected.json",
+    )
+    violations = vc.scrub_audit(corpus_bundle)
+    assert any("host" in v for v in violations)

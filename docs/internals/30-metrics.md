@@ -88,6 +88,47 @@ node list of its own to build the default tier from (`_check_coverage()`/
 one series directly, where cross-cluster contamination is not a
 correctness question the way a summed rate is).
 
+## `safe_range_step_seconds()` / `decimate_to_configured_step()`: the gigapipe `step >= range` workaround
+
+Two live-confirmed deployments of a recently updated gigapipe backend return
+**zero series** from `/api/v1/query_range` (and the PromQL `[range:step]`
+subquery form) for any range-vector function (`rate()`, `irate()`,
+`increase()`, `delta()`, `deriv()` all confirmed) whenever the query's own
+`step` is `>=` the function's own range-vector duration — even though the
+identical expression as a plain instant `/api/v1/query` (no step at all)
+returns correct data. Binary-searched to the exact second: `rate(x[300s])`
+gets a full response at `step=299s`, nothing at all at `step=300s`. This
+project's own defaults set `metrics.step == metrics.rate_window` (`300s`
+each) — exactly the failing boundary — so a fresh install with untouched
+defaults can hit this on an affected backend with no misconfiguration.
+
+`safe_range_step_seconds(step_seconds, rate_window_seconds)` is a no-op
+once `step_seconds` is already strictly below `rate_window_seconds` (nothing
+to work around); otherwise it returns the largest whole-second step strictly
+below `rate_window_seconds` that divides `step_seconds` as evenly as a
+whole-second value can (150s at the 300s/300s default; not necessarily an
+exact divisor at other ratios — 3600s/300s divides to 276s, 13·276=3588 ≠
+3600, a documented ~0.33%-per-point grid drift). `compute_disk_coverage()`
+and `loadmodel.py`'s raw-series fetch both call it unconditionally — not
+only when the affected backend is detected, since the symptom (zero series)
+is indistinguishable from genuinely absent data — and pass its result as the
+step on every `query_range` call, then `decimate_to_configured_step()`
+recovers the originally-configured grid by keeping every Nth point of the
+denser response, anchored at the same `start`. For an exact divisor this
+makes the workaround a true no-op: the retained points are the identical
+instants and values a plain `metrics.step` query would have returned on an
+unaffected backend.
+
+`quantile_over_time`'s subquery cannot decimate — an instant query returns
+one scalar, not a series — so it evaluates its inner expression on the
+denser, safe-step grid unconditionally, on *every* backend, healthy or not:
+at the 300s/300s default this doubles the inner sample count the 95th
+percentile is taken over, a small but real shift in the reduced statistic
+(REVIEW.md Z-04). `collect.py`'s `estimate_capture()` and `--replay`'s
+`compute_disk_coverage()` fallback (a bundle captured before this function
+existed, at the plain configured step) both account for this step, not the
+configured one, for the same reason (REVIEW.md Z-05).
+
 ## `verify_metrics()`: six checks, six functions
 
 Each `_check_*` function implements exactly one `IMPLEMENTATION_PLAN.md`

@@ -53,6 +53,14 @@ review, it compresses well in git, and the scrub audit reads it as plain files.
 
 ## Adding a bundle
 
+0. **Work under `tests/corpus/local/` while reviewing.** It is gitignored (scratch space for
+   "being reviewed before committed or discarded", and for anything too big to commit —
+   point `DRS_CORPUS_DIR` at it). A bundle sitting directly in `tests/corpus/` with no
+   submission file yet is an unattributed dump *in the committed-bundle namespace*, and the
+   scrub/submission gate below fails on it correctly — that failure is not "unrelated" or
+   "pre-existing" the way REVIEW.md's Z-07 finding shows a 0.1.3 release commit message once
+   treated it; it means the bundle is in the wrong place. Move it into `tests/corpus/`
+   proper — with its submission file — only once you are ready to commit it.
 1. **Read it first.** Open the directory. It is sorted, indented JSON, meant to be read.
    `manifest.json` says what was captured and what failed; `config.yaml` is the
    configuration the run used with its credentials removed.
@@ -65,6 +73,30 @@ review, it compresses well in git, and the scrub audit reads it as plain files.
    make corpus                                         # the full variant matrix
    ```
 4. Commit the bundle directory, its submission file and its expected file together.
+
+### Repairing an already-committed bundle
+
+Sometimes the collector itself had a privacy bug (REVIEW.md Z-01 is the first instance: a
+Telegraf `host` tag reached two committed bundles' `findings.json` before the fix that strips
+it). A committed bundle is real captured data, not something to hand-edit freely, so a repair
+follows a narrower path than "adding a bundle":
+
+1. Fix the collector first, with its own regression test.
+2. Rebuild the affected derived file (`findings.json`, `config.yaml`, ...) **from the
+   bundle's own already-captured, already-anonymized data**, with the fixed code — never by
+   inventing or guessing a replacement value. For a `findings.json` message that duplicates a
+   structured field (the sample-series-labels shape Z-01 fixed), the structured field itself
+   is the source of truth: the fix is mechanical, needs no salt, and is byte-verifiable
+   against it.
+3. Recompute `SHA256SUMS` for every file the repair touched.
+4. Verify: the scrub audit (plus any new shape check the fix added) passes, and
+   `validate_corpus.py --check` still exits 0 without needing to regenerate the bundle's own
+   `.expected.json` — a repair that changes `findings.json`'s *content*, not the plan the
+   bundle produces, should not need to.
+5. Record the repair in the bundle's own `<bundle-name>.submission.yaml` (a short note: what
+   leaked, which commit fixed the collector, which commit repaired the bundle) — so the
+   history of what a committed bundle once contained stays honest and discoverable, rather
+   than disappearing into a silent diff.
 
 ### Size ceiling, and bundles too big to commit
 

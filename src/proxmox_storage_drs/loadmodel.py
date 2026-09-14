@@ -133,9 +133,14 @@ def _fetch_raw_quantity(
     )
     # safe_range_step_seconds(): see compute_disk_coverage()'s own use of
     # it (and the try/except below's rationale) in metrics.py. No
-    # decimation needed here, unlike _fetch_raw_quantity_series():
-    # quantile_over_time() collapses to one scalar regardless of its own
-    # internal subquery resolution.
+    # decimation needed here, unlike _fetch_raw_quantity_series() -- an
+    # instant query returns one scalar, nothing to decimate back down --
+    # but that scalar is not independent of the subquery resolution it was
+    # reduced from: at the usual step==rate_window default this evaluates
+    # quantile_over_time()'s inner expression on a 2x-denser grid than the
+    # configured step would, on every backend, a small but real shift in
+    # the reduced statistic (REVIEW.md Z-04), not a no-op the way the range
+    # paths above are.
     query_step = safe_range_step_seconds(metrics.step_seconds, metrics.rate_window_seconds)
     promql = build_quantile_over_time_promql(
         rate_expr, window.quantile, window.lookback_seconds, query_step

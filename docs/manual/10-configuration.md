@@ -265,7 +265,25 @@ against the declared `pvestatd_push_interval`.
 Duration, default `5m`.
 
 The sampling step used for range queries (forecasting, coverage checks).
-Independent of `metrics.rate_window`, though the two are usually set equal.
+Independent of `metrics.rate_window`, though the two are usually set equal —
+which is also the one setting a workaround below silently changes what
+actually gets fetched at.
+
+**Whenever `metrics.step >= metrics.rate_window`** (true at the usual-equal
+default), the collector does not send `metrics.step` to Prometheus as-is: a
+live-confirmed gigapipe bug returns zero series for any `rate()`-based range
+query or `quantile_over_time` subquery once the query's own step reaches the
+function's range-vector duration, so this tool queries at half that step (or
+the largest whole-second step below it that divides `metrics.step` evenly,
+at a wider ratio) and reassembles the configured grid from the result. Every
+disk's coverage, load history and forecaster input comes back numerically
+identical to what a plain `metrics.step` query would have returned on an
+unaffected backend — except the `quantile_over_time` decision statistic
+itself, whose inner evaluation runs on the denser grid unconditionally, on
+every backend (a small, real shift in the reduced 95th-percentile value; see
+`docs/internals/30-metrics.md`). The *stored* sample count this produces —
+what `collect-testdata --estimate` prints and `support.max_series_points`
+compares against — is correspondingly doubled (or more) at the same ratio.
 
 ### `metrics.pvestatd_push_interval`
 

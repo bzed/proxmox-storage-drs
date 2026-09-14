@@ -164,6 +164,28 @@ remains unimplemented on the real-capture path; the manifest's new version strin
 `_redact_free_text()`, whose vmid substitution can silently rewrite digits inside them; and the
 rewritten 0.1.1 changelog bullet says "five" documentation fixes and lists four.
 
+A **seventeenth pass** (section 33) reviews everything after the Y-fixes: releases 0.1.2 and
+0.1.3, the `findings.json` label-leak fix found by hand-reading a fresh corpus submission
+(`bb9417b`), and the gigapipe step-vs-range workaround (`29213e8`), with the review specifically
+tasked to verify that generated `findings.json` files cannot contain confidential log lines.
+Eight findings (Z-01..Z-08) are identified: three Medium — **both committed corpus bundles still
+carry the exact leak the fix exists to prevent** (`host: 'data001'` in twelve "sample series
+labels" messages, green under every gate, because the fix corrected only the uncommitted
+`cluster-a` bundle); two further free-text finding shapes (per-disk coverage and cross-metric
+consistency warnings) still leak real vmids for any disk outside the managed groups
+(`_redact_free_text` substitutes registered vmids only — reproduced); and a capture from a
+cluster with `metrics.extra_selector` set stores the operator's raw selector text verbatim in
+~19 of its ~25 Prometheus query files (the `rate_expr_map` degenerates to the identity through
+tier-1 precedence) while the bundle's nulled config makes it outright unreplayable — both
+reproduced end to end. Three Low: the changelog's "no effect on an unaffected backend" is not
+literally true for the `quantile_over_time` subquery path; `--estimate` and the
+`support.max_series_points` refusal now understate a live capture's stored points by exactly
+the workaround factor (2× at the defaults, 13× at `metrics.step: 1h`); and the workaround
+landed with zero plan/manual/internals documentation. One Low on 0.1.3 being merged with a red
+local `make check` (the in-progress `cluster-a` bundle sitting in the committed-bundle
+namespace instead of the `tests/corpus/local/` scratch space), and one Info on §16's promise
+that `findings.json` carries `verify-storages` output, which no build has ever implemented.
+
 ---
 
 ## 0. Overall assessment
@@ -4606,6 +4628,405 @@ also attempted directly (not part of `make check`); it reports the same two comm
 for a reason predating this pass entirely (reproduced identically on the pre-fix commit `81df865`,
 via `git stash`) — unrelated to Y-01..Y-07 and out of this pass's scope, consistent with section
 30's own note that the full-matrix sweep was not re-run there either.
+
+---
+
+## 33. Seventeenth-pass review — the findings.json label-leak fix, the gigapipe step workaround, releases 0.1.2/0.1.3
+
+Reviewed commit range `81df865..HEAD` (the Y-01..Y-07 fixes themselves are recorded in section
+32 and are verified here rather than re-reviewed). Six non-merge commits: `9e80f6c` (the
+Y-fixes), `46583a0` (Release 0.1.2: README AI-disclaimer section, changelog entry, version
+bump), `bb9417b` (the `findings.json` label-leak fix — `_check_sample_series()`'s "info"
+finding dumps a live series' entire raw label dict into free text, and a real Telegraf `host`
+tag that `_redact_free_text()` cannot recognize reached a bundle; found by hand-reading the
+fresh, never-committed `tests/corpus/cluster-a/` submission), `29213e8` (the gigapipe
+step-vs-range workaround: two live-confirmed deployments of a recently updated gigapipe return
+zero series for any range-vector function whenever the query's own step `>=` the function's
+range-vector duration — exactly this project's default `metrics.step == metrics.rate_window` —
+binary-searched to the second, with a second confirmed quirk forcing whole-second steps),
+`b4c7de6` (Release 0.1.3), plus the subsequent removal of the untracked `cluster-a/` working
+tree. This pass was specifically tasked with verifying that generated `findings.json` files
+cannot contain confidential log lines (the motivating example being a former run's
+`rd_operations: sample series labels {'service_name': 'unknown', 'vmid': '143', …, 'cluster':
+'secret-clustername', 'host': 'secret-hostname', …}` message).
+
+The answer to the tasked question, up front: **a fresh capture is clean for the one message
+shape that was fixed, but not for two other shapes that leak real vmids, and the two committed
+corpus bundles still contain the original leak outright** (Z-01, Z-02). The fix itself
+(`_redact_finding_message()` rebuilding the message from the same vmid/device/node-only view
+the structured `sample_series` field already uses) is the right shape and is pinned by a
+regression test; the audit and the committed corpus were simply never extended to match it.
+
+### 33.1 Verification run
+
+- Dev venv `python3 -m pytest`: **847 passed, 1 warning** (the same benign statsmodels
+  `ConvergenceWarning` noted since the eleventh pass), **96.19% line coverage**. The two
+  privacy regression tests (`test_capture_bundle_findings_json_does_not_leak_unconfigured_labels`,
+  `test_capture_bundle_manifest_version_is_not_mangled_by_vmid_redaction`) re-run individually:
+  green.
+- `tests/fixtures/generate_expected.py --check`: OK. `make docs-check`: OK. Version agreement:
+  0.1.3 in `debian/changelog`, `pyproject.toml` and `__init__.py`.
+- **Corpus gate under both toolchains**: `validate_corpus.py --check` exits 0 in the dev venv
+  (ortools, pulp 3.3.2) *and* under the system Python (pulp 2.7.0, no ortools) — the Y-02 fix
+  demonstrably holds cross-environment now — and regeneration in the dev venv reproduces both
+  committed `.expected.json` files byte-for-byte (no diff).
+- **The committed-bundle leak was measured, not inferred**: both
+  `tests/corpus/bzed-dev-cluster-{24h,7d-holt-winters}/findings.json` carry six
+  `"…: sample series labels {'host': 'data001', …}"` messages each (twelve total), beside the
+  correctly-filtered structured `sample_series` field (`{"instance": "ide2",
+  "nodename": "node-9bcf256f", "vmid": "389722"}`). The scrub audit exits 0 over both bundles.
+  A `grep` for the other raw-label markers (`service_name`, `measurement`) confines the leak to
+  `findings.json` — the `prometheus/` payload files are correctly label-filtered.
+- **The unregistered-vmid channel was reproduced end to end**: a capture whose Prometheus
+  reports a low-coverage disk for vmid 777 (no such VM in the PVE topology — the shape of a
+  deleted VM, a VM on ungrouped storages, or a foreign cluster sharing the Prometheus) writes
+  `"777:scsi0: coverage 0% is below window.min_coverage (80%)"` into `findings.json` while the
+  structured `coverage_by_disk` next to it correctly drops the disk. Only managed-group disk
+  vmids are registered with the mapper (`collect.py:1110`), and `_redact_free_text()` substitutes
+  registered vmids only.
+- **The extra_selector channel was reproduced end to end**: a capture with
+  `metrics.extra_selector: 'cluster="prod"'` stores that text verbatim inside 19 of its 25
+  Prometheus query files (`quantile_over_time(0.95, (sum by (vmid, instance)
+  (rate(blockstat_rd_operations{cluster="prod"}[300s])))[86400s:150s])`), sets
+  `extra_selector: null` in the bundle's `config.yaml`, records
+  `extra_selector_rewritten: true` in the manifest — and a replay attempt against the written
+  bundle dies on the first load query with `BundleError: bundle has no recorded response for
+  the instant query '…rate(blockstat_rd_operations[300s]…'` (replay reconstructs the default
+  tier's unscoped/node-alternation text, which matches nothing stored).
+- `safe_range_step_seconds()`/`decimate_to_configured_step()` arithmetic hand-checked for the
+  realistic (step, rate_window) pairs: 300/300→150 (exact), 600/300→200 (exact), 900/300→225
+  (exact), 7200/300→288 (exact), 3600/300→276 (**inexact**: 13·276=3588≠3600, a 0.33%/point
+  grid drift, documented in the docstring as "approximately, by rounded division"), 3600/900→720
+  (exact). Decimation of a range response keeps indices 0, N, 2N… of a grid anchored at the same
+  `start`, so for every exact divisor the retained points are *the identical instants at the
+  identical values* a plain configured-step query would have returned — the range paths
+  (coverage, forecaster raw series, saturation series) are truly unchanged on a healthy backend.
+- All seven Y-fixes spot-verified in place: the lookahead regex (`validate_corpus.py:125`), the
+  `full_matrix`-only skip reason, manual 26's `568512`, §16.6's "sorted list of moves" wording,
+  §16.2's "computes it internally" wording, the version strings bypassing `_redact_free_text`
+  (`collect.py:1133-1148`), and the changelog's five named W-fixes.
+
+### 33.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| Z-01 | Medium | `tests/corpus/*/findings.json`, `validate_corpus.py` | Both *committed* corpus bundles still contain the exact label leak `bb9417b` fixed: `'host': 'data001'` (a real, unmapped Telegraf host tag) in twelve "sample series labels" messages — the fix corrected only the uncommitted `cluster-a` bundle, and the scrub audit is structurally blind to the dict-repr label shape, so every gate is green over the leak |
+| Z-02 | Medium | `collect.py`, `metrics.py` | Two further free-text finding shapes leak real vmids into `findings.json`: the per-disk coverage warning and the cross-metric consistency warning embed `vmid:device` for any vmid not registered with the mapper (any disk outside the managed groups), which `_redact_free_text()` passes through raw — reproduced; the structured `coverage_by_disk` drops the same disk, so file contradicts itself |
+| Z-03 | Medium | `collect.py`, plan §16.3 | A capture with `metrics.extra_selector` set stores the operator's raw selector text verbatim in ~19 of ~25 Prometheus query files (the `rate_expr_map` degenerates to the identity because `resolve_node_selector()`'s tier-1 precedence wins on *both* sides), contradicting §16.3's "rewritten, not carried — the collector replaces it with the equivalent anonymized node alternation"; the bundle is then *unreplayable* (config nulls the selector, every replay-reconstructed query text mismatches → `BundleError`), and the manifest's `extra_selector_rewritten: true` asserts a rewrite that never happened |
+| Z-04 | Low | `metrics.py`, `loadmodel.py`, changelog | "No effect on an unaffected backend" (0.1.3 changelog; echoed by `safe_range_step_seconds()`'s "costs nothing (a no-op)") is not literally true for the `quantile_over_time` decision statistic: at the default config the subquery resolution silently changes 300s→150s on *every* backend — a denser p95 sample grid and ~2× the server-side inner evaluations |
+| Z-05 | Low | `collect.py` | `estimate_capture()` still computes sample points at the *configured* step, so `--estimate`'s printed figure, the `support.max_series_points` refusal check and the manifest's refusal record all understate a live capture's actually-stored dense range points by exactly the workaround factor — 2× at the defaults, 13× at `metrics.step: 1h`/rw 300 (the committed 7d bundle's shape) |
+| Z-06 | Low | plan §3.4, `docs/manual/`, `docs/internals/` | The gigapipe workaround landed with zero documentation: no §3.4 "as built" note, no manual touch (`metrics.step`'s entry still says only "The sampling step used for range queries"), no internals page — violating AGENTS.md §8.6 (docs in the same commit) and §7.6 (plan and code together); the code comments are excellent, the operator- and plan-facing layers were skipped |
+| Z-07 | Low | release process, `tests/corpus/` | 0.1.3 was cut and merged while the developer's `make check` was red — corpus-check failing over the untracked `cluster-a/` sitting in the committed-bundle namespace instead of the `tests/corpus/local/` scratch space the corpus `.gitignore` provides for exactly this; documented in the commit message as "an unrelated, pre-existing gap" when the gap was the placement. Related: the disclosed hand-correction of `cluster-a`'s `findings.json` shows the project has no sanctioned procedure for repairing an already-captured bundle — the same procedure Z-01's fix needs |
+| Z-08 | Info | plan §16.1/§16.2 | §16 promises `findings.json` carries "the verbatim output of `verify-metrics` **and `verify-storages`**"; no build has ever run `verify-storages` during capture (`collect.py` has zero references), and `_findings_to_json()` handles the verify-metrics report only — the X-08 family (a §16 sentence describing bundle content that does not exist), pre-existing since phase 10 and unreported by passes 15/16 |
+
+### 33.3 Z-01 — the committed bundles still leak the label the fix removes
+
+**Severity:** Medium
+**Files:** `tests/corpus/bzed-dev-cluster-24h/findings.json`,
+`tests/corpus/bzed-dev-cluster-7d-holt-winters/findings.json`, `tests/corpus/validate_corpus.py`
+
+`bb9417b` fixed the collector and hand-corrected the one bundle that had not yet been committed
+(`cluster-a`), updating its `SHA256SUMS` — and left the two *committed* bundles untouched. Both
+still carry six `"…: sample series labels {'host': 'data001', 'instance': 'ide2',
+'measurement': 'blockstat', 'nodename': 'node-9bcf256f', 'object': 'qemu',
+'service_name': 'unknown', 'vmid': '389722', '__name__': …}"` messages each: a real Telegraf
+`host` tag, unmapped (had `data001` been a cluster node name, `_redact_free_text()`'s node
+substitution would have rewritten it — its survival next to the mapped `node-9bcf256f` is
+itself proof it is something else), committed to the repository, inside the exact message
+shape the fix rebuilds. The structured `sample_series` field beside each message shows the
+correct three-label view, so each file contradicts itself line by line — the same asymmetry
+the fix eliminates for new captures.
+
+Every gate is green over it, and that is the structural half of the finding: the scrub audit's
+value patterns cannot see the shape. `data001` is a bare host (no dot, so no public-suffix
+match), and the `host='…'` literal check added for X-02/Y-01 is the *requests-exception*
+equals-shape — a Python dict repr writes `host: 'data001'`, colon not equals. The audit is a
+blocklist over shapes its authors could enumerate; an arbitrary Prometheus/Telegraf label value
+is by construction not enumerable. `findings.json` was honestly re-scoped to value-patterns-only
+by X-03's resolution, but nothing checks the one free-text field whose *structured twin sits in
+the same file*.
+
+**Recommendation:** (a) Correct both committed bundles' findings.json by rebuilding each
+"sample series labels" message from the structured `sample_series` entry beside it — the
+transformation is mechanical (the fixed collector's own output for the same captured data,
+which is precisely how `cluster-a` was hand-corrected), needs no salt, and is verifiable;
+update `SHA256SUMS` in the same commit. (b) Teach the scrub audit the shape: every
+`"<metric>: sample series labels {...}"` message in a bundle's findings.json must carry a label
+key set ⊆ the bundle config's three configured label names — computable from the bundle alone,
+no mapper needed. That one check turns both this committed instance and any future collector
+regression of `bb9417b` into a red `make check` instead of a reviewer's good fortune.
+
+### 33.4 Z-02 — coverage and cross-metric warnings leak unregistered vmids
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/metrics.py:718-741`, `collect.py`
+(`_redact_free_text`, `_findings_to_json`), `collect.py:1110`
+
+`_check_coverage()`'s per-disk warning and `_check_cross_metric_disk_consistency()`'s warning
+both embed `vmid:device` strings built from the Prometheus series themselves — every series the
+coverage query returns, not the managed disk set. The mapper registers only the vmids of disks
+in configured groups (`mapper.register_vmids(disk.vmid for group in topology.groups …)`), and
+`_redact_free_text()` substitutes *registered* vmids only, so any disk outside the managed
+groups — a deleted VM whose series linger, a VM whose disks all sit on ungrouped storages, a
+same-numbered vmid from another cluster sharing the Prometheus (the exact scenario §3.4's node
+selector exists to exclude from *data*, while this channel carries its *identifier*) — reaches
+`findings.json` as a bare real vmid. Reproduced (33.1): `"777:scsi0: coverage 0% is below
+window.min_coverage (80%)"` beside an empty structured `coverage_by_disk`. §16.3's rule is
+"unmapped means dropped"; the structured fields follow it, these two message shapes do not.
+This is the same rebuild-from-the-allowlisted-view fix `bb9417b` applied to the sample-series
+shape, two shapes over — the blocklist approach cannot be extended to cover it, because
+nothing distinguishes a vmid-shaped number that is a vmid from one that is not.
+
+**Recommendation:** route both message shapes through structured rebuilds like
+`_redact_finding_message()` does: drop (or placeholder) a disk whose vmid is unregistered,
+using the same predicate the structured `coverage_by_disk` already applies. Add the
+composition regression the current test suite lacks: a capture with one managed and one
+foreign-vmid low-coverage disk, asserting neither message carries the foreign vmid while the
+managed one appears pseudonymized.
+
+### 33.5 Z-03 — an `extra_selector` capture leaks the selector verbatim and cannot replay
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/collect.py:1015-1048`, `collect.py:1407-1409`,
+`IMPLEMENTATION_PLAN.md` §16.3 (line 2791ff)
+
+§16.3 is explicit: "`metrics.extra_selector` is rewritten, not carried … The collector replaces
+it with the equivalent anonymized node alternation — the selector §3.4's default tier would
+have built — and the manifest flags that it did." The implementation *tries* to build both
+sides of the `rate_expr_map` through `resolve_node_selector()` — but that function's tier-1
+precedence returns `metrics.extra_selector` on **both** calls (real node names and pseudonym
+node names are never consulted when the operator set a selector), so the map is the identity
+for all six fields. Empirically (33.1): 19 of 25 query files carry `cluster="prod"` verbatim;
+`config.yaml` says `extra_selector: null`; the manifest says `extra_selector_rewritten: true`.
+Three consequences, in increasing order:
+
+1. **Privacy**: the operator-authored PromQL over real label values — the plan's own words for
+   why it must not be carried — reaches the bundle's `prometheus/` files. `extra_selector`
+   exists for shared-Prometheus deployments, so its text plausibly names exactly the things a
+   submission is supposed to abstract (cluster/customer identifiers).
+2. **Replay**: with the selector nulled in the bundle config, every replay-reconstructed query
+   (load, coverage, even `verify-metrics`' own probes, which also carried the selector at
+   capture time through `resolve_node_selector(metrics, None)`) textually mismatches every
+   stored query, and the first one raises `BundleError`. A bundle from the one configuration
+   `extra_selector` exists for is useless for its purpose — loudly, but only after the author
+   has received it.
+3. **Honesty**: the manifest flag asserts a rewrite that never happened — the X-08 mechanism
+   recording the opposite of the truth.
+
+The fix is the plan's own sentence: build the anonymized side of the map with the node
+alternation *directly* (`build_node_selector(labels.node, sorted(pseudonyms))`, bypassing tier
+1) instead of through `resolve_node_selector`. Then stored queries carry the alternation,
+replay reconstructs the alternation, the config's null is honest, the flag is true, and the
+residual not-byte-faithfulness is exactly what §16.3 already accepts and the flag already
+names. A capture test with `extra_selector` set, asserting (a) no query file carries the
+configured text and (b) the written bundle replays, closes both halves; the existing
+`test_capture_bundle_manifest_flags_an_extra_selector_rewrite` checks only the flag.
+
+### 33.6 Z-04 — "no effect on an unaffected backend" is not literally true for the quantile path
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/metrics.py:118-161`, `loadmodel.py:134-152`,
+`debian/changelog` (0.1.3)
+
+The range-query paths are exact: decimation keeps indices 0, N, 2N… of a grid anchored at the
+same `start`, so for every exact divisor the retained points are the identical instants and
+values a configured-step query would have returned (33.1's arithmetic). The
+`quantile_over_time` path cannot decimate — an instant query returns one scalar — and its
+subquery resolution step is now unconditionally the safe step: at the default config,
+`quantile_over_time(0.95, (rate(…)[24h:150s]))` evaluates the inner expression on a 2×-denser
+grid than the pre-workaround `:300s` did, on every backend, healthy or not. The p95 over 576
+highly-correlated samples is a slightly different statistic than over 288 (bounded by about one
+order-statistic notch, small but real and it feeds gates, solver, payback and ordering), and
+the server does ~2× the inner evaluations. `loadmodel.py`'s comment is honest about *why* no
+decimation happens but not about *that the scalar shifts*; the changelog's "no effect on an
+unaffected backend" and `safe_range_step_seconds()`'s "costs nothing (a no-op) against a
+correctly-behaving backend" both overstate. The unconditional choice itself is defensible (the
+symptom — zero series — is indistinguishable from genuinely absent data, so retry-on-empty
+would be data-dependent and messy); what should change is the wording, in the changelog's case
+as a 0.1.4 correction since 0.1.3 is released.
+
+**Recommendation:** one honest sentence in each place: the range paths are bit-identical; the
+quantile path's subquery resolution changes on every backend at boundary configs (defaults),
+shifting the p95 by at most an order-statistic notch.
+
+### 33.7 Z-05 — the estimate and the refusal threshold understate by the workaround factor
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/collect.py` (`estimate_capture`), `cli.py:3327-3331`
+
+`estimate_capture()` computes `points_per_disk = range_seconds / step_seconds` at the
+*configured* step, but a live capture now issues (and stores in the bundle, before any
+consumption-side decimation) the *safe* step's dense response whenever the workaround triggers
+— which at the default config is always. At the defaults the stored range points are 2× the
+printed figure; at `metrics.step: 1h`/rw 300 — the committed 7d bundle's own shape — they are
+13×. Both the printed `--estimate` figure and the `support.max_series_points` refusal check
+(compare `estimate.sample_points`, `cli.py:3329`) therefore understate by exactly that factor,
+so an operator sizing a capture against a busy Prometheus or against the 8 MiB commit ceiling
+is told a number the capture will exceed by 2-13×, and the refusal guard passes captures the
+config's own threshold was meant to stop. Note the interplay with Y-03: that fix made manual
+26's example *internally* consistent with `estimate_capture()`'s formula one day before this
+commit made the formula itself systematically wrong for every default-config live capture.
+
+**Recommendation:** `estimate_capture()` should compute `points_per_disk` at
+`safe_range_step_seconds(step_seconds, rate_window_seconds)` (the step the capture will
+actually issue and store), and the manual's example should follow. If the intention is that
+the threshold govern *stored* points, this is exactly the quantity that changed.
+
+### 33.8 Z-06 — the workaround landed with zero documentation
+
+**Severity:** Low
+**Files:** `IMPLEMENTATION_PLAN.md` §3.4, `docs/manual/10-configuration.md` (`metrics.step`,
+`metrics.rate_window`), `docs/internals/30-metrics.md`, `docs/manual/05-metrics-pipeline.md`
+
+`29213e8` touched three source files and three test files, and not one document. The manual's
+`metrics.step` entry still reads "The sampling step used for range queries (forecasting,
+coverage checks). Independent of `metrics.rate_window`, though the two are usually set equal" —
+with no hint that at the usual-equal setting the *issued* step is now half the configured one
+(and the subquery resolution with it, Z-04). §3.4, the plan's query-construction spec, carries
+no "as built" note for the workaround — the same AGENTS.md §7.6 debt T-03/U-01 established as
+findings, in a commit whose code-level documentation is otherwise exemplary (the docstrings on
+`safe_range_step_seconds`/`decimate_to_configured_step` and the call-site comments are among
+the best in the codebase). `05-metrics-pipeline.md` documents gigapipe as a tested backend and
+says "point `prometheus.url` at gigapipe's query endpoint. Nothing else [to configure]" — true
+only *since* this workaround, which is exactly the sentence that should say so.
+
+**Recommendation:** a documentation-only commit: §3.4 "as built" note (the workaround, its
+trigger, its exactness guarantees per path), the manual's `step`/`rate_window` entries and the
+gigapipe paragraph in `05-metrics-pipeline.md`, and an internals note in `30-metrics.md`.
+
+### 33.9 Z-07 — 0.1.3 merged on a red local `make check`; no sanctioned bundle-repair procedure
+
+**Severity:** Low
+**Files:** release process, `tests/corpus/.gitignore`, `tests/corpus/README.md`
+
+The 0.1.3 commit message is honest that "the target as a whole still exits non-zero for
+tests/corpus/cluster-a, an unrelated, pre-existing gap (a new corpus submission still missing
+its own cluster-a.submission.yaml)". Two things are off. First, the gap was the *placement*:
+the corpus `.gitignore` provides `tests/corpus/local/` as "scratch space for bundles being
+reviewed before they are either committed or discarded" precisely so the committed-bundle gate
+(README: "A bundle without [a submission file] is an unattributed dump … and the suite fails on
+it") keeps meaning what it says; `cluster-a` sat directly in the committed namespace, the gate
+failed *correctly*, and the release proceeded anyway — AGENTS.md §4's "Merge to `main` only
+when `make check` is green" is about the branch tip's check, not only CI's (which was green
+only because an untracked directory does not exist in a checkout). The directory has since
+been removed from the tree, so this is now historical — but the next submission will repeat it
+unless the README's "Adding a bundle" section names `local/` as where a bundle under review
+belongs. Second, and more useful going forward: `bb9417b`'s disclosed hand-correction of
+`cluster-a`'s `findings.json` (with `SHA256SUMS` updated to match) improvised the procedure
+that Z-01's fix now needs for the committed bundles. The corpus README should name the
+sanctioned repair: rebuild the affected derived file from the bundle's own recorded payloads
+with the fixed code (for findings.json, from the structured fields beside the damage), verify
+with the scrub audit plus the Z-01 shape check, and record the repair in the submission file —
+so a repaired bundle remains an honest artifact rather than an undetectable edit of captured
+data.
+
+### 33.10 Z-08 — §16's findings.json promise includes output no build ever captured (Info)
+
+**Severity:** Info
+**Files:** `IMPLEMENTATION_PLAN.md` §16.1 (line 2566), §16.2 (line 2666)
+
+Both sentences say `findings.json` carries "the verbatim output of `verify-metrics` and
+`verify-storages`". `collect.py` has never run `verify-storages` (zero references; the
+command's findings are rendered by `cli.py` only), and `_findings_to_json()` handles the
+verify-metrics report alone. Pre-existing since phase 10, missed by the fifteenth pass's X-08
+sweep (which checked three other §16.3 bundle promises) and by the sixteenth. One "as built"
+clause — or one line actually capturing the verify-storages report, which the topology pass
+has already produced — closes it.
+
+### 33.11 What this pass confirms
+
+- **The label-leak fix is the right shape and works.** Rebuilding the message from the same
+  filtered view the structured field uses (rather than blocklist-redacting an open-ended dict)
+  is exactly the allowlist principle §16.3 states, the two can never disagree again by
+  construction, the prefix-match is safe (the `": sample series labels "` suffix makes one
+  metric name unable to prefix-collide with another), and the regression test drives the real
+  `capture_bundle()` with an extra-label series. The committed-bundles gap (Z-01) is a
+  blast-radius omission, not a defect in the fix.
+- **The gigapipe workaround is engineered to the project's standard.** The trigger analysis
+  (live-confirmed on two deployments, binary-searched to the exact second, the fractional-step
+  parser quirk discovered and worked around while building the fix), the exactness argument
+  for the range paths, the unconditional-live/replay-fallback split that keeps both committed
+  bundles replaying byte-identically (verified: the corpus `--check` and the regenerated
+  expected files are unchanged), the whole-second floor, and the tests pinning decimation and
+  the `BundleError` fallback are all exactly right. The findings against it (Z-04..Z-06) are
+  about *claims made elsewhere* (changelog, estimate, docs), not about the mechanism.
+- **The releases are otherwise clean.** Version agreement across all three files, both
+  changelog entries detailed and accurate down to the mechanism (0.1.2's Y-fix bullet names
+  the mangled-version and sentinel-flag examples correctly; 0.1.3's two bullets describe the
+  two fixes faithfully, modulo Z-04's one overclaim), and the README AI-disclaimer section is
+  accurate and appropriately placed. The W-02/X-04 changelog-hygiene disease is cured.
+- **The Y-fixes all hold**, verified by the suite, by spot-checks of each fix in the source,
+  and — for Y-02, the one that mattered cross-environment — by running the corpus `--check`
+  under the ortools-less system toolchain: exit 0, no regeneration needed.
+- **The scrub audit's architecture is being asked to do something it cannot**: findings.json
+  is free text over data whose identifier set is unbounded (arbitrary label names, unregistered
+  vmids, operator selectors). Every finding in this pass's Medium tier is one more instance of
+  the same lesson X-01/X-02 taught: free-text channels need per-shape structural rebuilds plus
+  audit-side shape checks, and each new producer of a finding message must be treated as a new
+  privacy surface with its own test. The `verify_metrics()` finding catalogue is small (about
+  a dozen shapes); enumerating them in one place — which shapes carry cluster-derived
+  identifiers, and how each is redacted — would have made Z-02 and Z-03 visible when their
+  code landed.
+
+### 33.12 Assessment
+
+This is the shortest range since the twelfth pass — five substantive commits, two of them
+releases — but it carries the project's first *privacy incident response*: a real leak found
+by the submission-review discipline working as designed, fixed within a day, and released. The
+fix is good; the response's blast radius is not. The committed corpus — the artefact the whole
+§16 machinery exists to make shareable — still contains the leak the fix removed, the audit
+still cannot see the shape, and two neighbouring message shapes carry the same class of
+identifier through the same redactor. Z-01 and Z-02 together are an afternoon: rebuild twelve
+messages, teach the audit one shape, extend the rebuild pattern to two more shapes, and add
+the composition tests. Z-03 is the only finding with design content (build the anonymized
+selector side without tier 1), and it is a five-line change with a two-assertion test. The
+gigapipe work is the best-engineered change in the range and needs only honesty in the claims
+around it (Z-04, Z-05, Z-06). None of the eight findings touches a safety invariant; all three
+Mediums touch the same one property — *a bundle is safe to hand over* — which §16 exists to
+guarantee and which, as of this pass, holds for fresh default captures of the sample-series
+shape only.
+
+---
+
+## 34. Resolution of seventeenth-pass findings (Z-01..Z-08)
+
+All eight findings were real. All eight are fixed except the changelog-wording half of Z-04,
+deferred to the next release cut (see its own row).
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| Z-01 | Resolved | Both committed bundles' `findings.json` had their six "sample series labels" messages each rebuilt from the structured `sample_series` entry beside them (mechanical, no salt needed — `data001` and every other unmapped label dropped), `SHA256SUMS` updated to match; `validate_corpus.py` gained `_scrub_findings_json()`, a structural check (new `_SAMPLE_SERIES_LABELS_RE` + `ast.literal_eval` on the message's dict-repr suffix) asserting every such message's label key set is a subset of the bundle's own configured label names — verified to flag the pre-fix committed files (reproduced against the pre-fix git blob) and pass the corrected ones. `tests/corpus/README.md` gained a "Repairing an already-committed bundle" procedure and named `local/` as where a bundle under review belongs (closing the placement half of Z-07 too); both bundles' `.submission.yaml` record this repair. |
+| Z-02 | Resolved | `VerifyMetricsReport` gained `missing_disks_by_metric` (the full, untruncated real `(vmid, device)` lists `_check_cross_metric_disk_consistency()` already computed but only truncated into free text); `format_cross_metric_finding()` factors the message-building rule out so `collect.py` can call it again on a filtered view. `_redact_finding_message()` now recognizes the coverage-warning shape (matched by the exact real `coverage_by_disk` key as a prefix, mirroring the sample-series trick) and the cross-metric shape (matched by metric-name prefix against `missing_disks_by_metric`), rebuilding each with only registered vmids and returning `None` — meaning "drop this finding" — when none remain; `_findings_to_json()` filters `None`s out. Two new end-to-end regression tests reproduce the exact scenario 33.1 measured (a foreign vmid 777 low-coverage disk, and a foreign vmid missing from one of six metrics) and assert `"777"` is absent from the whole `findings.json`, not just from the structured fields. |
+| Z-03 | Resolved | The anonymized side of `rate_expr_map` now calls `build_node_selector()` directly instead of `resolve_node_selector()`, which was returning `metrics.extra_selector` verbatim on *both* sides (tier 1 winning regardless of which node list was passed) — the actual root cause. Testing this by hand also found a second, undocumented instance of the same defect class: `_check_observed_spacing()`'s bare `f"{metric_name}{{{selector}}}"` probe carries the selector outside any `rate_expr_map`-shaped text at all, so `_anonymize_query_text()` and `_redact_free_text()` both gained a second, direct substring-replacement fallback (`node_selector`/`anon_node_selector`, threaded from `_capture_prometheus_files()` through to `_findings_to_json()`) for exactly that shape. Three new regression tests: no captured query file carries the configured selector text; the resulting bundle actually replays end to end (`ReplayPrometheusClient` against the bundle's own nulled-selector `config.yaml`, reproducing what a real `--replay` run resolves) with real data surviving the round trip. |
+| Z-04 | Partially resolved | The two docstring overclaims are fixed: `safe_range_step_seconds()` now states the range paths are a true no-op and the `quantile_over_time` path is not; `loadmodel.py`'s comment states the reduced statistic shifts even though nothing needs decimating. The `debian/changelog` 0.1.3 entry itself is left as released text (never rewritten) — its wording carries the same overclaim, and per this project's own practice a correction belongs in the changelog entry of the next actual release, not backfilled into 0.1.3's; deferred, not forgotten. |
+| Z-05 | Resolved | `estimate_capture()` now computes `points_per_disk` at `safe_range_step_seconds(step_seconds, rate_window_seconds)` — the step a live capture actually issues and stores — instead of the configured step verbatim; `estimate.step_seconds` itself is untouched (manifest/replay still need the configured value). New regression pins the exact factor (2x at the defaults) against `estimate_capture()`'s own disk count. Manual §26's worked example recomputed: `568512` → `1137024` (`47 disks · 6 metrics · 4032 points`, `604800s / 150s`), with a note explaining the doubling. |
+| Z-06 | Resolved | Documentation-only follow-up commit, as recommended: an "as built" note in plan §3.4 (trigger, exactness guarantees per path, the quantile exception); `docs/manual/10-configuration.md`'s `metrics.step` entry now describes the workaround and its point-count effect; `docs/manual/05-metrics-pipeline.md`'s "nothing else changes" gigapipe sentence now says what *does* change; a new `docs/internals/30-metrics.md` section on `safe_range_step_seconds()`/`decimate_to_configured_step()`. |
+| Z-07 | Resolved | Both halves closed: the placement half by `tests/corpus/README.md` now naming `local/` as scratch space for a bundle under review (Z-01's row above); the missing-repair-procedure half by the new "Repairing an already-committed bundle" section, applied to Z-01's own fix as its first real use. The historical 0.1.3-merged-on-red-`make check` incident itself is not undone (the directory in question is already gone from the tree) — the fix is procedural, for the next time. |
+| Z-08 | Resolved | Corrected the plan's own overstatement rather than building a redundant feature: `verify-storages`'s report is a pure function of the topology and config a bundle already carries in `pve/`/`config.yaml`, so `--replay <bundle> verify-storages` already reproduces it byte-for-byte with no separate capture needed — unlike `verify-metrics`, whose report depends on a live Prometheus response that is otherwise lost. §16.1's file-listing comment, §16.2's failure-visibility paragraph and its "at a glance" table row all corrected to say so explicitly, closing the promise/reality gap without adding dead-weight duplicate data to every bundle. |
+
+New/updated regression tests: `test_capture_bundle_extra_selector_never_reaches_a_query_file`,
+`test_capture_bundle_findings_json_drops_a_foreign_vmids_coverage_warning`,
+`test_capture_bundle_findings_json_drops_a_foreign_vmid_from_cross_metric_finding`,
+`test_estimate_capture_sample_points_uses_the_safe_step` (`test_collect.py`);
+`test_replay_prometheus_client_range_query_survives_a_captured_extra_selector` (`test_replay.py`);
+`test_scrub_findings_json_flags_a_sample_series_label_outside_the_configured_set`,
+`test_scrub_findings_json_passes_the_allowlisted_view`,
+`test_scrub_audit_catches_a_findings_json_label_leak_the_value_checks_miss`
+(`test_validate_corpus.py`); plus signature-shape updates to
+`test_cross_metric_disk_consistency_*`/`test_check_sample_series_reports_a_cross_metric_gap`
+(`test_metrics.py`) for the new `missing_disks_by_metric` return value.
+
+Verification: dev venv `python3 -m pytest` — **855 passed**, **96.32% line coverage** (no
+regression; up from 96.19% with the new tests). `make check` clean end to end: fmt, lint
+(`_scrub_findings_json`'s first cut needed splitting to clear flake8's complexity limit),
+typecheck, test-with-coverage, fixtures, corpus-check (both committed bundles' scrub audit and
+`--check` clean, including the new Z-01 shape check), and docs-check (`IMPLEMENTATION_PLAN.pdf`
+rebuilt at 60 pages, `internals.pdf` at 52, the manual PDF at 46 — all three touched by this
+pass's documentation fixes, all three stamps refreshed). A `--full-matrix --check` run reports the
+same two committed bundles stale for the pre-existing, unrelated reason section 32 already
+documented (the narrow-vs-full-matrix skip-reason difference for `seasonal_naive`/`holt_winters`
+against a 24h-lookback bundle) — reproduced identically, out of this pass's scope for the same
+reason it was out of the sixteenth pass's.
 
 ---
 

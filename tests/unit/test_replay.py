@@ -19,6 +19,7 @@ import requests
 
 from proxmox_storage_drs import collect, replay
 from proxmox_storage_drs.config import PrometheusConfig
+from proxmox_storage_drs.config import load_config as _load_config
 from proxmox_storage_drs.exceptions import BundleError, PveApiError
 from proxmox_storage_drs.metrics import (
     build_quantile_over_time_promql,
@@ -275,6 +276,41 @@ def test_replay_prometheus_client_instant_quantile_query_round_trips(tmp_path: P
     result = client.instant_query(promql)
     parsed = parse_disk_series(result, "vmid", "instance")
     assert parsed  # the one captured disk survived the round trip
+
+
+def test_replay_prometheus_client_range_query_survives_a_captured_extra_selector(
+    tmp_path: Path,
+) -> None:
+    """Z-03: a bundle captured with `metrics.extra_selector` set must still
+    replay. `config.yaml` nulls the selector (section 16.3), so a real
+    `--replay` run resolves it back to `build_node_selector()`'s node
+    alternation via the bundle's *own* config -- reproducing that path
+    exactly (rather than reusing the capture-time `resolved` with
+    `extra_selector` still set, which would rebuild the wrong text) is
+    the point of this test."""
+    bundle_dir = tmp_path / "bundle"
+    bundle = capture(
+        tmp_path,
+        support={"salt_path": str(tmp_path / "salt")},
+        metrics={"extra_selector": 'cluster="prod"'},
+    )
+    collect.write_bundle_dir(bundle_dir, bundle)
+
+    # What a real `--replay` run loads: the bundle's own config.yaml, whose
+    # extra_selector is null (cli.py defaults --config to <replay>/config.yaml).
+    replayed = _load_config(str(bundle_dir / "config.yaml"), env={}, require_connection=False)
+    assert replayed.config.metrics.extra_selector is None
+
+    manifest = replay.load_manifest(bundle_dir)
+    end = manifest["capture"]["synthetic_now_epoch"]
+    range_seconds = manifest["capture"]["range_seconds"]
+    step = _captured_step(replayed, manifest["capture"]["step_seconds"])
+
+    client = replay.ReplayPrometheusClient(PrometheusConfig(url="unused"), bundle_dir)
+    rate_expr = _replay_rate_expr(bundle_dir, replayed)
+    result = client.range_query(rate_expr, end - range_seconds, end, step)
+    parsed = parse_disk_range_series(result, "vmid", "instance")
+    assert parsed  # replay succeeded -- no BundleError, and data survived
 
 
 def test_parse_disk_range_series_still_works_on_replayed_data(tmp_path: Path) -> None:

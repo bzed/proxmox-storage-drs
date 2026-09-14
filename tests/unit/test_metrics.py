@@ -618,8 +618,11 @@ def test_cross_metric_disk_consistency_silent_when_all_metrics_agree() -> None:
     from proxmox_storage_drs.metrics import _check_cross_metric_disk_consistency
 
     keys = {("101", "scsi0"), ("102", "efidisk0")}
-    findings = _check_cross_metric_disk_consistency({"rd_operations": keys, "wr_operations": keys})
+    findings, missing_by_metric = _check_cross_metric_disk_consistency(
+        {"rd_operations": keys, "wr_operations": keys}
+    )
     assert findings == []
+    assert missing_by_metric == {}
 
 
 def test_cross_metric_disk_consistency_warns_on_a_dropped_field() -> None:
@@ -633,7 +636,7 @@ def test_cross_metric_disk_consistency_warns_on_a_dropped_field() -> None:
     fetched, at no extra Prometheus cost."""
     from proxmox_storage_drs.metrics import _check_cross_metric_disk_consistency
 
-    findings = _check_cross_metric_disk_consistency(
+    findings, missing_by_metric = _check_cross_metric_disk_consistency(
         {
             "rd_operations": {("101", "scsi0"), ("102", "efidisk0")},
             "wr_total_time_ns": {("101", "scsi0")},  # missing 102:efidisk0
@@ -644,16 +647,18 @@ def test_cross_metric_disk_consistency_warns_on_a_dropped_field() -> None:
     assert "wr_total_time_ns" in findings[0].message
     assert "102:efidisk0" in findings[0].message
     assert "non-numeric" in findings[0].message
+    assert missing_by_metric == {"wr_total_time_ns": (("102", "efidisk0"),)}
 
 
 def test_cross_metric_disk_consistency_truncates_a_long_missing_list() -> None:
     from proxmox_storage_drs.metrics import _check_cross_metric_disk_consistency
 
     full = {(str(vmid), "scsi0") for vmid in range(100, 108)}  # 8 disks
-    findings = _check_cross_metric_disk_consistency({"a": full, "b": set()})
+    findings, missing_by_metric = _check_cross_metric_disk_consistency({"a": full, "b": set()})
     assert len(findings) == 1
     assert "no series for 8 disk(s)" in findings[0].message
     assert "+3 more" in findings[0].message
+    assert len(missing_by_metric["b"]) == 8
 
 
 def test_check_sample_series_reports_a_cross_metric_gap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -675,7 +680,7 @@ def test_check_sample_series_reports_a_cross_metric_gap(monkeypatch: pytest.Monk
     client = PrometheusClient(PROM_CONFIG, session=FakeSession({}))
     monkeypatch.setattr(client, "instant_query", fake_instant_query)
 
-    findings, _samples = _check_sample_series(client, metrics)
+    findings, _samples, _missing_by_metric = _check_sample_series(client, metrics)
     warnings = [f.message for f in findings if f.level == "warning"]
     assert any(metrics.write_time_ns in m and "102:efidisk0" in m for m in warnings)
 

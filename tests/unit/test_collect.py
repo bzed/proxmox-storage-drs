@@ -236,6 +236,33 @@ def test_estimate_capture_query_count_accounts_for_day_chunking(tmp_path: Path) 
     assert estimate_no_series_1d.query_count == estimate_no_series_7d.query_count
 
 
+def test_estimate_capture_sample_points_uses_the_safe_step(tmp_path: Path) -> None:
+    """Z-05: a live capture stores every range series at
+    `safe_range_step_seconds(step_seconds, rate_window_seconds)`, not the
+    configured `step_seconds` verbatim, whenever the gigapipe workaround
+    triggers -- true at this project's own defaults
+    (metrics.step == metrics.rate_window). `estimate_capture()`'s
+    `sample_points` (what `--estimate` prints and what
+    `support.max_series_points`'s refusal check compares against) must
+    reflect the step actually issued and stored, or both understate by
+    the workaround factor."""
+    from proxmox_storage_drs.metrics import safe_range_step_seconds
+
+    resolved = make_config(tmp_path)  # default metrics.step == metrics.rate_window == 300s
+    topology = build_topology(make_pve_client(), resolved.config)
+    range_seconds = 86400.0
+    estimate = collect.estimate_capture(
+        topology, resolved.config, range_seconds=range_seconds, step_seconds=300.0, no_series=False
+    )
+    safe_step = safe_range_step_seconds(300.0, resolved.config.metrics.rate_window_seconds)
+    assert safe_step == 150.0  # sanity: the workaround is actually triggering here
+    disk_count = sum(len(g.disks) for g in topology.groups)
+    expected_points_per_disk = int(range_seconds / safe_step)
+    assert estimate.sample_points == disk_count * 6 * expected_points_per_disk
+    # The configured step itself is unaffected -- only the point math changes.
+    assert estimate.step_seconds == 300.0
+
+
 # ----------------------------------------------------------------------- capture
 
 
@@ -569,6 +596,136 @@ def test_capture_bundle_findings_json_does_not_leak_unconfigured_labels(tmp_path
     assert "vmid" in sample_messages[0]
 
 
+def test_capture_bundle_findings_json_drops_a_foreign_vmids_coverage_warning(
+    tmp_path: Path,
+) -> None:
+    """Z-02: `_check_coverage()`'s per-disk warning embeds a real vmid taken
+    straight from whatever the coverage query returns -- not just vmids in a
+    managed disk group. A vmid outside every configured group (a deleted VM,
+    one on an ungrouped storage, or a same-numbered vmid from another
+    cluster sharing the Prometheus) is never registered with the mapper, so
+    it must not reach findings.json even though the structured
+    `coverage_by_disk` field beside it already drops it."""
+
+    def range_answer_with_foreign_vmid(params: dict[str, str]) -> dict[str, Any]:
+        query = params["query"]
+        if "blockstat_rd_operations" in query:
+            start = float(params["start"])
+            # Two points each -- far below window.min_coverage(80%) of the
+            # ~289 samples a 24h/300s window expects, for both disks.
+            return {
+                "result": [
+                    {
+                        "metric": {"vmid": "101", "instance": "scsi0"},
+                        "values": [[start, "1.0"], [start + 300.0, "2.0"]],
+                    },
+                    {
+                        "metric": {"vmid": "777", "instance": "scsi0"},
+                        "values": [[start, "1.0"], [start + 300.0, "2.0"]],
+                    },
+                ]
+            }
+        return _range_answer(params)
+
+    session = FakePrometheusSession(
+        answers={
+            "label/__name__/values": METRIC_NAMES,
+            "label/vmid/values": ["101"],
+            "label/instance/values": ["scsi0"],
+            "label/nodename/values": ["node1"],
+            "api/v1/query_range": range_answer_with_foreign_vmid,
+            "api/v1/query": _instant_answer,
+            "api/v1/status/buildinfo": {"version": "2.45.0"},
+        }
+    )
+    prom_client = PrometheusClient(
+        config_module.PrometheusConfig(url="http://localhost:9090"), session
+    )
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    bundle = collect.capture_bundle(
+        make_pve_client(), prom_client, resolved, options, now=CAPTURE_NOW
+    )
+
+    findings_text = json.dumps(bundle.findings)
+    assert "777" not in findings_text
+
+    coverage = bundle.findings["verify_metrics"]["coverage_by_disk"]
+    assert "777:scsi0" not in coverage
+    assert any(k.endswith(":scsi0") for k in coverage)  # 101's own, pseudonymized
+
+    messages = [f["message"] for f in bundle.findings["verify_metrics"]["findings"]]
+    coverage_messages = [m for m in messages if "coverage" in m and "min_coverage" in m]
+    assert len(coverage_messages) == 1  # 101's warning survives, 777's is dropped
+    (mapped_key,) = coverage.keys()
+    assert coverage_messages[0].startswith(mapped_key)
+
+
+def test_capture_bundle_findings_json_drops_a_foreign_vmid_from_cross_metric_finding(
+    tmp_path: Path,
+) -> None:
+    """Z-02: `_check_cross_metric_disk_consistency()`'s warning embeds every
+    disk missing from one metric's series set, drawn from whatever
+    Prometheus returns -- including a foreign vmid no managed group
+    registers. That vmid must not reach findings.json, and if it was the
+    *only* disk the warning would have named, the finding itself must be
+    dropped rather than emitted empty."""
+
+    def instant_answer_with_foreign_vmid(params: dict[str, str]) -> dict[str, Any]:
+        query = params["query"]
+        if query == "blockstat_wr_total_time_ns":
+            # This one metric is missing vmid 777 -- the asymmetry
+            # _check_cross_metric_disk_consistency() exists to catch.
+            return {
+                "result": [
+                    {
+                        "metric": {"vmid": "101", "instance": "scsi0", "nodename": "node1"},
+                        "value": [CAPTURE_NOW.timestamp(), "1.5"],
+                    }
+                ]
+            }
+        if query in METRIC_NAMES:
+            return {
+                "result": [
+                    {
+                        "metric": {"vmid": "101", "instance": "scsi0", "nodename": "node1"},
+                        "value": [CAPTURE_NOW.timestamp(), "1.5"],
+                    },
+                    {
+                        "metric": {"vmid": "777", "instance": "scsi0", "nodename": "node1"},
+                        "value": [CAPTURE_NOW.timestamp(), "1.5"],
+                    },
+                ]
+            }
+        return _instant_answer(params)
+
+    session = FakePrometheusSession(
+        answers={
+            "label/__name__/values": METRIC_NAMES,
+            "label/vmid/values": ["101"],
+            "label/instance/values": ["scsi0"],
+            "label/nodename/values": ["node1"],
+            "api/v1/query_range": _range_answer,
+            "api/v1/query": instant_answer_with_foreign_vmid,
+            "api/v1/status/buildinfo": {"version": "2.45.0"},
+        }
+    )
+    prom_client = PrometheusClient(
+        config_module.PrometheusConfig(url="http://localhost:9090"), session
+    )
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    bundle = collect.capture_bundle(
+        make_pve_client(), prom_client, resolved, options, now=CAPTURE_NOW
+    )
+
+    findings_text = json.dumps(bundle.findings)
+    assert "777" not in findings_text
+
+    messages = [f["message"] for f in bundle.findings["verify_metrics"]["findings"]]
+    assert not any("no series for" in m and "wr_total_time_ns" in m for m in messages)
+
+
 def test_capture_bundle_no_series_skips_the_forecasting_range_series(tmp_path: Path) -> None:
     """--no-series must skip the big, per-group superset range captures --
     it does not (and need not) suppress verify_metrics()'s own two smaller,
@@ -667,6 +824,23 @@ def test_capture_bundle_manifest_flags_an_extra_selector_rewrite(tmp_path: Path)
 
     custom_bundle = capture(tmp_path / "custom", metrics={"extra_selector": 'cluster="prod"'})
     assert custom_bundle.manifest["capture"]["extra_selector_rewritten"] is True
+
+
+def test_capture_bundle_extra_selector_never_reaches_a_query_file(tmp_path: Path) -> None:
+    """Z-03: `resolve_node_selector()`'s tier-1 precedence used to win on
+    *both* sides of `rate_expr_map` whenever `metrics.extra_selector` was
+    set, making the "anonymized" side identical to the real one --
+    section 16.3's "rewritten, not carried" promise was a no-op, and the
+    operator's raw selector text (a real label value on a shared
+    Prometheus) reached the bundle's `prometheus/` query files verbatim.
+    The anonymized side must always be `build_node_selector()`'s own node
+    alternation, bypassing `resolve_node_selector()` entirely."""
+    bundle = capture(tmp_path, metrics={"extra_selector": 'cluster="prod"'})
+    query_texts = [f["query"] for f in bundle.prometheus_files.values() if "query" in f]
+    assert query_texts  # sanity: something was actually captured
+    for query in query_texts:
+        assert "prod" not in query
+        assert "cluster=" not in query
 
 
 def test_capture_bundle_manifest_version_is_none_on_a_failed_call(tmp_path: Path) -> None:
