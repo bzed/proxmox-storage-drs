@@ -1,3 +1,44 @@
+pve-storage-drs (0.1.4) trixie; urgency=medium
+
+  * REVIEW.md seventeenth-pass fixes (findings Z-01..Z-08), tasked with
+    verifying that generated `findings.json` files cannot contain
+    confidential log lines -- the answer was "not quite": three more
+    privacy gaps in the same free-text findings channel the 0.1.3 fix
+    addressed one shape of. Both committed `tests/corpus/` bundles still
+    carried the exact label leak that fix removed (it corrected only an
+    uncommitted bundle) -- rebuilt from their own structured `sample_series`
+    field and `SHA256SUMS` updated; the corpus scrub audit gained a
+    structural check for the shape so this cannot recur silently. The
+    per-disk coverage warning and the cross-metric-consistency warning both
+    embedded a real vmid straight from Prometheus, including one outside
+    every managed disk group -- both now rebuilt from an allowlisted view,
+    dropping the finding entirely when nothing registered remains.
+    `metrics.extra_selector`, when set, reached a bundle's Prometheus query
+    files (and, in one shape not previously known, a `verify-metrics`
+    finding message) verbatim instead of being rewritten to the documented
+    anonymized node alternation -- fixed at the actual root cause (a
+    resolver precedence bug), and the bundle now replays correctly again.
+  * `collect-testdata --estimate` and the `support.max_series_points`
+    capture-refusal check both now account for the 0.1.3 gigapipe
+    workaround's actual, denser stored-point count (previously understated
+    by 2x at the default config, more at a wider `metrics.step`/
+    `metrics.rate_window` ratio) instead of the configured step's plain
+    arithmetic.
+  * Documentation: the 0.1.3 changelog entry and two code comments
+    overstated the gigapipe workaround as having "no effect on an
+    unaffected backend" -- true for every range-query path, not true for
+    the `quantile_over_time` decision statistic, which is corrected here;
+    the workaround itself gained the plan/manual/internals documentation
+    it launched without. `tests/corpus/README.md` now names `local/` as
+    where a bundle under review belongs and documents a repair procedure
+    for an already-committed bundle, applied to this release's own
+    `findings.json` fix. `IMPLEMENTATION_PLAN.md` no longer promises a
+    bundle's `findings.json` carries `verify-storages`' report -- it never
+    has, and never needs to: that report replays byte-for-byte from data
+    the bundle already carries.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Mon, 14 Sep 2026 23:26:22 +0200
+
 pve-storage-drs (0.1.3) trixie; urgency=medium
 
   * `collect-testdata`'s diagnostic bundle no longer leaks a live cluster's
