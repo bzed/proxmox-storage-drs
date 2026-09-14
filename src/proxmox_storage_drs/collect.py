@@ -1215,18 +1215,28 @@ def _redact_free_text(text: str, mapper: Mapper) -> str:
     log (built from the *real* PVE/Prometheus calls, since the recording
     clients run before ``mapper`` exists -- see :func:`capture_bundle`),
     are both written for a human reading them against a live cluster, so
-    they embed real identifiers verbatim (a sample series' own label
-    values, a per-disk coverage gap's ``vmid:device``, a node/storage name
-    in a call description, a transport failure's own connection target).
-    Section 16.3's allowlist principle applies to free text too, not just
-    structured fields. Rather than special-casing every message shape the
-    callers might ever produce, this strips anything URL- or
-    ``host='...'``-shaped, then substitutes any *whole* number matching an
-    already-registered real vmid, and any occurrence of a real node or
-    storage name, with its pseudonym -- broader than strictly necessary (a
-    coincidental vmid-shaped number that is not actually a vmid would also
-    get rewritten), which is the safe direction to be wrong in for a
-    privacy control."""
+    they embed real identifiers verbatim (a per-disk coverage gap's
+    ``vmid:device``, a node/storage name in a call description, a
+    transport failure's own connection target). Section 16.3's allowlist
+    principle applies to free text too, not just structured fields.
+    Rather than special-casing every message shape the callers might ever
+    produce, this strips anything URL- or ``host='...'``-shaped, then
+    substitutes any *whole* number matching an already-registered real
+    vmid, and any occurrence of a real node or storage name, with its
+    pseudonym -- broader than strictly necessary (a coincidental
+    vmid-shaped number that is not actually a vmid would also get
+    rewritten), which is the safe direction to be wrong in for a privacy
+    control.
+
+    This is a *blocklist* over the three identifier kinds the tool itself
+    knows about -- it cannot redact a label this project never assigned any
+    meaning to (a Telegraf ``host`` tag, ``service_name``, ``measurement``,
+    ...). ``_check_sample_series()``'s "sample series labels" finding is
+    exactly that shape -- a live series' *entire* raw label dict, dumped
+    verbatim for a human reading it against their own cluster -- so it is
+    handled separately, by :func:`_redact_finding_message`, which rebuilds
+    that one message from the already-allowlisted view instead of trying
+    to blocklist-filter an open-ended label set here."""
     result = _TRANSPORT_URL_RE.sub("<url-redacted>", text)
     result = _TRANSPORT_HOST_RE.sub("host='<redacted>'", result)
     for real_vmid, new_vmid in sorted(mapper.registered_vmids().items()):
@@ -1238,15 +1248,41 @@ def _redact_free_text(text: str, mapper: Mapper) -> str:
     return result
 
 
+def _redact_finding_message(
+    message: str, mapper: Mapper, sample_series: dict[str, dict[str, str]]
+) -> str:
+    """Bundle-safe rewrite of one ``verify_metrics()`` finding message.
+
+    ``_check_sample_series()`` builds its "info" finding as
+    ``f"{name}: sample series labels {sample_labels}"``, where
+    ``sample_labels`` is a live series' *complete* raw label dict --
+    whatever Prometheus/Telegraf happened to attach, not just the three
+    labels this project's config knows the meaning of. A real-world
+    ``host`` tag (a Telegraf host, not necessarily a PVE node name) is a
+    real identifier that ``_redact_free_text()`` has no way to recognize,
+    so it would otherwise reach ``findings.json`` unredacted.
+
+    Rather than parsing an arbitrary dict repr back out of free text, this
+    recognizes that one message shape by its ``"{name}: sample series
+    labels "`` prefix and rebuilds it from ``sample_series[name]`` -- the
+    same vmid/device/node-only view :func:`_findings_to_json` already
+    computes for the structured ``sample_series`` field, so the two can
+    never disagree. Every other message shape (coverage gaps, cross-metric
+    consistency, transport failures, ...) still goes through
+    :func:`_redact_free_text`."""
+    for field_name, labels in sample_series.items():
+        prefix = f"{field_name}: sample series labels "
+        if message.startswith(prefix):
+            return f"{prefix}{labels}"
+    return _redact_free_text(message, mapper)
+
+
 def _findings_to_json(
     report: VerifyMetricsReport | None, config: Config, mapper: Mapper
 ) -> dict[str, Any]:
     if report is None:
         return {"verify_metrics": None}
-    findings = [
-        {"level": f.level, "message": _redact_free_text(f.message, mapper)} for f in report.findings
-    ]
-    sample_series = {}
+    sample_series: dict[str, dict[str, str]] = {}
     for field_name, labels in report.sample_series.items():
         keep = {
             config.metrics.labels.vmid,
@@ -1269,6 +1305,10 @@ def _findings_to_json(
             else:
                 anonymized_labels[k] = v  # device: passes through unchanged
         sample_series[field_name] = anonymized_labels
+    findings = [
+        {"level": f.level, "message": _redact_finding_message(f.message, mapper, sample_series)}
+        for f in report.findings
+    ]
     coverage: dict[str, float] = {}
     for disk_key, value in report.coverage_by_disk.items():
         new_vmid = mapper.vmid(disk_key.vmid)
