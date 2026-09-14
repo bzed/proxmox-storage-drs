@@ -351,6 +351,24 @@ generated documentation. Three standing rules:
 
 `debian/changelog` and `pyproject.toml` must agree on the version; CI checks it.
 
+**Every version bump ships as one release, with all three of these together, never one without
+the others:**
+
+1. **The version itself**, bumped in lockstep in `pyproject.toml`, `src/proxmox_storage_drs/__init__.py`
+   (`__version__` — `tests/unit/test_version.py` checks the two agree) and `debian/changelog`.
+2. **A new `debian/changelog` entry**, signed `Bernd Zeimetz <bzed@debian.org>` (§0's one exception),
+   covering *everything* since the previous entry — every REVIEW.md finding fixed, every
+   user-visible or behavioural change — never split across entries and never backfilled into an
+   already-released one. A version bump with no changelog entry is not a release.
+3. **A git tag on the commit that lands the bump**, once it reaches `main`: annotated, named
+   `debian/<version>` (matching `git tag -l`'s existing history — e.g. `debian/0.1.2`), tagged as
+   `Bernd Zeimetz <bernd@bzed.de>` (the general git identity, not the changelog's packaging one),
+   with the tag message naming the package and version (`pve-storage-drs <version>`). A changelog
+   entry with no tag leaves the release unfindable by anyone who did not read the whole log.
+
+`make check` must be green on the commit being tagged — the same rule as any merge to `main`
+(§4), with no exception for a release commit.
+
 ### 9.3 Two pipelines
 
 | | Where | What it proves |

@@ -64,6 +64,12 @@ upstream tarball to track. `debian/gbp.conf` points at `main` for the same reaso
 | `debian/tests/` | A new failure mode is worth catching on the installed package |
 | `debian/changelog` | Every release; `gbp dch` generates it, and its version must match `pyproject.toml` |
 
+**A version bump ships with its changelog entry and a git tag, always together** — AGENTS.md §9.2
+has the three-part rule and [`git-workflow.md`](git-workflow.md#releases) the `git tag` mechanics.
+In practice, this repo's changelog entries so far are hand-authored (one detailed bullet per
+REVIEW.md finding or user-visible change), richer than plain `gbp dch` output — keep doing that;
+`gbp dch` is a floor, not what an entry should look like when there is real prose to write.
+
 ### What the build does and does not rebuild
 
 It **builds the manpage** from `man/pve-storage-drs.1.md`, because that is generated from source and nobody

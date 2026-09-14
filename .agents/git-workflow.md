@@ -9,6 +9,7 @@
 | `chore/` | tooling, packaging, housekeeping |
 | `docs/` | plan/README/agent-instruction changes only |
 | `review/` | addressing a batch of `REVIEW.md` findings |
+| `release/` | a version bump — see "Releases" below |
 
 Anything larger than one self-contained change gets a branch. A single typo fix on `main` is
 fine; a three-file refactor is not.
@@ -49,6 +50,22 @@ batch of review findings. Delete the branch after merging.
 
 `main` is always green. If a merge breaks it, fix forward immediately or revert the merge —
 do not leave it red while investigating.
+
+## Releases
+
+A version bump is not just an edit to `pyproject.toml` — see AGENTS.md §9.2 for the three things
+that must land together (version files, a `debian/changelog` entry, a git tag) and never one
+without the others. Mechanically:
+
+```sh
+make check                                   # must be green before tagging anything
+git tag -a debian/<version> -m "pve-storage-drs <version>"
+```
+
+The tag is annotated (`-a`), named `debian/<version>` to match this repo's existing tags
+(`git tag -l`), and created on the commit that lands the version bump once it is on `main` — not
+on a `release/*` branch tip before it merges. Push tags explicitly (`git push --tags` or
+`git push origin <tag>`); a plain `git push` does not push tags.
 
 ## Delegating to a subagent
 
