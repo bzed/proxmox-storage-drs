@@ -64,6 +64,7 @@ from proxmox_storage_drs.metrics import (
     build_rate_promql,
     raw_metric_name,
     resolve_node_selector,
+    safe_range_step_seconds,
     verify_metrics,
 )
 from proxmox_storage_drs.pve import PveClient
@@ -818,9 +819,17 @@ def _drive_group_series(
             config.metrics.rate_window_seconds,
             node_selector,
         )
+        # safe_range_step_seconds(): capture always talks to a real client
+        # (never a BundleError to fall back from), so this is unconditional
+        # here -- must still match loadmodel._fetch_raw_quantity()'s own
+        # use of it exactly, since that is the step a later `--replay` run
+        # tries *first* for this same rate_expr/quantile.
+        query_step = safe_range_step_seconds(
+            config.metrics.step_seconds, config.metrics.rate_window_seconds
+        )
         for quantile in (config.window.quantile, config.window.upper_quantile):
             promql = build_quantile_over_time_promql(
-                rate_expr, quantile, config.window.lookback_seconds, config.metrics.step_seconds
+                rate_expr, quantile, config.window.lookback_seconds, query_step
             )
             _guarded(
                 log,
@@ -830,7 +839,17 @@ def _drive_group_series(
 
         if options.no_series:
             continue
-        _issue_range_chunks(recording_prom, rate_expr, start_epoch, end_epoch, step_seconds, log)
+        # safe_range_step_seconds(): must match loadmodel._fetch_raw_quantity_series()'s
+        # own use of it exactly, not just compute_disk_coverage()'s --
+        # that is the step a later `--replay` run reconstructs and
+        # requests for this same rate_expr, and
+        # ReplayPrometheusClient._trim_range_result() rejects a step
+        # mismatch outright (BundleError, not a silent widen). Both sides
+        # derive the same value deterministically from the same
+        # (step_seconds, rate_window_seconds) pair, so capture and replay
+        # stay in lockstep even when the workaround is active.
+        query_step = safe_range_step_seconds(step_seconds, config.metrics.rate_window_seconds)
+        _issue_range_chunks(recording_prom, rate_expr, start_epoch, end_epoch, query_step, log)
 
 
 def _drive_label_values(

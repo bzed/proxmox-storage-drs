@@ -25,7 +25,7 @@ from typing import Any, Protocol, Sequence
 import requests
 
 from proxmox_storage_drs.config import MetricsConfig, PrometheusConfig, WindowConfig
-from proxmox_storage_drs.exceptions import MetricsError
+from proxmox_storage_drs.exceptions import BundleError, MetricsError
 
 
 class _ResponseLike(Protocol):
@@ -115,6 +115,74 @@ def build_rate_promql(
     return f"sum by ({vmid_label}, {device_label}) (rate({metric_name}{scope}[{window}]))"
 
 
+def safe_range_step_seconds(step_seconds: float, rate_window_seconds: float) -> float:
+    """The step to actually send Prometheus for a ``rate()``-based
+    ``query_range`` call or ``quantile_over_time`` subquery.
+
+    Confirmed live against a real gigapipe deployment (two independent
+    production clusters, both after an update to it): both
+    ``/api/v1/query_range`` and the PromQL ``[range:step]`` subquery form
+    silently return *zero series* for any range-vector function
+    (``rate()``, ``irate()``, ``increase()``, ``delta()``, ``deriv()`` all
+    confirmed) whenever the query's own ``step`` is **greater than or
+    equal to** the function's own range-vector duration -- even though the
+    identical expression evaluated with no step at all (a plain instant
+    ``/api/v1/query``) returns correct data, and even though a bare
+    (non-function) selector via the same ``query_range``/subquery step is
+    unaffected. Binary-searched to the exact second: for
+    ``rate(x[300s])``, ``step=299s`` returns full data, ``step=300s``
+    returns nothing at all -- independent of window length or absolute
+    step size. This project's own defaults set ``metrics.step`` and
+    ``metrics.rate_window`` to the *same* value (300s, idiomatic
+    back-to-back PromQL tiling with no gaps or overlap between successive
+    rate windows) -- exactly the failing boundary -- so a fresh install
+    with untouched defaults can hit this on an affected backend with no
+    misconfiguration at all.
+
+    A no-op (returns ``step_seconds`` unchanged) once ``step_seconds`` is
+    already strictly less than ``rate_window_seconds`` -- nothing to work
+    around. Otherwise returns the largest whole-second step that is
+    strictly less than ``rate_window_seconds`` and divides ``step_seconds``
+    as evenly as a whole-second value can -- :func:`decimate_to_configured_step`
+    recovers (approximately, by *rounded* division, not necessarily exact)
+    the originally configured grid from it by keeping every Nth point. A
+    whole number of seconds is not a style choice: gigapipe's own duration
+    parser rejects a fractional-second value outright (``cannot parse
+    "276.923s" to a valid duration``, confirmed live against
+    ``metrics.step: 1h``/the default ``rate_window: 300s``, whose exact
+    quotient is 3600/13 = 276.923...) -- confirmed on the very deployment
+    this workaround exists for, so this cannot skip the floor and still
+    work. Not Prometheus-backend-specific by name: this workaround is keyed
+    purely on the ``step >= range`` symptom, so it costs nothing (a no-op)
+    against a correctly-behaving backend."""
+    if step_seconds < rate_window_seconds:
+        return step_seconds
+    divisor = int(step_seconds // rate_window_seconds) + 1
+    return float(max(1, int(step_seconds // divisor)))
+
+
+def decimate_to_configured_step(
+    points: Sequence[Any], step_seconds: float, safe_step_seconds: float
+) -> list[Any]:
+    """The inverse of :func:`safe_range_step_seconds`: recover a series at
+    (approximately) the originally configured ``step_seconds`` grid from
+    one actually sampled at ``safe_step_seconds`` (a whole-second value
+    that divides ``step_seconds`` as evenly as a whole second can -- not
+    always an *exact* divisor, see that function's own docstring), by
+    keeping every ``round(step_seconds / safe_step_seconds)``-th point.
+    ``points`` is a plain, untyped sequence -- both a raw
+    ``query_range`` response's ``values`` list (``[timestamp, value_str]``
+    pairs) and an already-parsed ``TimeSeries`` (``(timestamp, value)``
+    tuples) are valid inputs; this never inspects an element, only slices
+    the sequence. A no-op (returns ``points`` unchanged, as a plain list)
+    when the two steps are equal -- :func:`safe_range_step_seconds` was
+    never triggered, so there is nothing to reduce."""
+    if safe_step_seconds >= step_seconds:
+        return list(points)
+    divisor = max(1, round(step_seconds / safe_step_seconds))
+    return list(points[::divisor])
+
+
 _PROMQL_REGEX_SPECIAL = re.compile(r"([.^$|()\[\]{}*+?\\])")
 
 
@@ -183,6 +251,19 @@ def build_quantile_over_time_promql(
     """Wrap a rate expression in the section 3.4 quantile-over-time reduction.
 
     ``quantile_over_time(q, (<rate_expr>)[<lookback>:<step>])``.
+
+    ``step_seconds`` is embedded verbatim, deliberately -- this stays a
+    pure, unconditional text builder. A caller working around the
+    ``step >= range`` gigapipe bug (:func:`safe_range_step_seconds`) does so
+    by calling this a second time with a *different* ``step_seconds``, not
+    by this function silently substituting one in: unlike
+    :func:`compute_disk_coverage`'s ``query_range`` call, an
+    unconditional substitution here would change every replayed bundle's
+    query text (hence its lookup hash) even for a bundle captured
+    correctly, before any backend ever had this bug -- see the retry
+    wrappers in ``loadmodel.py``/``collect.py`` instead, which only ever
+    reach for the alternate step after the plain one has already come back
+    empty.
     """
     lookback = _format_promql_duration(lookback_seconds)
     step = _format_promql_duration(step_seconds)
@@ -548,8 +629,12 @@ def compute_disk_coverage(
     computation, per AGENTS.md section 5, even though the two callers do
     different things with a low value (one reports it, the other falls back
     to a disk's last known load). Raises :class:`MetricsError` on a failed
-    query -- callers decide for themselves whether that is fatal or merely
-    unknown-coverage.
+    live query -- callers decide for themselves whether that is fatal or
+    merely unknown-coverage. Can also raise :class:`~proxmox_storage_drs.exceptions.BundleError`
+    under ``--replay``, but only for a bundle captured before
+    :func:`safe_range_step_seconds` existed *and* whose own
+    ``metrics.step``/``metrics.rate_window`` genuinely needs the
+    workaround -- see that function's own try/except below.
     """
     metric_name = metrics.read_ops
     expr = build_rate_promql(
@@ -570,7 +655,31 @@ def compute_disk_coverage(
     # happened to run at (section 16.1's determinism requirement).
     end = now if now is not None else time.time()
     start = end - window.lookback_seconds
-    result = client.range_query(expr, start, end, metrics.step_seconds)
+    # safe_range_step_seconds(): a no-op against a correctly-behaving
+    # backend, but works around a live-confirmed gigapipe bug where
+    # query_range on a rate()-based expression returns zero series
+    # whenever step >= rate_window -- exactly this project's own default
+    # (both 300s). decimate_to_configured_step() below recovers the
+    # expected_samples grid from whatever finer resolution this actually
+    # queried at, so the coverage fraction stays correct either way.
+    #
+    # The try/except is `--replay` backward compatibility, not part of the
+    # workaround itself: a *live* client never raises BundleError (only
+    # ReplayPrometheusClient does, when a requested (query, step) pair was
+    # never captured), so this is a no-op against a real cluster either
+    # way. A bundle captured *before* this function existed has real data
+    # at the plain `metrics.step` only -- collect.py now always captures
+    # at the safe step when one is needed, so this fallback exists solely
+    # to keep already-committed bundles (tests/corpus/bzed-dev-cluster-*)
+    # replaying exactly as they did before this change.
+    query_step = safe_range_step_seconds(metrics.step_seconds, metrics.rate_window_seconds)
+    try:
+        result = client.range_query(expr, start, end, query_step)
+    except BundleError:
+        if query_step == metrics.step_seconds:
+            raise
+        query_step = metrics.step_seconds
+        result = client.range_query(expr, start, end, query_step)
 
     expected_samples = max(1, round(window.lookback_seconds / metrics.step_seconds) + 1)
     coverage: dict[DiskKey, float] = {}
@@ -584,7 +693,10 @@ def compute_disk_coverage(
             key = DiskKey(vmid=int(vmid_raw), device=device)
         except (TypeError, ValueError):
             continue
-        actual_samples = len(series.get("values", []))
+        values = decimate_to_configured_step(
+            series.get("values", []), metrics.step_seconds, query_step
+        )
+        actual_samples = len(values)
         coverage[key] = min(1.0, actual_samples / expected_samples)
     return coverage
 

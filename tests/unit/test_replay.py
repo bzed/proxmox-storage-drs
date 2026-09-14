@@ -26,6 +26,7 @@ from proxmox_storage_drs.metrics import (
     parse_disk_range_series,
     parse_disk_series,
     resolve_node_selector,
+    safe_range_step_seconds,
 )
 from proxmox_storage_drs.topology import build_topology
 from tests.unit.test_collect import capture, make_config
@@ -185,6 +186,16 @@ def _replay_rate_expr(bundle_dir: Path, resolved) -> str:  # type: ignore[no-unt
     )
 
 
+def _captured_step(resolved, step_seconds: float) -> float:  # type: ignore[no-untyped-def]
+    """The step a range/subquery capture is actually stored at --
+    ``make_config()``'s default ``metrics.step``/``metrics.rate_window``
+    (300s/300s) sit exactly on ``safe_range_step_seconds()``'s failing
+    boundary, so ``collect.py`` now captures (and a live/replay run now
+    requests) the *safe*, decimatable step, not ``step_seconds`` verbatim
+    -- see that function in metrics.py and its callers' own docstrings."""
+    return safe_range_step_seconds(step_seconds, resolved.config.metrics.rate_window_seconds)
+
+
 def test_replay_prometheus_client_range_query_trims_to_the_requested_window(
     tmp_path: Path,
 ) -> None:
@@ -196,7 +207,7 @@ def test_replay_prometheus_client_range_query_trims_to_the_requested_window(
     manifest = replay.load_manifest(bundle_dir)
     end = manifest["capture"]["synthetic_now_epoch"]
     range_seconds = manifest["capture"]["range_seconds"]
-    step = manifest["capture"]["step_seconds"]
+    step = _captured_step(resolved, manifest["capture"]["step_seconds"])
 
     # A narrower window than the full capture -- e.g. a forecaster whose
     # required_range() is smaller than the capture superset.
@@ -239,7 +250,7 @@ def test_replay_prometheus_client_range_query_out_of_bounds_is_a_bundle_error(
     manifest = replay.load_manifest(bundle_dir)
     end = manifest["capture"]["synthetic_now_epoch"]
     range_seconds = manifest["capture"]["range_seconds"]
-    step = manifest["capture"]["step_seconds"]
+    step = _captured_step(resolved, manifest["capture"]["step_seconds"])
 
     client = replay.ReplayPrometheusClient(PrometheusConfig(url="unused"), bundle_dir)
     rate_expr = _replay_rate_expr(bundle_dir, resolved)
@@ -259,7 +270,7 @@ def test_replay_prometheus_client_instant_quantile_query_round_trips(tmp_path: P
         rate_expr,
         resolved.config.window.quantile,
         resolved.config.window.lookback_seconds,
-        resolved.config.metrics.step_seconds,
+        _captured_step(resolved, resolved.config.metrics.step_seconds),
     )
     result = client.instant_query(promql)
     parsed = parse_disk_series(result, "vmid", "instance")
@@ -277,7 +288,7 @@ def test_parse_disk_range_series_still_works_on_replayed_data(tmp_path: Path) ->
     manifest = replay.load_manifest(bundle_dir)
     end = manifest["capture"]["synthetic_now_epoch"]
     range_seconds = manifest["capture"]["range_seconds"]
-    step = manifest["capture"]["step_seconds"]
+    step = _captured_step(resolved, manifest["capture"]["step_seconds"])
 
     client = replay.ReplayPrometheusClient(PrometheusConfig(url="unused"), bundle_dir)
     rate_expr = _replay_rate_expr(bundle_dir, resolved)
