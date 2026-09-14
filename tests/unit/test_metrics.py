@@ -14,17 +14,20 @@ from typing import Any
 import pytest
 
 from proxmox_storage_drs.config import MetricLabels, MetricsConfig, PrometheusConfig, WindowConfig
-from proxmox_storage_drs.exceptions import MetricsError
+from proxmox_storage_drs.exceptions import BundleError, MetricsError
 from proxmox_storage_drs.metrics import (
     DiskKey,
     PrometheusClient,
     build_node_selector,
     build_quantile_over_time_promql,
     build_rate_promql,
+    compute_disk_coverage,
+    decimate_to_configured_step,
     parse_disk_range_series,
     parse_disk_series,
     raw_metric_name,
     resolve_node_selector,
+    safe_range_step_seconds,
     verify_metrics,
 )
 
@@ -139,6 +142,57 @@ def test_resolve_node_selector_is_none_with_neither_override_nor_node_names() ->
 def test_build_quantile_over_time_promql() -> None:
     expr = build_quantile_over_time_promql("sum(x)", 0.95, 86400, 300)
     assert expr == "quantile_over_time(0.95, (sum(x))[86400s:300s])"
+
+
+# ------------------------------------------------------- gigapipe step/range
+
+
+def test_safe_range_step_seconds_is_a_no_op_below_the_rate_window() -> None:
+    """The common, correctly-behaving-backend case: nothing to work around."""
+    assert safe_range_step_seconds(299.0, 300.0) == 299.0
+    assert safe_range_step_seconds(60.0, 300.0) == 60.0
+
+
+def test_safe_range_step_seconds_shrinks_when_equal_to_the_rate_window() -> None:
+    """This project's own default (metrics.step == metrics.rate_window ==
+    300s) sits exactly on the failing boundary a live gigapipe deployment
+    was confirmed to have (query_range/subquery step >= the range-vector
+    duration returns zero series) -- the result must be strictly smaller
+    than 300, and must evenly divide it (so decimate_to_configured_step()
+    can recover the original grid losslessly)."""
+    step = safe_range_step_seconds(300.0, 300.0)
+    assert step < 300.0
+    assert 300.0 % step == pytest.approx(0.0)
+
+
+def test_safe_range_step_seconds_shrinks_when_step_is_far_above_the_rate_window() -> None:
+    """A real observed shape (a 7-day-capture config's metrics.step: 1h
+    against the default rate_window: 300s): 3600/13 = 276.923...,
+    confirmed live to be rejected outright by gigapipe's own duration
+    parser ("cannot parse \"276.923s\" to a valid duration") -- so unlike
+    the 300/300 case above, this cannot be an exact divisor and must still
+    come out as a whole number of seconds."""
+    step = safe_range_step_seconds(3600.0, 300.0)
+    assert step < 300.0
+    assert step == int(step)
+    assert step == 276.0
+
+
+def test_decimate_to_configured_step_is_a_no_op_when_steps_match() -> None:
+    points = [(0.0, 1.0), (300.0, 2.0)]
+    assert decimate_to_configured_step(points, 300.0, 300.0) == points
+
+
+def test_decimate_to_configured_step_keeps_every_nth_point() -> None:
+    """safe_range_step_seconds(300, 300) == 150 -- a series captured at
+    that finer grid should decimate back to exactly the 300s-spaced one a
+    correctly-behaving backend would have returned directly."""
+    dense = [(0.0, "a"), (150.0, "b"), (300.0, "c"), (450.0, "d"), (600.0, "e")]
+    assert decimate_to_configured_step(dense, 300.0, 150.0) == [
+        (0.0, "a"),
+        (300.0, "c"),
+        (600.0, "e"),
+    ]
 
 
 def test_raw_metric_name() -> None:
@@ -301,6 +355,124 @@ def test_bearer_token_header() -> None:
 def test_no_headers_without_bearer_token() -> None:
     client = PrometheusClient(PROM_CONFIG, session=FakeSession({}))
     assert client._headers() == {}
+
+
+# ------------------------------------------------------------ compute_disk_coverage
+
+
+class _StepAwareFakeClient(PrometheusClient):
+    """A minimal, in-process stand-in for a live cluster's Prometheus
+    endpoint, for exercising compute_disk_coverage()'s
+    safe_range_step_seconds()/BundleError-fallback logic directly, without
+    a real bundle on disk (unlike test_replay.py's real
+    ReplayPrometheusClient round trips). ``range_query`` is overridden
+    entirely -- ``_session``/``_get`` are never reached -- so this
+    subclasses PrometheusClient (rather than merely duck-typing it) purely
+    to satisfy ``compute_disk_coverage``'s own ``client: PrometheusClient``
+    annotation."""
+
+    def __init__(self, working_step: float, result: list[dict[str, Any]]) -> None:
+        super().__init__(PROM_CONFIG)
+        self._working_step = working_step
+        self._result = result
+        self.requested_steps: list[float] = []
+
+    def range_query(
+        self, promql: str, start_epoch_seconds: float, end_epoch_seconds: float, step_seconds: float
+    ) -> list[dict[str, Any]]:
+        del promql, start_epoch_seconds, end_epoch_seconds
+        self.requested_steps.append(step_seconds)
+        if step_seconds != self._working_step:
+            raise BundleError("simulated --replay bundle: no recorded response at this step")
+        return self._result
+
+
+def test_compute_disk_coverage_applies_the_safe_step_and_decimates_back() -> None:
+    """metrics.step == metrics.rate_window == 300s is this project's own
+    default, and sits exactly on a live-confirmed gigapipe failing
+    boundary (query_range on a rate()-based expression returns zero series
+    whenever step >= the range-vector duration). The coverage query must
+    go out at the smaller, divisor-of-300 safe step, and the returned
+    (denser) series decimated back down to the configured grid before
+    counting samples -- 3 raw points at the 150s grid decimate to 2 at the
+    300s one, matching expected_samples exactly (not capped at some
+    inflated ratio)."""
+    metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
+    window = WindowConfig(
+        lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
+    )
+    dense_series = [
+        {
+            "metric": {"vmid": "101", "instance": "scsi0"},
+            "values": [[0, "0"], [150, "0"], [300, "0"]],
+        }
+    ]
+    client = _StepAwareFakeClient(working_step=150.0, result=dense_series)
+
+    coverage = compute_disk_coverage(client, metrics, window, now=300.0)
+
+    assert client.requested_steps == [150.0]  # the safe step succeeded on the first try
+    assert coverage[DiskKey(vmid=101, device="scsi0")] == 1.0
+
+
+def test_compute_disk_coverage_decimation_does_not_inflate_a_real_gap() -> None:
+    """The correctness property decimation exists for: real coverage is
+    only 2/3 of the configured 300s grid over this 600s window (data
+    exists for [0,300] only, nothing after), but counting raw points at
+    the finer 150s grid *without* decimating back down would read as an
+    inflated, wrong fraction relative to expected_samples (computed from
+    the configured step, not the safe one)."""
+    metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
+    window = WindowConfig(
+        lookback_seconds=600.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
+    )
+    partial_series = [
+        {
+            "metric": {"vmid": "101", "instance": "scsi0"},
+            "values": [[0, "0"], [150, "0"], [300, "0"]],
+        }
+    ]
+    client = _StepAwareFakeClient(working_step=150.0, result=partial_series)
+
+    coverage = compute_disk_coverage(client, metrics, window, now=600.0)
+
+    assert coverage[DiskKey(vmid=101, device="scsi0")] == pytest.approx(2 / 3)
+
+
+def test_compute_disk_coverage_falls_back_to_the_plain_step_on_bundle_error() -> None:
+    """``--replay`` backward compatibility: a bundle captured before
+    safe_range_step_seconds() existed has real data at the *plain*
+    metrics.step only (ReplayPrometheusClient raises BundleError for any
+    other step -- ``_StepAwareFakeClient`` mirrors that exactly).
+    compute_disk_coverage() must still find it, by falling back to the
+    plain step after the safe one 404s, not propagate the error."""
+    metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
+    window = WindowConfig(
+        lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
+    )
+    real_series = [
+        {"metric": {"vmid": "101", "instance": "scsi0"}, "values": [[0, "0"], [300, "0"]]}
+    ]
+    client = _StepAwareFakeClient(working_step=300.0, result=real_series)
+
+    coverage = compute_disk_coverage(client, metrics, window, now=300.0)
+
+    assert client.requested_steps == [150.0, 300.0]  # safe step tried first, then the fallback
+    assert coverage[DiskKey(vmid=101, device="scsi0")] == 1.0
+
+
+def test_compute_disk_coverage_reraises_bundle_error_when_no_workaround_was_attempted() -> None:
+    """A genuinely broken/stale bundle (step < rate_window, so
+    safe_range_step_seconds() never substitutes anything) must still fail
+    loudly -- this is not a blanket "swallow BundleError" change."""
+    metrics = MetricsConfig(rate_window_seconds=600.0, step_seconds=300.0, labels=MetricLabels())
+    window = WindowConfig(
+        lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
+    )
+    client = _StepAwareFakeClient(working_step=999.0, result=[])
+
+    with pytest.raises(BundleError):
+        compute_disk_coverage(client, metrics, window, now=300.0)
 
 
 # --------------------------------------------------------------- verify_metrics

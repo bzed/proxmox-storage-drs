@@ -29,13 +29,16 @@ from proxmox_storage_drs.config import (
     PrometheusConfig,
     WindowConfig,
 )
+from proxmox_storage_drs.exceptions import BundleError
 from proxmox_storage_drs.loadmodel import (
     GroupLoad,
+    _fetch_raw_quantity_series,
     _is_metrics_expected_absent,
     compute_disk_load_series,
     compute_group_load,
 )
 from proxmox_storage_drs.metrics import (
+    DiskKey,
     PrometheusClient,
     build_quantile_over_time_promql,
     build_rate_promql,
@@ -77,9 +80,14 @@ def make_storage(id_: str, *, capability_weight: float = 1.0) -> Storage:
 
 # A small window/step so `expected_samples` in compute_disk_coverage works
 # out to a round number (2) that is easy to hand-construct full/partial
-# coverage for, rather than the real default's 289.
+# coverage for, rather than the real default's 289. rate_window_seconds is
+# deliberately *larger* than step_seconds (not the real default's equal
+# 300/300) so metrics.safe_range_step_seconds()'s gigapipe-step-vs-range
+# workaround -- exercised on its own in test_metrics.py/test_loadmodel.py's
+# dedicated tests below -- stays a no-op here and every fixture below can
+# keep assuming the plain, unmodified query text/step.
 WINDOW = WindowConfig(lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.80)
-METRICS = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
+METRICS = MetricsConfig(rate_window_seconds=600.0, step_seconds=300.0, labels=MetricLabels())
 PROM_CONFIG = PrometheusConfig(url="http://prom.example.com:9090")
 
 
@@ -629,6 +637,63 @@ def _series_client(
     return PrometheusClient(PROM_CONFIG, session=session), session
 
 
+class _StepAwareFakeClient(PrometheusClient):
+    """test_metrics.py's own ``_StepAwareFakeClient``, restated here for
+    ``_fetch_raw_quantity_series()``: a minimal ``range_query`` stand-in
+    that raises ``BundleError`` for any step other than ``working_step``,
+    for exercising ``safe_range_step_seconds()``'s decimation and
+    ``--replay``-compatibility fallback without a real bundle on disk."""
+
+    def __init__(self, working_step: float, result: list[dict[str, Any]]) -> None:
+        super().__init__(PROM_CONFIG)
+        self._working_step = working_step
+        self._result = result
+        self.requested_steps: list[float] = []
+
+    def range_query(
+        self, promql: str, start_epoch_seconds: float, end_epoch_seconds: float, step_seconds: float
+    ) -> list[dict[str, Any]]:
+        del promql, start_epoch_seconds, end_epoch_seconds
+        self.requested_steps.append(step_seconds)
+        if step_seconds != self._working_step:
+            raise BundleError("simulated --replay bundle: no recorded response at this step")
+        return self._result
+
+
+def test_fetch_raw_quantity_series_decimates_a_successful_safe_step_response() -> None:
+    """metrics.step >= metrics.rate_window (the failing gigapipe boundary,
+    see metrics.safe_range_step_seconds()): the query goes out at the
+    smaller divisor step, and the denser response is decimated back down
+    to the configured grid before this reaches forecast.py -- 5 raw points
+    at the 150s grid decimate to 3 at the configured 300s one."""
+    metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
+    dense = range_series(
+        101, "scsi0", [(0.0, 1.0), (150.0, 2.0), (300.0, 3.0), (450.0, 4.0), (600.0, 5.0)]
+    )
+    client = _StepAwareFakeClient(working_step=150.0, result=[dense])
+
+    result = _fetch_raw_quantity_series(client, metrics, "read_ops", 0.0, 600.0, 300.0, None)
+
+    assert client.requested_steps == [150.0]
+    key = DiskKey(vmid=101, device="scsi0")
+    assert [ts for ts, _v in result[key]] == [0.0, 300.0, 600.0]
+
+
+def test_fetch_raw_quantity_series_falls_back_to_the_plain_step_on_bundle_error() -> None:
+    """--replay backward compatibility, the raw-series counterpart of
+    test_metrics.py's compute_disk_coverage equivalent: a bundle captured
+    before this workaround existed has real data at the plain step only."""
+    metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
+    real = range_series(101, "scsi0", [(0.0, 1.0), (300.0, 2.0)])
+    client = _StepAwareFakeClient(working_step=300.0, result=[real])
+
+    result = _fetch_raw_quantity_series(client, metrics, "read_ops", 0.0, 300.0, 300.0, None)
+
+    assert client.requested_steps == [150.0, 300.0]
+    key = DiskKey(vmid=101, device="scsi0")
+    assert [ts for ts, _v in result[key]] == [0.0, 300.0]
+
+
 # ------------------------------------------------------------- compute_disk_load_series
 
 
@@ -796,7 +861,10 @@ def test_compute_disk_load_series_uses_the_given_range_not_window_lookback() -> 
     """`range_seconds`/`step_seconds`/`now_epoch_seconds` are the caller's
     own choice, not `window.lookback_seconds` (300.0 in this fixture) --
     confirmed by using a wildly different range/step/step and checking the
-    actual `start`/`end`/`step` params a range query carried."""
+    actual `start`/`end`/`step` params a range query carried. 500s (not
+    METRICS.rate_window_seconds's 600s or higher) keeps
+    safe_range_step_seconds() a no-op, since that workaround is exercised on
+    its own elsewhere and isn't what this test is about."""
     group = Group(
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
@@ -808,7 +876,7 @@ def test_compute_disk_load_series_uses_the_given_range_not_window_lookback() -> 
         LoadWeights(),
         group,
         range_seconds=604800.0,
-        step_seconds=3600.0,
+        step_seconds=500.0,
         now_epoch_seconds=604800.0,
     )
 
@@ -816,7 +884,7 @@ def test_compute_disk_load_series_uses_the_given_range_not_window_lookback() -> 
     params = session.range_params[0]
     assert float(params["start"]) == pytest.approx(0.0)  # 604800 - 604800
     assert float(params["end"]) == pytest.approx(604800.0)
-    assert params["step"] == "3600s"
+    assert params["step"] == "500s"
 
 
 def test_load_by_disk_key_matches_disks_tuple() -> None:

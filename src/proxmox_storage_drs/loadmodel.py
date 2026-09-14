@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from proxmox_storage_drs.config import LoadWeights, MetricsConfig, WindowConfig
+from proxmox_storage_drs.exceptions import BundleError
 from proxmox_storage_drs.forecast import TimeSeries
 from proxmox_storage_drs.metrics import (
     RAW_METRIC_FIELDS,
@@ -28,9 +29,11 @@ from proxmox_storage_drs.metrics import (
     build_quantile_over_time_promql,
     build_rate_promql,
     compute_disk_coverage,
+    decimate_to_configured_step,
     parse_disk_range_series,
     parse_disk_series,
     raw_metric_name,
+    safe_range_step_seconds,
 )
 from proxmox_storage_drs.topology import Group
 
@@ -128,10 +131,24 @@ def _fetch_raw_quantity(
         metrics.rate_window_seconds,
         selector=node_selector,
     )
+    # safe_range_step_seconds(): see compute_disk_coverage()'s own use of
+    # it (and the try/except below's rationale) in metrics.py. No
+    # decimation needed here, unlike _fetch_raw_quantity_series():
+    # quantile_over_time() collapses to one scalar regardless of its own
+    # internal subquery resolution.
+    query_step = safe_range_step_seconds(metrics.step_seconds, metrics.rate_window_seconds)
     promql = build_quantile_over_time_promql(
-        rate_expr, window.quantile, window.lookback_seconds, metrics.step_seconds
+        rate_expr, window.quantile, window.lookback_seconds, query_step
     )
-    result = client.instant_query(promql)
+    try:
+        result = client.instant_query(promql)
+    except BundleError:
+        if query_step == metrics.step_seconds:
+            raise
+        promql = build_quantile_over_time_promql(
+            rate_expr, window.quantile, window.lookback_seconds, metrics.step_seconds
+        )
+        result = client.instant_query(promql)
     return parse_disk_series(result, metrics.labels.vmid, metrics.labels.device)
 
 
@@ -193,7 +210,33 @@ def _fetch_raw_quantity_series(
         metrics.rate_window_seconds,
         selector=node_selector,
     )
-    result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, step_seconds)
+    # safe_range_step_seconds()/decimate_to_configured_step(): see
+    # compute_disk_coverage()'s own use of the same pair (and its
+    # docstring on the try/except below) in metrics.py -- this is the
+    # forecaster's raw-series counterpart of that same
+    # gigapipe-step-vs-range workaround. Decimation matters more here than
+    # there: forecast.py's Holt-Winters model treats its input as a plain
+    # index-spaced array (`seasonal_periods` samples per cycle), so handing
+    # it a finer-than-configured grid would silently misalign the season
+    # length, not just look "extra precise".
+    query_step = safe_range_step_seconds(step_seconds, metrics.rate_window_seconds)
+    try:
+        result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, query_step)
+    except BundleError:
+        if query_step == step_seconds:
+            raise
+        query_step = step_seconds
+        result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, query_step)
+    if query_step < step_seconds:
+        result = [
+            {
+                **series,
+                "values": decimate_to_configured_step(
+                    series.get("values", []), step_seconds, query_step
+                ),
+            }
+            for series in result
+        ]
     return parse_disk_range_series(result, metrics.labels.vmid, metrics.labels.device)
 
 
