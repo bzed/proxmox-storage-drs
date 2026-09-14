@@ -1,3 +1,28 @@
+pve-storage-drs (0.1.3) trixie; urgency=medium
+
+  * `collect-testdata`'s diagnostic bundle no longer leaks a live cluster's
+    unconfigured Prometheus/Telegraf labels (a real guest hostname, seen via
+    a `host` tag) into `findings.json`'s free-text "sample series labels"
+    finding -- found by hand-reading a fresh corpus submission before
+    treating it as clean. The message is now rebuilt from the same
+    vmid/device/node-only view already used for the structured field next
+    to it, instead of trying to redact an open-ended raw label dict as free
+    text.
+  * `verify-metrics`/`show-load`/`plan` no longer silently read zero
+    coverage and zero load against a gigapipe deployment whose
+    `/api/v1/query_range` (and the PromQL subquery form) returns no series
+    at all whenever a query's own step is `>=` the range-vector duration of
+    the `rate()`-family function inside it -- confirmed live on two
+    independent gigapipe deployments, and exactly the boundary this
+    project's own default config (`metrics.step` == `metrics.rate_window`)
+    sits on. A new workaround (`metrics.safe_range_step_seconds()`/
+    `decimate_to_configured_step()`) requests a smaller, whole-second step
+    when needed and decimates the denser response back down, with no
+    effect on an unaffected backend and no effect on replaying a bundle
+    captured before this fix existed.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Mon, 14 Sep 2026 22:11:16 +0200
+
 pve-storage-drs (0.1.2) trixie; urgency=medium
 
   * REVIEW.md sixteenth-pass fixes (findings Y-01..Y-07), verifying the
