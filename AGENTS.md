@@ -115,16 +115,31 @@ Details and the test-layout conventions: [`.agents/testing.md`](.agents/testing.
 
 ---
 
-## 4. Git workflow — branch, commit often, merge on green
+## 4. Git workflow — branch first, commit often, merge on green
 
-- **Feature branches for anything longer than a single self-contained change.**
+- **Branch before you edit, not after.** The decision is made at the start of a task, from
+  the task description alone — never retroactively from how big the diff turned out to be.
+  Before the first `Edit`/`Write` touching anything under `src/`, `tests/`, `docs/`,
+  `debian/`, `.agents/`, `IMPLEMENTATION_PLAN.md`, or config schemas, run
+  `git checkout -b <prefix>/<slug>` first. This applies equally to an agent working
+  unattended — "just fix this one thing" is not an exception.
+- **The only thing that may be committed straight to `main`** is a single-line, single-file
+  correction with zero behavioural effect — a typo in a comment or a doc sentence, a dead
+  link. If the change touches more than one file, or touches any line of code, test, or
+  spec, it gets a branch, full stop. When in doubt, branch — a branch for a one-line fix
+  costs nothing; a direct commit for a multi-file change is the mistake this rule exists to
+  stop.
   `feat/…`, `fix/…`, `chore/…`, `docs/…`, `review/…`.
-- **Commit often.** Small commits that each leave the tree in a describable state are the
-  goal; a green tree is nice but a work-in-progress commit on a feature branch is fine and
-  preferable to a giant one at the end. Say so in the message when a commit is WIP.
+- **Commit often, on the branch.** Small commits that each leave the tree in a describable
+  state are the goal; a green tree is nice but a work-in-progress commit on a feature branch
+  is fine and preferable to a giant one at the end. Say so in the message when a commit is
+  WIP.
 - **Merge to `main` only when `make check` is green** on the branch tip. Merge with
-  `--no-ff` so the branch's shape survives in history.
+  `--no-ff` so the branch's shape survives in history. Delete the branch after merging.
 - `main` must stay green. Never push a red `main`.
+- **Caught yourself mid-task with uncommitted work already on `main`?** Stop, do not commit.
+  Create the branch first (`git checkout -b <prefix>/<slug>`), which carries the uncommitted
+  changes with it, *then* commit there.
 - Long or parallelisable work may be delegated to a subagent **on its own branch** (or a git
   worktree); the subagent runs `make check` itself before reporting done, and the merge back
   to `main` is the parent's decision, not the subagent's.
