@@ -288,6 +288,78 @@ def test_capture_bundle_produces_anonymized_pve_files(tmp_path: Path) -> None:
     assert "san-a" not in vm_config["scsi0"]
 
 
+def test_capture_bundle_storage_capture_agrees_with_replays_active_node_pick(
+    tmp_path: Path,
+) -> None:
+    """--replay's build_topology() derives which node to read a shared
+    storage's content/status from by calling topology._pick_active_node()
+    against the *committed* cluster-resources-storage.json -- sorted by
+    pseudonym (collect._anonymize_storage_resources()'s own ordering), not
+    the live API's response order. _capture_pve_storage_files() must pick
+    from that same sorted view when deciding what to capture, or a storage
+    with two nodes tied on status="available" can end up with content/
+    status captured for a node --replay never asks for (and missing for
+    the one it does) -- exactly what tests/corpus/cluster-g hit for real."""
+    from proxmox_storage_drs.anonymize import generate_new_salt, pseudonym
+    from proxmox_storage_drs.topology import _pick_active_node
+
+    salt_path = tmp_path / "salt"
+    salt = generate_new_salt(salt_path)
+
+    node_x, node_y = "node-x", "node-y"
+    # Order the raw/live-API response so the *first* entry is whichever
+    # real node's pseudonym sorts *last* -- guaranteed to disagree with the
+    # sorted-by-pseudonym order the bundle actually commits.
+    if pseudonym(salt, "node", node_x) > pseudonym(salt, "node", node_y):
+        raw_order = [node_x, node_y]
+    else:
+        raw_order = [node_y, node_x]
+
+    storage_defs = [
+        {"storage": "san-shared", "type": "rbd", "shared": 1, "content": "images"},
+        {"storage": "san-solo", "type": "rbd", "shared": 1, "content": "images"},
+    ]
+    storage_resources = [
+        {"storage": "san-shared", "node": n, "status": "available"} for n in raw_order
+    ] + [{"storage": "san-solo", "node": node_x, "status": "available"}]
+    storage_status = {"total": 10 * (1 << 40), "used": 1 * (1 << 40)}
+
+    responses: dict[str, Any] = {
+        "cluster/resources": lambda type: ([] if type == "vm" else storage_resources),
+        "storage": storage_defs,
+        "nodes": [{"node": node_x}, {"node": node_y}],
+        "cluster/tasks": [],
+        f"nodes/{node_x}/storage/san-shared/status": storage_status,
+        f"nodes/{node_x}/storage/san-shared/content": [],
+        f"nodes/{node_y}/storage/san-shared/status": storage_status,
+        f"nodes/{node_y}/storage/san-shared/content": [],
+        f"nodes/{node_x}/storage/san-solo/status": storage_status,
+        f"nodes/{node_x}/storage/san-solo/content": [],
+        "version": {"version": "8.2.1"},
+    }
+    pve_client = PveClient(fake_api(responses))
+
+    resolved = make_config(
+        tmp_path,
+        groups=[{"name": "g1", "storages": [{"id": "san-shared"}, {"id": "san-solo"}]}],
+        support={"salt_path": str(salt_path)},
+    )
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    bundle = collect.capture_bundle(
+        pve_client, make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    assert bundle.ok
+
+    storage_resources_committed = bundle.pve_files["cluster-resources-storage.json"]
+    new_storage_id = pseudonym(salt, "storage", "san-shared")
+    new_storage_id = f"stor-{new_storage_id}"
+    # The pick --replay will make against exactly what got committed.
+    expected_node = _pick_active_node(new_storage_id, storage_resources_committed)
+
+    assert f"storage-content/{expected_node}/{new_storage_id}.json" in bundle.pve_files
+    assert f"storage-status/{expected_node}/{new_storage_id}.json" in bundle.pve_files
+
+
 def test_capture_bundle_queries_the_real_prometheus_with_real_node_names(
     tmp_path: Path,
 ) -> None:

@@ -741,11 +741,22 @@ def _capture_pve_vm_files(
 def _capture_pve_storage_files(
     recording_pve: RecordingPveClient,
     topology: Topology,
-    storage_resources_raw: list[dict[str, Any]],
+    anonymized_storage_resources: list[dict[str, Any]],
     known_nodes: frozenset[str],
     mapper: Mapper,
 ) -> dict[str, Any]:
     files: dict[str, Any] = {}
+    # _pick_active_node()'s tie-break among several status="available"
+    # candidates depends on the order of the list it is given. --replay's
+    # build_topology() calls it against cluster-resources-storage.json in
+    # the order that file is committed in, i.e. _anonymize_storage_resources()'s
+    # own pseudonym-sorted order -- not the live API's order. Picking here
+    # from the raw, live-API-ordered list (as this used to) can name a
+    # different node than replay will later derive for the very same
+    # (still-tied) storage, so a captured bundle would be missing the
+    # content/status file replay actually asks for. Picking from this same
+    # anonymized, sorted view instead makes the two agree by construction.
+    real_node_by_pseudonym = {mapper.node(node): node for node in known_nodes}
     node_storage_pairs: set[tuple[str, str]] = set()
     for group in topology.groups:
         for storage in group.storages:
@@ -754,11 +765,15 @@ def _capture_pve_storage_files(
             # when no disk of this group currently sits on it -- picked the
             # same way topology.py itself picks a node for that call.
             try:
-                node_storage_pairs.add(
-                    (_pick_active_node(storage.id, storage_resources_raw), storage.id)
+                new_node = _pick_active_node(
+                    mapper.storage(storage.id), anonymized_storage_resources
                 )
             except TopologyError:
                 pass  # already surfaced by build_topology() itself; nothing to capture
+            else:
+                real_node = real_node_by_pseudonym.get(new_node)
+                if real_node is not None:
+                    node_storage_pairs.add((real_node, storage.id))
             for disk in group.disks:
                 if disk.current_storage == storage.id:
                     node_storage_pairs.add((disk.node, storage.id))
@@ -783,11 +798,10 @@ def _capture_pve_files(
     mapper: Mapper,
 ) -> dict[str, Any]:
     storage_resources_raw = recording_pve.storage_resources()
+    anonymized_storage_resources = _anonymize_storage_resources(storage_resources_raw, mapper)
     files: dict[str, Any] = {
         "cluster-resources-vm.json": _anonymize_vm_resources(recording_pve.vm_resources(), mapper),
-        "cluster-resources-storage.json": _anonymize_storage_resources(
-            storage_resources_raw, mapper
-        ),
+        "cluster-resources-storage.json": anonymized_storage_resources,
         "storage-definitions.json": _anonymize_storage_definitions(
             recording_pve.storage_definitions(), mapper
         ),
@@ -797,7 +811,7 @@ def _capture_pve_files(
     files.update(_capture_pve_vm_files(recording_pve, topology, mapper))
     files.update(
         _capture_pve_storage_files(
-            recording_pve, topology, storage_resources_raw, known_nodes, mapper
+            recording_pve, topology, anonymized_storage_resources, known_nodes, mapper
         )
     )
     return files
