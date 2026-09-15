@@ -25,7 +25,7 @@ from typing import Any, Protocol, Sequence
 import requests
 
 from proxmox_storage_drs.config import MetricsConfig, PrometheusConfig, WindowConfig
-from proxmox_storage_drs.exceptions import BundleError, MetricsError
+from proxmox_storage_drs.exceptions import BundleError, MetricsError, RangeStepMismatch
 
 
 class _ResponseLike(Protocol):
@@ -667,7 +667,11 @@ def compute_disk_coverage(
     under ``--replay``, but only for a bundle captured before
     :func:`safe_range_step_seconds` existed *and* whose own
     ``metrics.step``/``metrics.rate_window`` genuinely needs the
-    workaround -- see that function's own try/except below.
+    workaround -- see that function's own try/except below, which also
+    handles a bundle captured with ``collect-testdata --step`` overriding
+    ``config.metrics.step`` for that one run (a
+    :class:`~proxmox_storage_drs.exceptions.RangeStepMismatch`, distinct
+    from the plain-``BundleError`` case).
     """
     metric_name = metrics.read_ops
     expr = build_rate_promql(
@@ -707,6 +711,13 @@ def compute_disk_coverage(
     # replaying exactly as they did before this change.
     query_step = safe_range_step_seconds(metrics.step_seconds, metrics.rate_window_seconds)
     try:
+        result = client.range_query(expr, start, end, query_step)
+    except RangeStepMismatch as exc:
+        # A --step override at capture time (recorded only in manifest.json's
+        # capture.step_seconds, never in config.yaml) left this bundle's
+        # range data at a step neither guess above derives from config
+        # alone -- use the one the bundle actually has.
+        query_step = exc.actual_step_seconds
         result = client.range_query(expr, start, end, query_step)
     except BundleError:
         if query_step == metrics.step_seconds:

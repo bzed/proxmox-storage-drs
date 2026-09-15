@@ -20,17 +20,24 @@ import requests
 from proxmox_storage_drs import collect, replay
 from proxmox_storage_drs.config import PrometheusConfig
 from proxmox_storage_drs.config import load_config as _load_config
-from proxmox_storage_drs.exceptions import BundleError, PveApiError
+from proxmox_storage_drs.exceptions import BundleError, PveApiError, RangeStepMismatch
 from proxmox_storage_drs.metrics import (
     build_quantile_over_time_promql,
     build_rate_promql,
+    compute_disk_coverage,
     parse_disk_range_series,
     parse_disk_series,
     resolve_node_selector,
     safe_range_step_seconds,
 )
 from proxmox_storage_drs.topology import build_topology
-from tests.unit.test_collect import capture, make_config
+from tests.unit.test_collect import (
+    CAPTURE_NOW,
+    capture,
+    make_config,
+    make_prometheus_client,
+    make_pve_client,
+)
 
 
 def write_bundle(tmp_path: Path, **config_overrides: object) -> Path:
@@ -223,9 +230,15 @@ def test_replay_prometheus_client_range_query_trims_to_the_requested_window(
             assert narrow_start - 1 <= ts <= end + 1
 
 
-def test_replay_prometheus_client_range_query_step_mismatch_is_a_bundle_error(
+def test_replay_prometheus_client_range_query_step_mismatch_is_a_range_step_mismatch(
     tmp_path: Path,
 ) -> None:
+    """A step mismatch is the one BundleError case that carries its own
+    recovery: RangeStepMismatch.actual_step_seconds names the step this
+    bundle's range capture actually has (manifest.json's capture.step_seconds,
+    a --step override never written to config.yaml), which
+    metrics.compute_disk_coverage()/loadmodel._fetch_raw_quantity_series()
+    retry with instead of failing outright."""
     resolved = make_config(tmp_path, support={"salt_path": str(tmp_path / "salt")})
     bundle_dir = tmp_path / "bundle"
     bundle = capture(tmp_path, support={"salt_path": str(tmp_path / "salt")})
@@ -237,8 +250,11 @@ def test_replay_prometheus_client_range_query_step_mismatch_is_a_bundle_error(
 
     client = replay.ReplayPrometheusClient(PrometheusConfig(url="unused"), bundle_dir)
     rate_expr = _replay_rate_expr(bundle_dir, resolved)
-    with pytest.raises(BundleError, match="different metrics.step"):
+    captured_step = safe_range_step_seconds(step, resolved.config.metrics.rate_window_seconds)
+    with pytest.raises(RangeStepMismatch) as excinfo:
         client.range_query(rate_expr, end - range_seconds, end, step * 2)
+    assert excinfo.value.actual_step_seconds == captured_step
+    assert isinstance(excinfo.value, BundleError)
 
 
 def test_replay_prometheus_client_range_query_out_of_bounds_is_a_bundle_error(
@@ -331,3 +347,68 @@ def test_parse_disk_range_series_still_works_on_replayed_data(tmp_path: Path) ->
     result = client.range_query(rate_expr, end - range_seconds, end, step)
     parsed = parse_disk_range_series(result, "vmid", "instance")
     assert parsed
+
+
+def test_compute_disk_coverage_replays_a_bundle_captured_with_a_step_override(
+    tmp_path: Path,
+) -> None:
+    """The real bug, end to end: ``collect-testdata --step 180`` on a
+    cluster whose ``config.metrics.step`` is the 300s default (found on a
+    real 4-node production cluster) records its range data at 180s --
+    manifest.json's own ``capture.step_seconds``, never written to
+    config.yaml. Replaying with that same config.yaml alone used to fail
+    outright (neither the 150s safe-step guess nor the plain 300s fallback
+    matches what was actually captured); RangeStepMismatch fixes it by
+    naming the real step instead of guessing a third time."""
+    resolved = make_config(tmp_path, support={"salt_path": str(tmp_path / "salt")})
+    assert resolved.config.metrics.step_seconds == 300.0  # the untouched default
+
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"), step_seconds=180.0)
+    bundle = collect.capture_bundle(
+        make_pve_client(), make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    assert bundle.ok
+    bundle_dir = tmp_path / "bundle"
+    collect.write_bundle_dir(bundle_dir, bundle)
+
+    manifest = replay.load_manifest(bundle_dir)
+    assert manifest["capture"]["step_seconds"] == 180.0
+    safe_guess = safe_range_step_seconds(
+        resolved.config.metrics.step_seconds, resolved.config.metrics.rate_window_seconds
+    )
+    assert safe_guess != 180.0  # confirms this bundle really does trigger the mismatch
+
+    prom_client = replay.ReplayPrometheusClient(PrometheusConfig(url="unused"), bundle_dir)
+    end = manifest["capture"]["synthetic_now_epoch"]
+    # loadmodel.py's real call (the one plan/show-load actually make) scopes
+    # this to the cluster's own nodes -- the *other*, selector-less capture
+    # of this same metric (verify_metrics()'s own findings.json driver) is a
+    # separate file at a different step and not what this test is after.
+    node_names = replay.ReplayPveClient(bundle_dir).node_names()
+    node_selector = resolve_node_selector(resolved.config.metrics, node_names)
+    rate_expr = build_rate_promql(
+        "blockstat_rd_operations",
+        resolved.config.metrics.labels.vmid,
+        resolved.config.metrics.labels.device,
+        resolved.config.metrics.rate_window_seconds,
+        selector=node_selector,
+    )
+    # Requesting the guessed (wrong) step directly proves the mismatch is
+    # real and recoverable, not just that some unrelated path swallowed it.
+    with pytest.raises(RangeStepMismatch) as excinfo:
+        prom_client.range_query(rate_expr, end - 86400.0, end, safe_guess)
+    assert excinfo.value.actual_step_seconds == 180.0
+
+    # No BundleError/RangeStepMismatch propagating is the property under
+    # test here -- the test fixture's own canned Prometheus answers (see
+    # test_collect.py's _range_answer) have no series for read_ops, the
+    # metric compute_disk_coverage() queries, so an empty result is the
+    # correct outcome, not a sign the retry silently failed.
+    coverage = compute_disk_coverage(
+        prom_client,
+        resolved.config.metrics,
+        resolved.config.window,
+        selector=node_selector,
+        now=end,
+    )
+    assert coverage == {}

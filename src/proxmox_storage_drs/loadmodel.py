@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from proxmox_storage_drs.config import LoadWeights, MetricsConfig, WindowConfig
-from proxmox_storage_drs.exceptions import BundleError
+from proxmox_storage_drs.exceptions import BundleError, RangeStepMismatch
 from proxmox_storage_drs.forecast import TimeSeries
 from proxmox_storage_drs.metrics import (
     RAW_METRIC_FIELDS,
@@ -226,6 +226,12 @@ def _fetch_raw_quantity_series(
     # length, not just look "extra precise".
     query_step = safe_range_step_seconds(step_seconds, metrics.rate_window_seconds)
     try:
+        result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, query_step)
+    except RangeStepMismatch as exc:
+        # collect-testdata --step overrode config.metrics.step for this
+        # bundle's capture (manifest.json's capture.step_seconds, never
+        # written to config.yaml) -- use the step it actually has.
+        query_step = exc.actual_step_seconds
         result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, query_step)
     except BundleError:
         if query_step == step_seconds:

@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from proxmox_storage_drs.config import MetricLabels, MetricsConfig, PrometheusConfig, WindowConfig
-from proxmox_storage_drs.exceptions import BundleError, MetricsError
+from proxmox_storage_drs.exceptions import BundleError, MetricsError, RangeStepMismatch
 from proxmox_storage_drs.metrics import (
     DiskKey,
     PrometheusClient,
@@ -363,18 +363,29 @@ def test_no_headers_without_bearer_token() -> None:
 class _StepAwareFakeClient(PrometheusClient):
     """A minimal, in-process stand-in for a live cluster's Prometheus
     endpoint, for exercising compute_disk_coverage()'s
-    safe_range_step_seconds()/BundleError-fallback logic directly, without
-    a real bundle on disk (unlike test_replay.py's real
+    safe_range_step_seconds()/RangeStepMismatch-fallback logic directly,
+    without a real bundle on disk (unlike test_replay.py's real
     ReplayPrometheusClient round trips). ``range_query`` is overridden
     entirely -- ``_session``/``_get`` are never reached -- so this
     subclasses PrometheusClient (rather than merely duck-typing it) purely
     to satisfy ``compute_disk_coverage``'s own ``client: PrometheusClient``
-    annotation."""
+    annotation.
 
-    def __init__(self, working_step: float, result: list[dict[str, Any]]) -> None:
+    ``found=True`` (the default) mirrors the real ``ReplayPrometheusClient``:
+    the query text is always in the bundle, so a step other than
+    ``working_step`` raises :class:`RangeStepMismatch` carrying it, never a
+    plain, unrecoverable :class:`BundleError` -- a bundle's own captured
+    step is always discoverable once its query text matches something.
+    ``found=False`` simulates the one case that stays genuinely
+    unrecoverable: no capture for this query text at all."""
+
+    def __init__(
+        self, working_step: float, result: list[dict[str, Any]], *, found: bool = True
+    ) -> None:
         super().__init__(PROM_CONFIG)
         self._working_step = working_step
         self._result = result
+        self._found = found
         self.requested_steps: list[float] = []
 
     def range_query(
@@ -383,7 +394,12 @@ class _StepAwareFakeClient(PrometheusClient):
         del promql, start_epoch_seconds, end_epoch_seconds
         self.requested_steps.append(step_seconds)
         if step_seconds != self._working_step:
-            raise BundleError("simulated --replay bundle: no recorded response at this step")
+            if not self._found:
+                raise BundleError("simulated --replay bundle: no recorded response for this query")
+            raise RangeStepMismatch(
+                "simulated --replay bundle: recorded at a different step",
+                actual_step_seconds=self._working_step,
+            )
         return self._result
 
 
@@ -439,13 +455,14 @@ def test_compute_disk_coverage_decimation_does_not_inflate_a_real_gap() -> None:
     assert coverage[DiskKey(vmid=101, device="scsi0")] == pytest.approx(2 / 3)
 
 
-def test_compute_disk_coverage_falls_back_to_the_plain_step_on_bundle_error() -> None:
-    """``--replay`` backward compatibility: a bundle captured before
-    safe_range_step_seconds() existed has real data at the *plain*
-    metrics.step only (ReplayPrometheusClient raises BundleError for any
-    other step -- ``_StepAwareFakeClient`` mirrors that exactly).
-    compute_disk_coverage() must still find it, by falling back to the
-    plain step after the safe one 404s, not propagate the error."""
+def test_compute_disk_coverage_retries_at_the_bundles_actual_captured_step() -> None:
+    """``--replay`` backward/override compatibility: a bundle captured
+    before ``safe_range_step_seconds()`` existed, or with
+    ``collect-testdata --step`` overriding ``config.metrics.step`` for
+    that one run, has its range data at some step this run's own guess
+    does not match. ``RangeStepMismatch`` names that step, so
+    ``compute_disk_coverage()`` retries with exactly it -- one retry,
+    never a second guess -- rather than propagate the error."""
     metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
     window = WindowConfig(
         lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
@@ -457,19 +474,20 @@ def test_compute_disk_coverage_falls_back_to_the_plain_step_on_bundle_error() ->
 
     coverage = compute_disk_coverage(client, metrics, window, now=300.0)
 
-    assert client.requested_steps == [150.0, 300.0]  # safe step tried first, then the fallback
+    assert client.requested_steps == [150.0, 300.0]  # safe step tried first, then the real one
     assert coverage[DiskKey(vmid=101, device="scsi0")] == 1.0
 
 
-def test_compute_disk_coverage_reraises_bundle_error_when_no_workaround_was_attempted() -> None:
-    """A genuinely broken/stale bundle (step < rate_window, so
-    safe_range_step_seconds() never substitutes anything) must still fail
-    loudly -- this is not a blanket "swallow BundleError" change."""
+def test_compute_disk_coverage_reraises_bundle_error_when_the_query_was_never_captured() -> None:
+    """A step mismatch is always recoverable (RangeStepMismatch names the
+    real step) -- the one case that must still fail loudly is no capture
+    for this query at all, the same "no recorded response" a genuinely
+    wrong or corrupted bundle raises."""
     metrics = MetricsConfig(rate_window_seconds=600.0, step_seconds=300.0, labels=MetricLabels())
     window = WindowConfig(
         lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
     )
-    client = _StepAwareFakeClient(working_step=999.0, result=[])
+    client = _StepAwareFakeClient(working_step=999.0, result=[], found=False)
 
     with pytest.raises(BundleError):
         compute_disk_coverage(client, metrics, window, now=300.0)

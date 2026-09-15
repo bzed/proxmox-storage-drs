@@ -90,3 +90,23 @@ class BundleError(DrsError):
     The last case in particular must be loud and specific (section 16.5),
     never an empty result silently standing in for "no data".
     """
+
+
+class RangeStepMismatch(BundleError):
+    """``--replay`` found the requested range query, but at a different
+    step than this run re-derives from ``config.metrics.step`` -- a bundle
+    captured with ``collect-testdata --step`` overriding
+    ``config.metrics.step`` for that one run (section 16.4), which
+    ``manifest.json``'s own ``capture.step_seconds`` records but nothing in
+    ``config.yaml`` does. Carries the step the bundle actually has
+    (:attr:`actual_step_seconds`) so ``metrics.compute_disk_coverage()``/
+    ``loadmodel._fetch_raw_quantity_series()`` can retry with it instead of
+    guessing a third time -- a plain :class:`BundleError` here would be a
+    hard, unrecoverable failure for a bundle that is otherwise perfectly
+    good data, one column of it just needing size discovered from the file
+    that already carries it (`replay.py`'s own ``_trim_range_result``).
+    """
+
+    def __init__(self, message: str, actual_step_seconds: float) -> None:
+        super().__init__(message, actual_step_seconds)
+        self.actual_step_seconds = actual_step_seconds

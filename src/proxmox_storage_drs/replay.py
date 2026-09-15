@@ -24,10 +24,16 @@ for a *narrower* window of that same series (a different, smaller
 always ending at this bundle's own fixed :func:`bundle_reference_now`.
 :meth:`ReplayPrometheusClient._get` therefore does not key a range lookup on
 the literal requested start/end at all -- it looks up the one stored series
-for that query text and ``step``, then trims it to the requested window,
-raising :class:`~proxmox_storage_drs.exceptions.BundleError` (section
-16.5's "loud, specific" cache miss) if the request falls outside what was
-actually captured, or asks for a different ``step``.
+for that query text, then trims it to the requested window, raising
+:class:`~proxmox_storage_drs.exceptions.BundleError` (section 16.5's "loud,
+specific" cache miss) if the request falls outside what was actually
+captured. A ``step`` mismatch is not that kind of miss: a bundle captured
+with ``collect-testdata --step`` overriding ``config.metrics.step`` for
+that one run legitimately has its range data at a different step than this
+replay re-derives from ``config.yaml`` alone, so :func:`_trim_range_result`
+raises the narrower :class:`~proxmox_storage_drs.exceptions.RangeStepMismatch`
+instead, carrying the step the bundle actually has -- ``metrics.py``'s and
+``loadmodel.py``'s own fallback chains retry with it rather than fail.
 """
 
 from __future__ import annotations
@@ -39,7 +45,7 @@ from typing import Any
 
 from proxmox_storage_drs.collect import hash_label_name, hash_query_text
 from proxmox_storage_drs.config import PrometheusConfig
-from proxmox_storage_drs.exceptions import BundleError, PveApiError
+from proxmox_storage_drs.exceptions import BundleError, PveApiError, RangeStepMismatch
 from proxmox_storage_drs.metrics import PrometheusClient
 from proxmox_storage_drs.pve import PveClient
 
@@ -169,10 +175,11 @@ def _trim_range_result(
     stored_end = float(payload["end"])
     stored_step = float(payload["step"])
     if abs(stored_step - requested_step) > 1e-6:
-        raise BundleError(
+        raise RangeStepMismatch(
             f"bundle has a range capture for {payload['query']!r} at step {stored_step:g}s, "
-            f"but this replay requested step {requested_step:g}s -- captured with a different "
-            "metrics.step?"
+            f"but this replay requested step {requested_step:g}s -- captured with "
+            "collect-testdata --step overriding config.metrics.step?",
+            actual_step_seconds=stored_step,
         )
     # A little slack for floating-point rounding across the anonymized
     # epoch rebase, not for a genuinely out-of-range request.
