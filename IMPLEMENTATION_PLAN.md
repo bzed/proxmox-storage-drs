@@ -18,7 +18,13 @@ storages within each group by live-migrating individual VM disks, subject to:
   and this must hold *during* migrations, not merely before and after;
 - the number of migrations must be **minimal**;
 - a VM's disks should stay **together** on one storage unless space or I/O forces otherwise;
-- a migration's own I/O cost must not exceed the imbalance it removes.
+- data is spread evenly across a group's storages as a **second priority to I/O** — no single storage
+  should hold a disproportionate share of the group's bytes, so the failure of any one storage costs
+  a bounded share of the data;
+- a migration's own I/O cost must not exceed the benefit it delivers, judged over a horizon that
+  reflects how long the placement will actually last — a move's cost is paid in days of degraded
+  I/O, its benefit accrues for as long as the VM keeps running there (default horizon: one year,
+  configurable).
 
 ### Non-goals
 
@@ -44,7 +50,22 @@ The requirement that migrations be minimal is implemented as a **tunable prefere
 in §5.4), not as a strict lexicographic minimum. A strict minimum would refuse a second cheap move
 that halves the remaining imbalance, which is not what is wanted. `β` sets the exchange rate between
 "one more migration" and "this much less imbalance"; §14.3 demonstrates `β` selecting a two-move
-plan over a three-move plan on the same input.
+plan over a three-move plan on the same input (shown there at `δ = 0`; at the default `δ` the
+capacity term reaches the same two-move plan for its own reason).
+
+### Requirement interpretation: "spread data evenly"
+
+Even spread of **data** across a group's storages is a risk-reduction requirement — the failure of
+one storage costs the group whatever was on it — and it is subordinate to the I/O requirement: the
+load model of §4, in-flight I/O time by default with the ops/bytes terms available where the
+operator wants them, remains the primary quantity. Like the migration count, even spread is
+implemented as a **tunable preference** (the `δ` term in §5.4) rather than a strict "I/O first,
+bytes second" lexicographic order: two assignments' load objectives are essentially never exactly
+equal, so a strict order would reduce the capacity term to a tie-breaker that never acts. The
+default weight keeps I/O the first priority in every comparison on an imbalanced group, gives `δ`
+the deciding vote among plans the load objective is nearly indifferent between, and lets it act on
+its own — behind §6's capacity gate — on a group whose I/O is already balanced but whose data is
+concentrated on few storages.
 
 ### Operating assumptions
 
@@ -1109,6 +1130,7 @@ Set `Uˢᵉˣᵗ = 0` only if `snapshot_reserve.count_foreign_volumes` is false,
 | `y_{v,s}` | `{0,1}` | VM `v` has at least one disk on `s` |
 | `Z_s` | `≥ 0` | size of the largest disk on `s` |
 | `e_s` | `≥ 0` | absolute deviation of `u_s` from target (L1 objective) |
+| `d_s` | `≥ 0` | relative deviation of `s`'s fill fraction from the group mean fill `b̄` (capacity-spread objective, §5.3 (C7)) |
 | `t` | `≥ 0` | maximum utilization (min–max objective) |
 | `r_s` | `≥ 0` | reserve violation slack |
 
@@ -1190,8 +1212,10 @@ effectively hard:
    number**, because the bound depends on the group's absolute load `T_g` (§4):
 
    ```
-   U_obj  =  2·α·T_g  +  β·|D|  +  γ·Σ_d z_d  +  κ·|V|·(|S|−1)      (upper bound on the
-                                                                     non-reserve objective)
+   U_obj  =  2·α·T_g  +  β·|D|  +  γ·Σ_d z_d  +  κ·|V|·(|S|−1)  +  δ·2·|S|
+                                                                     (upper bound on the
+                                                                     non-reserve objective;
+                                                                     Σ_s d_s ≤ 2|S| by (C7))
    P_min  =  U_obj / ε_r          with  ε_r = the smallest reserve shortfall we refuse to trade
    ```
 
@@ -1208,10 +1232,10 @@ effectively hard:
    sees the engine using 2.3×10⁷ needs to be able to reconstruct that number rather than take it on
    faith.
 
-   Worked against §14 (`T_g = 7.4`, `|D| = 6`, `Σz = 6.5 TiB`, `|V| = 5`, `|S| = 3`, sizes in TiB):
-   `U_obj = 14.8 + 1.5 + 0.325 + 5.0 = 21.6`, so `P_min = 21.6 · 2²⁰ ≈ 2.27×10⁷`. The configured
-   default `P = 1000` is **four orders of magnitude too small** to be provably dominant at
-   mebibyte granularity — it is dominant for violations above roughly 22 GiB and silently tradeable
+   Worked against §14 (`T_g = 7.4`, `|D| = 6`, `Σz = 6.5 TiB`, `|V| = 5`, `|S| = 3`, `δ = 0.5`, sizes
+   in TiB): `U_obj = 14.8 + 1.5 + 0.325 + 5.0 + 3.0 = 24.6`, so `P_min = 24.6 · 2²⁰ ≈ 2.58×10⁷`. The
+   configured default `P = 1000` is **four orders of magnitude too small** to be provably dominant at
+   mebibyte granularity — it is dominant for violations above roughly 25 GiB and silently tradeable
    below that. This is precisely why option 1 is the default and this option needs the computed `P`.
 
 **Use the lexicographic solve (option 1) by default.** It needs no calibration, its correctness does
@@ -1248,6 +1272,22 @@ The min–max alternative is `t ≥ u_s ∀s`. L1 is the default: min–max only
 storage and is indifferent to everything below it, which tends to produce plans that fix the worst
 storage and ignore a second nearly-as-bad one.
 
+**(C7) Capacity-spread linearization.** Let `b_s = (Σ_d z_d·x_{d,s} + Uˢᵉˣᵗ) / C_s` be the storage's
+**fill fraction** and `b̄ = (Σ_d z_d + Σ_s Uˢᵉˣᵗ) / (Σ_s C_s)` the group's mean fill — a constant,
+like `u*`, because total bytes are invariant under reassignment. Then:
+
+```
+(b_s − b̄)/b̄  ≤  d_s        and        (b̄ − b_s)/b̄  ≤  d_s      ∀ s ∈ S
+```
+
+`b_s` is linear in `x`, so no variables beyond `d_s` are needed. Dividing by `b̄` makes the term
+**scale-free**: measured on absolute fractions, deviation shrinks as a group empties and the term
+would stop acting precisely where risk concentration is easiest to fix; relative to `b̄`, a group
+filled to 5% that keeps 60% of its bytes on one storage deviates as much as a full one does. If
+`b̄ = 0` the group holds no data: the term is inactive, and so is §6's capacity gate. The fill
+counts managed disks and foreign volumes but **not** the snapshot reserve — the quantity spread is
+*data at risk*, and free space is not data.
+
 ### 5.4 Objective
 
 ```
@@ -1255,6 +1295,7 @@ min   α · Σ_{s∈S} e_s                            (imbalance)
     + β · Σ_{d∈D} (1 − x_{d,σ₀(d)})              (number of migrations)
     + γ · Σ_{d∈D} z_d · (1 − x_{d,σ₀(d)})        (bytes migrated)
     + κ · Σ_{v∈V} ( Σ_{s∈S} y_{v,s} − 1 )        (VM disk fragmentation)
+    + δ · Σ_{s∈S} d_s                            (data spread / failure risk)
     + P · Σ_{s∈S} r_s                            (reserve violation)
 ```
 
@@ -1268,6 +1309,29 @@ imbalance can legitimately override, as required.
 disk can never leave its group, a VM with disks in two different groups is not counted as
 fragmented — that spread is structural and no migration could ever repair it. This is a consequence
 of the decomposition, not an oversight.
+
+`δ` spreads **bytes**, not load. The failure of a storage takes with it everything on it, so an
+even fill fraction bounds the share of the group's data that any single failure costs, and it keeps
+peak fill — hence reserve headroom — uniform across the group. I/O balance stays the first
+priority: `Σ_s e_s` and `Σ_s d_s` are both sums of per-storage deviations from an equal-share
+target on comparable relative scales, `δ` defaults to half of `α`, and on an imbalanced group the
+`α` term dominates every plan comparison (in §14.2: `α·Σe = 8.07` against `δ·Σd = 1.08`). `δ`
+decides among plans the load objective is nearly indifferent between, and acts on its own only
+when a group's I/O is already balanced but its data is concentrated — the case §6's capacity gate
+exists to reach.
+
+Like `β` and `κ`, `δ` is an exchange rate, not a lexicographic order — a strict "I/O first, bytes
+only among exactly equal load optima" rule would never act, for the same reason §1 gives for
+refusing a strict migration minimum. It says how much summed utilization deviation one unit of
+summed relative fill deviation is worth (`objective.delta_capacity_spread`, default 0.5; `0`
+disables the term). Raise it to spread data more aggressively — §11.1 warns once `δ` exceeds `α`,
+the point where data evenness starts outweighing I/O evenness in every comparison. The term is L1
+and stays L1 whatever `objective.spread_metric` is set to: the risk argument cares about every
+storage's share, not only the fullest one.
+
+*Specified ahead of implementation (§12, phase 12): until it lands, the five-term breakdowns the
+as-built notes quote in §2.3, §9.5 and §16.6 remain the truth; each becomes six-term when this
+term is built.*
 
 Scaling matters: express `z_d` in TiB and `ℓ_d` in average in-flight I/O requests (§4) before
 applying the weights, so the defaults in the example config are meaningful.
@@ -1285,7 +1349,7 @@ Two scales are needed, one for quantities that appear as *variables* and one for
 
 | Scale | Applies to | Value |
 |---|---|---|
-| `K` | the load-valued variables `e_s`, `t`, and the constants `u*`, `L_s` they are compared against | `10⁶` (micro-requests) |
+| `K` | the load-valued variables `e_s`, `t`, the fill-deviation variables `d_s`, and the constants `u*`, `L_s`, `b̄` they are compared against | `10⁶` (micro-units) |
 | — | the size-valued variables `Z_s`, `R_s`, `r_s` and the constants `z_d`, `C_s`, `Uˢᵉˣᵗ`, `min_free_bytes` | MiB (integers already) |
 | `W` | every objective weight, so `α`, `β`, `γ`, `κ`, `P` keep four decimals | `10⁴` |
 
@@ -1301,7 +1365,10 @@ a_{d,s} = round(K · ℓ_d / c_s)          →   Σ_d a_{d,s}·x_{d,s} − round
 The error is then a single rounding of the finished product: `|a_{d,s} − K·ℓ_d/c_s| ≤ 0.5`, i.e.
 `≤ 5×10⁻⁷` in load units per disk, **independent of `c_s`**. Summed over a group of even 1 000 disks
 that is `< 5×10⁻⁴` — three orders below the solver's `mip_gap` of 0.02, so it cannot change the
-selected plan and the two backends stay directly comparable. (C4)/(C5) are already integral in MiB.
+selected plan and the two backends stay directly comparable. (C4)/(C5) are already integral in MiB,
+and (C7) folds exactly like (C6): the per-(disk, storage) coefficient is
+`round(K · z_d / (b̄·C_s))`, with the constant `K·(1 − Uˢᵉˣᵗ/(C_s·b̄))` rounded once — one rounding
+error per coefficient, independent of `C_s` and `b̄`.
 
 **Objective coefficients.** Same rule — `z_d` is a constant, so the `γ` term's coefficient is
 per-disk and needs no separate `γ_scaled`:
@@ -1311,6 +1378,7 @@ min   Σ_s round(α·W)              · e_s^int                     (imbalance)
     + Σ_d round(β·W·K)            · (1 − x_{d,σ₀(d)})           (number of migrations)
     + Σ_d round(γ·W·K·z_d^TiB)    · (1 − x_{d,σ₀(d)})           (bytes migrated)
     + Σ_v round(κ·W·K)            · (Σ_s y_{v,s} − 1)           (fragmentation)
+    + Σ_s round(δ·W)              · d_s^int                     (data spread)
     + Σ_s round(P·W·K / 2²⁰)      · r_s^MiB                     (reserve violation)
 ```
 
@@ -1353,7 +1421,7 @@ the rounding bound — a cheap guard against a scaling mistake silently producin
 3. **Descend**: repeatedly evaluate every single-disk move, every pairwise swap, **and every
    whole-VM co-relocation** (every movable disk of one multi-disk VM moved to the same target
    storage together, in one trial); apply the one that most improves the full objective (including
-   `β`, `γ`, `κ`); stop when no move improves it or `heuristic_iterations` is reached. The third
+   `β`, `γ`, `κ`, `δ`); stop when no move improves it or `heuristic_iterations` is reached. The third
    candidate family was added after the first two (confirmed live on a real production cluster,
    not found by review): whenever `κ` is large enough to make moving one disk of an N-disk VM a
    net loss on its own (it pays `κ`'s fragmentation penalty before a later move could reunite it),
@@ -1413,7 +1481,24 @@ without ever triggering.
 (max_s u_s − min_s u_s) / u*   ≥   gates.imbalance_threshold   (default 0.20)
 ```
 
-Evaluated per group; a group that passes is planned, others are skipped.
+Evaluated per group; a group that passes it — or the capacity gate below — is planned, others are
+skipped.
+
+**Capacity gate** — the data-spread counterpart of the imbalance gate, on fill fractions rather
+than loads:
+
+```
+(max_s b_s − min_s b_s) / b̄   ≥   gates.capacity_spread_threshold      (default 0.25)
+```
+
+with `b_s` and `b̄` as in §5.3 (C7). A group that passes it is planned even when its I/O is
+perfectly balanced — in that case the `δ` term of §5.4 is what does the work — and it bypasses the
+drift and imbalance gates for the same reason the reserve override does: a stable workload is not a
+reason to keep data concentrated. Unlike a reserve violation this is a preference rather than a
+safety property: cooldowns, payback (§7) and the transient invariant (§8.1) all still apply, and
+`gates.capacity_spread_threshold: null` disables the gate — with
+`objective.delta_capacity_spread: 0`, the whole feature. The gate cannot fire when `b̄ = 0`: an
+empty group has nothing to spread.
 
 **Cooldowns** — a disk moved within `cooldown_per_disk` (default 24h) is pinned in place; a storage
 involved in a migration within `cooldown_per_storage` accepts no new incoming moves.
@@ -1472,15 +1557,45 @@ storage-level lock while it runs.
 
 ### 7.2 Benefit
 
-The plan reduces the imbalance objective from `E_before = Σ_s e_s` to `E_after`. That reduction
-persists until the workload changes, which we bound by the payback horizon `H`:
+The plan improves the two *persistent* parts of the §5.4 objective — load balance and data spread —
+from `(E_before, F_before)` to `(E_after, F_after)`, where `E = Σ_s e_s` and `F = Σ_s d_s`
+(§5.3 (C7)). Both improvements persist for as long as the workloads keep running on the new
+placement, and we account them over the payback horizon `H`:
 
 ```
-benefit  =  (E_before − E_after) · H
+benefit  =  ( α·(E_before − E_after)  +  δ·(F_before − F_after) )  ·  H
 ```
 
-also in load-seconds. Both sides of the comparison are thus in the same unit, which is the whole
-point of using I/O time as the load metric.
+also in load-seconds — `δ` converts relative fill deviation into load-deviation equivalents (§5.4),
+so both sides of §7.3's comparison stay in the unit that is the whole point of using I/O time as
+the load metric. `β` and `γ` charge the move itself and belong on the cost side; `κ` is a
+preference, not a physical benefit, and appears in neither.
+
+**`H` defaults to 365d** (`migration.payback_horizon`), with `λ = 10`. The reasoning is the
+asymmetry of the two sides: a migration's cost is paid once and early — days of mirror I/O (§7.1),
+plus a source wipe that can outlast the mirror by an order of magnitude — while its benefit
+accrues for as long as the placement lasts, which for infrastructure is months to years. Assume,
+by default, that a VM balanced today keeps running where it is for at least another year. A short
+horizon asks "does this pay back before the bruise heals?", and at the previous `7d` default the
+answer was *no* for every move worth less than `λ·cost/H` — `0.17` of summed deviation per TiB
+moved, `0.69` for the 4 TiB disk of §14.5 — rejecting, at the same `λ`, precisely the
+slow-accruing but real benefits a balancer exists to capture: a week of degraded I/O on the
+storages looks bad, and still pays for itself many times over across a year of better balance.
+
+Three things `H` is **not**, to keep the semantics honest:
+
+- **Not a prediction that nothing changes for a year.** Drift and operator action will re-plan long
+  before that (§6), and a re-plan does not claw back benefit already accrued. `H` is the accounting
+  period over which a recurring benefit pays for a one-time cost — the convention capacity
+  planning has always used for exactly this shape of decision.
+- **Not the brake on doing too much.** That role belongs to `β`/`γ` and the gates. With a one-year
+  horizon the aggregate test's remaining job is to reject plans whose persistent-objective
+  improvement is genuinely negligible — `ΔObj < λ·cost/H`, about `0.008` for the two-move plan of
+  §14.5 — which is the right shape for a safety test: a guard against absurdity, not the main cost
+  control.
+- **Not universal.** It is an assumption about VM lifetime. Short-lived fleets (CI, render farms,
+  lab clusters) should lower it toward the actual lifetime of their VMs; §11.1 warns below 30d,
+  where the test starts rejecting real benefits again.
 
 ### 7.3 Acceptance
 
@@ -1488,7 +1603,7 @@ point of using I/O time as the load metric.
 accept plan   ⟺   benefit  ≥  migration.payback_ratio · Σ_d cost_d
 ```
 
-with `H = 7d` and `λ = 10` by default. Additional **hard** rules, applied per move, that reject
+with `H = 365d` and `λ = 10` by default. Additional **hard** rules, applied per move, that reject
 individual migrations regardless of the aggregate test:
 
 - `duration_d > migration.max_single_move_duration` (default 6h) → reject the move;
@@ -1645,13 +1760,15 @@ while pending:
         if a staging move exists:  order.append(staging_move); continue
         else: report deadlock with the blocking storages; break
 
-    m ← argmax over feasible of  (imbalance reduction) / cost_m
+    m ← argmax over feasible of  (persistent-objective reduction) / cost_m
+                                 # the α and δ terms of §5.4 — the parts whose
+                                 # improvement persists; β/γ are one-time costs
     order.append(m)
     state ← apply(state, m)          # target charged immediately; the source is charged
                                      # until its volume is observed gone (see below)
 ```
 
-Ordering by **imbalance reduction per unit cost** means the plan front-loads its value: if the
+Ordering by **objective reduction per unit cost** means the plan front-loads its value: if the
 operator aborts halfway, or a maintenance window closes, the moves that mattered most have already
 run. Two exceptions take priority and are scheduled first regardless of ratio:
 
@@ -1863,7 +1980,8 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
   2. 101:scsi1  san-a → san-b   1.0 TiB   ~1.5h   Δimbalance −2.00   ℓ/z 1.00
 
   after: san-a u=3.00  san-b u=1.70  san-c u=2.70   spread 53% (from 255%)
-  payback: benefit 3.95e6 load·s vs cost 2.62e4 load·s → ratio 151 (need 10) ✓
+  data:  fill 25%/31%/25%   deviation 31% (from 215%)
+  payback: benefit 2.35e8 load·s vs cost 2.62e4 load·s → ratio 8970 (need 10) ✓
 
   pinned (not movable this run):
     106  snapshots present (2)      1.0 TiB  ℓ 0.9  on san-a  → clear snapshots to unblock
@@ -2040,6 +2158,7 @@ requirement-to-setting mapping:
 | Timeframe considered | `window.lookback` (default `24h`) |
 | Minimal number of migrations | `objective.beta_move_count` |
 | Keep a VM's disks together | `objective.kappa_vm_affinity` |
+| Spread data evenly across storages (failure risk) | `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` |
 | Migration load accounted for | `migration.*`, `objective.gamma_move_bytes_per_tib` |
 | Manual vs automatic | `execution.mode` |
 | Forecasting | `forecast.model` |
@@ -2071,6 +2190,9 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `rate_window ≥ 4 × metrics.pvestatd_push_interval` | Below this, `rate()` sees too few points. The interval is a PVE-side setting the tool cannot read, so it is declared in config (default `60s`, PVE's own default) and `verify-metrics` cross-checks it against the observed sample spacing of a live series, erroring if the two disagree by more than 20% |
 | `window.lookback ≥ forecaster.required_range()` | See §10.1 — otherwise the model can never run |
 | `payback_ratio > 0`, `payback_horizon > 0` | Zero disables the safety test |
+| `payback_horizon ≥ 30d` (warn, not error) | A horizon of days rejects slow-accruing but real benefits; it should approximate VM lifetime, not operator patience (§7.2) |
+| `delta_capacity_spread ≥ 0`; warn when `> alpha_spread` | A negative weight would reward concentration; above `α`, data evenness outweighs I/O evenness in every comparison and the tool is no longer an I/O balancer first |
+| `capacity_spread_threshold > 0` where set, `null` disables | A ratio of fill fractions to the mean fill; it can legitimately exceed 1 (§14.2 measures 1.85) |
 | `saturation_ceiling ∈ (0,1]` | A fraction of `saturation_load`, not of `capability_weight` |
 | `saturation_load > 0` where set; warn once per run for each storage where it is unset | §7.3's guard is silently inactive without it |
 | `max_concurrent_* ≥ 1` | Zero would deadlock the scheduler |
@@ -2241,6 +2363,7 @@ Each phase is independently testable and useful on its own.
 | 9 | `forecast.py` beyond p95 | Seasonal-naive validated by backtest |
 | 10 | `anonymize.py`, `collect.py`, `replay.py`, `tests/corpus/` (§16) | A bundle collected from a live cluster replays to the same plan the live run produced; the scrub audit and the determinism test pass on it |
 | 11 | Logging policy (§2.3) | **Done.** A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
+| 12 | Capacity-spread objective and gate, one-year payback horizon (§5.3 (C7), §5.4 `δ`, §6, §7.2) | Fixtures regenerated with the `delta_values` sweep and the 365d horizon; a replayed bundle shows the capacity gate deciding; `explain` reports the fill deviation; manual and manpage document `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` and the new `payback_horizon` default |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
@@ -2270,6 +2393,7 @@ engine underneath was still being built.
 | Foreign volumes on a storage | Counted via `count_foreign_volumes`; otherwise the reserve silently overstates free space |
 | Orphaned target volume after a failure | Detected and reported, never auto-deleted (§9.3) |
 | Storage already violating the reserve | Soft slack `r_s` keeps the model feasible; violation bypasses gates and is scheduled first |
+| Group I/O-balanced but data concentrated on few storages | The capacity gate (§6) triggers planning anyway and the `δ` term (§5.4) does the spreading; it still honours cooldowns, payback and the transient invariant |
 | Two DRS instances running | Advisory lock in `state.json` plus a startup scan for in-flight `move_disk` UPIDs owned by the DRS user. The lock is node-local; only the UPID scan crosses the cluster (§11) |
 | Config edited mid-run, cluster-wide | The config is read once at startup and never re-read; the resolved path and its SHA-256 are logged, so a plan can be traced to the exact file that produced it |
 | Storage `/…/` pattern matches nothing in the cluster | Hard error before planning, exactly like a literal id that does not exist: the likelier cause is a typo, and the alternative is a silently shrunken group (§11.4) |
@@ -2299,13 +2423,18 @@ and (C5) is enforced before, during and after every move.
 A complete, self-consistent fixture. Implementations must reproduce these numbers exactly.
 
 The machine-readable form lives in **`tests/fixtures/fc-tier1.yaml`** (input) and
-**`tests/fixtures/fc-tier1.expected.json`** (expected derivations for every `β` in the input's
-`beta_values` sweep, the execution order with its transient checks, the post-plan reserve state, and
+**`tests/fixtures/fc-tier1.expected.json`** (expected derivations for every `(β, δ)` pair in the
+input's `beta_values` × `delta_values` sweeps, the execution order with its transient checks, the
+post-plan reserve state, and
 both payback calculations). Assert against those files in CI rather than transcribing the tables
 below.
 
+*The committed fixture predates this revision of §5.4/§7.2 — no `delta_values` sweep, and
+`payback_horizon: 7d` — so regenerating it is the first task of §12's phase 12; the tables below
+state the numbers the regenerated fixture must produce.*
+
 The expected file is **generated, not written**: `tests/fixtures/generate_expected.py` enumerates all
-`3⁶ = 729` assignments per `β`, so the recorded optimum is proven rather than hand-worked, and
+`3⁶ = 729` assignments per `(β, δ)` pair, so the recorded optimum is proven rather than hand-worked, and
 derives the order with the §8.2 rule and the §8.1 transient predicate. Run it with `--check` in CI to
 assert the committed file is current; that check is also the regression test for §5.5's coefficient
 scaling, since a scaling bug shows up as a different optimum.
@@ -2345,57 +2474,81 @@ one — which is what makes the `ω = 1.0` per mirror endpoint in §14.5 commens
 
 - Spread `(6.50 − 0.20)/2.4667 = 2.554` → **255%**, far above the 20% gate.
 - `E_before = |6.50−2.4667| + |0.70−2.4667| + |0.20−2.4667| = 4.0333 + 1.7667 + 2.2667 = 8.0667`
+- Data spread (§5.3 (C7)): fills 56%/19%/6% against `b̄ = 0.2708`, `F_before = 2.154` — san-a
+  alone holds 69% of the group's bytes. `(0.5625 − 0.0625)/0.2708 = 1.85`, far above the 25%
+  capacity gate.
 - san-a already breaches the snapshot reserve. This is why (C5) carries slack `r_s` rather than being
   hard — a hard constraint would report *infeasible* here and refuse to help.
 
 ### 14.3 Solution
 
-With default weights (`α=1.0, β=0.25, γ=0.05/TiB, κ=0.5`) the optimum is **three** moves:
+With default weights (`α=1.0, β=0.25, γ=0.05/TiB, κ=0.5, δ=0.5`) the optimum is **two** moves:
 
 1. `102:scsi0` san-a → san-c
 2. `101:scsi1` san-a → san-b
-3. `105:scsi0` san-c → san-b
 
-| Storage | `L_s` | used | `Z_s` | `used + f·Z_s` | ✓ |
-|---|---|---|---|---|---|
-| san-a | 3.00 | 2.0 | 2.0 | 6.0 | ✓ |
-| san-b | 1.90 | 3.0 | 1.0 | 5.0 | ✓ |
-| san-c | 2.50 | 1.5 | 1.5 | 4.5 | ✓ |
+| Storage | `L_s` | used | `Z_s` | `used + f·Z_s` | fill | ✓ |
+|---|---|---|---|---|---|---|
+| san-a | 3.00 | 2.0 | 2.0 | 6.0 | 25% | ✓ |
+| san-b | 1.70 | 2.5 | 1.0 | 4.5 | 31% | ✓ |
+| san-c | 2.70 | 2.0 | 1.5 | 5.0 | 25% | ✓ |
 
-`E_after = 0.5333 + 0.5667 + 0.0333 = 1.1333`, spread **44.6%**. The reserve violation is repaired.
+`E_after = 0.5333 + 0.7667 + 0.2333 = 1.5333`, spread (3.00−1.70)/2.4667 = **53%**; the fill
+deviation drops from `F_before = 2.154` to `F_after = 0.308`. The reserve violation is repaired.
 
-**The `β` knob, demonstrated.** The third move improves imbalance by only
-`1.5333 − 1.1333 = 0.400`. Its objective contribution is:
+**The `β` knob, demonstrated at `δ = 0`.** Switch the capacity term off and a third move becomes
+worth taking: `105:scsi0 san-c → san-b` improves the imbalance by `1.5333 − 1.1333 = 0.400`,
+and its objective contribution is
 
 ```
 α·ΔE + β·1 + γ·0.5 TiB  =  −0.400 + 0.250 + 0.025  =  −0.125   → accepted at β=0.25
                         =  −0.400 + 0.500 + 0.025  =  +0.125   → rejected at β=0.50
 ```
 
-At `beta_move_count: 0.5` the solver returns the **two-move** plan instead, ending at
-`(3.00, 1.70, 2.70)`, `E = 1.5333`, spread 53%. This is exactly the "minimal number of migrations"
+So with `delta_capacity_spread: 0` the solver returns the **three-move** plan — `(3.00, 1.90,
+2.50)`, `E = 1.1333`, spread 44.6%, fills 25%/38%/19% — for every `beta_move_count < 0.375`, and
+the two-move plan above for everything past it. This is exactly the "minimal number of migrations"
 trade-off made explicit and tunable; both plans are correct, and `β` chooses.
 
-**The affinity trade-off, demonstrated.** Both plans split VM 101 (`scsi0` on san-a, `scsi1` on
-san-b), incurring `κ = 0.5`. Keeping VM 101 together forces san-a to `L = 4.0` and the best reachable
-`E` becomes `3.133`. Comparing: `3.133 + 0` (together) vs `1.1333 + 0.5` (split) `= 1.633`. Splitting
-wins by 1.5, so high I/O legitimately overrides the affinity preference — precisely the intended
-behaviour.
+**The `δ` knob, demonstrated at the defaults.** The third move concentrates data — san-b's fill
+rises to 38% while san-c's falls to 19%, `F` goes from 0.308 to 0.769, `δ·ΔF = +0.231` — and that
+regression outweighs the move's net I/O gain:
+
+```
+α·ΔE + β·1 + γ·0.5 TiB + δ·ΔF  =  −0.400 + 0.250 + 0.025 + 0.231  =  +0.106   → rejected
+```
+
+The two-move plan is therefore the optimum at the defaults (full objectives: 2.812 against 2.918),
+and it is also ahead on migrations (2 < 3), bytes moved (2.5 < 3.0 TiB) and data spread. That is
+the intended shape of the term: `α` decides how much imbalance to remove; `δ` helps decide when a
+further move would concentrate data more than it evens load. (At `beta_move_count: 0.5` the
+two-move plan wins with or without `δ`.)
+
+**The affinity trade-off, demonstrated.** The two-move plan splits VM 101 (`scsi0` on san-a,
+`scsi1` on san-b), incurring `κ = 0.5`. Keeping VM 101 together forces san-a to `L = 4.0` and the
+best reachable `E` becomes `3.133`. Comparing on the persistent terms (`E + κ + δ·F`):
+`3.133 + 0 + 0.5·0.769 = 3.52` (together) against `1.5333 + 0.5 + 0.5·0.308 = 2.19` (split).
+Splitting wins by 1.3, so high I/O legitimately overrides the affinity preference — precisely the
+intended behaviour.
 
 ### 14.4 Ordering
 
 `102:scsi0` is scheduled first: it alone repairs san-a's reserve violation (`4.5 → 3.0` used, so
-`3.0 + 4.0 = 7.0 ≤ 8.0`), and it also has the largest imbalance reduction. Transient checks:
+`3.0 + 4.0 = 7.0 ≤ 8.0`), and it also has the largest persistent-objective reduction per unit
+cost. Transient checks for the two-move plan:
 
 ```
 move 1 → san-c:  used 0.5 + 1.5 = 2.0,  max(Z_c, 1.5) = 1.5,  2.0 + 3.0 = 5.0 ≤ 8.0  ✓
 move 2 → san-b:  used 1.5 + 1.0 = 2.5,  max(Z_b, 1.0) = 1.0,  2.5 + 2.0 = 4.5 ≤ 8.0  ✓
-move 3 → san-b:  used 2.5 + 0.5 = 3.0,  max(Z_b, 0.5) = 1.0,  3.0 + 2.0 = 5.0 ≤ 8.0  ✓
 ```
+
+The `δ = 0` three-move variant appends `105:scsi0 → san-b` — `used 2.5 + 0.5 = 3.0`,
+`max(Z_b, 0.5) = 1.0`, `3.0 + 2.0 = 5.0 ≤ 8.0 ✓` — recorded alongside in the expected file's
+`delta_values` sweep.
 
 ### 14.5 Payback
 
-At `bwlimit = 200 MiB/s`, `ω_src = ω_dst = 1.0`, `H = 7d = 604800 s`, `λ = 10`, and **`saferemove`
+At `bwlimit = 200 MiB/s`, `ω_src = ω_dst = 1.0`, `H = 365d = 31 536 000 s`, `λ = 10`, and **`saferemove`
 off on all three storages** so `duration_wipe_d = 0` (§7.1), for the two-move plan:
 
 That last assumption is not a detail of the prose — the config default is
@@ -2414,22 +2567,27 @@ different number in a named field rather than a silent discrepancy.
 | | | **Σ** | **26 214 load·s** |
 
 ```
-benefit = ΔE · H = 6.5333 × 604 800 = 3 951 360 load·s
-ratio   = 3 951 360 / 26 214 = 150.7   ≥ λ = 10   → ACCEPT
+benefit = (α·ΔE + δ·ΔF) · H
+        = (6.5333 + 0.5 × 1.8462) × 31 536 000        (ΔF = 2.1538 − 0.3077)
+        = 7.4564 × 31 536 000 = 235 145 354 ≈ 2.35×10⁸ load·s
+ratio   = 235 145 354 / 26 214 = 8 970   ≥ λ = 10   → ACCEPT
 ```
 
 **A move that fails payback.** Consider instead a 4.0 TiB archive disk with `ℓ = 0.1` whose relocation
-would improve `E` by only 0.05:
+would improve `E` by only 0.01 and leave the data spread essentially unchanged:
 
 ```
 cost    = 2 × (4.0 TiB / 200 MiB/s) = 2 × 20 972 = 41 943 load·s
-benefit = 0.05 × 604 800 = 30 240 load·s
-ratio   = 0.72   <  λ = 10   → REJECT
+benefit = 0.01 × 31 536 000 = 315 360 load·s
+ratio   = 7.5   <  λ = 10   → REJECT
 ```
 
-The migration would generate more I/O than it saves within the horizon. This is the requirement that
+Even a full year of accumulated benefit does not pay for this migration. This is the requirement that
 "migrating a very large disk might generate more traffic than we are trying to save", enforced
-numerically.
+numerically — and it is the horizon that sets the bar: at the previous `7d` default this same test
+demanded `ΔObj ≥ 0.69` for a disk of this size (`0.17` per TiB moved) and rejected a large share of
+the moves that were worth making, which is why `H` is configurable and why its default is now
+stated as an explicit assumption about how long a placement lasts (§7.2).
 
 ### 14.6 Companion fixture: when the reserve and the balance objective disagree
 
@@ -2440,11 +2598,11 @@ Two storages: `roomy` (20 TiB, empty) and `cramped` (5 TiB, of which 3 TiB is al
 volumes DRS does not manage). `f = 2.0`. Two disks, both 1.0 TiB, both `ℓ_d = 5.0`, both on `roomy`,
 belonging to different VMs. So `u* = 5.0`, and:
 
-| Assignment | `Σ r_s` | `E` | Non-reserve objective at `β = 0.25` |
+| Assignment | `Σ r_s` | `E` | Non-reserve objective at `β = 0.25`, `δ = 0.5` |
 |---|---|---|---|
-| both on `roomy` (current) | **0** | 10.0 | 10.0 |
-| one moved to `cramped` | 1.0 TiB | **0.0** | 0.30 |
-| both moved to `cramped` | 2.0 TiB | 10.0 | 10.60 |
+| both on `roomy` (current) | **0** | 10.0 | 11.25 |
+| one moved to `cramped` | 1.0 TiB | **0.0** | 2.18 |
+| both moved to `cramped` | 2.0 TiB | 10.0 | 11.85 |
 
 Moving one disk balances the group *perfectly* and costs a 1 TiB reserve breach on `cramped`
 (`3 + 1 + 2·1 = 6 > 5`). That is the trade the reserve rule exists to forbid, and the three answers
@@ -2453,15 +2611,17 @@ are:
 - **Lexicographic (the default).** Stage 1 finds `min Σ r_s = 0`, stage 2 optimises within that
   set — so the plan is *no moves at all*, and the group stays at `E = 10`. Correct, and it needed
   no calibration to be correct.
-- **Big-M at the configured `P = 1000`.** Same answer: `0.30 + 1000 > 10.0`.
-- **Big-M at `P = 5`.** `0.30 + 5 = 5.30 < 10.0`, so it moves the disk and breaches the reserve for
+- **Big-M at the configured `P = 1000`.** Same answer: `2.18 + 1000 > 11.25`.
+- **Big-M at `P = 5`.** `2.18 + 5 = 7.18 < 11.25`, so it moves the disk and breaches the reserve for
   balance. The exact flip point, recorded in the expected file as
-  `big_m_agreement_threshold_p`, is **`P = 9.7`**: below it big-M is wrong, above it big-M is right.
+  `big_m_agreement_threshold_p`, is **`P = 9.08`**: below it big-M is wrong, above it big-M is right.
   Note how small that number is — nothing about `P = 5` looks obviously wrong to an operator, which
-  is the whole argument for computing `P` rather than configuring it.
+  is the whole argument for computing `P` rather than configuring it. (The `δ` term raises the moved
+  plan's objective — concentrating both disks on `cramped` is also the worse data spread, and the
+  gap between the two plans narrows from 9.70 to 9.08 — but not enough to matter at any sane `P`.)
 
-The build-time bound of §5.3 gives `P_min = 21.6 · 2²⁰ ≈ 2.26×10⁷` for this group, four orders above
-the 9.7 actually needed. That is the bound doing its job: it is deliberately worst-case (it refuses
+The build-time bound of §5.3 gives `P_min = 23.6 · 2²⁰ ≈ 2.47×10⁷` for this group, four orders above
+the 9.08 actually needed. That is the bound doing its job: it is deliberately worst-case (it refuses
 to trade even one mebibyte), and being conservative in the safe direction costs nothing.
 
 One further check the fixture records: the `P = 5` plan is not merely undesirable, it is
@@ -2491,6 +2651,7 @@ move *count* and the resulting slack, not on the disk identity.
 | Min % changed traffic before acting (10%) | §6 drift gate |
 | % I/O difference across the group | §6 imbalance gate |
 | Keep a VM's disks together, unless space/IO forces otherwise | §5.3 (C3), §5.4 `κ`; demonstrated §14.3 |
+| Spread data evenly over the storages (failure risk) | §5.3 (C7), §5.4 `δ`, §6 capacity gate; demonstrated §14.3 |
 | Mathematical optimization formulation | §5 |
 | Migration order planned | §8 |
 | Automatic or manual confirmation | §9.1 (`dry-run` / `confirm` / `auto`) |
@@ -2517,6 +2678,7 @@ bug waiting to happen; this table is the audit.
 | `snapshot_reserve.count_foreign_volumes` | §5.1.1, `Uˢᵉˣᵗ` |
 | `gates.drift_threshold` | §6 drift gate |
 | `gates.imbalance_threshold` | §6 imbalance gate |
+| `gates.capacity_spread_threshold` | §6 capacity gate (fill fractions from §5.3 (C7)) |
 | `gates.cooldown_per_disk/storage` | §5.3 (C2) pinning, §8.1 `concurrency_ok` |
 | `migration.bwlimit_bytes_per_sec` | §7.1 `duration_d`; converted to KiB/s at the API call |
 | `migration.source/target_load_weight` | §7.1 `ω_src`, `ω_dst` |
@@ -2532,7 +2694,7 @@ bug waiting to happen; this table is the audit.
 | `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
 | `migration.saturation_ceiling` | §7.3 `L_during(s) ≤ saturation_ceiling · N_s` |
 | `groups[].storages[].saturation_load` | §7.3 `N_s`; guard skipped when unset |
-| `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity` | §5.4 |
+| `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity/delta_capacity_spread` | §5.4 (the `δ` term also enters §7.2's benefit) |
 | `objective.reserve_violation_penalty` | §5.3 (C5), *floor* for the single-stage `P` alternative |
 | `metrics.pvestatd_push_interval` | §11.1 `rate_window` validation; §3.3 `verify-metrics` |
 | `objective.spread_metric` | §5.3 (C6), L1 vs min–max |
