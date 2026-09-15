@@ -11,8 +11,23 @@
 | `review/` | addressing a batch of `REVIEW.md` findings |
 | `release/` | a version bump — see "Releases" below |
 
-Anything larger than one self-contained change gets a branch. A single typo fix on `main` is
-fine; a three-file refactor is not.
+**Decide before you touch a file, not after looking at the diff.** The failure mode this
+guards against is a string of small, individually-reasonable-looking commits landing straight
+on `main` because each one, in isolation, felt too small to bother branching for. It adds up to
+exactly the un-reviewable history that branches exist to prevent. So the test is mechanical,
+not a judgment call:
+
+- Touches one file, one line, no code/test/spec content (a comment typo, a dead link, a
+  one-word doc correction) → `main` directly is fine.
+- Anything else — multiple files, any line of `src/`, `tests/`, `debian/`, or
+  `IMPLEMENTATION_PLAN.md`, even a "small" one — gets a branch, created with
+  `git checkout -b <prefix>/<slug>` **before** the first edit.
+
+If you're not sure which bucket a change falls into, it's the second one. A branch you didn't
+strictly need costs a `git checkout main && git branch -d`; a multi-file change committed
+straight to `main` costs a rewritten history to undo, which this repo does not do
+([`AGENTS.md`](../AGENTS.md) §4, never rewrite history past a pushed commit). Cheap-if-wrong
+beats expensive-if-wrong.
 
 ## Commit cadence
 
