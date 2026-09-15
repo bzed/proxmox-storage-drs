@@ -780,7 +780,11 @@ def test_capture_bundle_findings_json_drops_a_foreign_vmids_coverage_warning(
     )
 
     findings_text = json.dumps(bundle.findings)
-    assert "777" not in findings_text
+    # A plain substring check would occasionally false-fail: the random
+    # per-run salt can land a node/storage pseudonym's hex suffix on "777"
+    # by pure chance (e.g. "node-a5ccb777"), same as line ~475's manifest
+    # check already guards against.
+    assert not re.search(r"\b777\b", findings_text)
 
     coverage = bundle.findings["verify_metrics"]["coverage_by_disk"]
     assert "777:scsi0" not in coverage
@@ -852,7 +856,11 @@ def test_capture_bundle_findings_json_drops_a_foreign_vmid_from_cross_metric_fin
     )
 
     findings_text = json.dumps(bundle.findings)
-    assert "777" not in findings_text
+    # A plain substring check would occasionally false-fail: the random
+    # per-run salt can land a node/storage pseudonym's hex suffix on "777"
+    # by pure chance (e.g. "node-a5ccb777"), same as line ~475's manifest
+    # check already guards against.
+    assert not re.search(r"\b777\b", findings_text)
 
     messages = [f["message"] for f in bundle.findings["verify_metrics"]["findings"]]
     assert not any("no series for" in m and "wr_total_time_ns" in m for m in messages)
