@@ -1164,11 +1164,13 @@ def capture_bundle(
     salt = _load_salt(options, config, log)
     known_nodes = frozenset(recording_pve.node_names())
     known_storages = frozenset(s.id for group in topology.groups for s in group.storages)
+    known_groups = frozenset(group.name for group in topology.groups)
     mapper = Mapper(
         salt=salt,
         capture_start_epoch=capture_now.timestamp(),
         known_nodes=known_nodes,
         known_storages=known_storages,
+        known_groups=known_groups,
     )
     mapper.register_vmids(disk.vmid for group in topology.groups for disk in group.disks)
 
@@ -1308,17 +1310,21 @@ def _redact_free_text(
     clients run before ``mapper`` exists -- see :func:`capture_bundle`),
     are both written for a human reading them against a live cluster, so
     they embed real identifiers verbatim (a per-disk coverage gap's
-    ``vmid:device``, a node/storage name in a call description, a
-    transport failure's own connection target). Section 16.3's allowlist
-    principle applies to free text too, not just structured fields.
-    Rather than special-casing every message shape the callers might ever
-    produce, this strips anything URL- or ``host='...'``-shaped, then
-    substitutes any *whole* number matching an already-registered real
-    vmid, and any occurrence of a real node or storage name, with its
-    pseudonym -- broader than strictly necessary (a coincidental
-    vmid-shaped number that is not actually a vmid would also get
-    rewritten), which is the safe direction to be wrong in for a privacy
-    control. Z-03: when ``node_selector`` is given (``metrics.extra_selector``
+    ``vmid:device``, a node/storage/group name in a call description, a
+    transport failure's own connection target -- ``_drive_group_series()``'s
+    own "instant quantile_over_time ... (<group name>)" description is the
+    group-name case, found the same way as the node/storage one below: a
+    real bundle whose ``config.yaml`` group names leaked straight into
+    ``manifest.json``'s call log). Section 16.3's allowlist principle
+    applies to free text too, not just structured fields. Rather than
+    special-casing every message shape the callers might ever produce,
+    this strips anything URL- or ``host='...'``-shaped, then substitutes
+    any *whole* number matching an already-registered real vmid, and any
+    occurrence of a real node, storage or group name, with its pseudonym
+    -- broader than strictly necessary (a coincidental vmid-shaped number
+    that is not actually a vmid would also get rewritten), which is the
+    safe direction to be wrong in for a privacy control. Z-03: when
+    ``node_selector`` is given (``metrics.extra_selector``
     was set for this capture), any occurrence of that already-fully-built
     selector text is also replaced with ``anon_node_selector`` -- the same
     "replace the whole self-consistent string" rule
@@ -1343,6 +1349,8 @@ def _redact_free_text(
         result = result.replace(real_node, mapper.node(real_node))
     for real_storage in sorted(mapper.known_storages, key=len, reverse=True):
         result = result.replace(real_storage, mapper.storage(real_storage))
+    for real_group in sorted(mapper.known_groups, key=len, reverse=True):
+        result = result.replace(real_group, mapper.group(real_group))
     if node_selector and node_selector in result:
         result = result.replace(node_selector, anon_node_selector or "<node-selector-redacted>")
     return result

@@ -467,15 +467,23 @@ def test_capture_bundle_manifest_call_log_is_anonymized(tmp_path: Path) -> None:
     call log exists to describe what happened, not to feed replay.py --
     and, unlike every other file in the bundle, nothing was redacting it
     before it reached manifest.json. Section 16.3's governing rule applies
-    to this free text exactly as it does to structured fields."""
+    to this free text exactly as it does to structured fields.
+
+    A second dev-cluster capture found the same gap one identifier kind
+    later: ``_drive_group_series()``'s own "instant quantile_over_time ...
+    (<group name>)" description embeds the *group* name, not just node/
+    storage/vmid, and ``_redact_free_text()`` had no substitution for it --
+    real group names (e.g. ``dc6_T2``) reached committed corpus bundles'
+    ``manifest.json`` verbatim."""
     bundle = capture(tmp_path)
     manifest_text = json.dumps(bundle.manifest)
-    for real in ("node1", "san-a", "san-b"):
+    for real in ("node1", "san-a", "san-b", "g1"):
         assert real not in manifest_text
     assert not re.search(r"\b101\b", manifest_text)
     descriptions = [c["description"] for c in bundle.manifest["calls"]]
     assert any("node-" in d for d in descriptions)
     assert any("stor-" in d for d in descriptions)
+    assert any("group-" in d for d in descriptions)
 
 
 def test_capture_bundle_manifest_scrubs_a_transport_failures_own_hostname(

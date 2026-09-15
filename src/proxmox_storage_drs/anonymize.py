@@ -318,6 +318,7 @@ class Mapper:
     time_offset_seconds: float = field(init=False)
     known_nodes: frozenset[str] = frozenset()
     known_storages: frozenset[str] = frozenset()
+    known_groups: frozenset[str] = frozenset()
     dropped_records: int = field(default=0, init=False)
     _vmid_map: dict[int, int] = field(default_factory=dict, init=False)
     _vmid_taken: set[int] = field(default_factory=set, init=False)
@@ -329,6 +330,7 @@ class Mapper:
         # impossible by construction (register_vmids()'s own linear probe).
         _check_no_pseudonym_collision(self.salt, "node", self.known_nodes)
         _check_no_pseudonym_collision(self.salt, "storage", self.known_storages)
+        _check_no_pseudonym_collision(self.salt, "group", self.known_groups)
 
     # -------------------------------------------------------------- clock
 
