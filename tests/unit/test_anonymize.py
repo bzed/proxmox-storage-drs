@@ -294,6 +294,31 @@ def test_volume_id_base_prefix_and_cloudinit_fallback() -> None:
     assert cloudinit is not None and cloudinit.endswith("-cloudinit")
 
 
+def test_volume_id_preserves_a_format_extension_on_the_volume_name() -> None:
+    """PVE's own `get_next_vm_diskname()` appends a literal `.<format>` to
+    the volume *name* itself for a non-raw-default volume -- confirmed on a
+    real cluster's qcow2-on-shared-LVM disk (`vm-101-disk-1.qcow2`, no
+    separate `format=` param in the disk value at all). Every such disk was
+    silently dropped ("unrecognized name") before this fix -- the `$`
+    anchor in `_VOLUME_ID_RE` left no room for the extension."""
+    mapper = make_mapper()
+    mapper.register_vmids([101])
+    pseudo = mapper.volume_id("san-a:vm-101-disk-1.qcow2")
+    assert pseudo is not None
+    storage_part, _, name_part = pseudo.partition(":")
+    assert storage_part == mapper.storage("san-a")
+    assert name_part == f"vm-{mapper.vmid(101)}-disk-1.qcow2"
+
+
+def test_volume_id_preserves_a_format_extension_on_the_fallback_shapes() -> None:
+    mapper = make_mapper()
+    mapper.register_vmids([101])
+    base = mapper.volume_id("san-a:base-101-disk-0.qcow2")
+    assert base is not None and base.endswith(".qcow2")
+    cloudinit = mapper.volume_id("san-a:vm-101-cloudinit.raw")
+    assert cloudinit is not None and cloudinit.endswith("-cloudinit.raw")
+
+
 # --------------------------------------------------------------------- upid
 
 

@@ -275,13 +275,27 @@ def week_aligned_offset_seconds(
 
 # ------------------------------------------------------------------- Mapper
 
-_VOLUME_ID_RE = re.compile(r"^(?P<prefix>vm|base)-(?P<vmid>\d+)-disk-(?P<index>\d+)$")
+#: PVE's own `get_next_vm_diskname()` appends a literal `.<format>` suffix
+#: to the volume *name itself* (not just the disk value's separate
+#: `format=` param) whenever the volume isn't the storage type's own raw
+#: default -- confirmed against a real cluster's qcow2-on-shared-LVM volumes
+#: (`vm-101-disk-1.qcow2`; `topology.py`'s own `_resolve_disk_size_and_format`
+#: docstring already names this PVE 9.2+ feature). Optional and captured so
+#: :meth:`Mapper.volume_id` can re-attach it verbatim -- it is a structural
+#: format marker, not free text, and dropping it would leave the
+#: reconstructed volid unable to match its own storage-content listing entry
+#: at replay time.
+_VOLUME_EXT_RE = r"(?P<ext>\.[a-zA-Z0-9]+)?"
+_VOLUME_ID_RE = re.compile(
+    rf"^(?P<prefix>vm|base)-(?P<vmid>\d+)-disk-(?P<index>\d+){_VOLUME_EXT_RE}$"
+)
 # A narrower fallback for the handful of other PVE-generated shapes this
 # tool's own read path can encounter (cloud-init volumes, EFI/TPM state) --
 # prefix and vmid are remapped, the fixed suffix is not free text and
 # survives verbatim; anything else is dropped (fail closed).
 _VOLUME_ID_FALLBACK_RE = re.compile(
-    r"^(?P<prefix>[a-zA-Z]+)-(?P<vmid>\d+)-(?P<suffix>cloudinit|disk-\d+-state-\d+)$"
+    rf"^(?P<prefix>[a-zA-Z]+)-(?P<vmid>\d+)-"
+    rf"(?P<suffix>cloudinit|disk-\d+-state-\d+){_VOLUME_EXT_RE}$"
 )
 
 
@@ -390,10 +404,14 @@ class Mapper:
 
     def volume_id(self, volid: str) -> str | None:
         """Rebuild a volume id as ``<storage-pseudonym>:<prefix>-<vmid
-        -pseudonym>-disk-<n>`` (section 16.3). ``None`` (record dropped) if
-        the storage is outside every group, the owning vmid was never
-        registered, or the volume name matches neither the common
-        ``vm``/``base`` disk pattern nor the narrow allowlisted fallback."""
+        -pseudonym>-disk-<n>[.<ext>]`` (section 16.3) -- the optional
+        ``.<ext>`` (e.g. ``.qcow2``) is PVE's own format marker on the
+        volume name itself (see ``_VOLUME_EXT_RE``), carried through
+        verbatim, never dropped, since it is structural rather than free
+        text. ``None`` (record dropped) if the storage is outside every
+        group, the owning vmid was never registered, or the volume name
+        matches neither the common ``vm``/``base`` disk pattern nor the
+        narrow allowlisted fallback."""
         storage_id, volume_name, _params = parse_disk_spec(volid)
         if storage_id not in self.known_storages:
             self.dropped_records += 1
@@ -405,14 +423,21 @@ class Mapper:
             new_vmid = self.vmid(int(match.group("vmid")))
             if new_vmid is None:
                 return None
-            return f"{new_storage}:{match.group('prefix')}-{new_vmid}-disk-{match.group('index')}"
+            ext = match.group("ext") or ""
+            return (
+                f"{new_storage}:{match.group('prefix')}-{new_vmid}-disk-{match.group('index')}{ext}"
+            )
 
         fallback = _VOLUME_ID_FALLBACK_RE.match(volume_name)
         if fallback:
             new_vmid = self.vmid(int(fallback.group("vmid")))
             if new_vmid is None:
                 return None
-            return f"{new_storage}:{fallback.group('prefix')}-{new_vmid}-{fallback.group('suffix')}"
+            ext = fallback.group("ext") or ""
+            return (
+                f"{new_storage}:{fallback.group('prefix')}-{new_vmid}-"
+                f"{fallback.group('suffix')}{ext}"
+            )
 
         # "A volume whose name does not match the pattern keeps only its
         # prefix and index" (section 16.3) -- there is no safe generic

@@ -288,6 +288,66 @@ def test_capture_bundle_produces_anonymized_pve_files(tmp_path: Path) -> None:
     assert "san-a" not in vm_config["scsi0"]
 
 
+def test_capture_bundle_preserves_a_qcow2_on_lvm_disks_format_extension(
+    tmp_path: Path,
+) -> None:
+    """A real cluster's plain-LVM ("type": "lvm") storage can still host
+    qcow2-formatted disks (PVE 9.2+'s qcow2-on-shared-LVM feature, already
+    named in topology.py's own `_resolve_disk_size_and_format` docstring).
+    PVE names such a disk `vm-<vmid>-disk-<n>.qcow2` -- the extension lives
+    on the volume *name*, not as a separate `format=` param in the disk
+    value -- confirmed against a real cluster's own
+    `dc6_con-abn-pve-dc6_T2T3_001:vm-101-disk-1.qcow2,discard=on,iothread=1,
+    size=50G,ssd=1`. Before the fix, every such disk failed both
+    `_VOLUME_ID_RE` and its fallback (neither allowed a trailing extension)
+    and was silently dropped, emptying vm-config.json and
+    storage-content.json for every VM on the affected storage."""
+    responses = {
+        "cluster/resources": lambda type: (VM_RESOURCES if type == "vm" else STORAGE_RESOURCES),
+        "storage": STORAGE_DEFS,
+        "nodes": [{"node": "node1"}],
+        "cluster/tasks": [],
+        "nodes/node1/storage/san-a/status": STORAGE_STATUS["san-a"],
+        "nodes/node1/storage/san-b/status": STORAGE_STATUS["san-b"],
+        "nodes/node1/storage/san-a/content": [
+            {
+                "volid": "san-a:vm-101-disk-0.qcow2",
+                "vmid": 101,
+                "size": 10 * (1 << 30),
+                "format": "qcow2",
+            }
+        ],
+        "nodes/node1/storage/san-b/content": [],
+        "nodes/node1/qemu/101/config": {
+            "name": "db-01",
+            "scsi0": "san-a:vm-101-disk-0.qcow2,discard=on,iothread=1,size=10G,ssd=1",
+        },
+        "nodes/node1/qemu/101/snapshot": VM_SNAPSHOTS[101],
+        "nodes/node1/qemu/101/status/current": {},
+        "version": {"version": "8.2.1"},
+    }
+    pve_client = PveClient(fake_api(responses))
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    bundle = collect.capture_bundle(
+        pve_client, make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    assert bundle.ok
+
+    (vm_config_key,) = (k for k in bundle.pve_files if k.startswith("vm-config/"))
+    vm_config = bundle.pve_files[vm_config_key]
+    assert "scsi0" in vm_config, "the disk was dropped -- vm-config came back empty"
+    assert ":vm-" in vm_config["scsi0"] and "-disk-0.qcow2,size=10G" in vm_config["scsi0"]
+
+    non_empty_content = [
+        v for k, v in bundle.pve_files.items() if k.startswith("storage-content/") and v
+    ]
+    assert len(non_empty_content) == 1, "the content listing was dropped -- came back empty"
+    (content_item,) = non_empty_content[0]
+    assert content_item["volid"].endswith("-disk-0.qcow2")
+    assert content_item["volid"].startswith("stor-")
+
+
 def test_capture_bundle_storage_capture_agrees_with_replays_active_node_pick(
     tmp_path: Path,
 ) -> None:
