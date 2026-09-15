@@ -12,6 +12,7 @@
   "derived": {
     "total_load": 10.0,
     "u_star": 5.0,
+    "b_bar": 0.2,
     "initial": {
       "roomy": {
         "load": 10.0,
@@ -29,14 +30,18 @@
       }
     },
     "E_before": 10.0,
-    "spread_before": 2.0
+    "F_before": 2.5,
+    "spread_before": 2.0,
+    "capacity_spread_before": 2.5
   },
   "cases": [
     {
       "beta_move_count": 0.25,
-      "expected_objective": 10.0,
+      "delta_capacity_spread": 0.5,
+      "expected_objective": 11.25,
       "expected_move_count": 0,
       "expected_E_after": 10.0,
+      "expected_F_after": 2.5,
       "expected_fragmentation": 0,
       "expected_moves": [],
       "expected_order": [],
@@ -61,19 +66,20 @@
         }
       },
       "expected_spread_after": 2.0,
+      "expected_capacity_spread_after": 2.5,
       "lexicographic": {
         "min_total_slack_tib": 0.0,
-        "expected_objective_nonreserve": 10.0,
+        "expected_objective_nonreserve": 11.25,
         "expected_move_count": 0,
         "expected_moves": [],
         "agrees_with_big_m_at_configured_p": true,
-        "big_m_agreement_threshold_p": 9.7,
+        "big_m_agreement_threshold_p": 9.075,
         "big_m_p_configured": 1000.0,
-        "big_m_p_min_computed": 22649241.6
+        "big_m_p_min_computed": 24746393.6
       },
       "big_m_undersized_p_demo": {
         "p": 5.0,
-        "expected_objective": 5.3,
+        "expected_objective": 7.175,
         "expected_moves": [
           "202:scsi0:roomy->cramped"
         ],

@@ -72,8 +72,17 @@ def section_14_group() -> Group:
     return Group(name="fc-tier1", storages=storages, disks=disks)
 
 
+# delta_capacity_spread=0.0: this file's section 14.4 ordering fixture is
+# the classic beta demonstration, cross-checked at delta=0 -- see
+# IMPLEMENTATION_PLAN.md section 14.3's own framing ("the classic beta
+# demonstration kept at delta = 0"); at the section 12 default (0.5) the
+# two-move plan wins instead, which is a different, already-covered case.
 DEFAULT_OBJECTIVE = ObjectiveConfig(
-    alpha_spread=1.0, beta_move_count=0.25, gamma_move_bytes_per_tib=0.05, kappa_vm_affinity=0.50
+    alpha_spread=1.0,
+    beta_move_count=0.25,
+    gamma_move_bytes_per_tib=0.05,
+    kappa_vm_affinity=0.50,
+    delta_capacity_spread=0.0,
 )
 
 

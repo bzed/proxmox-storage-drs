@@ -4,8 +4,9 @@
 
 Cross-checked against IMPLEMENTATION_PLAN.md section 14.5's worked
 example exactly: the two-move plan's per-move durations/costs, the
-accepted ratio (150.7), and the separate failed-payback example (a 4 TiB
-archive disk, ratio 0.72, rejected).
+accepted ratio (~8970 at the 365d default horizon, with the delta*F term
+folded in per section 12), and the separate failed-payback example (a
+4 TiB archive disk, ratio 7.5, rejected).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ SECTION_14_5_MIGRATION = MigrationConfig(
     bwlimit_bytes_per_sec=200 * MIB,
     source_load_weight=1.0,
     target_load_weight=1.0,
-    payback_horizon_seconds=604800.0,  # 7d
+    payback_horizon_seconds=31_536_000.0,  # 365d, section 12's default
     payback_ratio=10.0,
     max_single_move_duration_seconds=21600.0,  # 6h
     account_saferemove_wipe=True,  # the default; irrelevant since saferemove is off below
@@ -90,7 +91,7 @@ def test_section_14_5_move_durations_and_costs_match_exactly() -> None:
     assert total_cost == pytest.approx(26214.4, abs=0.1)  # plan: "26 214 load*s"
 
 
-def test_section_14_5_two_move_plan_is_accepted_at_ratio_150_7() -> None:
+def test_section_14_5_two_move_plan_is_accepted_at_ratio_8970() -> None:
     san_a = no_saferemove_storage("san-a")
     moves = [
         move("102:scsi0", "san-a", "san-c", 1.5),
@@ -98,21 +99,27 @@ def test_section_14_5_two_move_plan_is_accepted_at_ratio_150_7() -> None:
     ]
     costs = [compute_move_cost(m, san_a, SECTION_14_5_MIGRATION) for m in moves]
 
-    # Section 14.2/14.3's exact E_before/E_after for the two-move plan.
-    benefit = compute_benefit_load_seconds(8.066667, 1.533333, 604800.0)
-    assert benefit == pytest.approx(3951360.0, abs=1.0)  # plan: "3 951 360"
+    # Section 14.2/14.3's exact E_before/E_after and F_before/F_after for
+    # the two-move plan, at the defaults alpha_spread=1.0,
+    # delta_capacity_spread=0.5, and the 365d horizon (section 12/7.2).
+    benefit = compute_benefit_load_seconds(
+        1.0, 8.066667, 1.533333, 0.5, 2.153846, 0.307692, 31_536_000.0
+    )
+    assert benefit == pytest.approx(235145375.0, rel=1e-6)  # plan: "~2.35e8"
 
     result = evaluate_plan_payback(costs, benefit, SECTION_14_5_MIGRATION.payback_ratio)
 
     assert result.total_cost_load_seconds == pytest.approx(26214.4, abs=0.1)
-    assert result.ratio == pytest.approx(150.7, abs=0.05)
+    assert result.ratio == pytest.approx(8970.0, abs=1.0)
     assert result.aggregate_ok
     assert result.accepted
     assert result.rejected_moves == ()
 
 
-def test_section_14_5_archive_disk_fails_payback_at_ratio_0_72() -> None:
-    """The plan's own counter-example: a 4 TiB, low-benefit disk."""
+def test_section_14_5_archive_disk_fails_payback_at_ratio_7_5() -> None:
+    """The plan's own counter-example: a 4 TiB disk whose relocation
+    improves E by only 0.01 and leaves the data spread essentially
+    unchanged (delta*F contributes ~0)."""
     san_x = no_saferemove_storage("san-x")
     archive_move = move("106:scsi0", "san-x", "san-y", 4.0)
     cost = compute_move_cost(archive_move, san_x, SECTION_14_5_MIGRATION)
@@ -120,12 +127,13 @@ def test_section_14_5_archive_disk_fails_payback_at_ratio_0_72() -> None:
     assert cost.duration_mirror_seconds == pytest.approx(20971.52, abs=0.01)
     assert cost.cost_load_seconds == pytest.approx(41943.04, abs=0.01)
 
-    benefit = 0.05 * 604800.0  # plan states the improvement directly: 0.05
-    assert benefit == pytest.approx(30240.0)
+    # plan states the improvement directly: alpha*0.01, delta*0 (unchanged spread).
+    benefit = compute_benefit_load_seconds(1.0, 0.01, 0.0, 0.5, 0.0, 0.0, 31_536_000.0)
+    assert benefit == pytest.approx(315360.0)
 
     result = evaluate_plan_payback([cost], benefit, SECTION_14_5_MIGRATION.payback_ratio)
 
-    assert result.ratio == pytest.approx(0.72, abs=0.005)
+    assert result.ratio == pytest.approx(7.5, abs=0.05)
     assert not result.aggregate_ok
     assert not result.accepted
 
@@ -497,7 +505,13 @@ def test_negative_benefit_is_never_accepted() -> None:
     """A plan that makes imbalance worse (possible if beta/gamma/kappa
     dominate) must fail payback outright, not merely score low."""
     benefit = compute_benefit_load_seconds(
-        imbalance_before=1.0, imbalance_after=1.5, payback_horizon_seconds=604800.0
+        alpha_spread=1.0,
+        imbalance_before=1.0,
+        imbalance_after=1.5,
+        delta_capacity_spread=0.0,
+        capacity_spread_before=0.0,
+        capacity_spread_after=0.0,
+        payback_horizon_seconds=604800.0,
     )
     assert benefit < 0
     source = no_saferemove_storage("san-a")

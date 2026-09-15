@@ -57,7 +57,12 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from proxmox_storage_drs.config import ObjectiveConfig
-from proxmox_storage_drs.heuristic import Assignment, evaluate_assignment, group_average_utilization
+from proxmox_storage_drs.heuristic import (
+    Assignment,
+    evaluate_assignment,
+    group_average_fill,
+    group_average_utilization,
+)
 from proxmox_storage_drs.reserve import (
     compute_reserve_status,
     largest_disk_bytes,
@@ -203,11 +208,12 @@ def order_moves(
     state: Assignment = {d.key: d.current_storage for d in group.disks}
     pending = _pending_moves(group, target_assignment)
     u_star = group_average_utilization(group, load_by_key)
+    b_bar = group_average_fill(group)
 
     order: list[ScheduledMove] = []
     while pending:
         current_imbalance = evaluate_assignment(
-            group, state, load_by_key, objective, min_free_bytes, u_star
+            group, state, load_by_key, objective, min_free_bytes, u_star, b_bar
         ).imbalance_term
 
         feasible: list[str] = []
@@ -235,7 +241,7 @@ def order_moves(
             trial = dict(state)
             trial[key] = target_assignment[key]
             trial_imbalance = evaluate_assignment(
-                group, trial, load_by_key, objective, min_free_bytes, u_star
+                group, trial, load_by_key, objective, min_free_bytes, u_star, b_bar
             ).imbalance_term
             reduction = current_imbalance - trial_imbalance
             cost = disk.size_bytes

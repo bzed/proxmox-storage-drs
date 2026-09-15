@@ -196,6 +196,10 @@ gates:
   drift_threshold: 0.10          # 10%
   # Minimum relative I/O spread across a group before we act at all.
   imbalance_threshold: 0.20      # 20%
+  # Minimum relative spread in fill fraction (bytes/capacity) across a group before
+  # we act at all, even when I/O is perfectly balanced -- the data-spread counterpart
+  # of imbalance_threshold (plan section 6). null disables the gate entirely.
+  capacity_spread_threshold: 0.25  # 25%
   cooldown_per_disk: 24h
   cooldown_per_storage: 1h
 
@@ -204,7 +208,8 @@ migration:
   bwlimit_bytes_per_sec: 209715200     # 200 MiB/s; passed to move_disk
   source_load_weight: 1.0              # added in-flight I/O on the source
   target_load_weight: 1.0              # added in-flight I/O on the target
-  payback_horizon: 7d                  # H
+  payback_horizon: 365d                # H -- an explicit assumption about how long a
+                                        # placement lasts, not operator patience (7.2)
   payback_ratio: 10.0                  # lambda; benefit must exceed lambda * cost
   max_single_move_duration: 6h         # reject any move slower than this (mirror + wipe)
   # Account for the post-move source wipe in duration and cost. PVE's LVM
@@ -231,6 +236,10 @@ objective:
   beta_move_count: 0.25        # penalty per migration  -> "minimal number of migrations"
   gamma_move_bytes_per_tib: 0.05  # penalty per TiB migrated
   kappa_vm_affinity: 0.50      # penalty per extra storage a VM's disks are spread over
+  # Weight on data spread (fill-fraction deviation, plan section 5.3 (C7)) -- bounds
+  # the share of a group's data any single storage failure costs. Defaults to half of
+  # alpha_spread so I/O balance stays the first priority; 0 disables the term.
+  delta_capacity_spread: 0.5
   # Disks that cannot move THIS RUN (snapshot-blocked, config-excluded, or on a
   # locked VM) are excluded from the affinity count by default, so an unreachable
   # disk cannot pin the rest of its VM to one storage. true counts them: better

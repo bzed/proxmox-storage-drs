@@ -1069,13 +1069,16 @@ def test_plan_json_output_accepts_payback_when_saferemove_is_off(
 ) -> None:
     """The same repairable plan, but with san-a's `saferemove` off, so the
     hard duration rule no longer blocks it. This fixture's move has a real
-    cost and exactly *zero* balance benefit (moving the only loaded disk
+    cost and exactly *zero* imbalance benefit (moving the only loaded disk
     between two storages, one of which holds nothing but a zero-load
     pinned disk, just relocates which side carries it -- `ratio` is
     genuinely 0.0, not a rounding artefact) -- it is accepted anyway
     because it resolves san-a's reserve violation, and section 13's
     "never traded against balance" applies to payback too
-    (`evaluate_plan_payback()`'s own docstring)."""
+    (`evaluate_plan_payback()`'s own docstring). `delta_capacity_spread` is
+    set to 0 here: the move *does* change which storage holds the bytes,
+    so at the section 12 default it would contribute a real, nonzero data
+    -spread benefit -- not what this fixture is about."""
     topology = _repairable_sample_topology()
     group = topology.groups[0]
     no_wipe_storages = tuple(
@@ -1097,7 +1100,7 @@ def test_plan_json_output_accepts_payback_when_saferemove_is_off(
         warnings=topology.warnings,
     )
     _patch_plan_deps(monkeypatch, topology, _sample_group_load())
-    path = write_config(tmp_path)
+    path = write_config(tmp_path, objective={"delta_capacity_spread": 0.0})
     assert cli.main(["-c", str(path), "--json", "plan"]) == 0
     payload = json.loads(capsys.readouterr().out)
     group_payload = payload["groups"][0]
@@ -1442,7 +1445,9 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
     from proxmox_storage_drs.heuristic import (
         HeuristicResult,
         evaluate_assignment,
+        group_average_fill,
         group_average_utilization,
+        raw_capacity_spread,
         raw_spread,
         seed_assignment,
     )
@@ -1518,14 +1523,15 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
     objective = resolved.config.objective
     min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     u_star = group_average_utilization(group, load_by_key)
+    b_bar = group_average_fill(group)
 
     initial_breakdown = evaluate_assignment(
-        group, seed_assignment(group), load_by_key, objective, min_free_bytes, u_star
+        group, seed_assignment(group), load_by_key, objective, min_free_bytes, u_star, b_bar
     )
     # The heuristic's aspirational target: both disks move to san-b.
     target_assignment = {"101:scsi0": "san-b", "102:scsi0": "san-b"}
     target_breakdown = evaluate_assignment(
-        group, target_assignment, load_by_key, objective, min_free_bytes, u_star
+        group, target_assignment, load_by_key, objective, min_free_bytes, u_star, b_bar
     )
     heuristic_result = HeuristicResult(
         assignment=target_assignment,
@@ -1553,7 +1559,7 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
     monkeypatch.setattr("proxmox_storage_drs.cli.order_moves", lambda *a, **k: schedule_result)
 
     final_breakdown = evaluate_assignment(
-        group, final_assignment, load_by_key, objective, min_free_bytes, u_star
+        group, final_assignment, load_by_key, objective, min_free_bytes, u_star, b_bar
     )
     expected_after_spread = cli._spread_fraction(
         final_breakdown.utilization, group_load.average_utilization
@@ -1563,8 +1569,13 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
     )
     assert expected_after_spread != pytest.approx(target_after_spread)  # fixture sanity
     expected_benefit = (
-        raw_spread(initial_breakdown, objective.spread_metric)
-        - raw_spread(final_breakdown, objective.spread_metric)
+        objective.alpha_spread
+        * (
+            raw_spread(initial_breakdown, objective.spread_metric)
+            - raw_spread(final_breakdown, objective.spread_metric)
+        )
+        + objective.delta_capacity_spread
+        * (raw_capacity_spread(initial_breakdown) - raw_capacity_spread(final_breakdown))
     ) * resolved.config.migration.payback_horizon_seconds
 
     assert cli.main(["-c", str(path), "--json", "plan"]) == 0
@@ -2236,21 +2247,27 @@ def test_apply_refuses_the_whole_plan_when_the_aggregate_payback_test_fails(
 ) -> None:
     """`_balanced_apply_topology()`'s one move easily clears the default
     `migration.payback_ratio` (10) on its own economics -- raising the
-    configured ratio well above its real one (≈577) fails the *aggregate*
-    test without tripping the hard per-move duration rule, so this
-    exercises the other half of S-02's gate: refuse the whole plan,
-    never call `execute_plan()` at all, even though nothing about this
-    move is individually rejected."""
+    configured ratio well above its real one fails the *aggregate* test
+    without tripping the hard per-move duration rule, so this exercises
+    the other half of S-02's gate: refuse the whole plan, never call
+    `execute_plan()` at all, even though nothing about this move is
+    individually rejected. `delta_capacity_spread` is set to 0 so the
+    real ratio stays a pure alpha/imbalance number, not entangled with
+    the section 12 data-spread term this test is not about."""
 
     def fail(*_a: object, **_k: object) -> None:
         raise AssertionError("a plan failing the aggregate payback test must never execute")
 
     monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fail)
     _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    # The 365d default horizon (section 12) makes the real ratio here
+    # roughly 30,000 -- payback_ratio must clear that to still fail the
+    # aggregate test, unlike the pre-section-12 7d horizon's ~577.
     path = write_config(
         tmp_path,
         state={"path": str(tmp_path / "state.json")},
-        migration={"payback_ratio": 1000},
+        migration={"payback_ratio": 100_000},
+        objective={"delta_capacity_spread": 0.0},
     )
     assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
     out = capsys.readouterr().out
@@ -3398,13 +3415,15 @@ def _fake_breakdown(
 ) -> ObjectiveBreakdown:
     from proxmox_storage_drs.heuristic import (
         evaluate_assignment,
+        group_average_fill,
         group_average_utilization,
         seed_assignment,
     )
 
     u_star = group_average_utilization(group, loads)
+    b_bar = group_average_fill(group)
     return evaluate_assignment(
-        group, seed_assignment(group), loads, resolved.config.objective, 0, u_star
+        group, seed_assignment(group), loads, resolved.config.objective, 0, u_star, b_bar
     )
 
 
@@ -3820,7 +3839,13 @@ def test_quiet_changes_nothing_about_the_report(capsys: pytest.CaptureFixture[st
 def test_v_logs_the_decision_trail(capsys: pytest.CaptureFixture[str]) -> None:
     """Section 2.1's requirement, which was unimplemented: every gate
     decision with its computed value *and* the threshold it was compared
-    against, plus the load it was computed from."""
+    against, plus the load it was computed from.
+
+    This bundle's real data trips the section 12 capacity gate (its data
+    is concentrated enough to bypass drift/imbalance, per that gate's own
+    "bypasses the drift and imbalance gates" rule) -- so it is
+    ``capacity_fraction``, not ``imbalance_fraction``, that is populated
+    here; both gates' thresholds must still be logged either way."""
     assert cli.main(["--replay", str(CORPUS_BUNDLE), "-v", "--log-format", "json", "plan"]) == 0
     records = [
         json.loads(ln, parse_constant=_strict_json_constant)
@@ -3830,8 +3855,9 @@ def test_v_logs_the_decision_trail(capsys: pytest.CaptureFixture[str]) -> None:
     by_event = {r["event"]: r for r in records}
     assert {"run_started", "load_digest", "gate_decision", "run_summary"} <= set(by_event)
     gate = by_event["gate_decision"]
-    assert gate["imbalance_fraction"] is not None
+    assert gate["capacity_fraction"] is not None
     assert gate["imbalance_threshold"] is not None  # the threshold, not only the verdict
+    assert gate["capacity_spread_threshold"] is not None
     assert by_event["load_digest"]["disks"] > 0
 
 

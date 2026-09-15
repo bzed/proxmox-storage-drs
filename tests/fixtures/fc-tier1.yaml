@@ -1,10 +1,12 @@
 # Machine-readable form of IMPLEMENTATION_PLAN.md section 14.
 #
-# Fixture contract: a test harness reads this file, and for EACH value in
-# objective.beta_values solves the group and asserts the matching entry in
-# cases[] of fc-tier1.expected.json (same order). All other objective weights
-# are held fixed across the sweep. Sizes and capacities are TiB; loads are in
-# average-in-flight-I/O units (plan section 4), NOT normalised to sum to 1.
+# Fixture contract: a test harness reads this file, and for EACH (beta, delta)
+# pair in the cross product of objective.beta_values x objective.delta_values
+# solves the group and asserts the matching entry in cases[] of
+# fc-tier1.expected.json (same order: beta_values is the outer loop, delta_values
+# the inner one -- see generate_expected.py's build()). All other objective
+# weights are held fixed across the sweep. Sizes and capacities are TiB; loads
+# are in average-in-flight-I/O units (plan section 4), NOT normalised to sum to 1.
 #
 # Regenerate expectations with `python3 generate_expected.py`; do not hand-edit
 # fc-tier1.expected.json. `generate_expected.py --check` asserts it is current.
@@ -91,12 +93,16 @@ migration:
   # account_saferemove_wipe: true, and with saferemove on, the 1.5 TiB move
   # costs ~44h of wipe on top of ~2.2h of mirror.
   account_saferemove_wipe: false
-  payback_horizon_seconds: 604800
+  payback_horizon_seconds: 31536000  # 365d, section 12 default
   payback_ratio: 10.0
 objective:
   alpha_spread: 1.0
-  # Swept by the harness; one cases[] entry in the expected file per value.
+  # Swept by the harness; one cases[] entry in the expected file per
+  # (beta, delta) pair. delta=0.0 keeps section 14.3's classic beta
+  # demonstration (the three-move plan at beta=0.25); delta=0.5 is the
+  # section 12 default, where the two-move plan wins instead at beta=0.25.
   beta_values: [0.25, 0.5]
+  delta_values: [0.0, 0.5]
   gamma_move_bytes_per_tib: 0.05   # penalty per TiB migrated
   kappa_vm_affinity: 0.5
   reserve_violation_penalty: 1000.0

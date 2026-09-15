@@ -75,11 +75,15 @@ migration:
   target_load_weight: 1.0
   wipe_load_weight: 1.0
   account_saferemove_wipe: false
-  payback_horizon_seconds: 604800
+  payback_horizon_seconds: 31536000  # 365d, section 12 default
   payback_ratio: 10.0
 objective:
   alpha_spread: 1.0
   beta_values: [0.25]
+  # The section 12 default -- IMPLEMENTATION_PLAN.md section 14.6 records how
+  # folding this in narrows the two plans' objective gap from 9.70 to 9.08,
+  # since the moved-disk plan also concentrates data on `cramped`.
+  delta_values: [0.5]
   gamma_move_bytes_per_tib: 0.05   # penalty per TiB migrated
   kappa_vm_affinity: 0.5
   reserve_violation_penalty: 1000.0

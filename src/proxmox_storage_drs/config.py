@@ -160,6 +160,8 @@ class SnapshotReserveConfig:
 class GatesConfig:
     drift_threshold: float = 0.10
     imbalance_threshold: float = 0.20
+    # None disables the capacity gate outright (section 6); 0.25 default.
+    capacity_spread_threshold: float | None = 0.25
     cooldown_per_disk_seconds: float = 86400.0
     cooldown_per_storage_seconds: float = 3600.0
 
@@ -169,7 +171,7 @@ class MigrationConfig:
     bwlimit_bytes_per_sec: int = 209_715_200  # 200 MiB/s
     source_load_weight: float = 1.0
     target_load_weight: float = 1.0
-    payback_horizon_seconds: float = 604800.0  # 7d
+    payback_horizon_seconds: float = 31_536_000.0  # 365d
     payback_ratio: float = 10.0
     max_single_move_duration_seconds: float = 21600.0  # 6h
     account_saferemove_wipe: bool = True
@@ -185,6 +187,7 @@ class ObjectiveConfig:
     beta_move_count: float = 0.25
     gamma_move_bytes_per_tib: float = 0.05
     kappa_vm_affinity: float = 0.50
+    delta_capacity_spread: float = 0.5
     affinity_counts_pinned_disks: bool = False
     reserve_violation_penalty: float = 1000.0
 
@@ -527,6 +530,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
     gates = GatesConfig(
         drift_threshold=gates_raw.get("drift_threshold", 0.10),
         imbalance_threshold=gates_raw.get("imbalance_threshold", 0.20),
+        capacity_spread_threshold=gates_raw.get("capacity_spread_threshold", 0.25),
         cooldown_per_disk_seconds=parse_duration_seconds(gates_raw.get("cooldown_per_disk", "24h")),
         cooldown_per_storage_seconds=parse_duration_seconds(
             gates_raw.get("cooldown_per_storage", "1h")
@@ -538,7 +542,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         bwlimit_bytes_per_sec=parse_size_bytes(mig_raw.get("bwlimit_bytes_per_sec", 209715200)),
         source_load_weight=mig_raw.get("source_load_weight", 1.0),
         target_load_weight=mig_raw.get("target_load_weight", 1.0),
-        payback_horizon_seconds=parse_duration_seconds(mig_raw.get("payback_horizon", "7d")),
+        payback_horizon_seconds=parse_duration_seconds(mig_raw.get("payback_horizon", "365d")),
         payback_ratio=mig_raw.get("payback_ratio", 10.0),
         max_single_move_duration_seconds=parse_duration_seconds(
             mig_raw.get("max_single_move_duration", "6h")
@@ -556,6 +560,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         beta_move_count=obj_raw.get("beta_move_count", 0.25),
         gamma_move_bytes_per_tib=obj_raw.get("gamma_move_bytes_per_tib", 0.05),
         kappa_vm_affinity=obj_raw.get("kappa_vm_affinity", 0.50),
+        delta_capacity_spread=obj_raw.get("delta_capacity_spread", 0.5),
         affinity_counts_pinned_disks=obj_raw.get("affinity_counts_pinned_disks", False),
         reserve_violation_penalty=obj_raw.get("reserve_violation_penalty", 1000.0),
     )
@@ -809,6 +814,34 @@ def _check_saturation_load(config: Config, warnings: list[str]) -> None:
                 )
 
 
+def _check_payback_horizon(config: Config, warnings: list[str]) -> None:
+    """Warn (never error) below the horizon section 7.2 treats as a sane assumption
+    about VM lifetime -- ``payback_horizon > 0`` is already enforced structurally by
+    the schema."""
+    horizon = config.migration.payback_horizon_seconds
+    if horizon < 30 * 86400:
+        warnings.append(
+            f"migration.payback_horizon ({horizon:g}s) is below 30 days -- a short "
+            "horizon rejects slow-accruing but real balancing benefit; set it to "
+            "approximate how long a placement actually lasts (e.g. real VM lifetime), "
+            "not operator patience"
+        )
+
+
+def _check_objective_weights(config: Config, warnings: list[str]) -> None:
+    """Warn (never error) once ``delta_capacity_spread`` outweighs ``alpha_spread`` --
+    the point where data evenness starts outweighing I/O evenness in every plan
+    comparison, and the tool is no longer an I/O balancer first. ``delta_capacity_spread
+    >= 0`` is already enforced structurally by the schema."""
+    if config.objective.delta_capacity_spread > config.objective.alpha_spread:
+        warnings.append(
+            f"objective.delta_capacity_spread ({config.objective.delta_capacity_spread:g}) "
+            f"exceeds objective.alpha_spread ({config.objective.alpha_spread:g}) -- data "
+            "evenness now outweighs I/O evenness in every plan comparison; lower "
+            "delta_capacity_spread if I/O balance should stay the first priority"
+        )
+
+
 def _check_time_windows(config: Config, errors: list[str]) -> None:
     for tw in config.execution.time_windows:
         if tw.start == tw.end:
@@ -874,6 +907,8 @@ def _validate_semantics(config: Config, *, require_connection: bool = True) -> l
     _check_metrics(config, errors)
     _check_forecast_window(config, errors)
     _check_saturation_load(config, warnings)
+    _check_payback_horizon(config, warnings)
+    _check_objective_weights(config, warnings)
     _check_time_windows(config, errors)
     _check_support(config, errors)
 

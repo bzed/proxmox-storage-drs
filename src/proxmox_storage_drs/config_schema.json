@@ -129,6 +129,7 @@
       "properties": {
         "drift_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
         "imbalance_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "capacity_spread_threshold": { "type": ["number", "null"], "exclusiveMinimum": 0 },
         "cooldown_per_disk": { "type": ["string", "number"] },
         "cooldown_per_storage": { "type": ["string", "number"] }
       }
@@ -158,6 +159,7 @@
         "beta_move_count": { "type": "number", "minimum": 0 },
         "gamma_move_bytes_per_tib": { "type": "number", "minimum": 0 },
         "kappa_vm_affinity": { "type": "number", "minimum": 0 },
+        "delta_capacity_spread": { "type": "number", "minimum": 0 },
         "affinity_counts_pinned_disks": { "type": "boolean" },
         "reserve_violation_penalty": { "type": "number", "minimum": 0 }
       }

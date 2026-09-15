@@ -1568,6 +1568,7 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
         "gates": {
             "drift_threshold": config.gates.drift_threshold,
             "imbalance_threshold": config.gates.imbalance_threshold,
+            "capacity_spread_threshold": config.gates.capacity_spread_threshold,
             "cooldown_per_disk": config.gates.cooldown_per_disk_seconds,
             "cooldown_per_storage": config.gates.cooldown_per_storage_seconds,
         },
@@ -1589,6 +1590,7 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
             "beta_move_count": config.objective.beta_move_count,
             "gamma_move_bytes_per_tib": config.objective.gamma_move_bytes_per_tib,
             "kappa_vm_affinity": config.objective.kappa_vm_affinity,
+            "delta_capacity_spread": config.objective.delta_capacity_spread,
             "affinity_counts_pinned_disks": config.objective.affinity_counts_pinned_disks,
             "reserve_violation_penalty": config.objective.reserve_violation_penalty,
         },

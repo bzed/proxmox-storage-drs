@@ -347,6 +347,76 @@ def test_configured_saturation_load_silences_the_warning(tmp_path: Path) -> None
     assert resolved.warnings == ()
 
 
+def test_payback_horizon_default_is_365d(tmp_path: Path) -> None:
+    path = write_config(tmp_path, minimal_config_dict())
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.migration.payback_horizon_seconds == pytest.approx(31_536_000.0)
+
+
+def test_payback_horizon_below_30d_is_a_warning_not_an_error(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["migration"] = {"payback_horizon": "7d"}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert any("payback_horizon" in w for w in resolved.warnings)
+
+
+def test_payback_horizon_at_30d_silences_the_warning(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["migration"] = {"payback_horizon": "30d"}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert not any("payback_horizon" in w for w in resolved.warnings)
+
+
+def test_delta_capacity_spread_default_is_half_of_alpha_spread(tmp_path: Path) -> None:
+    path = write_config(tmp_path, minimal_config_dict())
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.objective.delta_capacity_spread == pytest.approx(0.5)
+    assert resolved.config.objective.alpha_spread == pytest.approx(1.0)
+    assert not any("delta_capacity_spread" in w for w in resolved.warnings)
+
+
+def test_delta_capacity_spread_above_alpha_spread_is_a_warning_not_an_error(
+    tmp_path: Path,
+) -> None:
+    data = minimal_config_dict()
+    data["objective"] = {"alpha_spread": 1.0, "delta_capacity_spread": 1.5}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert any("delta_capacity_spread" in w for w in resolved.warnings)
+
+
+def test_delta_capacity_spread_negative_is_a_structural_error(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["objective"] = {"delta_capacity_spread": -0.1}
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match="delta_capacity_spread"):
+        config.load_config(str(path), env={})
+
+
+def test_capacity_spread_threshold_default_is_quarter(tmp_path: Path) -> None:
+    path = write_config(tmp_path, minimal_config_dict())
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.gates.capacity_spread_threshold == pytest.approx(0.25)
+
+
+def test_capacity_spread_threshold_null_disables_the_gate(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["gates"] = {"capacity_spread_threshold": None}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.gates.capacity_spread_threshold is None
+
+
+def test_capacity_spread_threshold_zero_is_a_structural_error(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["gates"] = {"capacity_spread_threshold": 0}
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match="capacity_spread_threshold"):
+        config.load_config(str(path), env={})
+
+
 def test_multiple_errors_are_all_reported(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["schema_version"] = 2

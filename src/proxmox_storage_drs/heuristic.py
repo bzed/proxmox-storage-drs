@@ -83,7 +83,7 @@ Assignment = dict[str, str]  # topology.Disk.key -> storage id
 @dataclass(frozen=True, slots=True)
 class ObjectiveBreakdown:
     """The section 5.4 objective, evaluated for one candidate assignment,
-    broken into its five terms -- kept separate rather than collapsed into
+    broken into its six terms -- kept separate rather than collapsed into
     only ``total`` because ``explain`` (``cli._render_group_explain_human()``'s
     "objective:" line) needs to show the arithmetic, not just the answer,
     and because tests cross-checking this against the section 14 worked
@@ -93,9 +93,12 @@ class ObjectiveBreakdown:
     move_count_term: float  # beta * number of disks that moved
     bytes_moved_term: float  # gamma * TiB moved
     fragmentation_term: float  # kappa * sum(extra storages per VM)
+    capacity_spread_term: float  # delta * sum(d_s), section 5.3 (C7)
     reserve_penalty_term: float  # objective.reserve_violation_penalty * TiB short
     spread_e: dict[str, float]  # storage id -> e_s = |u_s - u*|, for reporting (both metrics)
     utilization: dict[str, float]  # storage id -> u_s, for reporting and the minmax metric
+    fill_fraction: dict[str, float]  # storage id -> b_s = used/capacity, section 5.3 (C7)
+    fill_deviation: dict[str, float]  # storage id -> d_s = |b_s - b_bar| / b_bar
     reserve_statuses: dict[str, ReserveStatus]  # storage id -> (C4)/(C5) at this assignment
     moved_disk_keys: frozenset[str]
 
@@ -106,6 +109,7 @@ class ObjectiveBreakdown:
             + self.move_count_term
             + self.bytes_moved_term
             + self.fragmentation_term
+            + self.capacity_spread_term
             + self.reserve_penalty_term
         )
 
@@ -154,6 +158,33 @@ def group_average_utilization(group: Group, load_by_key: Mapping[str, float]) ->
     return total_load / total_capability if total_capability else 0.0
 
 
+def group_average_fill(group: Group) -> float:
+    """`b_bar = (Sum_d z_d + Sum_s U^ext) / (Sum_s C_s)` (section 5.3 (C7)) -- a
+    constant under any reassignment of `D`'s own disks, exactly like `u*`
+    (`group_average_utilization`): moving a disk changes which storage its
+    bytes count toward, never the group's total managed+foreign bytes or
+    total capacity. Unlike `u*` this needs no per-candidate load lookup at
+    all -- every disk's `z_d` is fixed regardless of assignment -- so it
+    takes only ``group``, not ``reserve_statuses`` (which *is*
+    assignment-dependent, since a pinned disk's byte contribution still
+    only counts toward whichever storage `storage_of()` resolves it to)."""
+    total_used = sum(d.size_bytes for d in group.disks) + sum(
+        s.foreign_used_bytes for s in group.storages
+    )
+    total_capacity = sum(s.capacity_bytes for s in group.storages)
+    return total_used / total_capacity if total_capacity else 0.0
+
+
+def raw_capacity_spread(breakdown: ObjectiveBreakdown) -> float:
+    """Section 7.2's unweighted ``F`` -- ``sum(d_s)``, always L1 regardless of
+    ``objective.spread_metric`` (section 5.4: "the term is L1 and stays L1
+    whatever ``objective.spread_metric`` is set to"). As with
+    ``raw_spread()``/``imbalance_term``, ``payback.py`` needs this raw
+    quantity rather than ``breakdown.capacity_spread_term``, which is
+    already scaled by ``objective.delta_capacity_spread`` (REVIEW.md R-01)."""
+    return sum(breakdown.fill_deviation.values())
+
+
 def raw_spread(breakdown: ObjectiveBreakdown, spread_metric: str) -> float:
     """Section 7.2's unweighted ``E`` -- ``sum(e_s)`` (``"l1"``) or
     ``max(u_s)`` (``"minmax"``) -- as distinct from
@@ -177,13 +208,15 @@ def evaluate_assignment(
     objective: ObjectiveConfig,
     min_free_bytes: int,
     average_utilization: float,
+    average_fill: float,
 ) -> ObjectiveBreakdown:
     """Section 5.4's objective for one candidate ``assignment``.
 
     ``average_utilization`` is ``u*`` (see ``group_average_utilization``)
-    -- a parameter, not recomputed here, since every candidate evaluated
-    during a single heuristic run shares the same value and recomputing it
-    from scratch on every call would be pure waste.
+    and ``average_fill`` is ``b_bar`` (see ``group_average_fill``) -- both
+    parameters, not recomputed here, since every candidate evaluated during
+    a single heuristic run shares the same values and recomputing them from
+    scratch on every call would be pure waste.
 
     ``objective.spread_metric`` picks (C6)'s two alternative imbalance
     forms (section 5.4): ``"l1"`` (default) is ``alpha * sum(e_s)``, the
@@ -204,6 +237,8 @@ def evaluate_assignment(
     reserve_statuses: dict[str, ReserveStatus] = {}
     spread_e: dict[str, float] = {}
     utilization: dict[str, float] = {}
+    fill_fraction: dict[str, float] = {}
+    fill_deviation: dict[str, float] = {}
     for storage in group.storages:
         status = compute_reserve_status(storage, group.disks, min_free_bytes, storage_of=storage_of)
         reserve_statuses[storage.id] = status
@@ -211,11 +246,15 @@ def evaluate_assignment(
         u_s = load / storage.capability_weight if storage.capability_weight else 0.0
         utilization[storage.id] = u_s
         spread_e[storage.id] = abs(u_s - average_utilization)
+        b_s = status.managed_used_bytes / storage.capacity_bytes if storage.capacity_bytes else 0.0
+        fill_fraction[storage.id] = b_s
+        fill_deviation[storage.id] = abs(b_s - average_fill) / average_fill if average_fill else 0.0
 
     if objective.spread_metric == "minmax":
         spread = max(utilization.values()) if utilization else 0.0
     else:
         spread = sum(spread_e.values())
+    capacity_spread = sum(fill_deviation.values())
 
     moved = frozenset(
         d.key for d in group.disks if assignment.get(d.key, d.current_storage) != d.current_storage
@@ -238,9 +277,12 @@ def evaluate_assignment(
         move_count_term=objective.beta_move_count * len(moved),
         bytes_moved_term=objective.gamma_move_bytes_per_tib * bytes_moved_tib,
         fragmentation_term=objective.kappa_vm_affinity * fragmentation,
+        capacity_spread_term=objective.delta_capacity_spread * capacity_spread,
         reserve_penalty_term=objective.reserve_violation_penalty * reserve_shortfall_tib,
         spread_e=spread_e,
         utilization=utilization,
+        fill_fraction=fill_fraction,
+        fill_deviation=fill_deviation,
         reserve_statuses=reserve_statuses,
         moved_disk_keys=moved,
     )
@@ -277,6 +319,7 @@ def best_single_disk_alternative(
     objective: ObjectiveConfig,
     min_free_bytes: int,
     average_utilization: float,
+    average_fill: float,
     baseline: ObjectiveBreakdown,
 ) -> RejectedCandidate | None:
     """The single-disk move closest to being worth taking, among every
@@ -296,7 +339,13 @@ def best_single_disk_alternative(
             assignment = seed_assignment(group)
             assignment[disk.key] = storage.id
             breakdown = evaluate_assignment(
-                group, assignment, load_by_key, objective, min_free_bytes, average_utilization
+                group,
+                assignment,
+                load_by_key,
+                objective,
+                min_free_bytes,
+                average_utilization,
+                average_fill,
             )
             if best is None or breakdown.total < best.breakdown.total:
                 best = RejectedCandidate(
@@ -463,6 +512,7 @@ def _best_of(
     objective: ObjectiveConfig,
     min_free_bytes: int,
     average_utilization: float,
+    average_fill: float,
     best_value: float,
     best_assignment: Assignment | None,
 ) -> tuple[float, Assignment | None]:
@@ -474,7 +524,7 @@ def _best_of(
     and so all three score candidates through the exact same comparison."""
     for trial in trials:
         value = evaluate_assignment(
-            group, trial, load_by_key, objective, min_free_bytes, average_utilization
+            group, trial, load_by_key, objective, min_free_bytes, average_utilization, average_fill
         ).total
         if value < best_value:
             best_value = value
@@ -538,6 +588,7 @@ def _descend(
     objective: ObjectiveConfig,
     min_free_bytes: int,
     average_utilization: float,
+    average_fill: float,
     max_iterations: int,
     cooldown_storages: frozenset[str] = frozenset(),
 ) -> Assignment:
@@ -584,7 +635,7 @@ def _descend(
     movable = _movable_disks(group)
     vm_relocation_candidates = _vm_relocation_candidates(movable)
     current = evaluate_assignment(
-        group, assignment, load_by_key, objective, min_free_bytes, average_utilization
+        group, assignment, load_by_key, objective, min_free_bytes, average_utilization, average_fill
     ).total
 
     for _ in range(max_iterations):
@@ -605,6 +656,7 @@ def _descend(
                 objective,
                 min_free_bytes,
                 average_utilization,
+                average_fill,
                 best_value,
                 best_assignment,
             )
@@ -637,9 +689,10 @@ def run_heuristic(
     move is never blocked by it.
     """
     average_utilization = group_average_utilization(group, load_by_key)
+    average_fill = group_average_fill(group)
     initial = seed_assignment(group)
     initial_breakdown = evaluate_assignment(
-        group, initial, load_by_key, objective, min_free_bytes, average_utilization
+        group, initial, load_by_key, objective, min_free_bytes, average_utilization, average_fill
     )
 
     repaired, repair_moves = _repair(group, initial, min_free_bytes)
@@ -650,11 +703,12 @@ def run_heuristic(
         objective,
         min_free_bytes,
         average_utilization,
+        average_fill,
         heuristic_iterations,
         cooldown_storages,
     )
     final_breakdown = evaluate_assignment(
-        group, final, load_by_key, objective, min_free_bytes, average_utilization
+        group, final, load_by_key, objective, min_free_bytes, average_utilization, average_fill
     )
     return HeuristicResult(
         assignment=final,

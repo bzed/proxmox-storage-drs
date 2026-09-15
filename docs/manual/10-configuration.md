@@ -499,6 +499,21 @@ drifted. Also, unrelatedly, the section 10.2 backtest error ceiling a
 non-`quantile` `forecast.model` must stay within to drive the section 7.3
 saturation guard — see `forecast.model` above.
 
+### `gates.capacity_spread_threshold`
+
+Fraction or `null`, default `0.25`.
+
+The data-spread counterpart of `gates.imbalance_threshold`: the minimum
+relative spread in fill fraction (bytes used / capacity) across a group's
+storages before a plan is built, evaluated even when the group's I/O is
+already perfectly balanced -- in that case `objective.delta_capacity_spread`
+is what does the spreading. It can legitimately exceed `1` (a group filled to
+5% that keeps 60% of its bytes on one storage deviates as much as a full one
+does). Unlike the drift/imbalance gates, this one **bypasses** them when it
+fires -- a stable, balanced workload is not a reason to keep data
+concentrated on one storage. `null` disables the gate outright; the gate
+also cannot fire on a group with no data at all (mean fill `0`).
+
 ### `gates.cooldown_per_disk`
 
 Duration, default `24h`.
@@ -543,12 +558,21 @@ As `migration.source_load_weight`, for the target (one sequential writer).
 
 ### `migration.payback_horizon`
 
-Duration, default `7d`.
+Duration, default `365d`.
 
-The horizon `H` over which a plan's imbalance reduction is assumed to
-persist — `benefit = ΔE * H`. Setting this to `0` disables the payback test
-entirely (`IMPLEMENTATION_PLAN.md` section 11.1 rejects that at config-load
-time: `payback_horizon > 0` is required).
+The horizon `H` over which a plan's imbalance and data-spread reduction are
+assumed to persist — `benefit = (alpha_spread * ΔE + delta_capacity_spread *
+ΔF) * H`. Setting this to `0` disables the payback test entirely
+(`IMPLEMENTATION_PLAN.md` section 11.1 rejects that at config-load time:
+`payback_horizon > 0` is required). This is an explicit assumption about how
+long a placement lasts, not about operator patience: a migration's cost is
+paid once and early, while its benefit accrues for as long as the workload
+keeps running on the new placement — infrastructure timescales are months to
+years, and the default assumes at least one year. Configuration validation
+warns (does not error) below `30d`, where the test starts rejecting real,
+slow-accruing benefit again; lower it toward the actual lifetime of your VMs
+only for genuinely short-lived fleets (CI runners, render farms, lab
+clusters).
 
 ### `migration.payback_ratio`
 
@@ -649,6 +673,21 @@ Penalty per extra storage a VM's disks are spread across, counted only
 **within** a group (a VM split across two groups is structural and cannot be
 repaired by any migration, so it is not counted). A soft preference: a
 strong imbalance or a capacity constraint can legitimately override it.
+
+### `objective.delta_capacity_spread`
+
+Weight, default `0.5`.
+
+Weight on data spread — the deviation of each storage's fill fraction
+(bytes used / capacity) from the group's mean fill (`IMPLEMENTATION_PLAN.md`
+section 5.3 (C7)). Bounds the share of a group's data any single storage
+failure costs, and keeps peak fill uniform across the group. I/O balance
+stays the first priority: this defaults to half of `alpha_spread`, and acts
+on its own mainly when a group's I/O is already balanced but its data is
+concentrated — the case `gates.capacity_spread_threshold` exists to reach.
+`0` disables the term entirely; configuration validation warns once it
+exceeds `alpha_spread`, the point where data evenness starts outweighing I/O
+evenness in every plan comparison.
 
 ### `objective.affinity_counts_pinned_disks`
 

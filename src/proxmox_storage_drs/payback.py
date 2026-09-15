@@ -117,7 +117,8 @@ class PaybackResult:
     ``saturation_load`` configured."""
 
     move_costs: tuple[MoveCost, ...]
-    benefit_load_seconds: float  # (E_before - E_after) * migration.payback_horizon
+    # (alpha*(E_before-E_after) + delta*(F_before-F_after)) * migration.payback_horizon
+    benefit_load_seconds: float
     rejected_moves: tuple[str, ...]  # disk keys failing the hard per-move duration rule
     aggregate_ok: bool
     deferred_moves: tuple[str, ...] = ()  # disk keys failing the section 7.3 saturation guard
@@ -252,27 +253,45 @@ def compute_move_cost(
 
 
 def compute_benefit_load_seconds(
-    imbalance_before: float, imbalance_after: float, payback_horizon_seconds: float
+    alpha_spread: float,
+    imbalance_before: float,
+    imbalance_after: float,
+    delta_capacity_spread: float,
+    capacity_spread_before: float,
+    capacity_spread_after: float,
+    payback_horizon_seconds: float,
 ) -> float:
-    """Section 7.2: ``benefit = (E_before - E_after) * H``. Both
-    ``imbalance_before``/``imbalance_after`` must be the *raw*, unweighted
-    section 7.2 spread quantity -- ``heuristic.raw_spread()``'s
-    ``sum(e_s)`` (``"l1"``) or ``max(u_s)`` (``"minmax"``) -- evaluated at
-    the pre-plan and post-plan assignments respectively. **Not**
-    ``ObjectiveBreakdown.imbalance_term``: that is the same quantity scaled
-    by ``objective.alpha_spread`` for the section 5.4 *solver* objective,
-    and passing it here would make the payback ratio depend on that
-    tuning knob rather than only on the imbalance reduction and migration
-    cost a plan produces (REVIEW.md R-01 -- earlier code passed
+    """Section 7.2: ``benefit = (alpha*(E_before - E_after) +
+    delta*(F_before - F_after)) * H``. ``imbalance_before``/
+    ``imbalance_after`` and ``capacity_spread_before``/
+    ``capacity_spread_after`` must be the *raw*, unweighted section 7.2
+    quantities -- ``heuristic.raw_spread()``'s ``sum(e_s)`` (``"l1"``) or
+    ``max(u_s)`` (``"minmax"``) for ``E``, and
+    ``heuristic.raw_capacity_spread()``'s ``sum(d_s)`` for ``F`` --
+    evaluated at the pre-plan and post-plan assignments respectively.
+    **Not** ``ObjectiveBreakdown.imbalance_term``/``.capacity_spread_term``:
+    those are the same quantities already scaled by
+    ``objective.alpha_spread``/``objective.delta_capacity_spread`` for the
+    section 5.4 *solver* objective, and passing them here would double
+    -apply the weight (REVIEW.md R-01 -- earlier code passed
     ``imbalance_term`` directly; only invisible while ``alpha_spread``'s
-    default of ``1.0`` made the two numerically identical). A negative
-    result (the plan made imbalance *worse*,
+    default of ``1.0`` made the two numerically identical). Unlike the
+    pre-section-12 formula, ``alpha_spread``/``delta_capacity_spread`` are
+    now explicit parameters here rather than baked into the inputs --
+    section 7.2's formula genuinely weights both terms, and passing the
+    weights in visibly, applied once, in the one place that computes
+    ``benefit``, is what keeps R-01's underlying principle (no weight
+    smuggled in through an already-scaled quantity) intact under the new
+    formula. A negative result (the plan made imbalance or spread *worse*,
     which a beta/gamma/kappa-dominated objective can in principle choose)
     is returned as computed, not clamped -- ``evaluate_plan_payback()``'s
     acceptance test already rejects it correctly without special-casing
     the sign here.
     """
-    return (imbalance_before - imbalance_after) * payback_horizon_seconds
+    return (
+        alpha_spread * (imbalance_before - imbalance_after)
+        + delta_capacity_spread * (capacity_spread_before - capacity_spread_after)
+    ) * payback_horizon_seconds
 
 
 def evaluate_plan_payback(

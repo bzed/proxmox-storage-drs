@@ -103,6 +103,7 @@ from proxmox_storage_drs.heuristic import (
     Assignment,
     ObjectiveBreakdown,
     evaluate_assignment,
+    group_average_fill,
     group_average_utilization,
     seed_assignment,
 )
@@ -122,6 +123,19 @@ logger = logging.getLogger(__name__)
 _LOAD_SCALE = 1_000_000  # K
 _WEIGHT_SCALE = 10_000  # W
 _RESERVE_FACTOR_SCALE = 1_000_000
+# Section 5.3 (C7)'s own scale: `d_s`'s natural denominator is each
+# storage's own capacity, not a shared normalizer the way `capability_weight`
+# is for `u_s` -- so unlike `_LOAD_SCALE`'s single shared coefficient, (C7)
+# needs a *per-storage* integer coefficient (`_cpsat_fill_scale_for()`)
+# built from this scale, `b_bar`, and that storage's own MiB capacity.
+# Deliberately much larger than `_LOAD_SCALE`: `average_fill * capacity_mib`
+# is itself already in the millions for an ordinary multi-TiB storage (an
+# 8 TiB storage is ~8.4e6 MiB), so a `_LOAD_SCALE`-sized numerator would
+# round `_cpsat_fill_scale_for()` straight to 0 -- exactly the "gamma trap"
+# `_assert_nonzero_when_weighted()` exists to catch, found here the same
+# way (a real solve silently ignoring delta because its own linearization
+# collapsed to a no-op, not because the term is genuinely worth nothing).
+_FILL_SCALE = 1_000_000_000_000
 _BYTES_PER_MIB = 1 << 20
 _BYTES_PER_TIB = 1 << 40
 
@@ -266,9 +280,10 @@ def solve(
     """
     movable = _movable_disks(group)
     average_utilization = group_average_utilization(group, load_by_key)
+    average_fill = group_average_fill(group)
     initial = seed_assignment(group)
     initial_breakdown = evaluate_assignment(
-        group, initial, load_by_key, objective, min_free_bytes, average_utilization
+        group, initial, load_by_key, objective, min_free_bytes, average_utilization, average_fill
     )
 
     if not movable:
@@ -301,7 +316,7 @@ def solve(
         return None
     assignment, status = outcome
     breakdown = evaluate_assignment(
-        group, assignment, load_by_key, objective, min_free_bytes, average_utilization
+        group, assignment, load_by_key, objective, min_free_bytes, average_utilization, average_fill
     )
     return OptimizeResult(
         assignment=assignment,
@@ -455,6 +470,41 @@ def _cpsat_storage_lhs(
     return sum(coeffs[d.key] * x[d.key, s.id] for d in movable) + pinned_scaled
 
 
+def _cpsat_storage_used_mib(
+    s: Any,
+    movable: tuple[Disk, ...],
+    pinned_by_storage: dict[str, tuple[Disk, ...]],
+    x: dict[Any, Any],
+) -> Any:
+    """(C7)'s per-storage byte numerator in MiB -- managed disks assigned
+    here plus pinned disks plus foreign volumes, i.e. `b_s`'s numerator
+    before dividing by `C_s`. Identical arithmetic to the LHS of (C5)'s
+    capacity constraint (`_cpsat_feasibility_constraints`), factored out
+    separately here because (C5) also adds the reserve term `R_s`, which
+    (C7)'s fill fraction deliberately excludes (section 5.3 (C7): "the fill
+    counts managed disks and foreign volumes but not the snapshot
+    reserve")."""
+    pinned_used = sum(_mib(d.size_bytes) for d in pinned_by_storage[s.id])
+    return (
+        sum(_mib(d.size_bytes) * x[d.key, s.id] for d in movable)
+        + pinned_used
+        + _mib(s.foreign_used_bytes)
+    )
+
+
+def _cpsat_fill_scale_for(s: Any, average_fill: float) -> int:
+    """(C7)'s per-storage integer coefficient: `d_s`'s natural denominator
+    is `s`'s own capacity, not a shared normalizer like `u_s`'s
+    `capability_weight` -- so unlike `_LOAD_SCALE`'s single shared
+    coefficient, each storage needs its own, built from `_FILL_SCALE`,
+    `b_bar` (``average_fill``) and that storage's MiB capacity. Callers
+    must never invoke this when ``average_fill`` is 0 -- section 5.3 (C7):
+    "if b_bar = 0 the group holds no data: the term is inactive" -- the
+    caller's own ``if average_fill:`` guard is what makes that true."""
+    capacity_mib = _mib(s.capacity_bytes)
+    return round(_FILL_SCALE / (average_fill * capacity_mib)) if capacity_mib else 0
+
+
 def _assert_nonzero_when_weighted(unscaled_weight: float, scaled: int, name: str) -> None:
     """Section 5.5: "assert... every coefficient is a non-zero integer
     wherever its unscaled weight is non-zero" -- the regression guard
@@ -476,10 +526,12 @@ def _assert_objective_magnitude_within_int64(
     gamma_scaled_values: list[int],
     kappa_scaled: int,
     alpha_scaled: int,
+    delta_scaled: int,
     num_movable: int,
     num_vmids: int,
     num_storages: int,
     load_bound: int,
+    fill_bound_total: int,
 ) -> None:
     """Section 5.5: "assert... the maximum objective magnitude is below
     2**62" (REVIEW.md S-09). A coarse, deliberately conservative upper
@@ -489,17 +541,76 @@ def _assert_objective_magnitude_within_int64(
     a second pass over the built model. CP-SAT's own `IntVar`/objective
     domain is bounded at `2**63 - 1`; staying an order of magnitude under
     that is what makes overflow structurally impossible at any realistic
-    cluster size, rather than merely unlikely."""
+    cluster size, rather than merely unlikely. ``fill_bound_total`` is
+    `Sum_s d_bound_s` -- the (C7) analogue of `load_bound * num_storages`,
+    summed rather than multiplied because each storage's `d_s` domain
+    bound is its own (`_cpsat_fill_scale_for()` is per-storage, unlike
+    `_LOAD_SCALE`'s shared coefficient)."""
     worst_case = (
         beta_scaled * num_movable
         + sum(abs(g) for g in gamma_scaled_values)
         + abs(kappa_scaled) * num_vmids * num_storages
         + abs(alpha_scaled) * load_bound * num_storages
+        + abs(delta_scaled) * fill_bound_total
     )
     assert worst_case < 2**62, (
         f"objective magnitude bound {worst_case} exceeds 2**62 -- solver.* weights or "
         "disk/group sizes are large enough to risk CP-SAT integer overflow"
     )
+
+
+def _cpsat_capacity_spread_term(
+    model: Any,
+    group: Group,
+    movable: tuple[Disk, ...],
+    pinned_by_storage: dict[str, tuple[Disk, ...]],
+    objective: ObjectiveConfig,
+    average_fill: float,
+    size_bound: int,
+    x: dict[Any, Any],
+    terms: list[Any],
+) -> tuple[int, int]:
+    """(C7): data spread, always L1 regardless of `objective.spread_metric`
+    (section 5.4: "the term is L1 and stays L1 whatever
+    objective.spread_metric is set to" -- unlike (C6), there is no minmax
+    alternative for `d_s`). Inactive whenever the group holds no data
+    (``average_fill == 0``, section 5.3 (C7)) or the weight is 0 (section
+    5.4: "0 disables the term") -- both leave `delta_scaled`/no
+    `d`-variables built at all, matching how alpha/beta/gamma/kappa are
+    each skipped the same way in `_cpsat_objective_terms()`. Appends its
+    term to ``terms`` in place and returns ``(delta_scaled,
+    fill_bound_total)`` for that function's own overflow assertion --
+    factored out purely to stay within this project's complexity limit."""
+    delta_scaled = round(objective.delta_capacity_spread * _WEIGHT_SCALE) if average_fill else 0
+    if average_fill:
+        _assert_nonzero_when_weighted(objective.delta_capacity_spread, delta_scaled, "delta_scaled")
+    fill_bound_total = 0
+    if delta_scaled and average_fill:
+        fill_scale_by_storage = {
+            s.id: _cpsat_fill_scale_for(s, average_fill) for s in group.storages
+        }
+        for s in group.storages:
+            _assert_nonzero_when_weighted(
+                objective.delta_capacity_spread, fill_scale_by_storage[s.id], f"fill_scale[{s.id}]"
+            )
+        # d_s's exact worst case: the numerator ranges over [0, size_bound]
+        # and b_bar*C_s (a fixed constant, <= C_s <= size_bound) is the
+        # other side of the two-sided constraint below, so k_s * size_bound
+        # is a tight, always-safe domain bound -- not `size_bound` itself,
+        # which would silently make the model infeasible whenever k_s > 1.
+        d = {
+            s.id: model.NewIntVar(0, fill_scale_by_storage[s.id] * size_bound, f"d_{s.id}")
+            for s in group.storages
+        }
+        for s in group.storages:
+            k_s = fill_scale_by_storage[s.id]
+            b_bar_capacity = round(average_fill * _mib(s.capacity_bytes))
+            numerator = _cpsat_storage_used_mib(s, movable, pinned_by_storage, x)
+            model.Add(k_s * (numerator - b_bar_capacity) <= d[s.id])
+            model.Add(k_s * (b_bar_capacity - numerator) <= d[s.id])
+            fill_bound_total += k_s * size_bound
+        terms.append(delta_scaled * sum(d.values()))
+    return delta_scaled, fill_bound_total
 
 
 def _cpsat_objective_terms(
@@ -511,11 +622,13 @@ def _cpsat_objective_terms(
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
     u_star: float,
+    average_fill: float,
     load_bound: int,
+    size_bound: int,
     x: dict[Any, Any],
     y: dict[Any, Any],
 ) -> list[Any]:
-    """Section 5.5's stage-2 objective coefficients -- (C6) plus the
+    """Section 5.5's stage-2 objective coefficients -- (C6)/(C7) plus the
     beta/gamma/kappa terms -- factored out of `_solve_cpsat()` to keep
     that function's own branching within this project's complexity limit."""
     terms: list[Any] = []
@@ -562,15 +675,21 @@ def _cpsat_objective_terms(
         if alpha_scaled:
             terms.append(alpha_scaled * sum(e.values()))
 
+    delta_scaled, fill_bound_total = _cpsat_capacity_spread_term(
+        model, group, movable, pinned_by_storage, objective, average_fill, size_bound, x, terms
+    )
+
     _assert_objective_magnitude_within_int64(
         beta_scaled,
         gamma_scaled_values,
         kappa_scaled,
         alpha_scaled,
+        delta_scaled,
         len(movable),
         len(vmids),
         len(group.storages),
         load_bound,
+        fill_bound_total,
     )
     return terms
 
@@ -595,6 +714,7 @@ def _solve_cpsat(
     pinned_by_storage = _pinned_by_storage(group)
     vmids = _relevant_vmids(group, movable, objective)
     u_star = group_average_utilization(group, load_by_key)
+    b_bar = group_average_fill(group)
     total_load = sum(load_by_key.get(d.key, 0.0) for d in group.disks)
     total_mib = sum(_mib(d.size_bytes) for d in group.disks)
     size_bound = max((_mib(s.capacity_bytes) for s in group.storages), default=0) + total_mib + 1
@@ -652,7 +772,9 @@ def _solve_cpsat(
         load_by_key,
         objective,
         u_star,
+        b_bar,
         load_bound,
+        size_bound,
         x2,
         y2,
     )
@@ -763,6 +885,33 @@ def _cbc_storage_load(
     return (moved_load + pinned_load) / s.capability_weight if s.capability_weight else moved_load
 
 
+def _cbc_storage_fill(
+    pulp: Any,
+    s: Any,
+    movable: tuple[Disk, ...],
+    pinned_by_storage: dict[str, tuple[Disk, ...]],
+    x: dict[Any, Any],
+) -> Any:
+    """(C7)'s `b_s`, continuous -- the same numerator (C5)'s capacity
+    constraint already assembles (managed disks assigned here, plus pinned
+    disks, plus foreign volumes -- excluding the reserve term `R_s`, which
+    the fill fraction deliberately does not count, section 5.3 (C7)),
+    divided by `C_s`. In MiB, like every other size-valued quantity in this
+    model (C4)/(C5) already use -- raw bytes here (~1e12-1e14) alongside
+    load values (~1-10) would badly condition the LP matrix for CBC's
+    simplex, which is silently *not* the same failure shape as CP-SAT's
+    integer-overflow guards: it does not raise, it just returns a
+    numerically poor "optimal" (confirmed against a real corpus bundle,
+    where an unscaled version of this function made CBC's own after_spread
+    almost 100x worse than the heuristic's on the same weights)."""
+    pinned_used = sum(d.size_bytes for d in pinned_by_storage[s.id]) / _BYTES_PER_MIB
+    moved_bytes = pulp.lpSum((d.size_bytes / _BYTES_PER_MIB) * x[d.key, s.id] for d in movable)
+    foreign_mib = s.foreign_used_bytes / _BYTES_PER_MIB
+    numerator = moved_bytes + pinned_used + foreign_mib
+    capacity_mib = s.capacity_bytes / _BYTES_PER_MIB
+    return numerator / capacity_mib if capacity_mib else numerator * 0
+
+
 def _cbc_objective_terms(
     pulp: Any,
     prob: Any,
@@ -773,6 +922,7 @@ def _cbc_objective_terms(
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
     u_star: float,
+    average_fill: float,
     x: dict[Any, Any],
     y: dict[Any, Any],
 ) -> list[Any]:
@@ -805,7 +955,39 @@ def _cbc_objective_terms(
             prob += u_star - lhs <= e[s.id]
         if objective.alpha_spread:
             terms.append(objective.alpha_spread * pulp.lpSum(e.values()))
+
+    _cbc_capacity_spread_term(
+        pulp, prob, group, movable, pinned_by_storage, objective, average_fill, x, terms
+    )
     return terms
+
+
+def _cbc_capacity_spread_term(
+    pulp: Any,
+    prob: Any,
+    group: Group,
+    movable: tuple[Disk, ...],
+    pinned_by_storage: dict[str, tuple[Disk, ...]],
+    objective: ObjectiveConfig,
+    average_fill: float,
+    x: dict[Any, Any],
+    terms: list[Any],
+) -> None:
+    """(C7): data spread, always L1 (section 5.4: no minmax alternative for
+    `d_s`). Inactive when the group holds no data at all (``average_fill
+    == 0``, section 5.3 (C7): "if b_bar = 0 the group holds no data: the
+    term is inactive") or the weight is 0 (section 5.4: "0 disables the
+    term"). Appends its term to ``terms`` in place -- factored out of
+    `_cbc_objective_terms()` purely to stay within this project's
+    complexity limit, the same reason `_cpsat_capacity_spread_term()` is
+    factored out of its own CP-SAT counterpart."""
+    if objective.delta_capacity_spread and average_fill:
+        d = {s.id: _lp_variable(pulp, f"d_{s.id}", lowBound=0) for s in group.storages}
+        for s in group.storages:
+            b_s = _cbc_storage_fill(pulp, s, movable, pinned_by_storage, x)
+            prob += (b_s - average_fill) / average_fill <= d[s.id]
+            prob += (average_fill - b_s) / average_fill <= d[s.id]
+        terms.append(objective.delta_capacity_spread * pulp.lpSum(d.values()))
 
 
 def _solve_cbc(
@@ -828,6 +1010,7 @@ def _solve_cbc(
     pinned_by_storage = _pinned_by_storage(group)
     vmids = _relevant_vmids(group, movable, objective)
     u_star = group_average_utilization(group, load_by_key)
+    b_bar = group_average_fill(group)
     # COIN_CMD, not the older PULP_CBC_CMD alias PuLP now deprecates -- same
     # CBC binary, same keyword arguments.
     solver_cmd = pulp.COIN_CMD(msg=0, timeLimit=time_limit_seconds, gapRel=mip_gap)
@@ -891,6 +1074,7 @@ def _solve_cbc(
         load_by_key,
         objective,
         u_star,
+        b_bar,
         x2,
         y2,
     )

@@ -1329,10 +1329,6 @@ the point where data evenness starts outweighing I/O evenness in every compariso
 and stays L1 whatever `objective.spread_metric` is set to: the risk argument cares about every
 storage's share, not only the fullest one.
 
-*Specified ahead of implementation (§12, phase 12): until it lands, the five-term breakdowns the
-as-built notes quote in §2.3, §9.5 and §16.6 remain the truth; each becomes six-term when this
-term is built.*
-
 Scaling matters: express `z_d` in TiB and `ℓ_d` in average in-flight I/O requests (§4) before
 applying the weights, so the defaults in the example config are meaningful.
 
@@ -2014,16 +2010,16 @@ and names the one closest to being worth it, with the section 5.4 term-by-term a
 rejected it:
 
 ```
-  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + reserve 0 = 0.576
+  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + spread 0 + reserve 0 = 0.576
   no moves made: the objective is lowest at the current assignment
   closest alternative: 110:scsi1 VM-krbd → VM
-    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, reserve 0→0
+    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, spread 0→0, reserve 0→0
     total 0.576 → 0.8  (worse by 0.223 -- rejected)
 ```
 
 `--json` carries the same information as `rejected_alternative` (`null` unless this case applies),
 alongside `disk_key`/`vmid`/`device`/`from_storage`/`to_storage`, `baseline` and `objective` (each
-the five-term breakdown `objective` above already serializes), and `worse_by`. `plan`/`apply` still
+the six-term breakdown `objective` above already serializes), and `worse_by`. `plan`/`apply` still
 print none of it, for the same reason as everything else in this section (V-02, above) — it is
 narration for a human, not a machine-checked verdict.
 
@@ -2363,7 +2359,7 @@ Each phase is independently testable and useful on its own.
 | 9 | `forecast.py` beyond p95 | Seasonal-naive validated by backtest |
 | 10 | `anonymize.py`, `collect.py`, `replay.py`, `tests/corpus/` (§16) | A bundle collected from a live cluster replays to the same plan the live run produced; the scrub audit and the determinism test pass on it |
 | 11 | Logging policy (§2.3) | **Done.** A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
-| 12 | Capacity-spread objective and gate, one-year payback horizon (§5.3 (C7), §5.4 `δ`, §6, §7.2) | Fixtures regenerated with the `delta_values` sweep and the 365d horizon; a replayed bundle shows the capacity gate deciding; `explain` reports the fill deviation; manual and manpage document `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` and the new `payback_horizon` default |
+| 12 | Capacity-spread objective and gate, one-year payback horizon (§5.3 (C7), §5.4 `δ`, §6, §7.2) | **Done.** Fixtures regenerated with the `delta_values` sweep and the 365d horizon; a replayed bundle shows the capacity gate deciding; `explain` reports the fill deviation; the manual documents `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` and the new `payback_horizon` default (the manpage documents no individual knob, by §11's own established convention) |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
@@ -2428,10 +2424,6 @@ input's `beta_values` × `delta_values` sweeps, the execution order with its tra
 post-plan reserve state, and
 both payback calculations). Assert against those files in CI rather than transcribing the tables
 below.
-
-*The committed fixture predates this revision of §5.4/§7.2 — no `delta_values` sweep, and
-`payback_horizon: 7d` — so regenerating it is the first task of §12's phase 12; the tables below
-state the numbers the regenerated fixture must produce.*
 
 The expected file is **generated, not written**: `tests/fixtures/generate_expected.py` enumerates all
 `3⁶ = 729` assignments per `(β, δ)` pair, so the recorded optimum is proven rather than hand-worked, and
@@ -3120,7 +3112,7 @@ Four kinds of assertion that do hold:
    `check_invariants()` actually asserts. Three properties this bullet used to claim as checked and
    is not: `Σ r_s = 0` in the final assignment and §8.1's per-step transient predicate both need the
    emitted *order*, which no `plan --json` field carries; "the objective the scheduler was handed
-   equals the objective recomputed from the final assignment" needs the five-term breakdown, which
+   equals the objective recomputed from the final assignment" needs the six-term breakdown, which
    today only `explain --json` emits. A real and deliberate gap, named here rather than discovered
    later (the same shape as this section's own pattern-expansion gap above) — either sweep
    `explain --json` too or add the missing fields to `plan --json`'s group report to close it.
@@ -3134,12 +3126,12 @@ Four kinds of assertion that do hold:
    `after_spread` against `solver.mip_gap` as a relative tolerance produced real disagreement on a
    committed bundle under `--full-matrix` (cbc 0.0016 vs. cpsat 0.0034-0.0112 across several
    variants) that was legitimate under `mip_gap` on the *objective* the solvers actually optimize —
-   `mip_gap` bounds suboptimality of the five-term objective, not of any one derived quantity taken
+   `mip_gap` bounds suboptimality of the six-term objective, not of any one derived quantity taken
    in isolation, and a tiny baseline spread turns a small absolute gap into a large relative one.
    Getting this right needs the objective breakdown itself, the same gap named in check 2 above.
 4. **Regression.** `<name>.expected.json` records, per variant, the gate verdict, the plan (as a
    sorted list of moves with their per-move costs), the payback arithmetic and the findings —
-   as built: `plan --json`'s group report carries neither an emitted *order* nor the five-term
+   as built: `plan --json`'s group report carries neither an emitted *order* nor the six-term
    objective breakdown (Y-04; the exact gap checks 2 and 3 above name), so no expected file can
    record them either. It is generated by `validate_corpus.py` and asserted current by
    `validate_corpus.py --check`, exactly as `tests/fixtures/generate_expected.py` is for §14 — and

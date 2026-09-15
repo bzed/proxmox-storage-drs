@@ -13,6 +13,7 @@
   "derived": {
     "total_load": 7.4,
     "u_star": 2.466667,
+    "b_bar": 0.270833,
     "initial": {
       "san-a": {
         "load": 6.5,
@@ -37,14 +38,18 @@
       }
     },
     "E_before": 8.066667,
-    "spread_before": 2.554054
+    "F_before": 2.153846,
+    "spread_before": 2.554054,
+    "capacity_spread_before": 1.846154
   },
   "cases": [
     {
       "beta_move_count": 0.25,
+      "delta_capacity_spread": 0.0,
       "expected_objective": 2.533333,
       "expected_move_count": 3,
       "expected_E_after": 1.133333,
+      "expected_F_after": 0.769231,
       "expected_fragmentation": 1,
       "expected_moves": [
         "101:scsi1:san-a->san-b",
@@ -106,6 +111,7 @@
         }
       },
       "expected_spread_after": 0.445946,
+      "expected_capacity_spread_after": 0.692308,
       "lexicographic": {
         "min_total_slack_tib": 0.0,
         "expected_objective_nonreserve": 2.533333,
@@ -122,10 +128,12 @@
       }
     },
     {
-      "beta_move_count": 0.5,
-      "expected_objective": 3.158333,
+      "beta_move_count": 0.25,
+      "delta_capacity_spread": 0.5,
+      "expected_objective": 2.812179,
       "expected_move_count": 2,
       "expected_E_after": 1.533333,
+      "expected_F_after": 0.307692,
       "expected_fragmentation": 1,
       "expected_moves": [
         "101:scsi1:san-a->san-b",
@@ -178,6 +186,81 @@
         }
       },
       "expected_spread_after": 0.527027,
+      "expected_capacity_spread_after": 0.230769,
+      "lexicographic": {
+        "min_total_slack_tib": 0.0,
+        "expected_objective_nonreserve": 2.812179,
+        "expected_move_count": 2,
+        "expected_moves": [
+          "101:scsi1:san-a->san-b",
+          "102:scsi0:san-a->san-c"
+        ],
+        "agrees_with_big_m_at_configured_p": true,
+        "big_m_agreement_threshold_p": -3.961795,
+        "big_m_p_configured": 1000.0,
+        "big_m_p_min_computed": 25821184.0
+      }
+    },
+    {
+      "beta_move_count": 0.5,
+      "delta_capacity_spread": 0.0,
+      "expected_objective": 3.158333,
+      "expected_move_count": 2,
+      "expected_E_after": 1.533333,
+      "expected_F_after": 0.307692,
+      "expected_fragmentation": 1,
+      "expected_moves": [
+        "101:scsi1:san-a->san-b",
+        "102:scsi0:san-a->san-c"
+      ],
+      "expected_order": [
+        {
+          "move": "102:scsi0:san-a->san-c",
+          "transient_target_used_tib": 2.0,
+          "transient_reserve_basis_tib": 1.5,
+          "transient_required_tib": 5.0,
+          "capacity_tib": 8.0,
+          "ok": true
+        },
+        {
+          "move": "101:scsi1:san-a->san-b",
+          "transient_target_used_tib": 2.5,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 4.5,
+          "capacity_tib": 8.0,
+          "ok": true
+        }
+      ],
+      "expected_final_loads": {
+        "san-a": 3.0,
+        "san-b": 1.7,
+        "san-c": 2.7
+      },
+      "expected_final_reserve": {
+        "san-a": {
+          "load": 3.0,
+          "used_tib": 2.0,
+          "largest_tib": 2.0,
+          "required_tib": 6.0,
+          "violates_reserve": false
+        },
+        "san-b": {
+          "load": 1.7,
+          "used_tib": 2.5,
+          "largest_tib": 1.0,
+          "required_tib": 4.5,
+          "violates_reserve": false
+        },
+        "san-c": {
+          "load": 2.7,
+          "used_tib": 2.0,
+          "largest_tib": 1.5,
+          "required_tib": 5.0,
+          "violates_reserve": false
+        }
+      },
+      "expected_spread_after": 0.527027,
+      "expected_capacity_spread_after": 0.230769,
       "lexicographic": {
         "min_total_slack_tib": 0.0,
         "expected_objective_nonreserve": 3.158333,
@@ -191,10 +274,85 @@
         "big_m_p_configured": 1000.0,
         "big_m_p_min_computed": 24248320.0
       }
+    },
+    {
+      "beta_move_count": 0.5,
+      "delta_capacity_spread": 0.5,
+      "expected_objective": 3.312179,
+      "expected_move_count": 2,
+      "expected_E_after": 1.533333,
+      "expected_F_after": 0.307692,
+      "expected_fragmentation": 1,
+      "expected_moves": [
+        "101:scsi1:san-a->san-b",
+        "102:scsi0:san-a->san-c"
+      ],
+      "expected_order": [
+        {
+          "move": "102:scsi0:san-a->san-c",
+          "transient_target_used_tib": 2.0,
+          "transient_reserve_basis_tib": 1.5,
+          "transient_required_tib": 5.0,
+          "capacity_tib": 8.0,
+          "ok": true
+        },
+        {
+          "move": "101:scsi1:san-a->san-b",
+          "transient_target_used_tib": 2.5,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 4.5,
+          "capacity_tib": 8.0,
+          "ok": true
+        }
+      ],
+      "expected_final_loads": {
+        "san-a": 3.0,
+        "san-b": 1.7,
+        "san-c": 2.7
+      },
+      "expected_final_reserve": {
+        "san-a": {
+          "load": 3.0,
+          "used_tib": 2.0,
+          "largest_tib": 2.0,
+          "required_tib": 6.0,
+          "violates_reserve": false
+        },
+        "san-b": {
+          "load": 1.7,
+          "used_tib": 2.5,
+          "largest_tib": 1.0,
+          "required_tib": 4.5,
+          "violates_reserve": false
+        },
+        "san-c": {
+          "load": 2.7,
+          "used_tib": 2.0,
+          "largest_tib": 1.5,
+          "required_tib": 5.0,
+          "violates_reserve": false
+        }
+      },
+      "expected_spread_after": 0.527027,
+      "expected_capacity_spread_after": 0.230769,
+      "lexicographic": {
+        "min_total_slack_tib": 0.0,
+        "expected_objective_nonreserve": 3.312179,
+        "expected_move_count": 2,
+        "expected_moves": [
+          "101:scsi1:san-a->san-b",
+          "102:scsi0:san-a->san-c"
+        ],
+        "agrees_with_big_m_at_configured_p": true,
+        "big_m_agreement_threshold_p": -4.061795,
+        "big_m_p_configured": 1000.0,
+        "big_m_p_min_computed": 27394048.0
+      }
     }
   ],
   "payback_two_move_plan": {
-    "beta_move_count": 0.5,
+    "beta_move_count": 0.25,
+    "delta_capacity_spread": 0.5,
     "per_move": [
       {
         "disk": "101:scsi1",
@@ -214,16 +372,17 @@
       }
     ],
     "total_cost_load_seconds": 26214.4,
-    "benefit_load_seconds": 3951360.0,
-    "ratio": 150.73,
+    "benefit_load_seconds": 235145353.85,
+    "ratio": 8970.08,
     "accepted": true
   },
   "payback_rejected_archive_disk": {
     "size_tib": 4.0,
-    "delta_E": 0.05,
+    "delta_E": 0.01,
+    "delta_F": 0.0,
     "cost_load_seconds": 41943.04,
-    "benefit_load_seconds": 30240.0,
-    "ratio": 0.721,
+    "benefit_load_seconds": 315360.0,
+    "ratio": 7.519,
     "accepted": false
   }
 }

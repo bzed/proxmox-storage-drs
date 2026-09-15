@@ -95,8 +95,16 @@ def make_storage(
     )
 
 
+# delta_capacity_spread=0.0: this file's fixtures/expected assignments
+# predate section 12's capacity-spread term -- see test_capacity_spread
+# coverage for the dedicated (C7) MILP tests, which set their own non-zero
+# delta explicitly.
 DEFAULT_OBJECTIVE = ObjectiveConfig(
-    alpha_spread=1.0, beta_move_count=0.25, gamma_move_bytes_per_tib=0.05, kappa_vm_affinity=0.50
+    alpha_spread=1.0,
+    beta_move_count=0.25,
+    gamma_move_bytes_per_tib=0.05,
+    kappa_vm_affinity=0.50,
+    delta_capacity_spread=0.0,
 )
 
 
@@ -248,6 +256,59 @@ def test_beta_050_reproduces_the_two_move_solution(backend: str) -> None:
     }
     assert result.breakdown.moves == 2
     assert result.breakdown.total == pytest.approx(3.158333, abs=1e-4)
+
+
+# ---------------------------------------------------- capacity-spread (C7)/delta
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_delta_050_at_the_default_beta_reproduces_the_two_move_solution(backend: str) -> None:
+    """IMPLEMENTATION_PLAN.md section 14.3's "delta knob, demonstrated at
+    the defaults": with delta_capacity_spread=0.5 (the section 12
+    default) folded into beta=0.25's own three-move optimum, the third
+    move (105:scsi0 san-c -> san-b) concentrates data enough that delta's
+    penalty outweighs its I/O gain, so the two-move plan wins instead --
+    both backends' own (C7) linearization must agree with the heuristic
+    here, not just on beta's imbalance-only terms."""
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, delta_capacity_spread=0.5)
+    result = _solve(section_14_group(), section_14_loads(), objective, backend)
+
+    assert result.assignment == {
+        "101:scsi0": "san-a",
+        "101:scsi1": "san-b",
+        "102:scsi0": "san-c",
+        "103:scsi0": "san-b",
+        "104:scsi0": "san-b",
+        "105:scsi0": "san-c",
+    }
+    assert result.breakdown.moves == 2
+    # Section 14.2/14.3's exact F_before/F_after for this group.
+    assert sum(result.initial_breakdown.fill_deviation.values()) == pytest.approx(
+        2.153846, abs=1e-5
+    )
+    assert sum(result.breakdown.fill_deviation.values()) == pytest.approx(0.307692, abs=1e-5)
+    assert result.breakdown.capacity_spread_term == pytest.approx(0.5 * 0.307692, abs=1e-5)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_delta_zero_reproduces_the_beta_only_three_move_solution(backend: str) -> None:
+    """The inverse check: explicitly disabling delta must restore beta's
+    own three-move optimum exactly, confirming `delta_capacity_spread: 0`
+    "disables the term" (section 5.4) all the way through both MILP
+    backends, not just the heuristic."""
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, delta_capacity_spread=0.0)
+    result = _solve(section_14_group(), section_14_loads(), objective, backend)
+
+    assert result.assignment == {
+        "101:scsi0": "san-a",
+        "101:scsi1": "san-b",
+        "102:scsi0": "san-c",
+        "103:scsi0": "san-b",
+        "104:scsi0": "san-b",
+        "105:scsi0": "san-b",
+    }
+    assert result.breakdown.moves == 3
+    assert result.breakdown.capacity_spread_term == 0.0
 
 
 # ------------------------------------------------------- reserve-tradeoff fixture
@@ -518,10 +579,12 @@ def test_assert_objective_magnitude_within_int64_passes_for_realistic_sizes() ->
         gamma_scaled_values=[500_000, 500_000],
         kappa_scaled=5_000_000,
         alpha_scaled=10_000,
+        delta_scaled=5_000,
         num_movable=2,
         num_vmids=2,
         num_storages=3,
         load_bound=10_000_000,
+        fill_bound_total=10_000_000,
     )
 
 
@@ -532,10 +595,12 @@ def test_assert_objective_magnitude_within_int64_raises_when_over_the_bound() ->
             gamma_scaled_values=[],
             kappa_scaled=0,
             alpha_scaled=2**60,
+            delta_scaled=0,
             num_movable=0,
             num_vmids=0,
             num_storages=1000,
             load_bound=2**60,
+            fill_bound_total=0,
         )
 
 

@@ -69,7 +69,9 @@ from proxmox_storage_drs.heuristic import (
     ObjectiveBreakdown,
     best_single_disk_alternative,
     evaluate_assignment,
+    group_average_fill,
     group_average_utilization,
+    raw_capacity_spread,
     raw_spread,
     run_heuristic,
 )
@@ -756,6 +758,7 @@ def _render_show_load_human(
             decision = evaluate_group_gates(
                 group_load,
                 reserve_statuses,
+                group,
                 config.gates,
                 last_load=last_loads_by_group.get(group.name),
             )
@@ -832,6 +835,7 @@ def _render_show_load_json(
             decision = evaluate_group_gates(
                 group_load,
                 reserve_statuses,
+                group,
                 config.gates,
                 last_load=last_loads_by_group.get(group.name),
             )
@@ -841,6 +845,7 @@ def _render_show_load_json(
                 "reserve_override": decision.reserve_override,
                 "drift_fraction": decision.drift_fraction,
                 "imbalance_fraction": decision.imbalance_fraction,
+                "capacity_fraction": decision.capacity_fraction,
             }
         groups_out.append(
             {
@@ -1229,6 +1234,20 @@ def _render_group_plan_json(
             after_spread = _spread_fraction(
                 final_breakdown.utilization, group_load.average_utilization
             )
+    # Section 5.3 (C7)'s counterpart to before_spread/after_spread, on fill
+    # fraction rather than load -- needed alongside it (not in place of it)
+    # for a fair MILP-vs-heuristic comparison once objective.delta_capacity_spread
+    # is non-zero: a solve can legitimately trade a worse after_spread for a
+    # much better after_capacity_spread (tests/corpus/validate_corpus.py's
+    # check_milp_vs_heuristic() consumes both, not after_spread alone).
+    before_capacity_spread = after_capacity_spread = None
+    if solve_outcome is not None:
+        average_fill = group_average_fill(group)
+        before_capacity_spread = _spread_fraction(
+            solve_outcome.initial_breakdown.fill_fraction, average_fill
+        )
+        if final_breakdown is not None:
+            after_capacity_spread = _spread_fraction(final_breakdown.fill_fraction, average_fill)
     payback_out = None
     if payback_result is not None:
         payback_out = {
@@ -1251,6 +1270,8 @@ def _render_group_plan_json(
         "deadlock_message": schedule_result.deadlocked_msg if schedule_result else None,
         "before_spread": before_spread,
         "after_spread": after_spread,
+        "before_capacity_spread": before_capacity_spread,
+        "after_capacity_spread": after_capacity_spread,
         "payback": payback_out,
     }
 
@@ -1401,7 +1422,7 @@ def _render_fragmentation_lines(group: Group, assignment: Assignment | None) -> 
 
 
 def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
-    """The section 5.4 objective's five terms, individually -- the reason
+    """The section 5.4 objective's six terms, individually -- the reason
     :class:`ObjectiveBreakdown` keeps them apart instead of collapsing to
     only ``.total`` in the first place (that class's own docstring)."""
     return (
@@ -1410,6 +1431,7 @@ def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
         f"moves {breakdown.move_count_term:.3g} + "
         f"bytes {breakdown.bytes_moved_term:.3g} + "
         f"fragmentation {breakdown.fragmentation_term:.3g} + "
+        f"spread {breakdown.capacity_spread_term:.3g} + "
         f"reserve {breakdown.reserve_penalty_term:.3g} = {breakdown.total:.3g}"
     )
 
@@ -1417,13 +1439,14 @@ def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
 def _objective_breakdown_json(breakdown: ObjectiveBreakdown) -> dict[str, float]:
     """The one implementation ``explain --json``'s ``objective`` and
     ``rejected_alternative.{baseline,objective}`` fields all share (AGENTS.md
-    section 5) -- so a third caller never has to guess which five keys a
+    section 5) -- so a third caller never has to guess which six keys a
     breakdown serializes to."""
     return {
         "imbalance_term": breakdown.imbalance_term,
         "move_count_term": breakdown.move_count_term,
         "bytes_moved_term": breakdown.bytes_moved_term,
         "fragmentation_term": breakdown.fragmentation_term,
+        "capacity_spread_term": breakdown.capacity_spread_term,
         "reserve_penalty_term": breakdown.reserve_penalty_term,
         "total": breakdown.total,
     }
@@ -1458,6 +1481,7 @@ def _render_no_moves_lines(
         objective,
         min_free_bytes,
         group_plan.group_load.average_utilization,
+        group_average_fill(group),
         group_plan.final_breakdown,
     )
     if candidate is None:
@@ -1484,6 +1508,7 @@ def _render_no_moves_lines(
                 f"moves {b.move_count_term:.3g}→{c.move_count_term:.3g}",
                 f"bytes {b.bytes_moved_term:.3g}→{c.bytes_moved_term:.3g}",
                 f"fragmentation {b.fragmentation_term:.3g}→{c.fragmentation_term:.3g}",
+                f"spread {b.capacity_spread_term:.3g}→{c.capacity_spread_term:.3g}",
                 f"reserve {b.reserve_penalty_term:.3g}→{c.reserve_penalty_term:.3g}",
             ]
         ),
@@ -1716,6 +1741,7 @@ def _render_group_explain_json(
             objective,
             min_free_bytes,
             group_plan.group_load.average_utilization,
+            group_average_fill(group),
             breakdown,
         )
         if candidate is not None:
@@ -2142,8 +2168,10 @@ def _log_gate_decision(group: Group, decision: GateDecision, gates: GatesConfig)
             "reserve_override": decision.reserve_override,
             "drift_fraction": decision.drift_fraction,
             "imbalance_fraction": decision.imbalance_fraction,
+            "capacity_fraction": decision.capacity_fraction,
             "drift_threshold": gates.drift_threshold,
             "imbalance_threshold": gates.imbalance_threshold,
+            "capacity_spread_threshold": gates.capacity_spread_threshold,
         },
     )
 
@@ -2266,6 +2294,7 @@ def _plan_group(
     decision = evaluate_group_gates(
         group_load,
         reserve_statuses,
+        group,
         resolved.config.gates,
         last_load=last_loads_by_group.get(group.name),
     )
@@ -2304,6 +2333,7 @@ def _plan_group(
         resolved.config.objective,
         min_free_bytes,
         group_average_utilization(group, group_load.load_by_disk_key()),
+        group_average_fill(group),
     )
 
     storages_by_id = {s.id: s for s in group.storages}
@@ -2325,8 +2355,12 @@ def _plan_group(
     ]
     spread_metric = resolved.config.objective.spread_metric
     benefit = compute_benefit_load_seconds(
+        resolved.config.objective.alpha_spread,
         raw_spread(solve_outcome.initial_breakdown, spread_metric),
         raw_spread(final_breakdown, spread_metric),
+        resolved.config.objective.delta_capacity_spread,
+        raw_capacity_spread(solve_outcome.initial_breakdown),
+        raw_capacity_spread(final_breakdown),
         resolved.config.migration.payback_horizon_seconds,
     )
     payback_result = evaluate_plan_payback(

@@ -648,18 +648,38 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
 
 
 def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> list[str]:
-    """Section 16.6, check 3: the MILP must never reach a worse spread than
-    the heuristic on the same variant. Compares each group's own
-    ``after_spread`` (``plan --json``'s already-computed post-plan spread
-    fraction, lower is better) directly, group by group -- *not* move
-    count. Move count is not a valid proxy for "worse": at
-    objective.beta_move_count=0.0 moves cost nothing, so a MILP reaching a
-    far better spread with more moves than the heuristic is exactly the
-    outcome this check exists to want, not flag. (Found for real on a 7-day
-    holt_winters capture -- tests/corpus/bzed-dev-cluster-7d-holt-winters --
-    where the previous move-count check flagged cpsat for using 13 moves
-    against the heuristic's 4, when cpsat's after_spread was ~0.00002
-    against the heuristic's 0.41: strictly better, not worse.)"""
+    """Section 16.6, check 3: the MILP must never reach a *dominated* plan
+    -- one worse than the heuristic's on both persistent-objective axes at
+    once -- on the same variant. Compares each group's own ``after_spread``
+    (I/O balance, section 5.3 (C6)) *and* ``after_capacity_spread`` (data
+    spread, section 5.3 (C7); both ``plan --json``'s already-computed
+    post-plan fractions, lower is better), group by group -- *not* move
+    count, and *not* either spread axis in isolation. Move count is not a
+    valid proxy for "worse": at objective.beta_move_count=0.0 moves cost
+    nothing, so a MILP reaching a far better spread with more moves than
+    the heuristic is exactly the outcome this check exists to want, not
+    flag. (Found for real on a 7-day holt_winters capture --
+    tests/corpus/bzed-dev-cluster-7d-holt-winters -- where the previous
+    move-count check flagged cpsat for using 13 moves against the
+    heuristic's 4, when cpsat's after_spread was ~0.00002 against the
+    heuristic's 0.41: strictly better, not worse.)
+
+    Section 12 added a second persistent-objective axis
+    (``delta_capacity_spread``), and a solver can legitimately accept a
+    worse I/O balance for a much better data spread (or vice versa) --
+    comparing ``after_spread`` alone, as this check originally did,
+    reintroduces exactly the "one metric is not a valid proxy once a
+    second objective term exists" trap the move-count fix above already
+    named, just on the axis section 12 added rather than the one
+    ``beta_move_count`` already covered. Found for real on the same
+    holt_winters bundle: cbc's after_spread (0.0122) was ~96x the
+    heuristic's (0.000127) at the section 12 defaults, but its full
+    objective total was *lower* (0.201 against 1.085) -- cbc had correctly
+    traded a little imbalance for a much better after_capacity_spread
+    (0.120 against the heuristic's 0.571) and zero fragmentation, exactly
+    the trade `delta_capacity_spread` exists to make available. A
+    violation is therefore only real when the MILP's plan is worse on
+    *both* axes at once (Pareto-dominated), not merely different on one."""
     violations = []
     tolerance = 1e-6
     by_key: dict[tuple[Any, ...], dict[str, VariantResult]] = {}
@@ -688,16 +708,28 @@ def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> lis
                     continue
                 h_spread = h_group.get("after_spread")
                 m_spread = m_group.get("after_spread")
-                # Either side not having acted (after_spread is only set
-                # once a plan's final_breakdown exists) leaves nothing
-                # comparable -- not a violation, just not this check's case.
+                h_capacity = h_group.get("after_capacity_spread")
+                m_capacity = m_group.get("after_capacity_spread")
+                # Either side not having acted leaves nothing comparable --
+                # not a violation, just not this check's case.
                 if h_spread is None or m_spread is None:
                     continue
-                if m_spread > h_spread + tolerance:
+                worse_spread = m_spread > h_spread + tolerance
+                # A bundle captured before section 12 (or a group whose
+                # mean fill is 0, section 5.3 (C7)) never populates
+                # after_capacity_spread -- fall back to the single-axis
+                # comparison rather than treating a missing value as
+                # "better" and masking a real regression.
+                if h_capacity is None or m_capacity is None:
+                    worse_capacity = worse_spread
+                else:
+                    worse_capacity = m_capacity > h_capacity + tolerance
+                if worse_spread and worse_capacity:
                     violations.append(
-                        f"{bundle.name} {key} group {name!r}: {backend_name}'s after_spread "
-                        f"({m_spread:g}) is worse than the heuristic's ({h_spread:g}) -- "
-                        "the MILP should never do worse"
+                        f"{bundle.name} {key} group {name!r}: {backend_name}'s plan is "
+                        f"Pareto-dominated by the heuristic's -- after_spread ({m_spread:g} "
+                        f"vs {h_spread:g}) and after_capacity_spread "
+                        f"({m_capacity!r} vs {h_capacity!r}) are both worse"
                     )
     return violations
 

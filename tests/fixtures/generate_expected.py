@@ -75,6 +75,14 @@ class Fixture:
         return self.total_load / sum(self.weight.values())
 
     @property
+    def b_bar(self) -> float:
+        """Section 5.3 (C7): `(Sum_d z_d + Sum_s U^ext) / (Sum_s C_s)` --
+        the group's mean fill fraction, a constant like `u_star`."""
+        total_used = sum(self.size.values()) + sum(self.foreign.values())
+        total_capacity = sum(self.capacity.values())
+        return total_used / total_capacity if total_capacity else 0.0
+
+    @property
     def big_m_p(self) -> float:
         return float(self.objective.get("reserve_violation_penalty", 1000.0))
 
@@ -148,6 +156,15 @@ def E_of(f: Fixture, assign: Assignment) -> float:
     )
 
 
+def F_of(f: Fixture, assign: Assignment) -> float:
+    """Section 5.3 (C7) L1 data spread, Sum_s |b_s - b_bar| / b_bar --
+    always L1, unlike E_of there is no minmax alternative (section 5.4)."""
+    b_bar = f.b_bar
+    if not b_bar:
+        return 0.0
+    return sum(abs(used_on(f, assign, s) / f.capacity[s] - b_bar) / b_bar for s in f.storages)
+
+
 def slack_of(f: Fixture, assign: Assignment) -> float:
     """Total reserve shortfall Sum_s r_s, in TiB."""
     return sum(
@@ -172,7 +189,7 @@ def fragmentation(f: Fixture, assign: Assignment) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def objective_nonreserve(f: Fixture, assign: Assignment, beta: float) -> float:
+def objective_nonreserve(f: Fixture, assign: Assignment, beta: float, delta: float) -> float:
     """The section 5.4 objective without the reserve term."""
     moved = [k for k in f.keys if assign[k] != f.current[k]]
     return float(
@@ -180,26 +197,27 @@ def objective_nonreserve(f: Fixture, assign: Assignment, beta: float) -> float:
         + beta * len(moved)
         + f.objective["gamma_move_bytes_per_tib"] * sum(f.size[k] for k in moved)
         + f.objective["kappa_vm_affinity"] * fragmentation(f, assign)
+        + delta * F_of(f, assign)
     )
 
 
-def objective_big_m(f: Fixture, assign: Assignment, beta: float, p: float) -> float:
+def objective_big_m(f: Fixture, assign: Assignment, beta: float, delta: float, p: float) -> float:
     """Single-stage big-M objective: section 5.4 plus P * Sum_s r_s."""
-    return objective_nonreserve(f, assign, beta) + p * slack_of(f, assign)
+    return objective_nonreserve(f, assign, beta, delta) + p * slack_of(f, assign)
 
 
-def best_big_m(f: Fixture, beta: float, p: float) -> Tuple[Assignment, float]:
+def best_big_m(f: Fixture, beta: float, delta: float, p: float) -> Tuple[Assignment, float]:
     """Exhaustive minimum of the single-stage big-M objective at penalty p."""
     best: Assignment = {}
     best_val = float("inf")
     for a in all_assignments(f):
-        v = objective_big_m(f, a, beta, p)
+        v = objective_big_m(f, a, beta, delta, p)
         if v < best_val - 1e-12:
             best, best_val = a, v
     return best, best_val
 
 
-def best_lexicographic(f: Fixture, beta: float) -> Tuple[Assignment, float, float]:
+def best_lexicographic(f: Fixture, beta: float, delta: float) -> Tuple[Assignment, float, float]:
     """Section 5.3 option 1: minimise Sum_s r_s first, then the rest.
 
     Returns (assignment, minimum total slack, non-reserve objective). No penalty
@@ -211,13 +229,13 @@ def best_lexicographic(f: Fixture, beta: float) -> Tuple[Assignment, float, floa
     for a in all_assignments(f):
         if slack_of(f, a) > min_slack + 1e-12:
             continue
-        v = objective_nonreserve(f, a, beta)
+        v = objective_nonreserve(f, a, beta, delta)
         if v < best_val - 1e-12:
             best, best_val = a, v
     return best, min_slack, best_val
 
 
-def big_m_agreement_threshold(f: Fixture, beta: float) -> float:
+def big_m_agreement_threshold(f: Fixture, beta: float, delta: float) -> float:
     """Smallest P above which big-M provably matches the lexicographic solve.
 
     Big-M prefers a higher-slack assignment `a` over the lexicographic optimum
@@ -226,23 +244,24 @@ def big_m_agreement_threshold(f: Fixture, beta: float) -> float:
     slack than the minimum. `-inf` means no reserve-violating assignment can win
     at any P >= 0 -- the fixture simply does not exercise the distinction.
     """
-    _, min_slack, best_nr = best_lexicographic(f, beta)
+    _, min_slack, best_nr = best_lexicographic(f, beta, delta)
     threshold = float("-inf")
     for a in all_assignments(f):
         extra = slack_of(f, a) - min_slack
         if extra <= 1e-12:
             continue
-        threshold = max(threshold, (best_nr - objective_nonreserve(f, a, beta)) / extra)
+        threshold = max(threshold, (best_nr - objective_nonreserve(f, a, beta, delta)) / extra)
     return threshold
 
 
-def computed_p_min(f: Fixture, beta: float) -> float:
+def computed_p_min(f: Fixture, beta: float, delta: float) -> float:
     """The section 5.3 build-time bound: U_obj / eps_r, with eps_r = 1 MiB."""
     u_obj = (
         2 * f.objective["alpha_spread"] * f.total_load
         + beta * len(f.keys)
         + f.objective["gamma_move_bytes_per_tib"] * sum(f.size.values())
         + f.objective["kappa_vm_affinity"] * len(set(f.vmid.values())) * (len(f.storages) - 1)
+        + delta * 2 * len(f.storages)
     )
     return float(u_obj * (1 << 20))
 
@@ -351,26 +370,41 @@ def spread(f: Fixture, state: Dict[str, StorageState]) -> float:
     return (max(per_unit) - min(per_unit)) / f.u_star
 
 
-def case_for(f: Fixture, beta: float) -> Dict[str, Any]:
-    """One beta value: the big-M optimum, the lexicographic optimum, and order."""
-    a, val = best_big_m(f, beta, f.big_m_p)
+def capacity_spread(f: Fixture, state: Dict[str, StorageState]) -> float:
+    """Section 6's capacity-gate ratio, `(max_s b_s - min_s b_s) / b_bar`
+    -- the gate-check quantity, distinct from `F_of()`'s sum-of-deviations
+    objective term, the same way `spread()` is distinct from `E_of()`."""
+    b_bar = f.b_bar
+    if not b_bar:
+        return 0.0
+    per_unit = [float(state[s]["used_tib"]) / f.capacity[s] for s in f.storages]
+    return (max(per_unit) - min(per_unit)) / b_bar
+
+
+def case_for(f: Fixture, beta: float, delta: float) -> Dict[str, Any]:
+    """One (beta, delta) pair: the big-M optimum, the lexicographic optimum, and order."""
+    a, val = best_big_m(f, beta, delta, f.big_m_p)
     final = per_storage(f, a)
-    lex_a, lex_slack, lex_nr = best_lexicographic(f, beta)
-    threshold = big_m_agreement_threshold(f, beta)
+    lex_a, lex_slack, lex_nr = best_lexicographic(f, beta, delta)
+    threshold = big_m_agreement_threshold(f, beta, delta)
 
     case: Dict[str, Any] = {
         "beta_move_count": beta,
+        "delta_capacity_spread": delta,
         # Unrounded, for the payback arithmetic; not written to the expected file.
         "_exact_E_after": E_of(f, a),
+        "_exact_F_after": F_of(f, a),
         "expected_objective": round(val, R),
         "expected_move_count": len(moves_of(f, a)),
         "expected_E_after": round(E_of(f, a), R),
+        "expected_F_after": round(F_of(f, a), R),
         "expected_fragmentation": fragmentation(f, a),
         "expected_moves": moves_of(f, a),
         "expected_order": order_moves(f, a),
         "expected_final_loads": {s: final[s]["load"] for s in f.storages},
         "expected_final_reserve": final,
         "expected_spread_after": round(spread(f, final), R),
+        "expected_capacity_spread_after": round(capacity_spread(f, final), R),
         # Section 5.3 option 1, the preferred solve. Recorded so an implementer
         # of the lexicographic path has something to assert against, rather than
         # only the big-M path above.
@@ -388,13 +422,13 @@ def case_for(f: Fixture, beta: float) -> Dict[str, Any]:
                 None if threshold == float("-inf") else round(threshold, R)
             ),
             "big_m_p_configured": f.big_m_p,
-            "big_m_p_min_computed": round(computed_p_min(f, beta), 3),
+            "big_m_p_min_computed": round(computed_p_min(f, beta, delta), 3),
         },
     }
 
     demo_p = f.objective.get("big_m_undersized_p_demo")
     if demo_p is not None:
-        demo_a, demo_val = best_big_m(f, beta, float(demo_p))
+        demo_a, demo_val = best_big_m(f, beta, delta, float(demo_p))
         demo = {
             "p": float(demo_p),
             "expected_objective": round(demo_val, R),
@@ -407,13 +441,14 @@ def case_for(f: Fixture, beta: float) -> Dict[str, Any]:
     return case
 
 
-def payback(f: Fixture, case: Dict[str, Any], e_after: float) -> Dict[str, Any]:
-    """Section 7 payback arithmetic for one case.
+def payback(f: Fixture, case: Dict[str, Any], e_after: float, f_after: float) -> Dict[str, Any]:
+    """Section 7.2 payback arithmetic for one case:
+    ``benefit = (alpha*(E_before-E_after) + delta*(F_before-F_after)) * H``.
 
-    `e_after` is the EXACT objective of the chosen assignment. Taking it from
-    `case["expected_E_after"]` instead would mix an exact E_before with a
-    6-decimal-rounded E_after and shift the recorded benefit off the section 14.5
-    value by a fraction of a load-second.
+    `e_after`/`f_after` are the EXACT objective of the chosen assignment. Taking
+    them from `case["expected_E_after"]`/`case["expected_F_after"]` instead would
+    mix an exact *_before with a 6-decimal-rounded *_after and shift the recorded
+    benefit off the section 14.5 value by a fraction of a load-second.
     """
     keys = [m.split(":")[0] + ":" + m.split(":")[1] for m in case["expected_moves"]]
     per_move = [
@@ -428,10 +463,16 @@ def payback(f: Fixture, case: Dict[str, Any], e_after: float) -> Dict[str, Any]:
         for k in keys
     ]
     total_cost = sum(cost(f, k) for k in keys)
+    alpha = float(f.objective["alpha_spread"])
+    delta_weight = float(case["delta_capacity_spread"])
     delta_e = E_of(f, f.current) - e_after
-    benefit = delta_e * float(f.migration["payback_horizon_seconds"])
+    delta_f = F_of(f, f.current) - f_after
+    benefit = (alpha * delta_e + delta_weight * delta_f) * float(
+        f.migration["payback_horizon_seconds"]
+    )
     return {
         "beta_move_count": case["beta_move_count"],
+        "delta_capacity_spread": case["delta_capacity_spread"],
         "per_move": per_move,
         "total_cost_load_seconds": round(total_cost, 2),
         "benefit_load_seconds": round(benefit, 2),
@@ -443,7 +484,11 @@ def payback(f: Fixture, case: Dict[str, Any], e_after: float) -> Dict[str, Any]:
 def build(f: Fixture) -> Dict[str, Any]:
     """Derive the whole expected file for one fixture."""
     initial = per_storage(f, f.current)
-    cases = [case_for(f, float(beta)) for beta in f.objective["beta_values"]]
+    delta_values = f.objective.get("delta_values", [0.0])
+    cases = [
+        case_for(f, float(beta), float(delta))
+        for beta, delta in itertools.product(f.objective["beta_values"], delta_values)
+    ]
 
     out: Dict[str, Any] = {
         "schema_version": 1,
@@ -458,24 +503,48 @@ def build(f: Fixture) -> Dict[str, Any]:
         "derived": {
             "total_load": round(f.total_load, R),
             "u_star": round(f.u_star, R),
+            "b_bar": round(f.b_bar, R),
             "initial": initial,
             "E_before": round(E_of(f, f.current), R),
+            "F_before": round(F_of(f, f.current), R),
             "spread_before": round(spread(f, initial), R),
+            "capacity_spread_before": round(capacity_spread(f, initial), R),
         },
         "cases": [{k: v for k, v in c.items() if not k.startswith("_")} for c in cases],
     }
 
-    two_move = [c for c in cases if c["expected_move_count"] == 2]
+    # The section 14.3/14.5 worked example at the defaults: beta=0.25,
+    # delta=0.5 -- the two-move plan. Falls back to any two-move case if
+    # the defaults are not in the sweep (not the case for either fixture).
+    two_move = [
+        c
+        for c in cases
+        if c["expected_move_count"] == 2
+        and c["beta_move_count"] == 0.25
+        and c["delta_capacity_spread"] == 0.5
+    ] or [c for c in cases if c["expected_move_count"] == 2]
     if two_move:
-        out["payback_two_move_plan"] = payback(f, two_move[0], two_move[0]["_exact_E_after"])
-        arch_size, arch_delta_e = 4.0, 0.05
+        chosen = two_move[0]
+        out["payback_two_move_plan"] = payback(
+            f, chosen, chosen["_exact_E_after"], chosen["_exact_F_after"]
+        )
+        # Section 14.5's counter-example: a 4 TiB archive disk whose
+        # relocation improves E by only 0.01 and leaves the data spread
+        # essentially unchanged (delta*F contributes ~0) -- alpha/delta at
+        # the same defaults as the two-move plan above.
+        arch_size, arch_delta_e, arch_delta_f = 4.0, 0.01, 0.0
+        alpha = float(f.objective["alpha_spread"])
+        delta_weight = float(chosen["delta_capacity_spread"])
         omega = float(f.migration["source_load_weight"] + f.migration["target_load_weight"])
         # saferemove is off in this fixture, so there is no wipe term to add.
         arch_cost = arch_size * TIB / float(f.migration["bwlimit_bytes_per_sec"]) * omega
-        arch_benefit = arch_delta_e * float(f.migration["payback_horizon_seconds"])
+        arch_benefit = (alpha * arch_delta_e + delta_weight * arch_delta_f) * float(
+            f.migration["payback_horizon_seconds"]
+        )
         out["payback_rejected_archive_disk"] = {
             "size_tib": arch_size,
             "delta_E": arch_delta_e,
+            "delta_F": arch_delta_f,
             "cost_load_seconds": round(arch_cost, 2),
             "benefit_load_seconds": round(arch_benefit, 2),
             "ratio": round(arch_benefit / arch_cost, 3),
