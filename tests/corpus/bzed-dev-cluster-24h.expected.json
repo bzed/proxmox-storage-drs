@@ -6,13 +6,16 @@
         "groups": [
           {
             "after_capacity_spread": 0.9264614379850156,
+            "after_objective_total": 0.4776632014798669,
             "after_spread": 0.0012555274007314818,
             "before_capacity_spread": 1.1189049969080853,
+            "before_objective_total": 0.645747336680275,
             "before_spread": 0.04868579173307583,
             "deadlock_message": null,
             "deadlocked": [],
             "gate": {
               "act": true,
+              "capacity_fraction": 1.1189049969080853,
               "drift_fraction": null,
               "imbalance_fraction": null,
               "reason": "capacity spread 111.9% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance",
@@ -49,21 +52,6 @@
                 "size_bytes": 80530636800,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 244122
-              },
-              {
-                "cost_load_seconds": 0.01,
-                "device": "efidisk0",
-                "disk_key": "92831:efidisk0",
-                "duration_mirror_seconds": 0.005,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-9034bbcd",
-                "imbalance_reduction": 0.0,
-                "load_per_tib": 0.0,
-                "resolves_reserve_violation": false,
-                "size_bytes": 1048576,
-                "to_storage": "stor-593d0eeb",
-                "vmid": 92831
               },
               {
                 "cost_load_seconds": 512.0,
@@ -109,6 +97,21 @@
                 "size_bytes": 26843545600,
                 "to_storage": "stor-593d0eeb",
                 "vmid": 92831
+              },
+              {
+                "cost_load_seconds": 0.01,
+                "device": "efidisk0",
+                "disk_key": "92831:efidisk0",
+                "duration_mirror_seconds": 0.005,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-9034bbcd",
+                "imbalance_reduction": 0.0,
+                "load_per_tib": 0.0,
+                "resolves_reserve_violation": false,
+                "size_bytes": 1048576,
+                "to_storage": "stor-593d0eeb",
+                "vmid": 92831
               }
             ],
             "name": "group-448ef164",
@@ -140,13 +143,16 @@
         "groups": [
           {
             "after_capacity_spread": 0.4607438720480041,
+            "after_objective_total": 0.28878872027280167,
             "after_spread": 0.00034089797454694276,
             "before_capacity_spread": 1.1189049969080853,
+            "before_objective_total": 0.645747336680275,
             "before_spread": 0.04868579173307583,
             "deadlock_message": null,
             "deadlocked": [],
             "gate": {
               "act": true,
+              "capacity_fraction": 1.1189049969080853,
               "drift_fraction": null,
               "imbalance_fraction": null,
               "reason": "capacity spread 111.9% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance",

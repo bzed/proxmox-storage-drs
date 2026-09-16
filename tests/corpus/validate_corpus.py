@@ -394,6 +394,56 @@ def _scrub_sample_series_message(
     )
 
 
+# AA-02: `_redact_free_text()`'s group-name substitution (87b4a6c) fixed
+# new captures, but nothing checked that an *already-committed* bundle's
+# `manifest.json` actually stayed within its own config.yaml's group
+# names -- a real group name reached two committed bundles' call logs
+# this way, invisible to every value-pattern check above: a bare group
+# name has no punctuation shape to match, the same reason Z-01's bare
+# Telegraf host tag needed its own structural check. This is that check
+# for `_drive_group_series()`'s own "instant quantile_over_time ... (<group
+# name>)" description shape.
+_GROUP_QUALIFIER_RE = re.compile(r"^instant quantile_over_time \S+ q=[\d.]+ \((?P<group>.+)\)$")
+
+
+def _configured_group_names(config_path: Path) -> frozenset[str]:
+    if not config_path.is_file():
+        return frozenset()
+    import yaml
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    groups = raw.get("groups", [])
+    return frozenset(g["name"] for g in groups if isinstance(g, dict) and "name" in g)
+
+
+def _scrub_manifest_group_names(manifest_path: Path, config_path: Path) -> list[str]:
+    if not manifest_path.is_file():
+        return []
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"{manifest_path}: could not read/parse: {exc}"]
+    group_names = _configured_group_names(config_path)
+    if not group_names:
+        return []
+    calls = data.get("calls") if isinstance(data, dict) else None
+    if not isinstance(calls, list):
+        return []
+    violations: list[str] = []
+    for i, call in enumerate(calls):
+        description = call.get("description") if isinstance(call, dict) else None
+        if not isinstance(description, str):
+            continue
+        match = _GROUP_QUALIFIER_RE.match(description)
+        if match and match.group("group") not in group_names:
+            violations.append(
+                f"{manifest_path}: calls[{i}].description carries group qualifier "
+                f"{match.group('group')!r}, not one of this bundle's own group names "
+                f"{sorted(group_names)}"
+            )
+    return violations
+
+
 def _scrub_findings_json(findings_path: Path, config_path: Path) -> list[str]:
     if not findings_path.is_file():
         return []
@@ -445,6 +495,11 @@ def scrub_audit(bundle: Bundle) -> list[str]:
             violations.extend(_scrub_json_file(path, None))
     violations.extend(
         _scrub_findings_json(bundle.directory / "findings.json", bundle.directory / "config.yaml")
+    )
+    violations.extend(
+        _scrub_manifest_group_names(
+            bundle.directory / "manifest.json", bundle.directory / "config.yaml"
+        )
     )
     violations.extend(_scrub_node_or_storage_ids(bundle.directory))
     violations.extend(_scrub_config_yaml(bundle.directory / "config.yaml"))
@@ -745,10 +800,72 @@ def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> lis
 # -- `mip_gap` bounds suboptimality of the five-term objective, not of any
 # one term taken in isolation, and a tiny baseline spread turns a small
 # absolute gap into a huge relative one. Getting this right needs the
-# objective breakdown itself, which today only `explain --json` emits (see
-# `check_invariants`'s own docstring) -- a real and deliberate gap, named
-# here rather than shipped as a check that would have been flaky on the
-# first real bundle to exercise it.
+# objective breakdown itself, which today only `explain --json` emitted at
+# the time this note was written -- `plan --json`'s own
+# `before/after_objective_total` (added for REVIEW.md AA-01) closes that
+# gap; `check_milp_objective_total()` below is the check this note used to
+# say could not be shipped yet.
+
+
+def check_milp_objective_total(bundle: Bundle, results: list[VariantResult]) -> list[str]:
+    """REVIEW.md AA-01's own recommendation, the objective-level version of
+    `check_milp_vs_heuristic()`'s dominance check: "not dominated" is
+    checkable cheaply from the two spread axes alone, but "optimized the
+    objective we wrote" needs the objective itself. CP-SAT's (C7)
+    linearization once scaled `d_s` six orders of magnitude too strongly,
+    so the default `auto` backend planned mass relocations that were
+    *worse* than doing nothing on the very objective `solver.*`/
+    `objective.*` configure -- invisible to the Pareto check above because
+    the amplified plan traded a tiny, real gain on one axis for a huge,
+    illegitimate one on the other, so neither spread axis alone was ever
+    "both worse". Asserts each MILP backend's `after_objective_total` is
+    no worse than the heuristic's by more than `solver.mip_gap` (the
+    backend's own configured suboptimality tolerance on this exact
+    objective) plus a small floor for near-zero objectives, catching this
+    class of scaling defect at any `delta_capacity_spread`, for any future
+    objective term, without needing a dedicated fixture for each."""
+    import yaml
+
+    violations = []
+    raw_config = yaml.safe_load((bundle.directory / "config.yaml").read_text(encoding="utf-8"))
+    mip_gap = raw_config.get("solver", {}).get("mip_gap", 0.02)
+    by_key: dict[tuple[Any, ...], dict[str, VariantResult]] = {}
+    for result in results:
+        if result.report is None:
+            continue
+        key = (
+            result.variant["spread_metric"],
+            result.variant["forecast_model"],
+            result.variant["beta"],
+        )
+        by_key.setdefault(key, {})[result.variant["solver_backend"]] = result
+    for key, by_backend in by_key.items():
+        heuristic = by_backend.get("heuristic")
+        for backend_name in ("cbc", "cpsat"):
+            milp = by_backend.get(backend_name)
+            if heuristic is None or milp is None:
+                continue
+            if heuristic.report is None or milp.report is None:
+                continue
+            heuristic_by_name = {g["name"]: g for g in heuristic.report["groups"]}
+            milp_by_name = {g["name"]: g for g in milp.report["groups"]}
+            for name, h_group in heuristic_by_name.items():
+                m_group = milp_by_name.get(name)
+                if m_group is None:
+                    continue
+                h_total = h_group.get("after_objective_total")
+                m_total = m_group.get("after_objective_total")
+                if h_total is None or m_total is None:
+                    continue
+                tolerance = mip_gap * max(abs(h_total), abs(m_total), 1.0) + 1e-6
+                if m_total > h_total + tolerance:
+                    violations.append(
+                        f"{bundle.name} {key} group {name!r}: {backend_name}'s plan scores "
+                        f"{m_total:g} on the configured objective against the heuristic's "
+                        f"{h_total:g} -- worse by more than solver.mip_gap ({mip_gap:g}), i.e. "
+                        f"{backend_name} did not optimize the objective it was given"
+                    )
+    return violations
 
 
 # ------------------------------------------------------------- regression
@@ -793,6 +910,7 @@ def main(argv: list[str]) -> int:
         results = run_variant_matrix(bundle, full_matrix=full_matrix)
         all_violations.extend(check_invariants(bundle, results))
         all_violations.extend(check_milp_vs_heuristic(bundle, results))
+        all_violations.extend(check_milp_objective_total(bundle, results))
 
         expected = build_expected(bundle, results)
         text = json.dumps(expected, indent=2, sort_keys=True) + "\n"

@@ -31,3 +31,19 @@ repairs:
     repaired_by: this commit (rebuilt each message from the structured
       sample_series field beside it, per tests/corpus/README.md's repair
       procedure; SHA256SUMS updated to match)
+  - date: 2026-09-16
+    what_leaked: >
+      manifest.json's twelve "instant quantile_over_time ... (bzed-shared)"
+      call-log descriptions carried the real, unpseudonymized group name
+      that 87b4a6c's _redact_free_text() group-name substitution was meant
+      to remove -- the fix corrected only new captures, not this
+      already-committed bundle (REVIEW.md AA-02). Note: this same group
+      name is deliberately named in this file's own what_this_reproduces
+      above as submitter-disclosed provenance; the leak is specifically
+      that it also reached manifest.json, the channel section 16.3's
+      redaction rules govern.
+    fixed_by: 87b4a6c (collector fix, prior commit)
+    repaired_by: this commit (replaced the group qualifier with this
+      bundle's own group-448ef164 pseudonym, from this bundle's own
+      config.yaml, per tests/corpus/README.md's repair procedure;
+      SHA256SUMS updated to match)

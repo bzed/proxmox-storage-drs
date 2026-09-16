@@ -186,6 +186,25 @@ local `make check` (the in-progress `cluster-a` bundle sitting in the committed-
 namespace instead of the `tests/corpus/local/` scratch space), and one Info on §16's promise
 that `findings.json` carries `verify-storages` output, which no build has ever implemented.
 
+An **eighteenth pass** (section 35) reviews everything after the Z-fixes: release 0.1.4, plan
+§12 (the capacity-spread objective/gate and one-year payback horizon) with its implementation,
+four collect/replay/anonymize dogfooding fixes, and the AGENTS.md workflow hardening. Eight
+findings (AA-01..AA-08) are identified: one **High** — the CP-SAT backend's new (C7) term is
+integer-scaled six orders of magnitude too strongly, so with ortools installed (the default
+`auto` cascade's first choice) the solver optimizes data spread with an effective
+`delta_capacity_spread` of ~500,000 and returns plans up to 3.2× worse on the specified
+objective than moving nothing — reproduced on a committed corpus bundle, and every gate is
+blind to it; one Medium — both committed bundles still carry a real group name in their
+`manifest.json` call logs, the exact leak shape the range's own last fix corrected for *new*
+captures (Z-01's pattern, one identifier kind later); four Low (a wrong §14.6 table cell; the
+revised §8.2 ordering rule never implemented; a stale "five terms" documentation cluster plus
+the new `plan`/`show-load` JSON fields undocumented; §9.5's new "data:" sample line that no
+renderer prints); one Low on process (eight substantive commits straight to `main`, one
+knowingly red for two commits); one Info. **Section 36** records the resolution: AA-01..AA-06
+and AA-08(a)'s underlying concern are fixed (AA-08(a) itself is refuted as unreachable, more
+strongly than the finding claimed); AA-07 is acknowledged without a process change, and
+AA-08(b) without a code change, both per the operator's own direction.
+
 ---
 
 ## 0. Overall assessment
@@ -5027,6 +5046,399 @@ same two committed bundles stale for the pre-existing, unrelated reason section 
 documented (the narrow-vs-full-matrix skip-reason difference for `seasonal_naive`/`holt_winters`
 against a 24h-lookback bundle) — reproduced identically, out of this pass's scope for the same
 reason it was out of the sixteenth pass's.
+
+---
+
+## 35. Eighteenth-pass review — plan §12 (capacity spread, one-year payback), its implementation, release 0.1.4, and four dogfooding fixes
+
+Reviewed commit range `5397c45..HEAD` (the Z-01..Z-08 fixes themselves are recorded in section
+34 and are verified here rather than re-reviewed). Nine non-merge commits: `32db294` (AGENTS.md
+release rules: changelog entry + annotated `debian/<version>` tag on every version bump),
+`036617c` (Release 0.1.4), `a4fbaa8` (a shared storage's capture node is picked from the same
+pseudonym-sorted view `--replay` will derive its pick from — a real bundle, `cluster-g`, hit the
+disagreement), `9b053d8` (`anonymize.py` accepts PVE's `.<format>` suffix on volume names,
+found on a real cluster's qcow2-on-shared-LVM disks whose volids were silently dropped whole),
+`97368f0` (the plan change: §12 — `δ`/§5.3 (C7) data-spread term, §6 capacity gate, §7.2's
+`H = 365d` and two-term benefit, §14 rewritten around them), `df77140` (a range capture taken
+with `collect-testdata --step` replays: a step mismatch is now a recoverable
+`RangeStepMismatch` carrying the bundle's real step, not a hard `BundleError`), `71c306f` (the
+phase 12 implementation: config, heuristic, gates, both MILP backends, payback, CLI, fixtures,
+corpus), `87b4a6c` (`_redact_free_text()` substitutes group names — real group names reached
+committed bundles' `manifest.json` call logs), and `e4240fa`/`ee2d805` (AGENTS.md's branch-first
+rule made mechanical — the range's only branch-merged commit). This pass was tasked with the
+updated implementation as a whole, with §12 as its centre of gravity.
+
+The headline, up front: **the §12 specification work is of this plan's usual quality, the
+heuristic/CBC/gate/payback wiring implements it correctly, and the CP-SAT backend does not** —
+its (C7) term carries a six-orders-of-magnitude scaling error that makes the default `auto`
+cascade plan mass relocations for fill evenness while ignoring migration penalties and I/O
+balance (AA-01, reproduced on a committed bundle). Every gate — suite, fixtures, corpus,
+cross-backend check — is blind to it, each for an unrelated, individually-reasonable reason.
+
+### 35.1 Verification run
+
+- `make check` at HEAD (`ee2d805`): green end to end — fmt-check, lint, typecheck, **878 passed,
+  1 warning** (the same benign statsmodels `ConvergenceWarning` noted since the eleventh pass),
+  **96.31% line coverage**, `generate_expected.py --check` OK, `validate_corpus.py --check` OK,
+  docs-check OK.
+- Release hygiene: version agreement (0.1.4 in `debian/changelog`, `pyproject.toml`,
+  `__init__.py`); the 0.1.4 changelog entry covers the whole Z-range accurately, including the
+  Z-04 correction its resolution deferred to "the next actual release"; annotated tag
+  `debian/0.1.4` on `036617c`, tagger `Bernd Zeimetz <bernd@bzed.de>`, message `pve-storage-drs
+  0.1.4` — the first release shipped under `32db294`'s new rule, and it complies.
+- **All eight Z-fixes verified in place**: `data001` gone from both committed `findings.json`
+  (0 hits); `_scrub_findings_json()` and its three tests in `validate_corpus.py`; the Z-02
+  rebuild shapes (`missing_disks_by_metric`, the coverage/cross-metric `_redact_finding_message`
+  paths, both end-to-end foreign-vmid regression tests); the Z-03 root-cause fix
+  (`build_node_selector()` for the anonymized map side, the bare-probe fallback, the
+  no-selector-in-any-query-file and bundle-replays tests); Z-05's `estimate_capture()` at
+  `safe_range_step_seconds()` with the pinned-factor test; Z-06's four documents; Z-07's
+  `local/` and "Repairing an already-committed bundle" README sections; Z-08's §16 wording.
+- §14's new numbers re-derived by hand: §14.2's fills 56%/19%/6%, `b̄ = 0.2708`, `F_before =
+  2.1538`, capacity gate `(0.5625−0.0625)/0.2708 = 1.85` ✓; §14.3's two-move `E_after = 1.5333`,
+  `F_after = 0.3077`, full objectives 2.812 vs 2.918, the δ=0 β-flip at 0.375, and the affinity
+  comparison 3.52 vs 2.19 ✓; §14.5's benefit 235,145,354, ratio 8,970, and the rejected 4-TiB
+  move at ratio 7.5 ✓; §14.6's rows one and two (11.25, 2.18), flip point 9.08 and `P_min =
+  23.6·2²⁰ ≈ 2.47×10⁷` ✓ — all matching the regenerated fixtures byte-for-byte, except one cell
+  (AA-03).
+- The regenerated `fc-tier1` fixture sweeps `(β, δ) ∈ {0.25, 0.5} × {0.0, 0.5}` at
+  `payback_horizon: 365d`; the δ=0 cases record the three-move plan, the defaults the two-move
+  plan, exactly as §14.3's two knob demonstrations claim.
+- The CP-SAT experiments of AA-01 were run in the dev venv (ortools 9.15) against the §14 group
+  and, end to end, against the committed `bzed-dev-cluster-24h` bundle (in-process at the
+  bundle's own configured weights, and via `--replay … plan`, where `solver.backend: auto`
+  resolves to cpsat).
+
+### 35.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| AA-01 | High | `optimize.py` (CP-SAT), plan §5.5 | The (C7) integer linearization builds `d_s` at a 10¹² scale (`_FILL_SCALE`) while `delta_scaled = round(δ·W)` presumes §5.5's 10⁶ scale — CP-SAT's effective `delta_capacity_spread` is the configured value ×10⁶ (500,000 at the defaults), swamping α/β/γ/κ; with ortools installed the default `auto` backend returns plans up to 3.2× worse on the specified objective than moving nothing (reproduced on a committed bundle), and no gate catches it: the corpus default sweep skips cpsat, the fixture's δ=0.5 case cannot distinguish the amplified objective, and the MILP-vs-heuristic check was relaxed to two-axis Pareto dominance in the same commit |
+| AA-02 | Medium | `tests/corpus/*/manifest.json`, `validate_corpus.py` | Both committed bundles still carry the real group name `bzed-shared` twelve times each in their `manifest.json` call-log free text — the exact leak shape `87b4a6c` fixed for new captures, whose own test docstring names committed bundles as the find; the fix corrected only the collector, the audit still cannot see a bare group name, and the Z-07 repair procedure was not applied |
+| AA-03 | Low | plan §14.6 | The "both moved to `cramped`" non-reserve-objective cell says 11.85; (C7) gives F = 5.0 (`b_roomy = 0`, `b_cramped = 1.0` against `b̄ = 0.2`), so the cell is 10 + 0.5 + 0.1 + 2.5 = **13.10** — 11.85 reuses the current assignment's F = 2.5; inert to the section's conclusions (the flip point compares against 11.25) but §14 is the plan's hand-verifiable worked example |
+| AA-04 | Low | `schedule.py`, `generate_expected.py`, plan §8.2/§14.4 | §8.2's revised ordering rule ("persistent-objective reduction … the α and δ terms") and §14.4's matching claim were never implemented: `order_moves()` — in both the engine and the fixture generator — still ranks by α-only `imbalance_term`; code and fixture agree with each other and with the *old* §8.2 |
+| AA-05 | Low | plan §2.3, `docs/manual/`, `docs/internals/` | The six-term objective landed over a stale "five terms" cluster — plan §2.3's `plan_selected` audit row, manual 29-explain (prose + JSON field list), manual 30's explain row, manual 10:710, internals 40:61 and 90:190,221 — and both PDFs were rebuilt and re-stamped *with* the stale text, so docs-check now enforces it; also `plan --json`'s new `before/after_capacity_spread` are missing from 27-plan.md's field list and `show-load --json`'s new `capacity_fraction` from manual 25's gate-field description |
+| AA-06 | Low | plan §9.5, `cli.py` | §9.5's updated sample gained a `data:  fill 25%/31%/25%  deviation 31% (from 215%)` line that no renderer prints — `plan`/`apply` print `after:`/`spread:` only, `explain` has no fill line either — and the V-02 "As built" paragraph directly below, which exists to say which sample lines belong to `explain`, was not extended to cover it |
+| AA-07 | Low | git workflow | Eight substantive commits landed straight on `main` with no branch (`32db294`, `036617c`, `a4fbaa8`, `9b053d8`, `97368f0`, `df77140`, `71c306f`, `87b4a6c`) — the exact "string of small, individually-reasonable-looking commits" pattern `e4240fa`'s rule exists to stop, and the rule-hardening commit is the range's only branch; `9b053d8` additionally landed with `make pdf-check` red (disclosed in its commit message, healed two commits later by `97368f0`) against §7.4's same-commit rule and §4's main-must-stay-green |
+| AA-08 | Info | `collect.py`, `tests/unit/` | (a) `a4fbaa8`'s `real_node_by_pseudonym.get()` silently drops the (node, storage) capture pair when the picked node is absent from `/nodes` — the bundle then lacks the content/status file replay will ask for and fails late; (b) `9b053d8`/`87b4a6c`'s test docstrings quote real production identifiers verbatim (`dc6_con-abn-pve-dc6_T2T3_001:vm-101-disk-1.qcow2…`, `dc6_T2`) into committed sources, a posture inconsistency with the anonymization machinery rather than a bundle leak |
+
+### 35.3 AA-01 — CP-SAT's (C7) term is scaled 10⁶× too strongly; the default backend optimizes the wrong objective
+
+**Severity:** High
+**Files:** `src/proxmox_storage_drs/optimize.py` (`_FILL_SCALE`, `_cpsat_fill_scale_for()`,
+`_cpsat_capacity_spread_term()`), `IMPLEMENTATION_PLAN.md` §5.5
+
+The (C7) linearization builds, per storage, `k_s = round(_FILL_SCALE / (b̄·C_s_MiB))` with
+`_FILL_SCALE = 10¹²`, and `d_s ≥ k_s·|numerator_MiB − round(b̄·C_s_MiB)|` — so `d_s` is a
+**10¹²-scaled** relative fill deviation (`d_s ≈ 10¹²·|b_s − b̄|/b̄`; the code comment itself
+derives this shape). Every other objective variable in the model is scaled by §5.5's
+`K = 10⁶` (`e_s` via `a_{d,s} = round(K·ℓ_d/c_s)`), and every weight by `W = 10⁴` — including
+`delta_scaled = round(δ·W)`, which per §5.5's own scaling table presumes `d_s` sits on the same
+10⁶ scale as `e_s` ("`K` | the load-valued variables `e_s`, `t`, the fill-deviation variables
+`d_s` … | 10⁶"). Multiplying a 10¹²-scale variable by a 10⁶-scale weight makes the term's
+effective magnitude `round(δ·W)·10¹²/(W·K) = δ·10⁶` relative to the rest of the objective:
+
+- at the new default `δ = 0.5`, CP-SAT optimizes with an **effective δ of 500,000** against
+  `α = 1` — §5.4's "`δ` defaults to half of `α`" and §1's "I/O stays first priority by weight
+  and by scale" are both simply false for this backend;
+- at `δ = 10⁻⁴` (total term contribution ~3×10⁻⁵ — the true optimum is the δ=0 optimum), the
+  effective δ is ~100;
+- at `δ ∈ (0, 5×10⁻⁵)`, `round(δ·W)` is 0 and `_assert_nonzero_when_weighted` raises
+  `AssertionError: delta_scaled rounded to 0 …` on a schema-legal config — this half is §5.5's
+  mandated zero-coefficient guard behaving as it already does for α/β/γ/κ, not a separate
+  defect, but it marks the granularity floor.
+
+**Reproduced twice.** (1) The §14 group at `δ = 10⁻⁴`: the heuristic returns the three-move
+plan (the δ=0 optimum, as expected for a negligible δ); CP-SAT returns the two-move plan —
+on the specified objective that plan is worse by 0.125, and its advantage exists only on the
+amplified capacity term. (2) The committed `bzed-dev-cluster-24h` bundle at its own configured
+weights (α=1, β=0.25, γ=0.05, κ=0.5, δ=0.5 by default), evaluated through the same
+`evaluate_assignment()` the engine uses: the specified objective's optimum is **no moves**
+(total 0.6457; imbalance term 0.086, capacity term 0.559) — the heuristic and CBC both find it;
+**CP-SAT returns a 4-move plan that splits VM 612603 across storages** (move-count term 1.0,
+fragmentation 0.5, bytes 0.057) **for a total of 2.0951 — 3.2× worse than doing nothing** —
+buying `after_capacity_spread` 0.0011 from 1.119 with real migrations no term of the specified
+objective justify. `solver.backend: auto` is `("cpsat", "cbc")`, so every environment with
+ortools (the dev venv's `solver` extra, CI) plans with the broken backend by default; a plain
+`--replay tests/corpus/bzed-dev-cluster-24h plan` on this checkout exhibits it (capacity gate
+ACT at 111.9%, four moves, payback accepted at the one-year horizon — in `apply`'s execution
+modes this plan would be executed). The packaged Debian install falls through to CBC and is
+unaffected — which is also why production dogfooding has not yet hit it.
+
+**Why every gate is blind.** The corpus default sweep skips cpsat entirely ("not swept without
+`--full-matrix`"), so the committed expected files record heuristic and cbc only.
+`test_optimize.py`'s two §12 tests are δ=0 (term not built) and δ=0.5 — on the §14 group the
+minimum-F assignment set happens to *coincide* with the true optimum, so CP-SAT "agrees" with
+the fixture at exactly the one δ the fixture sweeps. And `check_milp_vs_heuristic()` was
+relaxed in the same commit from `after_spread` alone to two-axis Pareto dominance — a correct
+generalization on its own terms (CBC demonstrably and legitimately trades imbalance for spread
+at the true weights), but exactly the property that lets a plan which is better *only* on the
+capacity axis through: the amplified plan is never dominated. The commit's own corpus narrative
+("cbc's after_spread was ~96× the heuristic's … but its full objective total was *lower*")
+observed the legitimate version of this trade and generalized the check past the point where it
+could catch the broken one.
+
+**Recommendation.** Make the term commensurate with the rest of the model — either build the
+per-(disk, storage) coefficients `round(K·z_d/(b̄·C_s))` with the constant
+`round(K·(1 − Uˢᵉˣᵗ/(C_s·b̄)))` exactly as §5.5 specifies (`K = 10⁶`; the coefficient is ≥ 1
+for any disk of ~2 MiB and up at §14's shape — only sub-MiB volumes round to zero, worth an
+as-built note), or keep the per-storage `k_s` decomposition and rescale `delta_scaled` by
+`K/_FILL_SCALE`. Then add the regression that fails today: cpsat-vs-heuristic at
+`delta_capacity_spread: 0.0001` on the §14 group asserting the three-move optimum — and,
+stronger and δ-independent, re-score every backend's returned assignment through
+`evaluate_assignment()` at true weights inside the corpus check and assert the MILP's total ≤
+the heuristic's plus the `mip_gap` tolerance ("the MILP optimized the objective we wrote", the
+objective-level version of the dominance check). Update §5.5's table row and folding sentence
+to the as-built decomposition, and regenerate the `--full-matrix` expected files, which
+currently record the amplified cpsat behaviour.
+
+### 35.4 AA-02 — the committed bundles still carry the group-name leak the range's last fix removes
+
+**Severity:** Medium
+**Files:** `tests/corpus/bzed-dev-cluster-24h/manifest.json`,
+`tests/corpus/bzed-dev-cluster-7d-holt-winters/manifest.json`, `tests/corpus/validate_corpus.py`
+
+`87b4a6c` extended `_redact_free_text()` with group-name substitution, registered
+`known_groups` on the mapper (with the pseudonym-collision check), and pinned the shape with a
+regression test — and its own test docstring records the find: "real group names (e.g. `dc6_T2`)
+reached committed corpus bundles' `manifest.json` verbatim". Like `bb9417b` before it (Z-01),
+the fix corrected only the collector. Both committed bundles still carry the real group name
+`bzed-shared` **twelve times each** in `manifest.json`'s call-log free text
+(`instant quantile_over_time write_time_ns q=0.95 (bzed-shared)`), while each bundle's
+`config.yaml` carries only the pseudonym `group-448ef164` — the file contradicts itself, the
+scrub audit's value patterns cannot see a bare group name (no dot, no public suffix, and group
+names appear in no allowlist), and the "Repairing an already-committed bundle" procedure that
+Z-07's fix added to the corpus README for exactly this contingency was not applied. One nuance
+the seventeenth pass did not have: the 24h bundle's `.submission.yaml` deliberately names
+`bzed-shared` as provenance, so *this* name is not secret in this repository — but the manifest
+is the channel §16.3's redaction rules govern, the fix's motivating example was a *production*
+group name, and a collector whose committed corpus still contradicts it is precisely the state
+Z-01 existed to end.
+
+**Recommendation:** repair both manifests by replacing the group qualifier with each bundle's
+own `group-<8hex>` pseudonym (mechanical, salt-free — the pseudonym is in the bundle's own
+`config.yaml`), update `SHA256SUMS`, and record the repair in the submission files per the
+README procedure. Teach the audit the shape: every parenthesised group qualifier in a call
+description must be one of the bundle config's own group names.
+
+### 35.5 AA-03 — §14.6's "both moved" cell does not derive
+
+**Severity:** Low
+**Files:** `IMPLEMENTATION_PLAN.md` §14.6
+
+The table's third row says both disks moved to `cramped` costs a non-reserve objective of
+11.85 at `β = 0.25, δ = 0.5`. The four other terms give `10 + 0.5 + 0.1 = 10.6`, so 11.85
+implies `δ·F = 1.25`, i.e. `F = 2.5` — the F of the *current* assignment (row one). Both disks
+on `cramped` gives `b_roomy = 0`, `b_cramped = 5/5 = 1.0` against `b̄ = 0.2`, so `F = 1 + 4 =
+5.0`, `δ·F = 2.5`, and the cell is **13.10** — confirmed with the generator's own
+`objective_nonreserve()` (`current: 11.25 / one-moved: 2.175 / both-moved: 13.100`). The error
+is inert — the row is dominated either way, the `big_m_agreement_threshold_p` of 9.08 compares
+against 11.25, and `P_min = 23.6·2²⁰` all verify against the regenerated fixture — but §14 is
+the plan's executable acceptance fixture, its tradition is that every number hand-derives, and
+this pass's own regeneration made the table newly checkable in exactly this shape.
+
+### 35.6 AA-04 — §8.2's revised ordering rule was never implemented
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/schedule.py` (`order_moves`),
+`tests/fixtures/generate_expected.py` (`order_moves`), plan §8.2, §14.4
+
+`97368f0` rewrote §8.2's scheduling pseudocode to `m ← argmax over feasible of
+(persistent-objective reduction) / cost_m` with the gloss "the α and δ terms of §5.4 — the
+parts whose improvement persists; β/γ are one-time costs", and §14.4 now claims move 1 "has
+the largest persistent-objective reduction per unit cost". The engine still ranks candidates by
+`evaluate_assignment(...).imbalance_term` — α only — and the fixture generator mirrors it with
+`(E_of(state) − E_of(next)) / cost`, so code and fixture agree with each other and with the
+*pre-§12* §8.2, while the plan describes a rule neither implements. The divergence is invisible
+on the §14 fixture (the ordering coincides) but real whenever a pending move trades I/O balance
+for data spread — exactly the trade δ exists to express, so the front-loaded-value ordering
+§8.2's prose argues for would differ. Per AGENTS.md §7.6, one of the two is a bug: either
+score `α·ΔE + δ·ΔF` in both implementations, or revert §8.2/§14.4 to "imbalance reduction" and
+say why δ stays out of the ratio (its ΔF is often dominated by the assignment's *final* state,
+not the move's own effect, which is a legitimate design argument — but it has to be made in the
+plan, not silently contradicted by the code).
+
+### 35.7 AA-05 — the six-term objective over a stale "five terms" documentation cluster
+
+**Severity:** Low
+**Files:** `IMPLEMENTATION_PLAN.md` §2.3, `docs/manual/29-explain.md`,
+`docs/manual/30-safety-and-status.md`, `docs/manual/10-configuration.md`,
+`docs/manual/27-plan.md`, `docs/manual/25-show-load-and-verify-storages.md`,
+`docs/internals/40-cli-and-logging.md`, `docs/internals/90-heuristic.md`
+
+`71c306f` added the sixth term to `ObjectiveBreakdown`, `explain --json`'s `objective`, the
+audit log, and both "closest alternative" renderers — and updated the plan's §9.5 sample and
+§16.6, but not the layer that documents the output shape. Still saying "five terms" (or "the
+five terms" as an exhaustive list) after the change: plan §2.3's `plan_selected` audit row
+("move count, the five objective terms" — the built audit log carries the six-term
+`_objective_breakdown_json`); `29-explain.md`'s `objective:` line prose and its `--json` field
+list (twice); `30-safety-and-status.md`'s explain row; `10-configuration.md`'s
+reserve-penalty cross-reference (line 710); `40-cli-and-logging.md` line 61; `90-heuristic.md`
+lines 190 and 221. Both PDFs were rebuilt and re-stamped in the same commit *with* the stale
+text, so `make docs-check` now enforces the lie. Two neighbouring field-list gaps: `plan
+--json` gained `before_capacity_spread`/`after_capacity_spread` (consumed by
+`validate_corpus.py`) but `27-plan.md`'s field list still ends at `before_spread`/`after_spread`
+(line 195), and `show-load --json`'s gate block gained `capacity_fraction` but
+`25-show-load-and-verify-storages.md` documents `drift_fraction`/`imbalance_fraction` only —
+the AGENTS.md §8.6 "tests, not good intentions" enforcement apparently covers CLI options and
+config knobs, not JSON field lists.
+
+**Recommendation:** one documentation sweep: the seven "five terms" locations, the two field
+lists, rebuild both PDFs; consider a tiny test asserting `29-explain.md`'s documented objective
+key set equals `_objective_breakdown_json()`'s keys, which would have failed here and holds
+the manual to the same standard the config-knob tests already hold §8.3.
+
+### 35.8 AA-06 — §9.5's new "data:" sample line is printed by nothing
+
+**Severity:** Low
+**Files:** `IMPLEMENTATION_PLAN.md` §9.5, `src/proxmox_storage_drs/cli.py`
+
+`97368f0`/`71c306f` added a `data:  fill 25%/31%/25%  deviation 31% (from 215%)` line to §9.5's
+sample plan output. No renderer prints it: `plan`/`apply`'s human output ends at `after:` /
+`spread:` / payback (`_render_group_plan_human()`), and `explain`'s human output has no fill
+line either — the fill quantities reach a human only indirectly, via the gate reason and the
+`spread` term of the objective line. The V-02 "As built" paragraph immediately below the
+sample — which exists precisely to say which of the sample's lines belong to `explain` rather
+than `plan` — was not extended to cover the new line, so a reader matching output to spec will
+look for a line that never appears, the exact V-02 failure mode the paragraph was written to
+close. (Phase 12's acceptance bullet "`explain` reports the fill deviation" is satisfied only
+by `--json` scalars — `before/after_capacity_spread` and the objective's `capacity_spread_term`
+— which is defensible, but then the sample and its disclaimer should say so.)
+
+### 35.9 AA-07 — eight substantive commits straight to `main`, one knowingly red
+
+**Severity:** Low
+**Files:** git history `5397c45..ee2d805`, AGENTS.md §4/§7.4
+
+The range's eight substantive commits (all listed in 35.1's first paragraph) landed linearly on
+`main` with no branch and no merge — against AGENTS.md §4's branch-first rule as it already
+stood ("Branch before you edit, not after … 'just fix this one thing' is not an exception"),
+the exact pattern `e4240fa`'s rewrite names as its target ("a string of small,
+individually-reasonable-looking commits landing straight on `main`"), with the sharpening
+commit itself the range's only branch. `9b053d8` additionally landed with `make pdf-check` red
+— its commit message discloses the sandbox-local `make pdf` failure and says "make pdf-check
+will fail until then", which is honest and exactly the wrong state for `main` per §7.4 ("run
+`make pdf` and commit the regenerated PDF … in the *same* commit as the Markdown") and §4
+("main must stay green"); `97368f0` healed the drift two commits later. Z-07 made this same
+point about 0.1.3; the pattern then repeated inside the very range that hardened the rule
+against it. Nothing shipped broken — HEAD is green, the release tag is clean — which is the
+mitigation, not the excuse: the rule's value is reviewability of each step, not merely the
+end state.
+
+### 35.10 AA-08 — two small edges (Info)
+
+(a) `a4fbaa8`'s pseudonym→real back-map (`real_node_by_pseudonym.get(new_node)`) silently drops
+the (node, storage) capture pair when `_pick_active_node()` picks a node that is not in
+`known_nodes` (the `/nodes` response) — a storage reported `available` on a node absent from
+`/nodes` produces a bundle missing the content/status file replay will later ask for, failing
+late with a `BundleError` instead of warning at capture time. Unreachable in the committed
+bundles' shape; a one-line warning would localize it when it happens.
+
+(b) `9b053d8`'s and `87b4a6c`'s test docstrings quote the production cluster's identifiers
+verbatim (`dc6_con-abn-pve-dc6_T2T3_001:vm-101-disk-1.qcow2,discard=on,…`, `dc6_T2`) as the
+"confirmed against a real cluster" evidence. The whole §16.3 machinery exists to keep such
+identifiers out of shareable artefacts, and the same commits' corpus discipline did; the test
+files are the repo's own, and this is self-disclosure rather than a leak — but the habit of
+pasting the evidencing value whole, where a redacted-but-shape-preserving example would carry
+the same information, is how the next bundle leak will happen. Noted, not actionable beyond
+awareness.
+
+### 35.11 What this pass confirms
+
+- **The Z-01..Z-08 fixes are all real and hold** — each spot-verified in the tree (35.1), the
+  suite and both corpus gates green over them, and the committed bundles clean of the shapes
+  the fixes removed (the `data001` label, the foreign-vmid findings, the verbatim selector).
+  Section 34's claims are accurate, including the deliberately-partial Z-04 whose changelog
+  correction 0.1.4 now carries.
+- **Release 0.1.4 is clean and is the first release under the new §9.2 rules** — changelog
+  complete and mechanism-accurate, three-way version agreement, annotated `debian/0.1.4` tag
+  with the right identity and message on the release commit. The W-02/X-04/Z-07 release
+  hygiene arc is, on its own terms, cured.
+- **The dogfooding fixes in the range are exemplary.** `a4fbaa8` finds the capture/replay
+  disagreement at its root (the tie-break depends on list order, and the committed list is
+  sorted by pseudonym) and closes it by making the two sides agree *by construction*, with a
+  salt-adaptive test that cannot pass by accident. `9b053d8` root-causes the dropped qcow2
+  volumes to PVE's own `.<format>` volume-name convention, carries the extension through
+  verbatim for the right reason (replay must still match the content listing), and updates the
+  plan's §16.3 row in the same commit. `df77140` gets the exception taxonomy right — a step
+  mismatch is recoverable because the bundle itself carries the true step, a genuine cache
+  miss is not — implements exactly one retry with the named step, and keeps the loud-failure
+  path re-pinned by a test. `87b4a6c` is the right fix shape (register the identifier kind,
+  substitute whole strings longest-first, extend the collision check); only its blast radius is
+  short (AA-02).
+- **The §12 plan change itself is well-argued and its numbers hand-verify**: the
+  "spread data evenly" interpretation as a tunable preference (with the honest reason a strict
+  lexicographic order could never act), the three-things-`H`-is-not paragraph, the scale-free
+  `b̄` normalization with its empty-group edge, the δ knob and affinity demonstrations in
+  §14.3, and the regenerated fixtures agreeing with the plan to the digit (mod AA-03). The
+  capacity gate's wiring is correct and well-tested (bypass order after the reserve override,
+  null-disable, `b̄ = 0`, the §14.2 1.85 pin), payback's R-01 discipline survives the two-term
+  formula (raw quantities in, weights explicit, the internals page updated to explain why),
+  and CBC's (C7) path is correct as built.
+- **The corpus relaxation was argued honestly and still masked AA-01** — the docstring
+  documents a real, legitimate cbc trade at true weights, and the two-axis dominance rule is
+  the right *minimal* claim; what was missing is the objective-level check (re-scoring each
+  backend's plan at true weights) that no relaxation can talk its way past.
+
+### 35.12 Assessment
+
+This is the range where the project's two habits — specification-first rigour and
+dogfooding-driven fixes — met the first feature specified ahead of the implementation (§12),
+and the result is both the best-engineered plan change since §14 itself and the project's
+first true solver-correctness bug that every gate blesses. AA-01 is the plainest kind of
+integer-scaling defect — two scales built by different rules twenty lines apart in the same
+function — and it survived because each safety net that should have caught it was exactly one
+coincidence or one honest generalization away from blind: the fixture sweeps the one δ whose
+optimum coincides with the amplified objective's, the corpus sweep never runs cpsat by default,
+and the cross-backend check was relaxed, for a correctly-argued reason, in the same commit that
+needed it most. The durable lesson is §16.6-shaped: "not dominated" is checkable cheaply, but
+"optimized the objective we wrote" needs the objective — re-scoring every backend's plan
+through `evaluate_assignment()` at true weights, inside the corpus check, closes this class at
+any δ, in any sweep, for any future term. AA-02 is Z-01 replayed one identifier kind later and
+should be closed the same afternoon, with the procedure Z-07 already wrote. Everything else in
+the range — the payback horizon's honest re-derivation, the gate, the collect/replay fixes,
+the release — is work this reviewer would sign off on unchanged.
+
+---
+
+## 36. Resolution of eighteenth-pass findings (AA-01..AA-08)
+
+Seven findings fixed, one (AA-07) acknowledged without a code/process change per the operator's
+own direction (its row explains why), one half of AA-08 fixed and the other refuted as
+unreachable given code this pass verified more closely than the finding itself did.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AA-01 | Resolved | `optimize.py`'s (C7) linearization rebuilt to fold exactly like (C6) (section 5.5's own words for it): `_cpsat_fill_scale_for()`/`_cpsat_storage_used_mib()`/`_FILL_SCALE` (a 10¹² scale distinct from every other term's 10⁶) removed outright, replaced by `_cpsat_storage_fill_lhs()`, a per-(disk, storage) folded coefficient at the same `_LOAD_SCALE` (`K`) every other term uses — `round(K·z_d/(b̄·C_s))` per disk plus a `round(K·(1−Uˢᵉˣᵗ/(C_s·b̄)))` constant, precisely §5.5's specified decomposition, with a domain bound derived from the coefficients themselves rather than a separate oversized constant. New regression `test_delta_negligible_does_not_swamp_the_objective` (both backends) pins the fix at `delta_capacity_spread=0.0001`, where the pre-fix amplification returned the wrong (two-move) plan; reproduced end to end against the committed `bzed-dev-cluster-24h` bundle — CP-SAT now agrees with CBC exactly (`moves: []`, `after_capacity_spread == before_capacity_spread`), where it previously returned a 4-move, 3.2×-worse plan. Per the recommendation's stronger half: `plan`/`apply --json` gained `before_objective_total`/`after_objective_total` (the full six-term `.total`, re-scored through the same `evaluate_assignment()` the engine uses), and `validate_corpus.py` gained `check_milp_objective_total()`, asserting every MILP backend's objective is no worse than the heuristic's by more than `solver.mip_gap` — the objective-level check X-07's own note (§35.3) said could not be shipped without exactly this field. Both committed bundles' `.expected.json` regenerated (narrow mode, matching the committed shape); a full `--full-matrix` run is clean too (zero violations from either cross-backend check, across every spread metric/forecast model/beta combination on both bundles). |
+| AA-02 | Resolved | Both committed bundles' `manifest.json` had their twelve `bzed-shared` group-name occurrences mechanically replaced with the bundle's own `group-448ef164` pseudonym (from its own `config.yaml`, no salt needed), `SHA256SUMS` recomputed, both `.submission.yaml` recording the repair per `tests/corpus/README.md`'s procedure. `validate_corpus.py` gained the structural check the audit was missing: `_scrub_manifest_group_names()` matches `_drive_group_series()`'s own `"instant quantile_over_time ... (<group>)"` shape and asserts the qualifier is one of the bundle's own configured group names — verified to flag the pre-repair files and pass the corrected ones, with unit regressions in `test_validate_corpus.py`. |
+| AA-03 | Resolved | §14.6's "both moved to `cramped`" cell corrected from 11.85 to 13.10 — confirmed against `generate_expected.py`'s own `objective_nonreserve()` (`11.25 / 2.175 / 13.1` for the three rows), which the erroneous cell had silently disagreed with. |
+| AA-04 | Resolved | Code changed to match the plan, per AGENTS.md §7 ("change the plan and the code together" — the plan's own persistent-vs-one-time-cost argument for including `δ` in the ranking is the one worth keeping). `schedule.order_moves()` now ranks candidates by `(imbalance_term + capacity_spread_term)` reduction per byte, not `imbalance_term` alone — both already carry their own weight, so no rescaling is needed; `ScheduledMove.imbalance_reduction`'s *reported* value is untouched (still alpha-only, matching every existing caller/test). `generate_expected.py`'s mirror `order_moves()`/`ratio()` updated the same way, now taking the case's own swept `delta` explicitly rather than reading a `f.objective["delta_capacity_spread"]` key that never existed outside the `delta_values` sweep list (a latent bug the fix surfaced, not introduced — the old code path was reading a nonexistent dict key that happened never to run with the term guarding it nonzero at a nonzero delta). New regression `test_ordering_prefers_the_larger_persistent_reduction_once_delta_matters` constructs a two-disk case where the imbalance-only and combined rankings disagree and pins both. The §14 fixture's own `expected_order` is byte-identical before and after (its ordering coincides either way, as §35.6 itself noted) — confirmed via `generate_expected.py --check`. |
+| AA-05 | Resolved | Every stale "five terms"/"five objective terms" instance corrected to "six": plan §2.3's `plan_selected` row (and the same claim in `docs/manual/35-logging.md`, one more instance than this finding named), `docs/manual/29-explain.md` (three places, including the worked example's own `objective:` sample line, which was still five terms wide — recomputed via `evaluate_assignment()` on the exact scenario shown and given a real `spread 0.25` term, total corrected to `2.57`), `docs/manual/30-safety-and-status.md`, `docs/manual/10-configuration.md`, `docs/internals/40-cli-and-logging.md`, `docs/internals/90-heuristic.md` (two places). The two field-list gaps closed: `docs/manual/27-plan.md` now documents `before/after_capacity_spread` and the new `before/after_objective_total` (AA-01); `docs/manual/25-show-load-and-verify-storages.md` now documents `capacity_fraction`. Closing that list surfaced a real, separate bug rather than just a doc gap: `plan`/`apply --json`'s own `gate` object was missing `capacity_fraction` entirely (`_render_group_plan_json()`), contradicting `27-plan.md`'s "identical shape to `show-load`'s" claim and `show-load`/`gate_decision` logging, which both already carry it — fixed in `cli.py`, pinned by a new assertion in `test_plan_json_output`. |
+| AA-06 | Resolved | Per the finding's own "the sample and its disclaimer should say so" framing: §9.5's phantom `data:` line removed from the sample output (no renderer has ever printed it), and the V-02 "As built" paragraph extended to say explicitly that fill deviation reaches a human only via `explain`'s `objective:` line (`spread` term) and the `--json` `before/after_capacity_spread` scalars — closing the exact gap the paragraph exists to close, for this line too. |
+| AA-07 | Acknowledged, no action | Per the operator: the branch-first rule (`e4240fa`) postdates every commit in the range it is being judged against, and `9b053d8`'s red `make pdf-check` was the PDF-build environment being broken at the time, not a process lapse. Left as historical record; no commit reordering or retroactive branch fabrication attempted (this project never rewrites history). |
+| AA-08(a) | Refuted | Traced the claimed silent-drop path (`real_node_by_pseudonym.get(new_node)` returning `None`) and found it structurally unreachable, more strongly than the finding itself claimed ("unreachable in the committed bundles' shape"): `_anonymize_storage_resources()` already drops any `cluster/resources` entry whose node is not in `mapper.known_nodes` *before* `_pick_active_node()` ever sees the list, so a storage active only on an unlisted node raises `TopologyError` instead (caught by the existing, correct `except TopologyError: pass`) — `real_node_by_pseudonym.get()` can only ever be asked about a node already known to be in `known_nodes`, and a same-kind pseudonym collision (the only other way it could miss) is already fatal at `Mapper` construction. Changed `.get(new_node)` + a dead `if real_node is not None` to a direct `real_node_by_pseudonym[new_node]` index instead of adding an unreachable warning branch (AGENTS.md's own rule against handling what cannot happen) — a future regression in the invariant now fails loudly (`KeyError` at capture time) rather than resurrecting a silent drop. New regression `test_capture_pve_storage_files_skips_only_the_storage_whose_node_is_unlisted` pins the actually-reachable behavior: one storage's capture is skipped via `TopologyError`, every other storage in the group is captured normally. |
+| AA-08(b) | Acknowledged, no action | Per the finding's own assessment ("self-disclosure rather than a leak ... noted, not actionable beyond awareness") — no change made. |
+
+New/updated regression tests: `test_delta_negligible_does_not_swamp_the_objective` (`test_optimize.py`);
+`test_scrub_manifest_group_names_flags_a_group_name_outside_the_configured_set`,
+`test_scrub_manifest_group_names_passes_the_pseudonymized_view` (`test_validate_corpus.py`);
+`test_ordering_prefers_the_larger_persistent_reduction_once_delta_matters` (`test_schedule.py`);
+`test_capture_pve_storage_files_skips_only_the_storage_whose_node_is_unlisted` (`test_collect.py`);
+plus a `capacity_fraction`/`before_objective_total`/`after_objective_total` assertion added to the
+existing `test_plan_json_output` (`test_cli.py`).
+
+Verification: dev venv `python3 -m pytest` — **897 passed**, **96.36% line coverage**; fmt
+(isort+black), lint (flake8) and typecheck (mypy) all clean; `generate_expected.py --check` and
+`validate_corpus.py --check` both clean, plus a full `--full-matrix` run (zero cross-backend
+violations, both committed bundles, every swept variant). `docs-check` is clean too: `make pdf`
+first appeared to fail with `lualatex`/`luaotfload` reporting "no writeable cache path" regardless
+of `HOME`/`TEXMFVAR`/`TEXMFCACHE` placement, which read like an environment defect — it was
+actually a stale `docs/.build/pdf.fdb_latexmk` from an earlier failed run: `latexmk` was reporting
+"nothing to do, up to date" against its own cached dependency database and never re-invoking
+`lualatex` at all, just re-surfacing the old cached failure on every retry. Removing `docs/.build/`
+before rebuilding fixed it outright; all three PDFs (`IMPLEMENTATION_PLAN.pdf` at 64 pages,
+`internals.pdf` at 53, the manual at 47) and their stamps are rebuilt and committed alongside this
+pass's Markdown changes, per AGENTS.md §7.4.
 
 ---
 

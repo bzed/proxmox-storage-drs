@@ -291,6 +291,31 @@ def test_delta_050_at_the_default_beta_reproduces_the_two_move_solution(backend:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_delta_negligible_does_not_swamp_the_objective(backend: str) -> None:
+    """REVIEW.md AA-01: CP-SAT's (C7) linearization once built `d_s` on a
+    scale six orders of magnitude larger than every other term's, so even
+    a negligible `delta_capacity_spread` acted, in effect, like ~100 --
+    the exact "obvious formulation" trap section 5.5 warns the gamma term
+    away from, reintroduced for (C7). At `delta=0.0001` the term's true
+    contribution to the specified objective is ~3e-5, so the optimum is
+    the delta=0 optimum (the three-move plan) -- both backends' (C7)
+    linearization must agree with that, not silently prefer the two-move
+    plan by amplifying delta's weight internally."""
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, delta_capacity_spread=0.0001)
+    result = _solve(section_14_group(), section_14_loads(), objective, backend)
+
+    assert result.assignment == {
+        "101:scsi0": "san-a",
+        "101:scsi1": "san-b",
+        "102:scsi0": "san-c",
+        "103:scsi0": "san-b",
+        "104:scsi0": "san-b",
+        "105:scsi0": "san-b",
+    }
+    assert result.breakdown.moves == 3
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_delta_zero_reproduces_the_beta_only_three_move_solution(backend: str) -> None:
     """The inverse check: explicitly disabling delta must restore beta's
     own three-move optimum exactly, confirming `delta_capacity_spread: 0`

@@ -6,7 +6,7 @@ scheduler, same payback test, byte-for-byte the same numbers — and prints
 everything `plan` already shows, plus the "why" `plan` itself never does:
 the measured load every one of those numbers derives from, which disks are
 pinned and the exact reason, which VMs a pin leaves spread across more than
-one storage, the section 5.4 objective broken into its five terms, and
+one storage, the section 5.4 objective broken into its six terms, and
 whether the pinned load is large enough that the residual imbalance is
 structural rather than a planning shortfall. `-v` additionally names
 exactly which Prometheus query produced all of it. It never changes
@@ -29,7 +29,7 @@ Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   after: san-a=2.50  san-b=2.90  san-c=3.00
   spread: 257.1% → 17.9%
   payback: benefit 5.2e+06 load·s vs cost 4.72e+04 load·s → ratio 110 (need 10) ✓
-  objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 0.5 + reserve 0 = 2.32
+  objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 0.5 + spread 0.25 + reserve 0 = 2.57
   measured load:
   san-a  used 5.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 1.50 TiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
     101:scsi0        2.00 TiB  raw     ℓ 3.00
@@ -56,13 +56,14 @@ how to read the move lines and the payback verdict. What follows is new.
 ## The `objective:` line
 
 The section 5.4 objective the solver actually minimized, broken into its
-five terms rather than only the total — `imbalance` (`alpha` times the
+six terms rather than only the total — `imbalance` (`alpha` times the
 spread metric), `moves` (`beta` times the move count), `bytes` (`gamma`
 times TiB moved), `fragmentation` (`kappa` times each VM's extra storage
-count beyond one), and `reserve` (the penalty for any remaining (C5)
-shortfall, zero on a plan that resolves or never had one). This is the
-same `heuristic.ObjectiveBreakdown` the solver itself compares candidate
-assignments with — the reason that class keeps the five terms apart
+count beyond one), `spread` (`delta` times the section 5.3 (C7) data-spread
+deviation), and `reserve` (the penalty for any remaining (C5) shortfall,
+zero on a plan that resolves or never had one). This is the same
+`heuristic.ObjectiveBreakdown` the solver itself compares candidate
+assignments with — the reason that class keeps the six terms apart
 instead of collapsing to only `.total` in the first place. Only printed
 when the gate said `ACT`; a `NO ACTION` group solved nothing this run, so
 there is no objective to show.
@@ -198,11 +199,11 @@ not the plan, so there is no reason to withhold them just because the gate
 found nothing to balance this run.
 
 `--json` emits everything `plan --json` does (`docs/manual/27-plan.md`'s
-own field list) plus `objective` (the five terms above, `null` when the
+own field list) plus `objective` (the six terms above, `null` when the
 gate said `NO ACTION`), `rejected_alternative` (`null` unless the
 "`no moves made`" case above applies, otherwise `disk_key`, `vmid`,
 `device`, `from_storage`, `to_storage`, `baseline` and `objective` — each
-the same five-term breakdown `objective` above serializes, for the
+the same six-term breakdown `objective` above serializes, for the
 current assignment and the candidate respectively — and `worse_by`, the
 difference between the two totals), `storages`/`disks` (the measured-load
 section above, identical shape to `show-load --json`'s own fields of the

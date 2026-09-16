@@ -58,7 +58,7 @@ for every other command as its own module landed — `apply`'s handler is
 `_handle_apply` (`execute.py`/`crashrecovery.py`); `explain`'s is
 `_handle_explain`, which runs the identical `_plan_group()` pipeline
 `plan` does and narrates the pins, the fragmentation they cause, and the
-section 5.4 objective's five terms that `plan` itself never prints.
+section 5.4 objective's six terms that `plan` itself never prints.
 Adding a new implemented command is exactly this: write the handler,
 assign it into the
 dict, done — `main()`'s dispatch does not change.

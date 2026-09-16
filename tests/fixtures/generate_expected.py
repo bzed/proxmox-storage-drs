@@ -299,12 +299,14 @@ def cost(f: Fixture, key: str) -> float:
     return duration_mirror(f, key) * omega_mirror + duration_wipe(f, key) * omega_wipe
 
 
-def order_moves(f: Fixture, target: Assignment) -> List[Dict[str, Any]]:
+def order_moves(f: Fixture, target: Assignment, delta: float) -> List[Dict[str, Any]]:
     """Section 8.2 greedy, with the two priority exceptions.
 
     Raises Deadlock if no pending move satisfies the section 8.1 transient
     invariant -- which is what a plan that breaches the reserve looks like at
-    schedule time.
+    schedule time. ``delta`` is the case's own swept
+    ``delta_capacity_spread`` -- not read from ``f.objective``, which never
+    carries a static value for it (only the ``delta_values`` sweep list).
     """
     state = dict(f.current)
     pending = [k for k in f.keys if target[k] != f.current[k]]
@@ -323,9 +325,18 @@ def order_moves(f: Fixture, target: Assignment) -> List[Dict[str, Any]]:
             raise Deadlock(f"no feasible move among {sorted(pending)}")
 
         def ratio(k: str, _state: Assignment = state) -> float:
+            # Section 8.2's revised ranking: "the persistent-objective
+            # reduction ... the alpha and delta terms of section 5.4 --
+            # the parts whose improvement persists; beta/gamma are
+            # one-time costs" -- both alpha-weighted imbalance and
+            # delta-weighted data spread, not imbalance alone.
             nxt = dict(_state)
             nxt[k] = target[k]
-            return (E_of(f, _state) - E_of(f, nxt)) / cost(f, k)
+            alpha = float(f.objective["alpha_spread"])
+            persistent_reduction = alpha * (E_of(f, _state) - E_of(f, nxt)) + delta * (
+                F_of(f, _state) - F_of(f, nxt)
+            )
+            return persistent_reduction / cost(f, k)
 
         pick = max(feasible, key=ratio)
         b = target[pick]
@@ -348,10 +359,10 @@ def order_moves(f: Fixture, target: Assignment) -> List[Dict[str, Any]]:
     return out
 
 
-def try_order(f: Fixture, target: Assignment) -> Dict[str, Any]:
+def try_order(f: Fixture, target: Assignment, delta: float) -> Dict[str, Any]:
     """order_moves, but record a deadlock instead of raising."""
     try:
-        return {"orderable": True, "order": order_moves(f, target)}
+        return {"orderable": True, "order": order_moves(f, target, delta)}
     except Deadlock as exc:
         return {"orderable": False, "blocked_reason": str(exc)}
 
@@ -400,7 +411,7 @@ def case_for(f: Fixture, beta: float, delta: float) -> Dict[str, Any]:
         "expected_F_after": round(F_of(f, a), R),
         "expected_fragmentation": fragmentation(f, a),
         "expected_moves": moves_of(f, a),
-        "expected_order": order_moves(f, a),
+        "expected_order": order_moves(f, a, delta),
         "expected_final_loads": {s: final[s]["load"] for s in f.storages},
         "expected_final_reserve": final,
         "expected_spread_after": round(spread(f, final), R),
@@ -436,7 +447,7 @@ def case_for(f: Fixture, beta: float, delta: float) -> Dict[str, Any]:
             "total_slack_tib": round(slack_of(f, demo_a), R),
             "matches_lexicographic": demo_a == lex_a,
         }
-        demo.update(try_order(f, demo_a))
+        demo.update(try_order(f, demo_a, delta))
         case["big_m_undersized_p_demo"] = demo
     return case
 

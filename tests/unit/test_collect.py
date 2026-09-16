@@ -465,6 +465,74 @@ def test_capture_bundle_storage_capture_agrees_with_replays_active_node_pick(
     assert f"storage-status/{expected_node}/{new_storage_id}.json" in bundle.pve_files
 
 
+def test_capture_pve_storage_files_skips_only_the_storage_whose_node_is_unlisted(
+    tmp_path: Path,
+) -> None:
+    """REVIEW.md AA-08(a): investigates whether a storage `cluster/resources`
+    reports `available` on a node absent from this cluster's own `/nodes`
+    response can reach `real_node_by_pseudonym.get(new_node)` returning
+    `None` and silently dropping the (node, storage) capture pair. It
+    cannot: `_anonymize_storage_resources()` already drops any
+    `cluster/resources` entry whose node is not in `mapper.known_nodes`
+    (X-09) before `_pick_active_node()` ever sees it, so the *storage*
+    with no node left in the filtered view raises `TopologyError` instead
+    -- caught by the existing `except TopologyError: pass` -- and every
+    other storage in the group is captured normally. This pins that
+    behaviour: one storage's capture is skipped, the rest are not."""
+    from proxmox_storage_drs.anonymize import generate_new_salt, pseudonym
+
+    salt_path = tmp_path / "salt"
+    salt = generate_new_salt(salt_path)
+
+    node_x, node_ghost = "node-x", "node-ghost"
+    storage_defs = [
+        {"storage": "san-shared", "type": "rbd", "shared": 1, "content": "images"},
+        {"storage": "san-b", "type": "rbd", "shared": 1, "content": "images"},
+    ]
+    # san-shared is reported available only on node-ghost, which /nodes
+    # (below) does not list at all; san-b is a normal, resolvable storage,
+    # only present so the group meets section 11.1's two-storage minimum.
+    storage_resources = [
+        {"storage": "san-shared", "node": node_ghost, "status": "available"},
+        {"storage": "san-b", "node": node_x, "status": "available"},
+    ]
+    storage_status = {"total": 10 * (1 << 40), "used": 1 * (1 << 40)}
+
+    responses: dict[str, Any] = {
+        "cluster/resources": lambda type: ([] if type == "vm" else storage_resources),
+        "storage": storage_defs,
+        "nodes": [{"node": node_x}],  # node-ghost is absent
+        "cluster/tasks": [],
+        f"nodes/{node_ghost}/storage/san-shared/status": storage_status,
+        f"nodes/{node_ghost}/storage/san-shared/content": [],
+        f"nodes/{node_x}/storage/san-b/status": storage_status,
+        f"nodes/{node_x}/storage/san-b/content": [],
+        "version": {"version": "8.2.1"},
+    }
+    pve_client = PveClient(fake_api(responses))
+    resolved = make_config(
+        tmp_path,
+        groups=[{"name": "g1", "storages": [{"id": "san-shared"}, {"id": "san-b"}]}],
+        support={"salt_path": str(salt_path)},
+    )
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+
+    bundle = collect.capture_bundle(
+        pve_client, make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+
+    assert bundle.ok
+    new_san_b = f"stor-{pseudonym(salt, 'storage', 'san-b')}"
+    new_node_x = f"node-{pseudonym(salt, 'node', node_x)}"
+    storage_keys = {
+        k for k in bundle.pve_files if k.startswith(("storage-content/", "storage-status/"))
+    }
+    assert storage_keys == {
+        f"storage-content/{new_node_x}/{new_san_b}.json",
+        f"storage-status/{new_node_x}/{new_san_b}.json",
+    }, "san-shared's capture should have been skipped, san-b's kept"
+
+
 def test_capture_bundle_queries_the_real_prometheus_with_real_node_names(
     tmp_path: Path,
 ) -> None:
