@@ -1390,6 +1390,8 @@ def _pin_action_hint(reason: str | None) -> str | None:
         return "re-check next run"
     if reason.startswith("locked:"):
         return "re-check next run once the lock releases"
+    if reason.startswith("pending "):
+        return "apply the pending change (reboot the VM) or revert it, then re-check"
     return None
 
 

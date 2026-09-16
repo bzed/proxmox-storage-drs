@@ -26,7 +26,7 @@ about the shape of the implementation, for whoever changes it next.
 same functions a live `plan`/`show-load`/`verify-metrics` run already
 calls, and lets every response pass through on its way back to the caller.
 
-- `RecordingPveClient` overrides each of `pve.py`'s ten read methods
+- `RecordingPveClient` overrides each of `pve.py`'s twelve read methods
   individually: catches `PveApiError`, records the outcome
   (`ok`/`http_error`/`empty`) in the manifest's `calls` list, and returns a
   safe empty default (`{}`/`[]`) on failure rather than raising — section
@@ -133,12 +133,21 @@ are genuine subclasses — `super().__init__()` with an inert transport
 existing `client: PveClient`/`client: PrometheusClient` type annotation in
 `topology.py`, `metrics.verify_metrics()`, `loadmodel.py` and `cli.py`
 accepts one with zero changes anywhere else. `ReplayPveClient` overrides
-each of the ten read methods directly, keyed by the bundle's own directory
+each of the eleven read methods directly, keyed by the bundle's own directory
 layout (vmid-only for VM files — the bundle does not key by node, since
 `topology.py` always already knows the right node before calling). Neither
 `move_disk` nor `task_status` can be reached in practice (`apply` is
 refused before any handler gets this far), but both raise `PveApiError`
 anyway — defense in depth costs one `raise` each.
+
+`vm_pending()` is the one method here that does not raise `BundleError` on
+a missing file: a bundle captured before section 3.8 added the call has no
+`pve/vm-pending/` directory at all, and a missing file there is read as
+"nothing pending" rather than a corrupt bundle. A bundle captured since
+always writes the file for every considered VM (`collect.py`'s
+`_capture_pve_vm_files()`), even when the list is empty, so this fallback
+can only trigger on a bundle that genuinely predates the feature — it is
+not a general "missing means empty" rule for this class.
 
 `ReplayPrometheusClient` overrides only `_get()`. Its `/api/v1/query`
 branch is an exact match on the (anonymized) query text — an instant query

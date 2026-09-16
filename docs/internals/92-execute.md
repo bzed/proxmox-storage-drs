@@ -14,10 +14,12 @@ half of `proxmox_storage_drs/cli.py`.
 cluster taken at planning time. By the time a move near the end of a long
 `confirm` run is about to be issued, that snapshot can be stale in ways a
 live cluster routinely produces: an operator touched the VM, PVE's own
-Dynamic Load Balancer moved it to another node, a snapshot appeared, or
-another process changed the target storage's free space. `_preflight()`
-re-fetches the VM's current node, config, running status, snapshot list
-and exclusion tags fresh for every single move — deliberately bypassing
+Dynamic Load Balancer moved it to another node, a snapshot appeared, an
+operator queued a pending config change on the disk about to move
+(section 3.8), or another process changed the target storage's free
+space. `_preflight()` re-fetches the VM's current node, config, running
+status, snapshot list, pending-change list and exclusion tags fresh for
+every single move — deliberately bypassing
 the per-run topology cache (`topology.py`'s section 3.5 cache exists to
 avoid re-fetching for *planning*, not to avoid re-validating immediately
 before a mutation). The exclusion re-check (section 9.2 step 3:
@@ -33,6 +35,14 @@ Either kind of mismatch stops the group's run with `"replan_needed"`
 rather than trying to patch the plan around it — `IMPLEMENTATION_PLAN.md`
 section 9.2 is explicit: "abandon the remaining moves... do not attempt to
 patch it."
+
+The pending-change re-check (section 9.2 step 6) is the opposite choice
+from the exclusion re-check's deliberate duplication above: it calls
+`topology.pending_disk_reasons()` directly rather than re-implementing the
+`/pending` entry parsing, because that parsing is not a one-line predicate
+— `topology.py` exports it (unlike its underscore-prefixed siblings)
+specifically so this is the only place it lives (`60-topology.md`'s "The
+pending-change pin").
 
 `_live_transient_check()`'s arithmetic is the identical section 8.1
 formula `schedule.transient_invariant_ok()` checks against the in-memory

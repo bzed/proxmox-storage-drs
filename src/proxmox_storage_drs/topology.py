@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Build the disk/storage/group model. See IMPLEMENTATION_PLAN.md sections
-3.5/3.6/3.7/5.1/5.3 (C2)/11.4.
+3.5/3.6/3.7/3.8/5.1/5.3 (C2)/11.4.
 
 This module joins ``pve.py``'s API responses with the configured
 ``groups`` into the per-group `D`/`S` sets the rest of the engine (the load
@@ -432,6 +432,33 @@ def _disk_snapshot_or_orphan_reason(
     return None
 
 
+def pending_disk_reasons(pending: list[dict[str, Any]]) -> dict[str, str]:
+    """Section 3.8: which disk device keys in ``GET .../pending`` (section
+    3.5's :meth:`~proxmox_storage_drs.pve.PveClient.vm_pending`) carry an
+    unapplied pending change, and why -- device -> pin reason, for every
+    entry whose ``key`` matches :data:`DISK_KEY_RE` and carries a
+    ``"pending"`` field (an edited value, not yet in effect) or a truthy
+    ``"delete"`` field (queued for removal, not yet removed). A key with
+    neither -- the common case, and every non-disk key regardless -- is
+    already fully in effect and is not returned.
+
+    Public (unlike the sibling ``_pin_reason``/``_disk_snapshot_or_orphan_reason``
+    helpers) because `execute.py`'s `_preflight()` re-check needs the exact
+    same parsing immediately before issuing a move (section 9.2 step 6) --
+    one implementation, per AGENTS.md section 5, rather than a second copy
+    of what counts as "pending" drifting out of sync with this one."""
+    reasons: dict[str, str] = {}
+    for item in pending:
+        key = item.get("key")
+        if not isinstance(key, str) or not DISK_KEY_RE.match(key):
+            continue
+        if item.get("delete"):
+            reasons[key] = "pending deletion (unapplied)"
+        elif "pending" in item:
+            reasons[key] = "pending config change (unapplied)"
+    return reasons
+
+
 @dataclass(frozen=True, slots=True)
 class _ClusterData:
     """Everything fetched before the per-VM join, gathered in one place so
@@ -488,6 +515,7 @@ def _pin_reason(
     vm_excluded: bool,
     disk_excluded: bool,
     snapshot_reason: str | None,
+    pending_reason: str | None,
     cooldown_remaining_seconds: float,
     lock: str | None,
     device: str,
@@ -500,13 +528,21 @@ def _pin_reason(
     function stays a pure decision over already-resolved flags, exactly
     like `snapshot_reason` already is, per AGENTS.md section 5 ("one
     implementation" of the cooldown-expiry arithmetic itself lives in
-    `state.cooldown_remaining_seconds()`, not duplicated here)."""
+    `state.cooldown_remaining_seconds()`, not duplicated here).
+
+    ``pending_reason`` (section 3.8) is this one disk's own entry from
+    `pending_disk_reasons()`, unlike every other parameter here which is
+    either VM-wide or already per-disk in the caller's loop -- passed
+    through rather than recomputed so this function stays the same kind of
+    pure decision over already-resolved flags as the rest of it."""
     if vm_excluded:
         return "excluded by config"
     if disk_excluded:
         return "excluded by config (exclude.disks)"
     if snapshot_reason is not None:
         return snapshot_reason
+    if pending_reason is not None:
+        return pending_reason
     if cooldown_remaining_seconds > 0:
         return (
             f"cooldown: moved recently, {format_duration_seconds(cooldown_remaining_seconds)} "
@@ -609,16 +645,20 @@ class _VmFetch:
     resource: dict[str, Any]
     raw_config: dict[str, Any]
     real_snapshots: list[dict[str, Any]]
+    pending: list[dict[str, Any]]
 
 
 def _fetch_vm(client: PveClient, resource: dict[str, Any]) -> _VmFetch:
-    """The two per-VM network calls (section 3.5), with nothing else --
+    """The three per-VM network calls (section 3.5/3.8), with nothing else --
     this is the unit `ThreadPoolExecutor` runs concurrently."""
     vmid = int(resource["vmid"])
     node = resource["node"]
     raw_config = client.vm_config(node, vmid)
     real_snapshots = [s for s in client.vm_snapshots(node, vmid) if s.get("name") != "current"]
-    return _VmFetch(resource=resource, raw_config=raw_config, real_snapshots=real_snapshots)
+    pending = client.vm_pending(node, vmid)
+    return _VmFetch(
+        resource=resource, raw_config=raw_config, real_snapshots=real_snapshots, pending=pending
+    )
 
 
 def _needed_content_node_pairs(
@@ -683,6 +723,7 @@ def _join_vm_disks(
     snapshot_reason = _disk_snapshot_or_orphan_reason(
         vmid, disk_specs, fetch.real_snapshots, data.content_by_id
     )
+    pending_reasons = pending_disk_reasons(fetch.pending)
     excluded_disk_keys = set(config.exclude.disks)
 
     for device, (storage_id, volume_name, params) in disk_specs.items():
@@ -710,6 +751,7 @@ def _join_vm_disks(
             vm_excluded=vm_excluded,
             disk_excluded=key in excluded_disk_keys,
             snapshot_reason=snapshot_reason,
+            pending_reason=pending_reasons.get(device),
             cooldown_remaining_seconds=cooldowns_by_group.get(group_name, {}).get(key, 0.0),
             lock=lock,
             device=device,

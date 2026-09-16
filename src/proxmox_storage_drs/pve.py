@@ -318,7 +318,16 @@ class PveClient:
         return result
 
     def vm_config(self, node: str, vmid: int) -> dict[str, Any]:
-        """``GET /nodes/{node}/qemu/{vmid}/config``: disk -> storage mapping and size."""
+        """``GET /nodes/{node}/qemu/{vmid}/config``: disk -> storage mapping and size.
+
+        Confirmed live against a real cluster: called with no ``current``
+        parameter, as this always does, a key with an unapplied pending
+        change comes back holding the *pending* value, not the one actually
+        in effect (PVE's own ``current=1`` parameter is what would ask for
+        the latter, and nothing in this project ever passes it). Section
+        3.8's :meth:`vm_pending` is what makes such a divergence detectable
+        at all -- do not treat a disk's ``size=``/options seen here as
+        certainly already true on disk."""
         result: dict[str, Any] = self._call(
             f"fetching config for VM {vmid} on {node}",
             lambda: self._api.nodes(node).qemu(vmid).config.get(),
@@ -346,6 +355,21 @@ class PveClient:
         result: list[dict[str, Any]] = self._call(
             f"fetching snapshots for VM {vmid} on {node}",
             lambda: self._api.nodes(node).qemu(vmid).snapshot.get(),
+        )
+        return result
+
+    def vm_pending(self, node: str, vmid: int) -> list[dict[str, Any]]:
+        """``GET /nodes/{node}/qemu/{vmid}/pending``: per-key current vs.
+        pending config values (section 3.8). Confirmed live against a real
+        cluster: ``GET .../config`` without ``current=1`` -- what
+        :meth:`vm_config` calls -- already returns *pending* values merged
+        in wherever a key differs, not the value actually in effect; this
+        endpoint is the only one that also exposes the still-in-effect
+        ``value`` alongside it, which is what makes a pending change on a
+        disk key detectable at all."""
+        result: list[dict[str, Any]] = self._call(
+            f"fetching pending config for VM {vmid} on {node}",
+            lambda: self._api.nodes(node).qemu(vmid).pending.get(),
         )
         return result
 

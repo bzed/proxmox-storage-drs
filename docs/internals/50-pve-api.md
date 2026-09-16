@@ -139,6 +139,16 @@ such a label "as standard practice" was wrong, so the extra
 `Sys.Audit`-gated API call it existed for bought nothing. See
 `docs/internals/30-metrics.md`'s node-scoping section.
 
+**`vm_config()` returns a key's *pending* value, not the one in effect, once one exists — confirmed
+against a real cluster** (`config/drs.yaml`'s dev cluster, VM 102): called with no `current`
+parameter, which is every call `vm_config()` ever makes, `GET .../qemu/{vmid}/config` merges in
+whatever change is queued for a key rather than showing what PVE is actually running right now. Only
+`GET .../qemu/{vmid}/pending` (`vm_pending()`, section 3.8) exposes both — each entry's `value` is
+the real, in-effect one, and a `pending`/`delete` field appears only on a key with something queued.
+`topology.py`'s `pending_disk_reasons()` is what turns this into the section 5.3 (C2) pin
+(`60-topology.md`'s "The pending-change pin"); `pve.py` itself does nothing with the distinction
+beyond exposing both calls.
+
 ## `move_disk()`: the one and only bytes/s -> KiB/s conversion
 
 Section 9.2 is explicit that `bwlimit`'s bytes/s-to-KiB/s conversion happens

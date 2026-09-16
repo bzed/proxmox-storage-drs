@@ -129,6 +129,7 @@ DEFAULT_RESPONSES: dict[str, object] = {
     "cluster/resources": [{"vmid": 101, "node": "pve01", "status": "running"}],
     "nodes/pve01/qemu/101/config": {"scsi0": "san-a:vm-101-disk-0,size=1024G"},
     "nodes/pve01/qemu/101/snapshot": [{"name": "current"}],
+    "nodes/pve01/qemu/101/pending": [],
     "nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 0},
     "nodes/pve01/qemu/101/move_disk": UPID,
     f"nodes/pve01/tasks/{UPID}/status": {"status": "stopped", "exitstatus": "OK"},
@@ -277,6 +278,7 @@ def test_confirm_mode_all_remaining_stops_prompting() -> None:
             ],
             "nodes/pve01/qemu/102/config": {"scsi0": "san-a:vm-102-disk-0,size=1024G"},
             "nodes/pve01/qemu/102/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/102/pending": [],
             "nodes/pve01/qemu/102/status/current": {"lock": None},
             "nodes/pve01/qemu/102/move_disk": upid2,
             f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
@@ -410,6 +412,46 @@ def test_preflight_snapshot_appeared_triggers_replan() -> None:
     result = run(client, default_group(), (make_move(),))
     assert result.outcomes[0].status == "replan_needed"
     assert "snapshot" in result.outcomes[0].detail
+
+
+def test_preflight_pending_change_appeared_triggers_replan() -> None:
+    """Section 3.8/9.2 step 6: an operator queuing a pending change on the
+    exact disk about to move, in the gap between planning and this move
+    being issued, must stop the run rather than let `move_disk` leave that
+    entry referring to pre-move state."""
+    client, _api = client_with(
+        {
+            "nodes/pve01/qemu/101/pending": [
+                {
+                    "key": "scsi0",
+                    "value": "san-a:vm-101-disk-0,size=1024G",
+                    "pending": "san-a:vm-101-disk-0,size=2048G",
+                }
+            ]
+        }
+    )
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "replan_needed"
+    assert "pending config change" in result.outcomes[0].detail
+    assert result.stopped_early is True
+
+
+def test_preflight_pending_change_on_a_different_disk_is_ignored() -> None:
+    """Only the disk this move actually targets matters -- a pending change
+    queued on a sibling device must not block an unrelated move."""
+    client, _api = client_with(
+        {
+            "nodes/pve01/qemu/101/pending": [
+                {
+                    "key": "scsi1",
+                    "value": "san-a:vm-101-disk-1,size=5G",
+                    "pending": "san-a:vm-101-disk-1,size=10G",
+                }
+            ]
+        }
+    )
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "moved"
 
 
 def test_preflight_vm_not_running_triggers_replan() -> None:
@@ -546,6 +588,7 @@ def test_task_failure_continues_when_abort_on_failure_false() -> None:
             ],
             "nodes/pve01/qemu/102/config": {"scsi0": "san-a:vm-102-disk-0,size=1024G"},
             "nodes/pve01/qemu/102/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/102/pending": [],
             "nodes/pve01/qemu/102/status/current": {"lock": None},
             "nodes/pve01/qemu/102/move_disk": upid2,
             f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
@@ -741,6 +784,7 @@ def test_max_migrations_per_run_stops_the_run_before_the_next_attempt() -> None:
             ],
             "nodes/pve01/qemu/102/config": {"scsi0": "san-a:vm-102-disk-0,size=1024G"},
             "nodes/pve01/qemu/102/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/102/pending": [],
             "nodes/pve01/qemu/102/status/current": {"lock": None},
             "nodes/pve01/qemu/102/move_disk": upid2,
             f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
@@ -884,6 +928,7 @@ def test_deadline_recheck_after_a_lock_wait_stops_the_whole_run_not_just_this_mo
             "nodes/pve01/qemu/101/status/current": status_current,
             "nodes/pve01/qemu/102/config": {"scsi0": "san-a:vm-102-disk-0,size=1024G"},
             "nodes/pve01/qemu/102/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/102/pending": [],
             "nodes/pve01/qemu/102/status/current": {"lock": None},
             "nodes/pve01/qemu/102/move_disk": upid2,
             f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
@@ -940,6 +985,7 @@ def test_lock_timeout_skip_does_not_consume_the_max_migrations_per_run_budget() 
             "nodes/pve01/qemu/101/status/current": {"lock": "backup"},
             "nodes/pve01/qemu/102/config": {"scsi0": "san-a:vm-102-disk-0,size=1024G"},
             "nodes/pve01/qemu/102/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/102/pending": [],
             "nodes/pve01/qemu/102/status/current": {"lock": None},
             "nodes/pve01/qemu/102/move_disk": upid2,
             f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
@@ -1105,11 +1151,13 @@ def concurrent_client_with(overrides: dict[str, object]) -> tuple[PveClient, Fak
         ],
         "nodes/pve01/qemu/201/config": {"scsi0": "san-a:vm-201-disk-0,size=1024G"},
         "nodes/pve01/qemu/201/snapshot": [{"name": "current"}],
+        "nodes/pve01/qemu/201/pending": [],
         "nodes/pve01/qemu/201/status/current": {"lock": None},
         "nodes/pve01/qemu/201/move_disk": UPID_A,
         f"nodes/pve01/tasks/{UPID_A}/status": {"status": "stopped", "exitstatus": "OK"},
         "nodes/pve01/qemu/202/config": {"scsi0": "san-b:vm-202-disk-0,size=1024G"},
         "nodes/pve01/qemu/202/snapshot": [{"name": "current"}],
+        "nodes/pve01/qemu/202/pending": [],
         "nodes/pve01/qemu/202/status/current": {"lock": None},
         "nodes/pve01/qemu/202/move_disk": UPID_B,
         f"nodes/pve01/tasks/{UPID_B}/status": {"status": "stopped", "exitstatus": "OK"},
@@ -1626,6 +1674,7 @@ def test_concurrent_waits_for_a_free_slot_before_launching_a_third_move() -> Non
             ],
             "nodes/pve01/qemu/203/config": {"scsi0": "san-e:vm-203-disk-0,size=1024G"},
             "nodes/pve01/qemu/203/snapshot": [{"name": "current"}],
+            "nodes/pve01/qemu/203/pending": [],
             "nodes/pve01/qemu/203/status/current": {"lock": None},
             "nodes/pve01/qemu/203/move_disk": upid_c,
             f"nodes/pve01/tasks/{upid_c}/status": {"status": "stopped", "exitstatus": "OK"},

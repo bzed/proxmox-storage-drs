@@ -147,19 +147,20 @@ Every disk section 5.3 (C2) excludes from this run's solve, in the same
 `vmid:device` order `show-load` lists disks, with its size, current
 storage, measured load (`ℓ`) and `ℓ/z` ratio when one is available, and
 its exact reason — a real snapshot or an unreferenced companion volume
-(section 3.7), a config exclusion, a still-running
-`gates.cooldown_per_disk`, or a VM config lock. Identical text to what
-`show-load` already prints per disk as `[pinned: ...]`; gathered here into
-one block instead of interleaved with movable disks, because pins are
-`explain`'s subject, not an aside.
+(section 3.7), an unapplied pending config change (section 3.8), a config
+exclusion, a still-running `gates.cooldown_per_disk`, or a VM config lock.
+Identical text to what `show-load` already prints per disk as
+`[pinned: ...]`; gathered here into one block instead of interleaved with
+movable disks, because pins are `explain`'s subject, not an aside.
 
 A pin with something to actually act on or wait for gets a trailing
 `→ <hint>` — "clear snapshots to unblock" for a real snapshot, "remove the
-stale reference to unblock" for an orphaned volume, "re-check next run"
-for a cooldown, "re-check next run once the lock releases" for a VM
-lock. A standing policy exclusion (`exclude.*`, or a deliberately skipped
-`unusedN` disk) carries no hint — that pin is not something to unblock,
-it is a choice already made in the config.
+stale reference to unblock" for an orphaned volume, "apply the pending
+change (reboot the VM) or revert it, then re-check" for a pending config
+change, "re-check next run" for a cooldown, "re-check next run once the
+lock releases" for a VM lock. A standing policy exclusion (`exclude.*`, or
+a deliberately skipped `unusedN` disk) carries no hint — that pin is not
+something to unblock, it is a choice already made in the config.
 
 ## `cannot fully consolidate:`
 

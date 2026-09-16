@@ -88,7 +88,7 @@ def bundle_reference_now(bundle_dir: str | Path) -> datetime:
 
 
 class ReplayPveClient(PveClient):
-    """Serves ``pve.py``'s ten read methods from a bundle's ``pve/``
+    """Serves ``pve.py``'s eleven read methods from a bundle's ``pve/``
     directory. ``move_disk``/``task_status`` raise -- defense in depth,
     since ``cli.py`` refuses ``apply``/an escalated ``--mode`` under
     ``--replay`` before either could ever be reached."""
@@ -148,6 +148,21 @@ class ReplayPveClient(PveClient):
     def vm_status_current(self, node: str, vmid: int) -> dict[str, Any]:
         del node
         return dict(self._load(f"vm-status-current/{vmid}.json", f"status for VM {vmid}"))
+
+    def vm_pending(self, node: str, vmid: int) -> list[dict[str, Any]]:
+        """Unlike every other method here, a missing file is not a bundle
+        defect: a bundle captured before section 3.8 added this call has no
+        ``vm-pending/`` directory at all, and treating every such bundle's
+        replay as broken would be a worse regression than the feature this
+        adds. A bundle captured *after* 3.8 always writes this file for
+        every considered VM (`collect.py`'s `_capture_pve_vm_files()`, even
+        when the list comes back empty), so a missing file unambiguously
+        means "older bundle", never "this VM was silently skipped"."""
+        del node
+        path = self._dir / "pve" / f"vm-pending/{vmid}.json"
+        if not path.is_file():
+            return []
+        return list(self._load(f"vm-pending/{vmid}.json", f"pending config for VM {vmid}"))
 
     def move_disk(self, *args: Any, **kwargs: Any) -> str:
         raise PveApiError("--replay is read-only: move_disk cannot be issued under replay")

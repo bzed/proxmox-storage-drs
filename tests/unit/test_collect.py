@@ -46,6 +46,7 @@ VM_RESOURCES = [
 ]
 VM_CONFIGS = {101: {"name": "db-01", "scsi0": "san-a:vm-101-disk-0,size=10G"}}
 VM_SNAPSHOTS: dict[int, list[dict[str, Any]]] = {101: [{"name": "current"}]}
+VM_PENDING: dict[int, list[dict[str, Any]]] = {101: []}
 CONTENT_SAN_A = [
     {"volid": "san-a:vm-101-disk-0", "vmid": 101, "size": 10 * (1 << 30), "format": "raw"}
 ]
@@ -91,6 +92,7 @@ def make_pve_client(
         "nodes/node1/storage/san-b/content": CONTENT_SAN_B,
         "nodes/node1/qemu/101/config": VM_CONFIGS[101],
         "nodes/node1/qemu/101/snapshot": VM_SNAPSHOTS[101],
+        "nodes/node1/qemu/101/pending": VM_PENDING[101],
         "nodes/node1/qemu/101/status/current": {},
         "version": {"version": "8.2.1"},
     }
@@ -287,6 +289,48 @@ def test_capture_bundle_produces_anonymized_pve_files(tmp_path: Path) -> None:
     assert vm_config["scsi0"].startswith("stor-")
     assert "san-a" not in vm_config["scsi0"]
 
+    (vm_pending_key,) = (k for k in bundle.pve_files if k.startswith("vm-pending/"))
+    assert bundle.pve_files[vm_pending_key] == []
+
+
+def test_capture_bundle_writes_only_the_disk_signal_for_a_pending_change(tmp_path: Path) -> None:
+    """Section 3.8/16.3: a real pending edit on the VM's own disk survives
+    as the boolean signal only -- never the storage id/volume name its
+    `pending` field actually carries on a live cluster."""
+    api = fake_api(
+        {
+            "cluster/resources": lambda type: (VM_RESOURCES if type == "vm" else STORAGE_RESOURCES),
+            "storage": STORAGE_DEFS,
+            "nodes": [{"node": "node1"}],
+            "cluster/tasks": [],
+            "nodes/node1/storage/san-a/status": STORAGE_STATUS["san-a"],
+            "nodes/node1/storage/san-b/status": STORAGE_STATUS["san-b"],
+            "nodes/node1/storage/san-a/content": CONTENT_SAN_A,
+            "nodes/node1/storage/san-b/content": CONTENT_SAN_B,
+            "nodes/node1/qemu/101/config": VM_CONFIGS[101],
+            "nodes/node1/qemu/101/snapshot": VM_SNAPSHOTS[101],
+            "nodes/node1/qemu/101/pending": [
+                {
+                    "key": "scsi0",
+                    "value": "san-a:vm-101-disk-0,size=10G",
+                    "pending": "san-a:vm-101-disk-0,size=20G",
+                }
+            ],
+            "nodes/node1/qemu/101/status/current": {},
+            "version": {"version": "8.2.1"},
+        }
+    )
+    client = PveClient(api)
+    resolved = make_config(tmp_path)
+    options = collect.CaptureOptions(output_dir=str(tmp_path / "bundle"))
+    bundle = collect.capture_bundle(
+        client, make_prometheus_client(), resolved, options, now=CAPTURE_NOW
+    )
+    assert bundle.ok
+
+    (vm_pending_key,) = (k for k in bundle.pve_files if k.startswith("vm-pending/"))
+    assert bundle.pve_files[vm_pending_key] == [{"key": "scsi0", "pending": True}]
+
 
 def test_capture_bundle_preserves_a_qcow2_on_lvm_disks_format_extension(
     tmp_path: Path,
@@ -323,6 +367,7 @@ def test_capture_bundle_preserves_a_qcow2_on_lvm_disks_format_extension(
             "scsi0": "san-a:vm-101-disk-0.qcow2,discard=on,iothread=1,size=10G,ssd=1",
         },
         "nodes/node1/qemu/101/snapshot": VM_SNAPSHOTS[101],
+        "nodes/node1/qemu/101/pending": VM_PENDING[101],
         "nodes/node1/qemu/101/status/current": {},
         "version": {"version": "8.2.1"},
     }
@@ -941,6 +986,7 @@ def test_capture_bundle_manifest_version_is_not_mangled_by_vmid_redaction(tmp_pa
             "nodes/node1/storage/san-b/content": CONTENT_SAN_B,
             "nodes/node1/qemu/101/config": VM_CONFIGS[101],
             "nodes/node1/qemu/101/snapshot": VM_SNAPSHOTS[101],
+            "nodes/node1/qemu/101/pending": VM_PENDING[101],
             "nodes/node1/qemu/101/status/current": {},
             "version": {"version": "pve-manager/8.2.101"},
         }
