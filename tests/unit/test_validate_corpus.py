@@ -71,6 +71,11 @@ def test_scrub_pve_dir_now_checks_vm_snapshots_storage_content_and_status(
     (pve_dir / "vm-status-current" / "101.json").write_text(
         json.dumps({"lock": None, "pid": 12345}), encoding="utf-8"
     )
+    (pve_dir / "vm-pending").mkdir(parents=True)
+    (pve_dir / "vm-pending" / "101.json").write_text(
+        json.dumps([{"key": "scsi0", "pending": True, "value": "stor-aaaaaaaa:vm-101-disk-0"}]),
+        encoding="utf-8",
+    )
     (pve_dir / "storage-content" / "node-aaaaaaaa").mkdir(parents=True)
     (pve_dir / "storage-content" / "node-aaaaaaaa" / "stor-bbbbbbbb.json").write_text(
         json.dumps([{"volid": "x", "vmid": 1, "size": 1, "notes": "leaked"}]), encoding="utf-8"
@@ -85,6 +90,7 @@ def test_scrub_pve_dir_now_checks_vm_snapshots_storage_content_and_status(
     assert "pid" in joined
     assert "notes" in joined
     assert "path" in joined
+    assert "value" in joined  # vm-pending/101.json: "value" is not in VM_PENDING_FIELDS
 
 
 @needs_full_checkout

@@ -76,6 +76,28 @@ def test_filter_vm_config_fields_keeps_disk_keys_and_lock_template() -> None:
     }
 
 
+def test_filter_vm_pending_entries_keeps_only_the_disk_signal() -> None:
+    """Section 3.8/16.3: neither a disk key's own `pending` string (a full
+    disk spec, storage id and volume name) nor a non-disk key's `value`/
+    `pending` (free text, e.g. a queued VM `name`) survives -- only which
+    disk devices carry an edit or a deletion."""
+    raw: list[dict[str, object]] = [
+        {"key": "name", "value": "db-01", "pending": "db-01-renamed"},  # free text -- dropped
+        {"key": "memory", "value": "8192", "pending": "16384"},  # non-disk -- dropped
+        {
+            "key": "scsi0",
+            "value": "san-a:vm-101-disk-0,size=32G",
+            "pending": "san-a:vm-101-disk-0,size=64G",
+        },
+        {"key": "scsi1", "value": "san-a:vm-101-disk-1,size=5G", "delete": 1},
+        {"key": "scsi2", "value": "san-a:vm-101-disk-2,size=5G"},  # no divergence -- dropped
+    ]
+    assert a.filter_vm_pending_entries(raw) == [
+        {"key": "scsi0", "pending": True},
+        {"key": "scsi1", "delete": 1},
+    ]
+
+
 def test_sanitize_snapshot_name() -> None:
     assert a.sanitize_snapshot_name("current") == "current"
     assert a.sanitize_snapshot_name("before-migration") == "snapshot"

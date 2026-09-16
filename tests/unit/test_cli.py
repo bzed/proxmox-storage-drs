@@ -2536,6 +2536,14 @@ def test_pin_action_hint_names_something_to_do_only_when_there_is_something() ->
     )
     assert cli._pin_action_hint("cooldown: moved recently, 5.0m left") == "re-check next run"
     assert cli._pin_action_hint("locked: backup") == "re-check next run once the lock releases"
+    assert (
+        cli._pin_action_hint("pending config change (unapplied)")
+        == "apply the pending change (reboot the VM) or revert it, then re-check"
+    )
+    assert (
+        cli._pin_action_hint("pending deletion (unapplied)")
+        == "apply the pending change (reboot the VM) or revert it, then re-check"
+    )
     assert cli._pin_action_hint("excluded by config") is None
     assert (
         cli._pin_action_hint("excluded: unused disk (exclude.include_unused_disks=false)") is None

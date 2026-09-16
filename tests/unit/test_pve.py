@@ -104,6 +104,18 @@ def test_vm_snapshots() -> None:
     assert client.vm_snapshots("pve01", 101) == [{"name": "current"}]
 
 
+def test_vm_pending() -> None:
+    api = fake_api(
+        {
+            "nodes/pve01/qemu/101/pending": [
+                {"key": "scsi0", "value": "san-a:vm-101-disk-0,size=32G", "pending": True}
+            ]
+        }
+    )
+    client = PveClient(api)
+    assert client.vm_pending("pve01", 101)[0]["key"] == "scsi0"
+
+
 def test_vm_status_current() -> None:
     api = fake_api({"nodes/pve01/qemu/101/status/current": {"lock": "backup"}})
     client = PveClient(api)

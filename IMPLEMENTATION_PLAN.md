@@ -697,6 +697,7 @@ Read path:
 | `GET /nodes/{node}/storage/{storage}/status` | authoritative `total`/`used`/`avail` |
 | `GET /nodes/{node}/storage/{storage}/content` | per-volume real allocated sizes, owner vmid |
 | `GET /nodes/{node}/qemu/{vmid}/snapshot` | detect existing snapshot/volume chains (§3.7) |
+| `GET /nodes/{node}/qemu/{vmid}/pending` | detect an unapplied pending config change per disk (§3.8) |
 | `GET /nodes/{node}/qemu/{vmid}/status/current` | `lock` state immediately before a move (§9.3) |
 
 **Use `GET /storage` (the list form), never `GET /storage/{storage}`, for a storage's own config
@@ -792,11 +793,12 @@ fetching dominates run time. Specify:
   reveals which storage it is actually on, so it costs a fetch too — the saving from this
   optimization is real but smaller than a naive reading suggests.
 
-Expected call count per run: `4 + 2·|VMs considered| + 2·|storages| + |extra content pairs|` — four
+Expected call count per run: `4 + 3·|VMs considered| + 2·|storages| + |extra content pairs|` — four
 cluster-wide calls (VM inventory, storage inventory, storage definitions, and `GET /nodes` for §3.4's
-default node-scoping filter, skipped only when `metrics.extra_selector` is set), two per considered VM
-(config, which also carries `lock` per §9.3's pseudocode so no separate `/status/current` call is
-needed at planning time; and `/snapshot`, per §3.7), and two per storage (`status`, `content`).
+default node-scoping filter, skipped only when `metrics.extra_selector` is set), three per considered
+VM (config, which also carries `lock` per §9.3's pseudocode so no separate `/status/current` call is
+needed at planning time; `/snapshot`, per §3.7; and `/pending`, per §3.8), and two per storage
+(`status`, `content`).
 `|extra content pairs|` is the amplification the managed-disk own-VM-node size fetch adds (below,
 "The actual mechanism..."): one additional `content` call per distinct `(node, storage)` pair a
 managed disk's VM runs on, beyond the per-storage active-node pick
@@ -973,6 +975,47 @@ VM shut down (out of scope — this tool never stops a VM, §1). So the policy i
 `exclude.skip_vms_with_snapshots` stays as a knob but its `false` setting does not make such moves
 work — it merely stops pre-filtering them, and PVE will reject them at the API. Keep it `true`; the
 pre-flight check of §9.3 runs regardless.
+
+### 3.8 Disks with an unapplied pending change are excluded
+
+Confirmed live against a real cluster (`config/drs.yaml`'s dev cluster, VM 102): `GET
+/nodes/{node}/qemu/{vmid}/config` — what §3.5's `vm_config()` calls, with no `current` parameter,
+which is every call this project ever makes — returns a key's **pending** value once one exists, not
+the value actually in effect. A disk edited through the PVE UI while the guest is running (a resize,
+an option change) shows up there as if the edit had already taken effect, even though PVE has queued
+it for the VM's next reboot. `GET /nodes/{node}/qemu/{vmid}/pending` (`vm_pending()`) is the only
+endpoint that exposes both: each entry carries `key`, the still-in-effect `value`, and — only when
+that key has an unapplied change — a `pending` field (an edit) or a truthy `delete` field (queued for
+removal).
+
+**Why this matters for a storage migration, specifically.** `move_disk` acts on the *current*
+volume, not on the pending edit — moving `scsi0` when its pending change is, say, a queued resize
+to a larger size relocates the disk at its *current* size, then leaves that same pending resize
+entry sitting in the config afterwards, now describing a change relative to a volume that has since
+moved storage. PVE does not reconcile or drop a key's `pending` entry as a side effect of
+`move_disk` — there is no code path that would, since the two are unrelated operations from PVE's
+own point of view. The operator's next reboot then applies a resize computed against a value that
+predates the migration, on whichever storage the disk ended up on. This is not a hypothetical: it is
+what "the pending disk entry is not being updated when the disk is migrated" (an operator report
+against the dev cluster) actually is once traced to the API level, and PVE has no fix for it because
+nothing in its own model treats `move_disk` and a pending edit as interacting at all. The engine's
+only safe option is to keep the two from ever overlapping in the first place.
+
+So, exactly like §3.7's snapshot handling:
+
+1. **Detect per disk device**, from `vm_pending()`, not from `vm_config()`'s own merged view — the
+   pending value is exactly what `vm_config()` cannot be trusted to distinguish from the real one.
+2. **Pin, do not drop.** A disk with an unapplied pending change stays in `D` with
+   `x_{d,σ₀(d)} = 1` fixed (C2), the same as a snapshot-blocked or locked disk (§3.6's "pinned
+   disks are modelled, not ignored").
+3. **Re-check immediately before issuing the move** (§9.2's step 6, below), not only at planning
+   time: an operator can queue a pending change in the PVE UI in the gap between `plan` and
+   `apply`/`auto` issuing the move, exactly as a lock (§9.3) or a new snapshot (§3.7) can.
+4. **No knob disables this.** Unlike `exclude.skip_vms_with_snapshots`, there is no configuration
+   escape hatch — a pending change is not a policy preference to override, it is PVE leaving a
+   config key referring to state that would become wrong the moment the disk moves.
+
+(C2)'s eligibility list and §9.2's re-check list both name this condition explicitly.
 
 ---
 
@@ -1156,6 +1199,9 @@ small:
 - `d`, or any disk of `v(d)`, has a snapshot or an unreferenced companion volume on its storage
   (§3.7) — pin `x_{d,σ₀(d)} = 1`. `move_disk delete=1` cannot move such a volume and would not carry
   the snapshots if it could;
+- `d` has an unapplied pending config change on PVE (§3.8, `GET .../pending`) — also pin. PVE does
+  not reconcile a disk's `pending` entry when that disk is moved, so migrating one leaves the entry
+  referring to state that predates the move;
 - `d` is within its per-disk cooldown — also pin to current;
 - `v(d)` is currently `lock`ed (§9.3) — pin for this run. A lock is transient, so this is a
   *planning-time* pin only and carries no cooldown; the next run re-evaluates it.
@@ -1859,10 +1905,16 @@ Before **every** move, re-read the live state rather than trusting the plan:
 3. confirm the VM is still running and untagged for exclusion;
 4. confirm `config.lock` is empty — if not, wait per §9.3 rather than failing;
 5. confirm no snapshot has appeared for the VM since planning (§3.7); if one has, drop the move and
-   re-plan — `delete=1` would be rejected by PVE anyway.
+   re-plan — `delete=1` would be rejected by PVE anyway;
+6. re-fetch `/nodes/{node}/qemu/{vmid}/pending` and confirm this disk still carries no unapplied
+   pending change (§3.8); if one has appeared since planning — an operator can queue one in the PVE
+   UI at any time — drop the move and re-plan rather than risk `move_disk` leaving that entry
+   referring to pre-move state.
 
 These re-reads bypass the per-run topology cache (§3.5) for this VM and this storage only. Steps 4
-and 5 are cheap: both come from the same `/qemu/{vmid}/config` response as step 1.
+and 5 are cheap: both come from the same `/qemu/{vmid}/config` response as step 1. Step 6 is its own
+call, since only `/pending` (not `/config`) distinguishes a key's pending value from the one in
+effect (§3.8).
 
 **Re-plan protocol.** A mismatch is a *normal* outcome in a live cluster, not an error, and must not
 be allowed to loop:
@@ -2748,6 +2800,7 @@ drs-testdata-cluster-3f8a91c2-2026-09-11/
     vm-config/<vmid>.json
     vm-snapshots/<vmid>.json
     vm-status-current/<vmid>.json
+    vm-pending/<vmid>.json
     storage-status/<node>/<storage>.json
     storage-content/<node>/<storage>.json
   prometheus/
@@ -3053,6 +3106,12 @@ with the real one.
   hits or misses deterministically — a key computed over the *original* text could only ever miss.
 - `state.json` under replay is read from the bundle if present and written nowhere. A replay never
   touches the host's real state.
+- **`vm-pending/<vmid>.json` is the one deliberate exception to the "key miss is loud" rule above.**
+  A bundle captured before section 3.8 added this call has no `vm-pending/` directory at all; a
+  missing file there is treated as "nothing pending", not a bundle defect, so an older committed
+  bundle keeps replaying rather than every one of them needing recapture the moment this file was
+  added. A bundle captured after 3.8 always writes the file for every considered VM, even when its
+  own list is empty, so this fallback can only ever trigger on a genuinely older bundle.
 
 `--replay` ships with the tool rather than living in `tests/`, for two reasons: the operator needs
 it to check their own bundle before sending it ("does `plan` against this bundle show the problem I

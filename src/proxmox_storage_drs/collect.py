@@ -50,6 +50,7 @@ from proxmox_storage_drs.anonymize import (
     filter_allowed_fields,
     filter_disk_value_params,
     filter_vm_config_fields,
+    filter_vm_pending_entries,
     load_or_create_salt,
     salt_fingerprint,
     sanitize_snapshot_name,
@@ -304,6 +305,12 @@ class RecordingPveClient(PveClient):
             _guarded(
                 self._log, f"vm_snapshots({vmid})", lambda: self._inner.vm_snapshots(node, vmid)
             )
+            or []
+        )
+
+    def vm_pending(self, node: str, vmid: int) -> list[dict[str, Any]]:
+        return (
+            _guarded(self._log, f"vm_pending({vmid})", lambda: self._inner.vm_pending(node, vmid))
             or []
         )
 
@@ -735,6 +742,8 @@ def _capture_pve_vm_files(
             files[f"vm-status-current/{new_vmid}.json"] = filter_allowed_fields(
                 status_raw, VM_STATUS_CURRENT_FIELDS
             )
+            pending_raw = recording_pve.vm_pending(node, vmid)
+            files[f"vm-pending/{new_vmid}.json"] = filter_vm_pending_entries(pending_raw)
     return files
 
 

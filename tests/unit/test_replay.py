@@ -116,6 +116,26 @@ def test_replay_pve_client_node_names(tmp_path: Path) -> None:
     assert all(n.startswith("node-") for n in names)
 
 
+def test_replay_pve_client_vm_pending(tmp_path: Path) -> None:
+    bundle_dir = write_bundle(tmp_path)
+    client = replay.ReplayPveClient(bundle_dir)
+    vmids = [int(p.stem) for p in (bundle_dir / "pve" / "vm-pending").glob("*.json")]
+    assert len(vmids) == 1
+    assert client.vm_pending("any-node-name", vmids[0]) == []
+
+
+def test_replay_pve_client_vm_pending_missing_file_means_nothing_pending(tmp_path: Path) -> None:
+    """Section 16.5's one deliberate exception: a bundle captured before
+    section 3.8 added this call has no `vm-pending/` directory at all, and
+    that must read as "nothing pending" rather than a bundle defect."""
+    bundle_dir = write_bundle(tmp_path)
+    for path in (bundle_dir / "pve" / "vm-pending").glob("*.json"):
+        path.unlink()
+    (bundle_dir / "pve" / "vm-pending").rmdir()
+    client = replay.ReplayPveClient(bundle_dir)
+    assert client.vm_pending("node1", 101) == []
+
+
 def test_replay_pve_client_missing_file_is_a_loud_bundle_error(tmp_path: Path) -> None:
     bundle_dir = write_bundle(tmp_path)
     client = replay.ReplayPveClient(bundle_dir)

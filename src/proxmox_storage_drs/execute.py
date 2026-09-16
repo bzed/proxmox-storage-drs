@@ -6,7 +6,9 @@
 for each move, re-validates it against the *live* cluster immediately
 before issuing it (section 9.2: never trust the plan alone -- the VM may
 have moved node, the disk may no longer be on the expected source, a
-snapshot may have appeared), waits out any VM config lock rather than
+snapshot may have appeared, an operator may have queued a pending config
+change on the very disk about to move -- section 3.8), waits out any VM
+config lock rather than
 failing (section 9.3.1, `.agents/domain-invariants.md` rule 5: locks are
 an open set, never whitelisted), issues ``move_disk``, and does not
 consider the move done until **three** things hold, not one (section
@@ -70,7 +72,14 @@ from proxmox_storage_drs.payback import MoveCost
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.reserve import largest_disk_bytes, transient_charge_ok
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult
-from proxmox_storage_drs.topology import DISK_KEY_RE, Disk, Group, Storage, parse_disk_spec
+from proxmox_storage_drs.topology import (
+    DISK_KEY_RE,
+    Disk,
+    Group,
+    Storage,
+    parse_disk_spec,
+    pending_disk_reasons,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +211,7 @@ def _is_excluded_by_tag_or_vmid(
 def _preflight(
     client: PveClient, disk: Disk, move: ScheduledMove, exclude: ExcludeConfig
 ) -> _PreflightResult:
-    """Section 9.2's five re-checks, immediately before issuing one move.
+    """Section 9.2's six re-checks, immediately before issuing one move.
 
     Re-fetches everything needed fresh -- the per-run topology cache
     (section 3.5) is deliberately bypassed here, since its whole point was
@@ -240,6 +249,20 @@ def _preflight(
         return _PreflightResult(
             f"VM {disk.vmid} now has {len(real_snapshots)} snapshot(s) that did not exist when "
             "this plan was built -- move_disk delete=1 would be rejected"
+        )
+
+    # Step 6 (section 3.8/9.2): only `/pending` -- not the `config` already
+    # fetched above -- distinguishes a key's pending value from the one
+    # actually in effect, so this needs its own live call. An operator can
+    # queue a pending change in the PVE UI at any point between planning and
+    # this exact moment, the same way a lock or a new snapshot can.
+    pending = client.vm_pending(node, disk.vmid)
+    pending_reason = pending_disk_reasons(pending).get(move.device)
+    if pending_reason is not None:
+        return _PreflightResult(
+            f"{move.disk_key} now has a {pending_reason} that did not exist when this plan was "
+            "built -- PVE does not reconcile a disk's pending entry when it is moved, so it "
+            "would be left referring to pre-move state"
         )
 
     lock = config.get("lock")

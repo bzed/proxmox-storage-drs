@@ -30,6 +30,7 @@ from proxmox_storage_drs.topology import (
     _split_tags,
     build_topology,
     parse_disk_spec,
+    pending_disk_reasons,
 )
 from tests.unit.fakes import fake_api
 
@@ -108,6 +109,7 @@ def build_fake_client(
     vm_configs: dict[int, dict[str, Any]],
     vm_snapshots: dict[int, list[dict[str, Any]]],
     content_by_storage: dict[str, list[dict[str, Any]]],
+    vm_pending: dict[int, list[dict[str, Any]]] | None = None,
 ) -> PveClient:
     responses: dict[str, Any] = {
         "cluster/resources": lambda type: (vm_resources if type == "vm" else STORAGE_RESOURCES),
@@ -121,6 +123,11 @@ def build_fake_client(
         responses[f"nodes/node1/qemu/{vmid}/config"] = cfg
     for vmid, snaps in vm_snapshots.items():
         responses[f"nodes/node1/qemu/{vmid}/snapshot"] = snaps
+    # Every considered VM is fetched (section 3.8) regardless of whether the
+    # scenario cares about pending changes -- default to "nothing pending"
+    # so a test that never mentions vm_pending does not have to enumerate it.
+    for vmid in vm_configs:
+        responses[f"nodes/node1/qemu/{vmid}/pending"] = (vm_pending or {}).get(vmid, [])
     return PveClient(fake_api(responses))
 
 
@@ -149,6 +156,7 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
         _vm(108, "node1"),  # disk on an ungrouped storage
         _vm(109, "node1", status="stopped"),  # excluded: running_only default True
         _vm(112, "node1"),  # has an orphaned companion volume
+        _vm(113, "node1"),  # pending-change-pinned (section 3.8)
     ]
     vm_configs = {
         101: {"name": "vm101", "scsi0": "san-a:vm-101-disk-0,size=10G"},
@@ -164,6 +172,7 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
         107: {"name": "vm107", "unused0": "san-a:vm-107-disk-0,size=1G"},
         108: {"name": "vm108", "scsi0": "local-only:vm-108-disk-0,size=10G"},
         112: {"name": "vm112", "scsi0": "san-a:vm-112-disk-0,size=10G"},
+        113: {"name": "vm113", "scsi0": "san-a:vm-113-disk-0,size=10G"},
     }
     vm_snapshots = {
         101: [{"name": "current"}],
@@ -175,6 +184,10 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
         107: [{"name": "current"}],
         108: [{"name": "current"}],
         112: [{"name": "current"}],
+        113: [{"name": "current"}],
+    }
+    vm_pending = {
+        113: [{"key": "scsi0", "value": "san-a:vm-113-disk-0,size=10G", "pending": True}],
     }
     content_san_a = [
         _content("san-a", 101, "disk-0", 10 * (1 << 30)),
@@ -187,6 +200,7 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
         _content("san-a", 109, "disk-0", 2 * (1 << 30)),  # stopped VM's disk: foreign
         _content("san-a", 112, "disk-0", 10 * (1 << 30)),
         _content("san-a", 112, "disk-1", 20 * (1 << 30)),  # orphan: not in vm112's config
+        _content("san-a", 113, "disk-0", 10 * (1 << 30)),
         {  # a template/orphan with no owning VM at all
             "volid": "san-a:base-9999-disk-0",
             "vmid": None,
@@ -204,6 +218,7 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
         vm_configs,
         vm_snapshots,
         {"san-a": content_san_a, "san-b": content_san_b},
+        vm_pending,
     )
 
     topology = build_topology(client, config)
@@ -241,6 +256,10 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
     assert disks_by_key["112:scsi0"].pinned_reason == (
         "unreferenced companion volume (snapshot chain or orphan)"
     )
+
+    # Pending-change-pinned (section 3.8): vm_config()'s own merged view
+    # would show this disk as ordinary -- only /pending distinguishes it.
+    assert disks_by_key["113:scsi0"].pinned_reason == "pending config change (unapplied)"
 
     # Ungrouped disk (108) never appears in any group, and is warned about.
     assert "108:scsi0" not in disks_by_key
@@ -569,6 +588,7 @@ def test_build_topology_content_queried_from_vm_own_node_not_storage_active_node
         ],
         "nodes/nodeB/qemu/301/config": vm_configs[301],
         "nodes/nodeB/qemu/301/snapshot": [{"name": "current"}],
+        "nodes/nodeB/qemu/301/pending": [],
     }
     fake = fake_api(responses)
     client = PveClient(fake)
@@ -789,6 +809,7 @@ def test_pin_reason_priority_order() -> None:
             vm_excluded=True,
             disk_excluded=True,
             snapshot_reason="snapshots present (1)",
+            pending_reason="pending config change (unapplied)",
             cooldown_remaining_seconds=3600.0,
             lock="backup",
             device="scsi0",
@@ -804,6 +825,7 @@ def test_pin_reason_movable() -> None:
             vm_excluded=False,
             disk_excluded=False,
             snapshot_reason=None,
+            pending_reason=None,
             cooldown_remaining_seconds=0.0,
             lock=None,
             device="scsi0",
@@ -819,6 +841,7 @@ def test_pin_reason_unused_disk_allowed_by_default() -> None:
             vm_excluded=False,
             disk_excluded=False,
             snapshot_reason=None,
+            pending_reason=None,
             cooldown_remaining_seconds=0.0,
             lock=None,
             device="unused0",
@@ -834,6 +857,7 @@ def test_pin_reason_cooldown_is_reported_with_time_remaining() -> None:
             vm_excluded=False,
             disk_excluded=False,
             snapshot_reason=None,
+            pending_reason=None,
             cooldown_remaining_seconds=3600.0,
             lock=None,
             device="scsi0",
@@ -851,6 +875,7 @@ def test_pin_reason_cooldown_wins_over_lock_per_the_plans_own_order() -> None:
             vm_excluded=False,
             disk_excluded=False,
             snapshot_reason=None,
+            pending_reason=None,
             cooldown_remaining_seconds=1.0,
             lock="backup",
             device="scsi0",
@@ -866,6 +891,7 @@ def test_pin_reason_snapshot_wins_over_cooldown() -> None:
             vm_excluded=False,
             disk_excluded=False,
             snapshot_reason="snapshots present (1)",
+            pending_reason=None,
             cooldown_remaining_seconds=3600.0,
             lock=None,
             device="scsi0",
@@ -873,6 +899,73 @@ def test_pin_reason_snapshot_wins_over_cooldown() -> None:
         )
         == "snapshots present (1)"
     )
+
+
+def test_pin_reason_pending_change_wins_over_cooldown() -> None:
+    """Section 5.3 (C2) lists the pending-change pin (section 3.8) before
+    the cooldown check -- both being true at once must report the pending
+    change, not the cooldown."""
+    assert (
+        _pin_reason(
+            vm_excluded=False,
+            disk_excluded=False,
+            snapshot_reason=None,
+            pending_reason="pending config change (unapplied)",
+            cooldown_remaining_seconds=3600.0,
+            lock=None,
+            device="scsi0",
+            include_unused_disks=True,
+        )
+        == "pending config change (unapplied)"
+    )
+
+
+def test_pin_reason_snapshot_wins_over_pending_change() -> None:
+    assert (
+        _pin_reason(
+            vm_excluded=False,
+            disk_excluded=False,
+            snapshot_reason="snapshots present (1)",
+            pending_reason="pending config change (unapplied)",
+            cooldown_remaining_seconds=0.0,
+            lock=None,
+            device="scsi0",
+            include_unused_disks=True,
+        )
+        == "snapshots present (1)"
+    )
+
+
+# --------------------------------------------------------------------- pending_disk_reasons
+
+
+def test_pending_disk_reasons_flags_an_edited_disk_key() -> None:
+    pending = [
+        {"key": "name", "value": "vm101"},  # non-disk key with no pending -- ignored
+        {
+            "key": "scsi0",
+            "value": "san-a:vm-101-disk-0,size=10G",
+            "pending": "san-a:vm-101-disk-0,size=10G,ssd=1",
+        },
+    ]
+    assert pending_disk_reasons(pending) == {"scsi0": "pending config change (unapplied)"}
+
+
+def test_pending_disk_reasons_flags_a_deletion() -> None:
+    pending = [{"key": "scsi1", "value": "san-a:vm-101-disk-1,size=5G", "delete": 1}]
+    assert pending_disk_reasons(pending) == {"scsi1": "pending deletion (unapplied)"}
+
+
+def test_pending_disk_reasons_ignores_a_key_with_no_divergence() -> None:
+    """A key with only `value` (no `pending`/`delete`) is fully in effect --
+    the common case for every key on an unmodified VM."""
+    pending = [{"key": "scsi0", "value": "san-a:vm-101-disk-0,size=10G"}]
+    assert pending_disk_reasons(pending) == {}
+
+
+def test_pending_disk_reasons_ignores_non_disk_keys_even_when_pending() -> None:
+    pending = [{"key": "memory", "value": "8192", "pending": "16384"}]
+    assert pending_disk_reasons(pending) == {}
 
 
 # --------------------------------------------------------------------- dataclass sanity

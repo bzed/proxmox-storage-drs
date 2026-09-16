@@ -66,12 +66,16 @@ first successful migration -- after that, `show-load`'s drift line
 reflects real history.
 
 A pinned disk carries `[pinned: <reason>]` after its size and format —
-`snapshots present (N)`, `locked: <lock>`, `excluded by config`,
+`snapshots present (N)`, `pending config change (unapplied)`,
+`pending deletion (unapplied)`, `locked: <lock>`, `excluded by config`,
 `excluded: unused disk (exclude.include_unused_disks=false)`, or
 `cooldown: moved recently, <time> left on gates.cooldown_per_disk`
 whenever `state.json` records that disk having moved within
 `gates.cooldown_per_disk` — matching `IMPLEMENTATION_PLAN.md` section 5.3
 (C2) exactly; that reason is the answer to "why won't it move this disk."
+The two `pending` reasons (section 3.8) mean PVE has an edit or a deletion
+queued against that disk key that has not taken effect yet (usually
+waiting on a VM reboot) — apply or revert it in the PVE UI, then re-run.
 
 A disk whose measured I/O falls below `window.min_coverage` (section 3.4)
 gets a `⚠ <disk> : <reason>` line of its own, right after that group's

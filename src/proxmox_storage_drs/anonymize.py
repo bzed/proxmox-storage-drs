@@ -115,6 +115,17 @@ DISK_VALUE_FIELDS = frozenset({"size", "format", "media"})
 #: :func:`sanitize_snapshot_name`.
 VM_SNAPSHOT_FIELDS = frozenset({"name"})
 
+#: ``GET /nodes/{node}/qemu/{vmid}/pending`` (``vm_pending()``, section 3.8):
+#: unlike every other allowlist above, this one is enforced entirely inside
+#: :func:`filter_vm_pending_entries` rather than via
+#: :func:`filter_allowed_fields` -- a pending entry's own ``value``/
+#: ``pending`` fields hold a full disk spec (storage id and volume name) for
+#: a disk key, or free text (a pending VM ``name``, e.g.) for any other, and
+#: ``pending_disk_reasons()`` itself never reads either, only whether they
+#: are *present*. So neither survives at all; this constant exists only to
+#: name the two structural fields that do.
+VM_PENDING_FIELDS = frozenset({"key", "pending", "delete"})
+
 #: ``GET .../status/current`` (``vm_status_current()``): ``lock`` only
 #: (section 9.3).
 VM_STATUS_CURRENT_FIELDS = frozenset({"lock"})
@@ -155,6 +166,28 @@ def filter_vm_config_fields(raw_config: MappingType[str, Any]) -> dict[str, Any]
         for key, value in raw_config.items()
         if key in VM_CONFIG_EXTRA_FIELDS or DISK_KEY_RE.match(key)
     }
+
+
+def filter_vm_pending_entries(raw: Iterable[MappingType[str, Any]]) -> list[dict[str, Any]]:
+    """Section 3.8/16.3: reduce ``vm_pending()``'s response to the one
+    boolean signal ``pending_disk_reasons()`` (topology.py) reads -- which
+    disk devices (matching ``topology.DISK_KEY_RE``) carry an unapplied
+    edit or deletion. Every non-disk key, and every disk key's own
+    ``value``/``pending`` string, is dropped rather than filtered field-by
+    -field the way :func:`filter_vm_config_fields` does, because those
+    values are exactly the storage-id/volume-name and free-text content
+    ``VM_PENDING_FIELDS``'s own docstring explains nothing downstream
+    needs."""
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        key = item.get("key")
+        if not isinstance(key, str) or not DISK_KEY_RE.match(key):
+            continue
+        if item.get("delete"):
+            out.append({"key": key, "delete": 1})
+        elif "pending" in item:
+            out.append({"key": key, "pending": True})
+    return sorted(out, key=lambda entry: str(entry["key"]))
 
 
 def sanitize_snapshot_name(name: str) -> str:

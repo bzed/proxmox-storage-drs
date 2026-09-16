@@ -41,7 +41,7 @@ storage)` content-fetch phase, the single-threaded join
 2. `storage_resources()` once, to pick one active node per storage
    (`_pick_active_node`, preferring one reporting `status: "available"`).
 3. `storage_content()` and `storage_status()` per group storage.
-4. `vm_config()` and `vm_snapshots()` per considered VM. A VM is *not*
+4. `vm_config()`, `vm_snapshots()` and `vm_pending()` per considered VM. A VM is *not*
    fetched at all when `exclude.running_only` is set and it is stopped —
    the one case `cluster/resources`'s own fields can decide without a
    config fetch. Every other VM is fetched, including config-excluded ones:
@@ -99,10 +99,38 @@ conditions: config exclusion (VM-level, then `exclude.disks`), a real
 snapshot or an unreferenced companion volume (section 3.7,
 `_disk_snapshot_or_orphan_reason` — the `"current"` entry `GET
 .../snapshot` always returns, verified on a live cluster, is filtered out
-before counting), the per-disk cooldown (below), a VM lock, then an
-`unusedN` disk when `exclude.include_unused_disks` is false. A disk gets
-at most one reason; the first that applies wins, matching how an operator
-would explain it.
+before counting), an unapplied pending config change (section 3.8, below),
+the per-disk cooldown (below), a VM lock, then an `unusedN` disk when
+`exclude.include_unused_disks` is false. A disk gets at most one reason;
+the first that applies wins, matching how an operator would explain it.
+
+## The pending-change pin
+
+`GET .../qemu/{vmid}/config` (`vm_config()`) is confirmed, against a real
+cluster, to return a key's **pending** value once one exists — not the
+value actually in effect. Only `GET .../qemu/{vmid}/pending`
+(`vm_pending()`) exposes both, so `_fetch_vm()` fetches it alongside
+`vm_config()`/`vm_snapshots()` for every considered VM, and
+`pending_disk_reasons()` (public, unlike its sibling helpers here — see
+below) reduces it to `device -> reason` for exactly the disk keys
+(matching `DISK_KEY_RE`) that carry a `"pending"` field (an edit) or a
+truthy `"delete"` field (a queued removal). `_join_vm_disks()` computes
+this dict once per VM, the same way it already does for
+`snapshot_reason`, and passes each disk's own entry into `_pin_reason()`.
+
+Why this exists at all: `move_disk` acts on a disk's *current* volume, and
+PVE does not reconcile that disk's `pending` entry as a side effect of the
+move — the entry keeps describing a change relative to whatever the disk
+looked like before it moved. Migrating a disk in this state would leave a
+config key that is wrong the moment the operator's next reboot applies it.
+Section 3.8 has the full reasoning and the live-cluster confirmation.
+
+`pending_disk_reasons()` is exported (not underscore-prefixed) specifically
+so `execute.py`'s `_preflight()` can call the identical parsing
+immediately before issuing a move (section 9.2 step 6, `92-execute.md`) —
+one implementation, per `AGENTS.md` section 5, rather than a second
+`/pending` parser that could silently classify an entry differently from
+this one.
 
 ## The per-disk cooldown pin
 

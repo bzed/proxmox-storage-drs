@@ -167,6 +167,7 @@ _PVE_ALLOWLISTS: dict[str, frozenset[str]] = {
 _PVE_FLAT_ALLOWLISTS: dict[str, frozenset[str]] = {
     "vm-snapshots": anonymize.VM_SNAPSHOT_FIELDS,
     "vm-status-current": anonymize.VM_STATUS_CURRENT_FIELDS,
+    "vm-pending": anonymize.VM_PENDING_FIELDS,
 }
 _PVE_NESTED_ALLOWLISTS: dict[str, frozenset[str]] = {
     "storage-status": anonymize.STORAGE_STATUS_FIELDS,
