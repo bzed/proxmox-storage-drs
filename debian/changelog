@@ -1,3 +1,63 @@
+pve-storage-drs (0.1.5) trixie; urgency=medium
+
+  * plan/optimize/heuristic: a new capacity-spread objective term and gate
+    (IMPLEMENTATION_PLAN.md section 5.3 (C7) and section 6) so a group with
+    balanced I/O but data concentrated on a single storage still gets
+    spread -- `objective.delta_capacity_spread` (default 0.5) and
+    `gates.capacity_spread_threshold` (default 0.25, nullable) are new
+    config knobs, linearized in both the CP-SAT and CBC MILP backends (the
+    CBC path also fixes a real numerical-conditioning bug found via corpus
+    replay: unscaled byte coefficients were badly conditioning the LP
+    against CBC's simplex). The default payback horizon is raised from 7d
+    to 365d: a migration's cost is paid once and early while its benefit
+    accrues for the placement's whole lifetime, and the old week-long
+    horizon rejected real but slow-accruing balancing benefit -- the knob
+    stays configurable, with config validation now warning below 30d.
+    `explain`/`plan`/`apply` reporting, the audit log and `plan --json`
+    (new `after_capacity_spread` field) all carry the new term; the
+    worked example, `fc-tier1`/`reserve-tradeoff` fixtures and the corpus
+    Pareto-dominance check are updated to match.
+  * topology+execute: a disk with an unapplied PVE pending config change
+    (a queued edit or deletion) is now pinned so plan/optimize never
+    propose a move for it (IMPLEMENTATION_PLAN.md section 3.8) --
+    Proxmox does not reconcile a disk's `pending` entry when the disk
+    moves to another storage, and `GET .../config` silently returns the
+    pending value rather than the one in effect, so only `GET
+    .../pending` can tell the two apart; confirmed live against a real VM
+    on a dev cluster. `execute`'s preflight gained a sixth live re-check
+    so a pending change queued between plan and apply also aborts that
+    move. Wired through `collect-testdata`/anonymize/replay (a new
+    anonymized `vm-pending/<vmid>.json` bundle file carrying only the
+    boolean pending/delete signal) and the corpus scrub audit; bundles
+    committed before this change replay as "nothing pending" rather than
+    failing.
+  * `collect-testdata --replay`: a shared storage's capture-node pick now
+    reads from the same anonymized, pseudonym-sorted view that gets
+    committed to `cluster-resources-storage.json`, instead of the live
+    API's own status-tie ordering, which could disagree with it and make
+    replay ask for a node/storage pair the collector never captured --
+    broke `plan --replay` outright on a real 4-node cluster capture.
+  * `collect-testdata --replay`: a range capture taken with `--step`
+    overriding `config.metrics.step` (recorded only in a bundle's
+    `manifest.json`, never in `config.yaml`) now replays correctly --
+    `compute_disk_coverage()`/`_fetch_raw_quantity_series()`'s two-guess
+    step fallback matched neither guess and failed outright on a real
+    4-node cluster's `plan`/`show-load`; the mismatch handler now raises
+    the real captured step instead of a third guess.
+  * `collect-testdata`'s anonymization step now accepts a format
+    extension on a volume name (e.g. `vm-101-disk-1.qcow2`, as PVE names
+    a qcow2 volume on shared LVM) instead of dropping the disk as an
+    "unrecognized name" -- confirmed on a real cluster, where it emptied
+    `vm-config.json`/`storage-content.json` for an entire group while the
+    live tool balanced it correctly. Live topology is unaffected; only
+    the anonymization step regexes the volume name.
+  * anonymize: a group's real name (e.g. `dc6_T2`) is no longer leaked
+    into a captured bundle's `manifest.json` call-log free text -- found
+    on a second dev-cluster capture, the same gap `_redact_free_text()`
+    already closed for node/storage/vmid one identifier kind earlier.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Wed, 16 Sep 2026 11:16:09 +0200
+
 pve-storage-drs (0.1.4) trixie; urgency=medium
 
   * REVIEW.md seventeenth-pass fixes (findings Z-01..Z-08), tasked with
