@@ -30,6 +30,7 @@ from proxmox_storage_drs.execute import (
     Clock,
     ExecutionResult,
     _detect_orphan_volumes,
+    _is_task_lock_timeout,
     _live_transient_check,
     _preflight,
     _vm_resource,
@@ -392,6 +393,149 @@ def test_wait_for_unlocked_helper_directly() -> None:
     assert last_lock is None
 
 
+# ------------------------------------------------ move_disk task lock timeout
+
+
+TASK_LOCK_TIMEOUT_EXITSTATUS = "can't lock file '/var/lock/qemu-server/lock-101.conf' - got timeout"
+
+
+def test_is_task_lock_timeout_matches_pve_wording_only() -> None:
+    assert _is_task_lock_timeout(f"move_disk task {UPID} failed: {TASK_LOCK_TIMEOUT_EXITSTATUS}")
+    assert not _is_task_lock_timeout(f"move_disk task {UPID} failed: mirror failed")
+    assert not _is_task_lock_timeout(f"move_disk task {UPID} failed: some lock error, got timeout")
+
+
+def test_task_lock_timeout_is_retried_and_succeeds() -> None:
+    """Section 9.3 point 3: the very race this fix targets -- a
+    `move_disk` task's own flock on the VM config file, still held by
+    another task's cleanup for a moment, fails the first attempt even
+    though the config `lock:` attribute the pre-flight check waits on
+    was already clear. The retry reissues `move_disk` and succeeds."""
+    upid2 = "UPID:pve01:00001112:00ABCDEF:qmmove:101:root@pam:"
+    move_disk_calls = {"n": 0}
+
+    def move_disk(**kwargs: object) -> str:
+        move_disk_calls["n"] += 1
+        return UPID if move_disk_calls["n"] == 1 else upid2
+
+    client, api = client_with(
+        {
+            "nodes/pve01/qemu/101/move_disk": move_disk,
+            f"nodes/pve01/tasks/{UPID}/status": {
+                "status": "stopped",
+                "exitstatus": TASK_LOCK_TIMEOUT_EXITSTATUS,
+            },
+            f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
+        }
+    )
+    execution = ExecutionConfig(
+        locks=LocksConfig(task_retry_limit=2, task_retry_backoff_seconds=15.0)
+    )
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    result = run(client, default_group(), (make_move(),), execution=execution, clock=fc)
+    assert result.outcomes[0].status == "moved"
+    assert result.outcomes[0].upid == upid2
+    assert fc.slept == [15.0]
+    move_disk_posts = [c for c in api.calls if c[1] == "nodes/pve01/qemu/101/move_disk"]
+    assert len(move_disk_posts) == 2
+
+
+def test_task_lock_timeout_retries_exhausted_reports_failed() -> None:
+    client, api = client_with(
+        {
+            f"nodes/pve01/tasks/{UPID}/status": {
+                "status": "stopped",
+                "exitstatus": TASK_LOCK_TIMEOUT_EXITSTATUS,
+            },
+            "nodes/pve01/storage/san-b/content": [],  # orphan check on the "failed" outcome
+        }
+    )
+    execution = ExecutionConfig(
+        locks=LocksConfig(task_retry_limit=1, task_retry_backoff_seconds=5.0)
+    )
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    result = run(client, default_group(), (make_move(),), execution=execution, clock=fc)
+    assert result.outcomes[0].status == "failed"
+    assert "got timeout" in result.outcomes[0].detail
+    assert fc.slept == [5.0]
+    move_disk_posts = [c for c in api.calls if c[1] == "nodes/pve01/qemu/101/move_disk"]
+    assert len(move_disk_posts) == 2  # the first attempt, plus one retry
+
+
+def test_task_lock_timeout_retry_limit_zero_disables_retry() -> None:
+    client, api = client_with(
+        {
+            f"nodes/pve01/tasks/{UPID}/status": {
+                "status": "stopped",
+                "exitstatus": TASK_LOCK_TIMEOUT_EXITSTATUS,
+            },
+            "nodes/pve01/storage/san-b/content": [],
+        }
+    )
+    execution = ExecutionConfig(locks=LocksConfig(task_retry_limit=0))
+    result = run(client, default_group(), (make_move(),), execution=execution)
+    assert result.outcomes[0].status == "failed"
+    move_disk_posts = [c for c in api.calls if c[1] == "nodes/pve01/qemu/101/move_disk"]
+    assert len(move_disk_posts) == 1
+
+
+def test_ordinary_task_failure_is_not_retried() -> None:
+    client, api = client_with(
+        {
+            f"nodes/pve01/tasks/{UPID}/status": {
+                "status": "stopped",
+                "exitstatus": "mirror failed",
+            },
+            "nodes/pve01/storage/san-b/content": [],
+        }
+    )
+    execution = ExecutionConfig(locks=LocksConfig(task_retry_limit=2))
+    result = run(client, default_group(), (make_move(),), execution=execution)
+    assert result.outcomes[0].status == "failed"
+    move_disk_posts = [c for c in api.calls if c[1] == "nodes/pve01/qemu/101/move_disk"]
+    assert len(move_disk_posts) == 1
+
+
+def test_task_lock_timeout_retry_drives_inflight_callbacks_for_both_upids() -> None:
+    """Crash recovery (section 11.2/13): a retried move is still always
+    exactly one UPID in flight at a time from `state.json`'s point of
+    view -- the first UPID's `on_inflight_finished` fires before the
+    retry's `on_inflight_started`."""
+    upid2 = "UPID:pve01:00001112:00ABCDEF:qmmove:101:root@pam:"
+    move_disk_calls = {"n": 0}
+
+    def move_disk(**kwargs: object) -> str:
+        move_disk_calls["n"] += 1
+        return UPID if move_disk_calls["n"] == 1 else upid2
+
+    client, _api = client_with(
+        {
+            "nodes/pve01/qemu/101/move_disk": move_disk,
+            f"nodes/pve01/tasks/{UPID}/status": {
+                "status": "stopped",
+                "exitstatus": TASK_LOCK_TIMEOUT_EXITSTATUS,
+            },
+            f"nodes/pve01/tasks/{upid2}/status": {"status": "stopped", "exitstatus": "OK"},
+        }
+    )
+    started: list[str] = []
+    finished: list[str] = []
+    execution = ExecutionConfig(
+        locks=LocksConfig(task_retry_limit=1, task_retry_backoff_seconds=1.0)
+    )
+    result = run(
+        client,
+        default_group(),
+        (make_move(),),
+        execution=execution,
+        on_inflight_started=started.append,
+        on_inflight_finished=finished.append,
+    )
+    assert result.outcomes[0].status == "moved"
+    assert started == [UPID, upid2]
+    assert finished == [UPID, upid2]
+
+
 # ------------------------------------------------------------------ pre-flight
 
 
@@ -729,7 +873,12 @@ def test_saferemove_source_releases_before_timeout() -> None:
     group = Group(
         name="g",
         storages=(
-            make_storage("san-a", saferemove=True, saferemove_throughput=10 * (1 << 20)),
+            # A throughput fast enough that the section 9.3 point 3
+            # `min_wipe_seconds` floor (1 TiB / 1 TiB/s = 1s) clears well
+            # within the first poll cycle below -- unlike the sibling
+            # 10 MiB/s fixture used elsewhere in this file, which would
+            # put that floor far past `timeout_seconds` for a 1 TiB disk.
+            make_storage("san-a", saferemove=True, saferemove_throughput=float(1 << 40)),
             make_storage("san-b"),
         ),
         disks=(make_disk("101:scsi0", 1.0, "san-a"),),
@@ -762,6 +911,56 @@ def test_source_release_wait_false_skips_the_drain_check_entirely() -> None:
     # check were consulted despite `wait: false`, this would KeyError.
     client, _api = client_with({})
     execution = ExecutionConfig(source_release=SourceReleaseConfig(wait=False))
+    result = run(client, group, (make_move(),), execution=execution)
+    assert result.outcomes[0].status == "moved"
+
+
+def test_min_wipe_seconds_floor_delays_moved_even_when_volume_and_lock_clear_immediately() -> None:
+    """Section 9.3 point 3: PVE's own `saferemove_throughput` (already
+    read live off the storage definition) gives an exact floor on how
+    long a disk's wipe can possibly take. Even when the source volume is
+    already gone from the content listing and the VM's config lock
+    already reads clear on the very first poll -- the pair
+    `_poll_move_once()`'s three-condition criterion alone would have
+    accepted -- a large disk on a slow-throughput storage must still
+    wait out that floor before being reported "moved", closing the race
+    (found dogfooding a real cluster) where a subsequent `move_disk` for
+    the same VM fails PVE's own lock-file cleanup despite both signals
+    already looking clear."""
+    group = Group(
+        name="g",
+        storages=(
+            make_storage("san-a", saferemove=True, saferemove_throughput=10 * (1 << 20)),
+            make_storage("san-b"),
+        ),
+        disks=(make_disk("101:scsi0", 1.0, "san-a"),),
+    )
+    client, _api = client_with({"nodes/pve01/storage/san-a/content": []})
+    execution = ExecutionConfig(
+        poll_interval_seconds=3600.0,
+        source_release=SourceReleaseConfig(wait=True, timeout_seconds=7200.0),
+    )
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    result = run(client, group, (make_move(),), execution=execution, clock=fc)
+    assert result.outcomes[0].status == "draining"
+    assert result.stopped_early is False
+
+
+def test_min_wipe_seconds_floor_is_skipped_when_throughput_is_not_configured() -> None:
+    """No `saferemove_throughput` configured on the storage (e.g. Ceph
+    RBD or ZFS, section 7.1 -- `compute_wipe_duration_seconds()` returns
+    `None` for those): the section 9.3 point 3 floor never applies, and
+    the original volume-gone/lock-clear pair alone still governs, exactly
+    as before this fix."""
+    group = Group(
+        name="g",
+        storages=(make_storage("san-a", saferemove=True), make_storage("san-b")),
+        disks=(make_disk("101:scsi0", 1.0, "san-a"),),
+    )
+    client, _api = client_with({"nodes/pve01/storage/san-a/content": []})
+    execution = ExecutionConfig(
+        source_release=SourceReleaseConfig(wait=True, timeout_seconds=7200.0)
+    )
     result = run(client, group, (make_move(),), execution=execution)
     assert result.outcomes[0].status == "moved"
 
@@ -1560,6 +1759,42 @@ def test_concurrent_lock_timeout_with_skip_semantics_continues_to_the_next_move(
     assert outcomes_by_key["202:scsi0"].status == "moved"
     assert result.stopped_early is False
     assert any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
+
+
+def test_concurrent_task_lock_timeout_is_retried_and_succeeds() -> None:
+    """Section 9.3 point 3's retry, concurrent counterpart of
+    `test_task_lock_timeout_is_retried_and_succeeds`: `_poll_inflight_once()`
+    reissues `move_disk` for 201 in place rather than resolving it, and
+    202 (a fully independent move) still completes normally alongside
+    it."""
+    upid_a2 = "UPID:pve01:00001236:00ABCDEF:qmmove:201:root@pam:"
+    move_disk_calls = {"n": 0}
+
+    def move_disk_201(**kwargs: object) -> str:
+        move_disk_calls["n"] += 1
+        return UPID_A if move_disk_calls["n"] == 1 else upid_a2
+
+    client, api = concurrent_client_with(
+        {
+            "nodes/pve01/qemu/201/move_disk": move_disk_201,
+            f"nodes/pve01/tasks/{UPID_A}/status": {
+                "status": "stopped",
+                "exitstatus": "can't lock file '/var/lock/qemu-server/lock-201.conf' - got timeout",
+            },
+            f"nodes/pve01/tasks/{upid_a2}/status": {"status": "stopped", "exitstatus": "OK"},
+        }
+    )
+    execution = ExecutionConfig(
+        max_concurrent_migrations=2,
+        locks=LocksConfig(task_retry_limit=1, task_retry_backoff_seconds=5.0),
+    )
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    outcomes_by_key = {o.disk_key: o for o in result.outcomes}
+    assert outcomes_by_key["201:scsi0"].status == "moved"
+    assert outcomes_by_key["201:scsi0"].upid == upid_a2
+    assert outcomes_by_key["202:scsi0"].status == "moved"
+    move_disk_201_calls = [c for c in api.calls if c[1] == "nodes/pve01/qemu/201/move_disk"]
+    assert len(move_disk_201_calls) == 2
 
 
 def test_concurrent_preflight_mismatch_replans_and_stops() -> None:

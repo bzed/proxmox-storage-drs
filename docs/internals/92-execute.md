@@ -56,7 +56,7 @@ every move currently in flight against the same target — this module does
 not do that yet (see "What `execute_plan()` deliberately does not do"
 below).
 
-## Why "done" needs three conditions, not one
+## Why "done" needs four conditions, not one
 
 `IMPLEMENTATION_PLAN.md` section 9.3.2's completion criterion is
 deliberately stronger than "the task succeeded":
@@ -65,6 +65,7 @@ deliberately stronger than "the task succeeded":
 move m from a to b is DONE  ⟺  task(upid) exitstatus == OK
                             ∧  volume(m) absent from GET /storage/{a}/content
                             ∧  config(vmid(m)).lock is empty
+                            ∧  elapsed(drain) ≥ min_wipe_seconds(m)
 ```
 
 A storage with `saferemove` enabled keeps a storage-level lock on the
@@ -81,6 +82,23 @@ together, bounded by `execution.source_release.timeout_seconds`. Hitting
 that bound is not a failure — it is `"draining"`: the mirror is done, the
 wipe is still running, and the next run will see the storage as it
 actually is.
+
+**The fourth condition, `min_wipe_seconds`, was added after the first
+three turned out not to be enough** (section 9.3 point 2's "found
+dogfooding" paragraph: VM 101's `scsi1` move satisfied all three —
+task OK, volume gone, lock clear — and the very next `move_disk` for the
+same VM still failed with PVE's own `can't lock file ... - got timeout`,
+because PVE's wipe cleanup was still finishing at the OS level after
+those API-visible signals had already cleared). `_poll_move_once()`
+computes it as `payback.compute_wipe_duration_seconds(size_bytes,
+source.saferemove_throughput_bytes_per_sec)` — the identical formula
+`payback.compute_move_cost()` already uses for the planning-time cost
+estimate (AGENTS.md section 5: one implementation, two callers) — and
+folds it into the same `drain_start` clock the volume/lock poll already
+tracks, so it costs no extra API call. It is `None`, and so has no effect
+at all, whenever the storage has no configured `saferemove_throughput` —
+this only tightens the criterion where PVE's own config gives an exact
+number to tighten it with.
 
 `execute_plan()`'s own `largest_by_storage` bookkeeping (section 8.1's
 `Z_s`, the largest resident disk on a storage — needed for *later* moves
@@ -128,6 +146,38 @@ happens after `execution.locks.wait_timeout_seconds` depends on
   respected on its own terms for an ordinary `move_disk` failure. Folding
   both into one flag would have made `abort_on_failure: false` silently
   defeat an operator's explicit `on_timeout: abort` choice.
+
+## The `move_disk` task's own flock: a retry as the fallback under `min_wipe_seconds`
+
+`min_wipe_seconds` above (section 9.3 point 2) closes the VM-101 race in the
+one case it can be computed exactly — a configured `saferemove_throughput`.
+Section 9.3 point 3 is the fallback for everything that condition cannot
+cover: no throughput configured, an inaccurate one, or `can't lock file
+'/var/lock/qemu-server/lock-<vmid>.conf' - got timeout` surfacing as a
+`move_disk` task's own `exitstatus` for some other momentary reason
+entirely. PVE clears the config `lock:` line before it releases the config
+file's own flock, so there is nothing `_wait_for_unlocked()`'s pre-flight
+check could ever have polled to see this coming — it is a task-level
+failure, not a lock the executor was ever in a position to wait out in
+advance.
+
+`_is_task_lock_timeout()` matches that exact PVE message against a failed
+move's `exitstatus`. `_execute_one_move()` (sequential) and
+`_poll_inflight_once()` (concurrent) both reissue `move_disk` on a match, up
+to `execution.locks.task_retry_limit` extra attempts, recording the crash-recovery
+`on_inflight_finished`/`on_inflight_started` pair for the old and new UPID
+exactly as the first attempt did (section 11.2 — a retried move is still
+always exactly one UPID in `state.json` at a time). The sequential path
+sleeps `execution.locks.task_retry_backoff` on the injected `Clock` before
+reissuing, matching every other wait loop in this module; the concurrent
+path deliberately does not sleep inline — blocking one in-flight move would
+stall every other candidate and in-flight move the same way a blocking lock
+wait would (see "What `execute_plan()` deliberately does not do" above) — a
+retry there is instead picked up on the next poll cycle, spaced by
+`execution.poll_interval_seconds` unless something else already made
+progress that cycle. A retry that still exhausts the limit is reported
+`"failed"` exactly like any other task failure, going through the same
+`abort_on_failure`/orphan-detection path.
 
 ## The injectable `Clock`
 

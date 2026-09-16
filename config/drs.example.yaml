@@ -280,6 +280,14 @@ execution:
     poll_interval: 30s
     on_timeout: skip          # skip | abort -- skip this move, keep the rest of the plan
 
+    # A move_disk TASK can fail immediately with PVE's own "can't lock file
+    # '/var/lock/qemu-server/lock-<vmid>.conf' - got timeout" -- a different
+    # lock than wait_timeout above waits out, momentarily still held by the
+    # previous move's own cleanup for the same VM even after the config
+    # `lock:` attribute has already cleared. Retried automatically.
+    task_retry_limit: 2       # extra attempts after the first task failure
+    task_retry_backoff: 15s   # wait this long before reissuing move_disk
+
   # A move_disk task reporting OK does NOT mean the source space is back. With
   # saferemove the old volume is still fully allocated while it is being zeroed,
   # and the storage lock it holds can block the NEXT move. A move counts as done

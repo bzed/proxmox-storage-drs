@@ -191,7 +191,9 @@
           "properties": {
             "wait_timeout": { "type": ["string", "number"], "exclusiveMinimum": 0 },
             "poll_interval": { "type": ["string", "number"], "exclusiveMinimum": 0 },
-            "on_timeout": { "type": "string", "enum": ["skip", "abort"] }
+            "on_timeout": { "type": "string", "enum": ["skip", "abort"] },
+            "task_retry_limit": { "type": "integer", "minimum": 0 },
+            "task_retry_backoff": { "type": ["string", "number"], "exclusiveMinimum": 0 }
           }
         },
         "source_release": {
