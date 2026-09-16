@@ -1,3 +1,50 @@
+pve-storage-drs (0.1.6) trixie; urgency=medium
+
+  * optimize: fixed a real solver-correctness bug in the CP-SAT backend's
+    capacity-spread term (REVIEW.md AA-01, section 5.3 (C7)/section 5.5) --
+    it was integer-scaled six orders of magnitude too strongly relative to
+    every other objective term, so `solver.backend: auto` (which prefers
+    CP-SAT whenever ortools is installed) planned mass relocations for
+    fill evenness while effectively ignoring migration cost and I/O
+    balance. Rebuilt to fold per-(disk, storage) exactly like the existing
+    I/O-balance term, per section 5.5's own specification; confirmed
+    against a real dev-cluster capture, where CP-SAT now agrees exactly
+    with CBC and the heuristic (no moves) instead of returning a plan
+    3.2x worse than doing nothing. `plan`/`apply --json` gained
+    `before/after_objective_total` (the full six-term objective,
+    re-scored at the configured weights) and the corpus regression suite
+    gained an objective-level cross-backend check, so a scaling defect in
+    any future objective term is caught the same way regardless of which
+    spread axis it happens to move.
+  * anonymize: repaired a real group name that reached both committed
+    corpus bundles' `manifest.json` call logs (REVIEW.md AA-02) -- the
+    collector fix for this shape (0.1.5) corrected only new captures;
+    the scrub audit now checks this shape structurally so it cannot
+    recur silently.
+  * schedule: move ordering now ranks candidates by the persistent
+    alpha+delta objective reduction IMPLEMENTATION_PLAN.md section 8.2
+    specifies, not I/O imbalance alone (REVIEW.md AA-04) -- matters
+    whenever a pending move trades I/O balance for data spread, which
+    section 12's capacity-spread term made a real, expressible trade for
+    the first time.
+  * `plan`/`apply --json`'s `gate` object now carries `capacity_fraction`
+    (REVIEW.md AA-05), matching `show-load --json`'s own gate shape,
+    which already did.
+  * collect: a storage active only on a node absent from this cluster's
+    own `/nodes` response now fails loudly (a clear error at capture
+    time) instead of silently dropping that storage's capture pair
+    (REVIEW.md AA-08(a)).
+  * IMPLEMENTATION_PLAN.md/docs: corrected a wrong worked-example number
+    in section 14.6, swept a stale "five objective terms" claim to six
+    throughout the plan and both the manual and internals documentation
+    (the objective gained a sixth, capacity-spread term in 0.1.4),
+    documented `plan`/`apply --json`'s `before/after_capacity_spread`
+    and `before/after_objective_total` fields and `show-load --json`'s
+    `capacity_fraction`, and removed a sample output line no renderer
+    has ever printed (REVIEW.md AA-03, AA-05, AA-06).
+
+ -- Bernd Zeimetz <bzed@debian.org>  Wed, 16 Sep 2026 15:40:06 +0200
+
 pve-storage-drs (0.1.5) trixie; urgency=medium
 
   * plan/optimize/heuristic: a new capacity-spread objective term and gate
