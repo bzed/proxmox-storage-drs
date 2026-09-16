@@ -61,6 +61,7 @@ failed move and reported in that move's own outcome -- **never deleted**.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -68,7 +69,7 @@ from typing import Callable, Mapping, Sequence
 
 from proxmox_storage_drs.config import ExcludeConfig, ExecutionConfig, LocksConfig, MigrationConfig
 from proxmox_storage_drs.exceptions import PveApiError
-from proxmox_storage_drs.payback import MoveCost
+from proxmox_storage_drs.payback import MoveCost, compute_wipe_duration_seconds
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.reserve import largest_disk_bytes, transient_charge_ok
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult
@@ -313,6 +314,40 @@ def _wait_for_unlocked(
     return True, None
 
 
+_TASK_LOCK_TIMEOUT_RE = re.compile(r"can't lock file '[^']*' - got timeout")
+
+
+def _is_task_lock_timeout(detail: str) -> bool:
+    """Section 9.3 point 3: a `move_disk` *task*'s own `exitstatus` can be
+    PVE's `can't lock file '<path>' - got timeout` -- the VM config file's
+    flock, a different lock than the `lock:` config attribute
+    `_wait_for_unlocked()` waits out above, momentarily still held (typically
+    by the previous move's own cleanup for the same VM) even after that
+    attribute already reads clear. Matched narrowly against PVE's own exact
+    wording, not any task failure, so this never retries a genuine failure
+    that happens to mention "lock" for an unrelated reason."""
+    return bool(_TASK_LOCK_TIMEOUT_RE.search(detail))
+
+
+def _log_task_lock_retry(
+    disk_key: str, vmid: int, attempt: int, limit: int, detail: str, *, concurrent: bool
+) -> None:
+    logger.warning(
+        "retrying move_disk after a task lock timeout (attempt %s/%s): %s",
+        attempt,
+        limit,
+        detail,
+        extra={
+            "event": "move_disk_task_lock_retry",
+            "disk_key": disk_key,
+            "vmid": vmid,
+            "attempt": attempt,
+            "limit": limit,
+            "concurrent": concurrent,
+        },
+    )
+
+
 def _live_transient_check(
     client: PveClient,
     node: str,
@@ -393,6 +428,7 @@ def _poll_move_once(
     upid: str,
     source: Storage,
     volid: str,
+    size_bytes: int,
     execution: ExecutionConfig,
     clock: Clock,
     wait_state: _MoveWaitState,
@@ -406,7 +442,11 @@ def _poll_move_once(
     implementation of the criterion, shared by the sequential executor
     (via that blocking wrapper) and the concurrent executor (calling this
     directly, once per in-flight move per poll cycle, so waiting on one
-    move's task or source-release never blocks progress on any other)."""
+    move's task or source-release never blocks progress on any other).
+
+    ``size_bytes`` is ``move``'s own disk size, needed only for the
+    ``min_wipe_seconds`` floor below -- see that variable's own comment
+    for why the volume-gone/lock-clear pair alone is not always enough."""
     task = client.task_status(node, upid)
     if task.get("status") != "stopped":
         return None, wait_state
@@ -418,12 +458,32 @@ def _poll_move_once(
         return ("moved", f"task {upid} completed OK"), wait_state
 
     drain_start = wait_state.drain_start or clock.now()
+    elapsed = (clock.now() - drain_start).total_seconds()
     content = client.storage_content(node, source.id)
     volume_present = any(item.get("volid") == volid for item in content)
     lock = _check_lock_once(client, node, vmid)
-    if not volume_present and not lock:
+    # Section 9.3 point 3: PVE's own `saferemove_throughput` (already read
+    # live off the storage definition, section 3.5) gives an exact floor on
+    # how long this disk's wipe can possibly take -- `min_wipe_seconds` is
+    # `None` only when the storage has no configured throughput to compute
+    # one from. Observed against a real cluster: the content listing and
+    # the config `lock:` attribute can both already read clear while PVE's
+    # own wipe cleanup for this VM is still finishing, so a subsequent
+    # `move_disk` for the *same* VM can still fail with `can't lock file
+    # ... - got timeout` even though this move's own three conditions
+    # looked satisfied. Never declaring "moved" before this floor elapses
+    # closes that race in the one case it can be computed exactly, sharing
+    # `payback.compute_wipe_duration_seconds()`'s formula (AGENTS.md
+    # section 5) rather than a second copy of it.
+    min_wipe_seconds = compute_wipe_duration_seconds(
+        size_bytes, source.saferemove_throughput_bytes_per_sec
+    )
+    if (
+        not volume_present
+        and not lock
+        and (min_wipe_seconds is None or elapsed >= min_wipe_seconds)
+    ):
         return ("moved", f"task {upid} completed OK, source released"), wait_state
-    elapsed = (clock.now() - drain_start).total_seconds()
     if elapsed > execution.source_release.timeout_seconds:
         return (
             "draining",
@@ -441,6 +501,7 @@ def _wait_for_move_completion(
     upid: str,
     source: Storage,
     volid: str,
+    size_bytes: int,
     execution: ExecutionConfig,
     clock: Clock,
 ) -> tuple[str, str]:
@@ -451,18 +512,117 @@ def _wait_for_move_completion(
     `migration.max_single_move_duration`), then, only if
     ``execution.source_release.wait`` and the source actually
     ``saferemove``s, polls for the source volume's disappearance and the
-    VM's lock clearing together, bounded by
-    ``execution.source_release.timeout``. Sequential-mode only -- see
+    VM's lock clearing together (plus, when computable, section 9.3 point
+    3's ``min_wipe_seconds`` floor -- see :func:`_poll_move_once`), bounded
+    by ``execution.source_release.timeout``. Sequential-mode only -- see
     :func:`_poll_move_once` for the non-blocking form the concurrent
     executor uses instead."""
     wait_state = _MoveWaitState()
     while True:
         result, wait_state = _poll_move_once(
-            client, node, vmid, upid, source, volid, execution, clock, wait_state
+            client, node, vmid, upid, source, volid, size_bytes, execution, clock, wait_state
         )
         if result is not None:
             return result
         clock.sleep(execution.poll_interval_seconds)
+
+
+def _issue_move_disk_and_wait(
+    client: PveClient,
+    node: str,
+    disk: Disk,
+    move: ScheduledMove,
+    source: Storage,
+    volid: str,
+    migration: MigrationConfig,
+    execution: ExecutionConfig,
+    clock: Clock,
+    on_inflight_started: InflightCallback | None,
+    on_inflight_finished: InflightCallback | None,
+) -> tuple[str, str, str]:
+    """Issues one `move_disk` attempt and blocks for section 9.3.2's
+    completion criterion -- factored out of `_execute_one_move()` purely
+    to stay within this project's flake8 complexity limit (AGENTS.md
+    section 5; `_confirm_decision()`/`_launch_lock_decision()` are the
+    same precedent), since `_execute_one_move()` now calls this once per
+    section 9.3 point 3 retry attempt rather than once. Returns
+    ``(upid, status, detail)``; drives `on_inflight_started`/
+    `on_inflight_finished` and the `move_started`/`move_finished` log
+    records exactly as a single, non-retried attempt always did -- a
+    retried attempt is still always exactly one UPID in flight at a
+    time, from `state.json`'s point of view."""
+    upid = client.move_disk(
+        node,
+        disk.vmid,
+        disk.device,
+        move.to_storage,
+        delete=True,
+        bwlimit_bytes_per_sec=migration.bwlimit_bytes_per_sec,
+    )
+    # Section 11.2: written *before* this function does anything else with
+    # `upid` -- if the engine crashes, is killed, or the host reboots
+    # anywhere from here on, `state.json` already has a trace of this move
+    # for the next startup's `crashrecovery.reconcile_inflight()` to find.
+    if on_inflight_started is not None:
+        on_inflight_started(upid)
+    # Section 2.1/2.3: "every `move_disk` issued with its UPID". This is the
+    # one record that makes an unattended run reconstructable afterwards --
+    # it is what lets an operator tie a PVE task in the cluster's own task
+    # log back to the plan that decided to issue it.
+    logger.info(
+        "move started: %s %s -> %s (%s)",
+        move.disk_key,
+        move.from_storage,
+        move.to_storage,
+        upid,
+        extra={
+            "event": "move_started",
+            "upid": upid,
+            "disk_key": move.disk_key,
+            "vmid": disk.vmid,
+            "device": disk.device,
+            "node": node,
+            "from_storage": move.from_storage,
+            "to_storage": move.to_storage,
+            "size_bytes": disk.size_bytes,
+        },
+    )
+    # `clock.now()`, not `time.monotonic()`: the injected fake clock tests
+    # use advances this instantly (`.agents/testing.md`), so the duration
+    # this record reports is the one the wait loop itself measured.
+    started_at = clock.now()
+    status, detail = _wait_for_move_completion(
+        client, node, disk.vmid, upid, source, volid, disk.size_bytes, execution, clock
+    )
+    logger.info(
+        "move finished: %s -> %s (%s)",
+        move.disk_key,
+        status,
+        upid,
+        extra={
+            "event": "move_finished",
+            "upid": upid,
+            "disk_key": move.disk_key,
+            "from_storage": move.from_storage,
+            "to_storage": move.to_storage,
+            "size_bytes": disk.size_bytes,
+            "status": status,
+            "detail": detail,
+            "duration_seconds": round((clock.now() - started_at).total_seconds(), 3),
+        },
+    )
+    # Deliberately *not* wrapped in try/finally: a "draining" source is
+    # still tracked by its own content-listing poll, not by `upid` (see
+    # `state.with_inflight_upid()`'s own docstring), so clearing it here
+    # exactly once `_wait_for_move_completion()` returns -- for any status
+    # -- is correct either way. If a call inside that wait itself raises
+    # (a network failure mid-poll, say) this callback never fires and
+    # `upid` stays recorded, which is exactly what section 13 wants: the
+    # move might still be running, so the next startup's scan must still
+    # find it.
+    if on_inflight_finished is not None:
+        on_inflight_finished(upid)
+    return upid, status, detail
 
 
 def _execute_one_move(
@@ -542,78 +702,46 @@ def _execute_one_move(
             "during the move, checked again just before starting",
         )
 
-    upid = client.move_disk(
-        preflight.node,
-        disk.vmid,
-        disk.device,
-        move.to_storage,
-        delete=True,
-        bwlimit_bytes_per_sec=migration.bwlimit_bytes_per_sec,
-    )
-    # Section 11.2: written *before* this function does anything else with
-    # `upid` -- if the engine crashes, is killed, or the host reboots
-    # anywhere from here on, `state.json` already has a trace of this move
-    # for the next startup's `crashrecovery.reconcile_inflight()` to find.
-    if on_inflight_started is not None:
-        on_inflight_started(upid)
-    # Section 2.1/2.3: "every `move_disk` issued with its UPID". This is the
-    # one record that makes an unattended run reconstructable afterwards --
-    # it is what lets an operator tie a PVE task in the cluster's own task
-    # log back to the plan that decided to issue it.
-    logger.info(
-        "move started: %s %s -> %s (%s)",
-        move.disk_key,
-        move.from_storage,
-        move.to_storage,
-        upid,
-        extra={
-            "event": "move_started",
-            "upid": upid,
-            "disk_key": move.disk_key,
-            "vmid": disk.vmid,
-            "device": disk.device,
-            "node": preflight.node,
-            "from_storage": move.from_storage,
-            "to_storage": move.to_storage,
-            "size_bytes": disk.size_bytes,
-        },
-    )
-    # `clock.now()`, not `time.monotonic()`: the injected fake clock tests
-    # use advances this instantly (`.agents/testing.md`), so the duration
-    # this record reports is the one the wait loop itself measured.
-    started_at = clock.now()
     source = storages_by_id[move.from_storage]
-    status, detail = _wait_for_move_completion(
-        client, preflight.node, disk.vmid, upid, source, preflight.volid, execution, clock
-    )
-    logger.info(
-        "move finished: %s -> %s (%s)",
-        move.disk_key,
-        status,
-        upid,
-        extra={
-            "event": "move_finished",
-            "upid": upid,
-            "disk_key": move.disk_key,
-            "from_storage": move.from_storage,
-            "to_storage": move.to_storage,
-            "size_bytes": disk.size_bytes,
-            "status": status,
-            "detail": detail,
-            "duration_seconds": round((clock.now() - started_at).total_seconds(), 3),
-        },
-    )
-    # Deliberately *not* wrapped in try/finally: a "draining" source is
-    # still tracked by its own content-listing poll, not by `upid` (see
-    # `state.with_inflight_upid()`'s own docstring), so clearing it here
-    # exactly once `_wait_for_move_completion()` returns -- for any status
-    # -- is correct either way. If a call inside that wait itself raises
-    # (a network failure mid-poll, say) this callback never fires and
-    # `upid` stays recorded, which is exactly what section 13 wants: the
-    # move might still be running, so the next startup's scan must still
-    # find it.
-    if on_inflight_finished is not None:
-        on_inflight_finished(upid)
+    task_retries_used = 0
+    while True:
+        upid, status, detail = _issue_move_disk_and_wait(
+            client,
+            preflight.node,
+            disk,
+            move,
+            source,
+            preflight.volid,
+            migration,
+            execution,
+            clock,
+            on_inflight_started,
+            on_inflight_finished,
+        )
+        # Section 9.3 point 3: the task's own flock on the VM config file is
+        # not the `lock:` config attribute the pre-flight check above waits
+        # on -- it can still be held for a moment by another task's cleanup
+        # even after that attribute reads clear, with nothing to poll that
+        # would have shown it coming. Retried here, narrowly, rather than
+        # reported as an ordinary failure.
+        if (
+            status == "failed"
+            and task_retries_used < execution.locks.task_retry_limit
+            and _is_task_lock_timeout(detail)
+            and not _deadline_exceeded(clock, deadline, estimated_seconds)
+        ):
+            task_retries_used += 1
+            _log_task_lock_retry(
+                move.disk_key,
+                disk.vmid,
+                task_retries_used,
+                execution.locks.task_retry_limit,
+                detail,
+                concurrent=False,
+            )
+            clock.sleep(execution.locks.task_retry_backoff_seconds)
+            continue
+        break
     orphans: tuple[str, ...] = ()
     if status == "failed":
         orphans = _detect_orphan_volumes(client, preflight.node, move.to_storage, disk.vmid)
@@ -1023,6 +1151,11 @@ class _InflightMove:
     target: Storage
     volid: str
     wait_state: _MoveWaitState = _MoveWaitState()
+    # Section 9.3 point 3's task-lock-timeout retry count for this move,
+    # the concurrent counterpart to `_execute_one_move()`'s own local
+    # `task_retries_used` -- carried here since nothing on this path holds
+    # a call stack per move across poll cycles.
+    task_retries_used: int = 0
 
 
 def _per_storage_inflight_counts(inflight: Sequence[_InflightMove]) -> dict[str, int]:
@@ -1048,10 +1181,12 @@ def _target_charges(inflight: Sequence[_InflightMove], storage_id: str) -> list[
 def _poll_inflight_once(
     client: PveClient,
     inflight: Sequence[_InflightMove],
+    migration: MigrationConfig,
     execution: ExecutionConfig,
     clock: Clock,
     largest_by_storage: dict[str, int],
     drained_storages: set[str],
+    on_inflight_started: InflightCallback | None,
     on_inflight_finished: InflightCallback | None,
 ) -> tuple[list[_InflightMove], list[MoveOutcome], str | None]:
     """One poll cycle across every currently in-flight move -- the
@@ -1079,6 +1214,7 @@ def _poll_inflight_once(
             im.upid,
             im.source,
             im.volid,
+            im.disk.size_bytes,
             execution,
             clock,
             im.wait_state,
@@ -1106,6 +1242,66 @@ def _poll_inflight_once(
                 "concurrent": True,
             },
         )
+        # Section 9.3 point 3, the concurrent counterpart of
+        # `_execute_one_move()`'s own retry loop. No inline `clock.sleep()`
+        # here on purpose -- blocking this poll cycle would stall every
+        # other in-flight and candidate move exactly like a blocking lock
+        # wait would; the retry is instead reissued immediately and picked
+        # up again next cycle, naturally spaced by
+        # `execution.poll_interval_seconds` unless something else already
+        # made progress this cycle.
+        if (
+            status == "failed"
+            and im.task_retries_used < execution.locks.task_retry_limit
+            and _is_task_lock_timeout(detail)
+        ):
+            retries_used = im.task_retries_used + 1
+            _log_task_lock_retry(
+                im.move.disk_key,
+                im.disk.vmid,
+                retries_used,
+                execution.locks.task_retry_limit,
+                detail,
+                concurrent=True,
+            )
+            new_upid = client.move_disk(
+                im.node,
+                im.disk.vmid,
+                im.disk.device,
+                im.move.to_storage,
+                delete=True,
+                bwlimit_bytes_per_sec=migration.bwlimit_bytes_per_sec,
+            )
+            if on_inflight_started is not None:
+                on_inflight_started(new_upid)
+            logger.info(
+                "move started: %s %s -> %s (%s)",
+                im.move.disk_key,
+                im.move.from_storage,
+                im.move.to_storage,
+                new_upid,
+                extra={
+                    "event": "move_started",
+                    "upid": new_upid,
+                    "disk_key": im.move.disk_key,
+                    "vmid": im.disk.vmid,
+                    "device": im.disk.device,
+                    "node": im.node,
+                    "from_storage": im.move.from_storage,
+                    "to_storage": im.move.to_storage,
+                    "size_bytes": im.disk.size_bytes,
+                    "concurrent": True,
+                },
+            )
+            still_inflight.append(
+                replace(
+                    im,
+                    upid=new_upid,
+                    wait_state=_MoveWaitState(),
+                    task_retries_used=retries_used,
+                )
+            )
+            continue
         orphans: tuple[str, ...] = ()
         if status == "failed":
             orphans = _detect_orphan_volumes(client, im.node, im.move.to_storage, im.disk.vmid)
@@ -1484,10 +1680,12 @@ def _execute_concurrent(
         still_inflight, resolved, poll_stop = _poll_inflight_once(
             client,
             inflight,
+            migration,
             execution,
             clock,
             largest_by_storage,
             drained_storages,
+            on_inflight_started,
             on_inflight_finished,
         )
         inflight = still_inflight

@@ -205,6 +205,14 @@ class LocksConfig:
     wait_timeout_seconds: float = 14400.0  # 4h
     poll_interval_seconds: float = 30.0
     on_timeout: str = "skip"
+    # section 9.3 point 3: a `move_disk` *task* can fail immediately with
+    # PVE's own "can't lock file '...' - got timeout" -- a different lock
+    # than `wait_timeout` above waits out, momentarily still held by
+    # another task's cleanup even after the config `lock:` attribute has
+    # already cleared. Retried, not waited on, since there is nothing to
+    # poll that shows it coming.
+    task_retry_limit: int = 2
+    task_retry_backoff_seconds: float = 15.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,6 +587,10 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         wait_timeout_seconds=parse_duration_seconds(locks_raw.get("wait_timeout", "4h")),
         poll_interval_seconds=parse_duration_seconds(locks_raw.get("poll_interval", "30s")),
         on_timeout=locks_raw.get("on_timeout", "skip"),
+        task_retry_limit=locks_raw.get("task_retry_limit", 2),
+        task_retry_backoff_seconds=parse_duration_seconds(
+            locks_raw.get("task_retry_backoff", "15s")
+        ),
     )
     sr2_raw = exec_raw.get("source_release", {})
     source_release = SourceReleaseConfig(

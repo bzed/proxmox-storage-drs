@@ -119,6 +119,32 @@ def test_duration_and_size_strings_are_parsed(tmp_path: Path) -> None:
     assert resolved.config.migration.bwlimit_bytes_per_sec == 100 * (1 << 20)
 
 
+def test_locks_task_retry_defaults(tmp_path: Path) -> None:
+    path = write_config(tmp_path, minimal_config_dict())
+    resolved = config.load_config(str(path), env={})
+    locks = resolved.config.execution.locks
+    assert locks.task_retry_limit == 2
+    assert locks.task_retry_backoff_seconds == 15.0
+
+
+def test_locks_task_retry_backoff_duration_string_is_parsed(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["execution"] = {"locks": {"task_retry_limit": 5, "task_retry_backoff": "1m"}}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    locks = resolved.config.execution.locks
+    assert locks.task_retry_limit == 5
+    assert locks.task_retry_backoff_seconds == 60.0
+
+
+def test_locks_task_retry_limit_below_zero_is_rejected(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["execution"] = {"locks": {"task_retry_limit": -1}}
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError):
+        config.load_config(str(path), env={})
+
+
 def test_not_a_mapping_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "drs.yaml"
     path.write_text("- just\n- a\n- list\n", encoding="utf-8")

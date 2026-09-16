@@ -857,6 +857,26 @@ What happens when `execution.locks.wait_timeout` elapses: skip this move and
 continue with the rest of the plan, or abort the run. Never "force" — that
 option does not exist, deliberately.
 
+### `execution.locks.task_retry_limit`
+
+Integer, default `2`.
+
+The `move_disk` *task itself* can fail immediately with PVE's own `can't
+lock file '/var/lock/qemu-server/lock-<vmid>.conf' - got timeout` — a
+different lock than the config `lock` attribute `execution.locks.wait_timeout`
+waits out, momentarily still held (typically by the previous move's own
+`saferemove` wipe/cleanup finishing for the same VM) even after that
+attribute already reads clear. This many extra attempts are made, each
+preceded by `execution.locks.task_retry_backoff`, before the move is
+reported `failed` like any other task failure. `0` disables the retry.
+
+### `execution.locks.task_retry_backoff`
+
+Duration, default `15s`.
+
+How long to wait between a task-lock-timeout failure and the next
+`move_disk` retry attempt.
+
 ### `execution.source_release.wait`
 
 Boolean, default `true`.

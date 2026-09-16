@@ -1979,14 +1979,49 @@ This is why the executor's completion criterion is deliberately stronger than ta
 move m from a to b is DONE  ⟺  task(upid) exitstatus == OK
                             ∧  volume(m) absent from GET /storage/{a}/content
                             ∧  config(vmid(m)).lock is empty
+                            ∧  elapsed(drain) ≥ min_wipe_seconds(m)
 ```
 
-Poll all three at `execution.poll_interval_seconds`, bounded by
+`min_wipe_seconds(m)` is `size_bytes(m) / storage.saferemove_throughput` — PVE's own configured
+wipe rate, already read live off the storage definition (§3.5) — or, when that throughput is not
+configured (the storage type has no such concept, e.g. Ceph RBD or ZFS, or `saferemove` is off
+there), simply absent from the criterion (the first three conditions alone still govern, exactly as
+before this term existed). **Found dogfooding against a real cluster: the first three conditions
+alone are not sufficient.** VM 101's `scsi1` move completed, its source volume was gone from the
+content listing, and its config `lock` read empty — every one of the first three conditions held —
+yet the very next move for the *same* VM (`efidisk0`) still had its `move_disk` task fail
+immediately with PVE's own
+
+```
+can't lock file '/var/lock/qemu-server/lock-101.conf' - got timeout
+```
+
+PVE's own wipe cleanup for the first move was still finishing at the OS level even though the
+API-visible signals this criterion polls had already cleared. `min_wipe_seconds` closes this in the
+one case it can be computed exactly, from the same formula §7.1's planning-time cost estimate
+already uses — one implementation, two callers, not a second copy of it.
+
+Poll all conditions at `execution.poll_interval_seconds`, bounded by
 `execution.source_release.timeout` (default **48h**, sized for a multi-TiB wipe at 10 MiB/s). On
 timeout, do not fail the run: mark the storage `draining`, exclude it as both source and target for
 the remainder of the run, report it, and let the next run re-evaluate from observed reality. Set
 `execution.source_release.wait: false` only on storages verified not to wipe — with
 `saferemove` off, the volume disappears immediately and this condition costs one extra API call.
+
+**3. The `move_disk` task's own flock — a residual race `min_wipe_seconds` cannot always close.**
+The `lock:` config attribute in **1** and the file `move_disk` itself must flock to start
+(`/var/lock/qemu-server/lock-<vmid>.conf`) are not the same thing, and `min_wipe_seconds` above is
+only as good as the configured throughput it is computed from — no throughput configured, an
+inaccurate one, or the same "`can't lock file` ... `got timeout`" exitstatus surfacing for some
+other momentary reason entirely, and the race in **2** can still reach `move_disk` itself.
+`_wait_for_unlocked()` cannot catch it either way — there is nothing to poll that shows it in
+advance, since PVE clears the config `lock:` line before releasing the flock. As a narrow,
+mechanical safety net under **2**'s proactive fix, the executor retries the `move_disk` task itself
+when its `exitstatus` matches this exact message: up to `execution.locks.task_retry_limit` extra
+attempts (default **2**), each preceded by `execution.locks.task_retry_backoff` (default **15s**).
+A retry that still exhausts the limit is reported `"failed"` exactly like any other task failure —
+this is a fallback for the residual race, not a substitute for **1**'s open-ended wait or **2**'s
+computed floor.
 
 **Sizing the knobs against each other.** With saferemove at its default throughput, one move can
 occupy its source storage for far longer than a whole planning cycle. Two consequences the
