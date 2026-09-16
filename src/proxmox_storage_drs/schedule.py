@@ -212,9 +212,20 @@ def order_moves(
 
     order: list[ScheduledMove] = []
     while pending:
-        current_imbalance = evaluate_assignment(
+        current_breakdown = evaluate_assignment(
             group, state, load_by_key, objective, min_free_bytes, u_star, b_bar
-        ).imbalance_term
+        )
+        current_imbalance = current_breakdown.imbalance_term
+        # Section 8.2's revised ranking: "the persistent-objective
+        # reduction ... the alpha and delta terms of section 5.4 -- the
+        # parts whose improvement persists; beta/gamma are one-time
+        # costs". `imbalance_term`/`capacity_spread_term` are already
+        # alpha-/delta-weighted (heuristic.ObjectiveBreakdown), so the
+        # persistent objective is just their sum -- ranking candidates
+        # differently from `imbalance_reduction` (still alpha-only,
+        # reported on `ScheduledMove` unchanged) whenever a pending move
+        # trades I/O balance for data spread.
+        current_persistent = current_imbalance + current_breakdown.capacity_spread_term
 
         feasible: list[str] = []
         for key, disk in pending.items():
@@ -240,12 +251,14 @@ def order_moves(
             disk = pending[key]
             trial = dict(state)
             trial[key] = target_assignment[key]
-            trial_imbalance = evaluate_assignment(
+            trial_breakdown = evaluate_assignment(
                 group, trial, load_by_key, objective, min_free_bytes, u_star, b_bar
-            ).imbalance_term
-            reduction = current_imbalance - trial_imbalance
+            )
+            trial_persistent = trial_breakdown.imbalance_term + trial_breakdown.capacity_spread_term
+            reduction = current_imbalance - trial_breakdown.imbalance_term
+            persistent_reduction = current_persistent - trial_persistent
             cost = disk.size_bytes
-            ratio = reduction / cost if cost > 0 else reduction
+            ratio = persistent_reduction / cost if cost > 0 else persistent_reduction
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_key = key

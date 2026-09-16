@@ -30,7 +30,7 @@ discarding the audit trail. `--quiet` is the only flag that discards it.
 `-v` logs, per group, the reasoning behind what the report shows: the
 measured load (`load_digest`), the gate's computed drift/imbalance together
 with the thresholds they were compared against (`gate_decision`), the chosen
-plan with its solver backend and the five objective terms (`plan_selected`),
+plan with its solver backend and the six objective terms (`plan_selected`),
 section 7's payback arithmetic and the ratio it needed (`payback_verdict`),
 and every migration issued with its PVE task UPID (`move_started` /
 `move_finished`). A run opens with `run_started` and closes with

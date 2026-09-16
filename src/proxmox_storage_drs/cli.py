@@ -1223,6 +1223,7 @@ def _render_group_plan_json(
             "reserve_override": decision.reserve_override,
             "drift_fraction": decision.drift_fraction,
             "imbalance_fraction": decision.imbalance_fraction,
+            "capacity_fraction": decision.capacity_fraction,
         }
     before_spread = after_spread = None
     if group_load is not None:
@@ -1248,6 +1249,17 @@ def _render_group_plan_json(
         )
         if final_breakdown is not None:
             after_capacity_spread = _spread_fraction(final_breakdown.fill_fraction, average_fill)
+    # REVIEW.md AA-01's own recommendation: "re-score every backend's
+    # returned assignment through evaluate_assignment() at true weights" --
+    # the full six-term objective (section 5.4), not one spread axis in
+    # isolation, so a solver that is worse on the objective it was actually
+    # asked to optimize is visible even when neither before_spread/
+    # before_capacity_spread axis alone would show it.
+    before_objective_total = after_objective_total = None
+    if solve_outcome is not None:
+        before_objective_total = solve_outcome.initial_breakdown.total
+        if final_breakdown is not None:
+            after_objective_total = final_breakdown.total
     payback_out = None
     if payback_result is not None:
         payback_out = {
@@ -1272,6 +1284,8 @@ def _render_group_plan_json(
         "after_spread": after_spread,
         "before_capacity_spread": before_capacity_spread,
         "after_capacity_spread": after_capacity_spread,
+        "before_objective_total": before_objective_total,
+        "after_objective_total": after_objective_total,
         "payback": payback_out,
     }
 

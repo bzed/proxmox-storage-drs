@@ -193,8 +193,13 @@ output's `solver:` line names), `moves[]` (`disk_key`, `vmid`, `device`, `from_s
 `duration_wipe_seconds`, `cost_load_seconds`, `exceeds_max_duration`),
 `deadlocked` (a list of disk keys) and `deadlock_message` (`null` if none),
 `before_spread`/`after_spread` (the section 6 spread fraction, before the
-plan and after every scheduled move), `load_error` (`null` unless
-Prometheus failed for this group), and `payback` — `null` when there is no
+plan and after every scheduled move), `before_capacity_spread`/
+`after_capacity_spread` (the section 5.3 (C7) fill-fraction spread the same
+way, `null` for a group whose mean fill is 0 or that has not solved),
+`before_objective_total`/`after_objective_total` (the section 5.4 objective's
+full `.total`, `evaluate_assignment()` re-scored at the same true weights
+`validate_corpus.py`'s cross-backend check uses -- REVIEW.md AA-01), `load_error`
+(`null` unless Prometheus failed for this group), and `payback` — `null` when there is no
 `GroupLoad` or the gate said `NO ACTION`, otherwise an object with
 `benefit_load_seconds`, `total_cost_load_seconds`, `ratio`, `aggregate_ok`
 (the economic test alone, or `true` if exempted), `rejected_moves` (disk

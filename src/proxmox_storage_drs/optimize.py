@@ -123,19 +123,6 @@ logger = logging.getLogger(__name__)
 _LOAD_SCALE = 1_000_000  # K
 _WEIGHT_SCALE = 10_000  # W
 _RESERVE_FACTOR_SCALE = 1_000_000
-# Section 5.3 (C7)'s own scale: `d_s`'s natural denominator is each
-# storage's own capacity, not a shared normalizer the way `capability_weight`
-# is for `u_s` -- so unlike `_LOAD_SCALE`'s single shared coefficient, (C7)
-# needs a *per-storage* integer coefficient (`_cpsat_fill_scale_for()`)
-# built from this scale, `b_bar`, and that storage's own MiB capacity.
-# Deliberately much larger than `_LOAD_SCALE`: `average_fill * capacity_mib`
-# is itself already in the millions for an ordinary multi-TiB storage (an
-# 8 TiB storage is ~8.4e6 MiB), so a `_LOAD_SCALE`-sized numerator would
-# round `_cpsat_fill_scale_for()` straight to 0 -- exactly the "gamma trap"
-# `_assert_nonzero_when_weighted()` exists to catch, found here the same
-# way (a real solve silently ignoring delta because its own linearization
-# collapsed to a no-op, not because the term is genuinely worth nothing).
-_FILL_SCALE = 1_000_000_000_000
 _BYTES_PER_MIB = 1 << 20
 _BYTES_PER_TIB = 1 << 40
 
@@ -470,39 +457,38 @@ def _cpsat_storage_lhs(
     return sum(coeffs[d.key] * x[d.key, s.id] for d in movable) + pinned_scaled
 
 
-def _cpsat_storage_used_mib(
+def _cpsat_storage_fill_lhs(
     s: Any,
     movable: tuple[Disk, ...],
     pinned_by_storage: dict[str, tuple[Disk, ...]],
+    average_fill: float,
     x: dict[Any, Any],
-) -> Any:
-    """(C7)'s per-storage byte numerator in MiB -- managed disks assigned
-    here plus pinned disks plus foreign volumes, i.e. `b_s`'s numerator
-    before dividing by `C_s`. Identical arithmetic to the LHS of (C5)'s
-    capacity constraint (`_cpsat_feasibility_constraints`), factored out
-    separately here because (C5) also adds the reserve term `R_s`, which
-    (C7)'s fill fraction deliberately excludes (section 5.3 (C7): "the fill
-    counts managed disks and foreign volumes but not the snapshot
-    reserve")."""
-    pinned_used = sum(_mib(d.size_bytes) for d in pinned_by_storage[s.id])
-    return (
-        sum(_mib(d.size_bytes) * x[d.key, s.id] for d in movable)
-        + pinned_used
-        + _mib(s.foreign_used_bytes)
-    )
-
-
-def _cpsat_fill_scale_for(s: Any, average_fill: float) -> int:
-    """(C7)'s per-storage integer coefficient: `d_s`'s natural denominator
-    is `s`'s own capacity, not a shared normalizer like `u_s`'s
-    `capability_weight` -- so unlike `_LOAD_SCALE`'s single shared
-    coefficient, each storage needs its own, built from `_FILL_SCALE`,
-    `b_bar` (``average_fill``) and that storage's MiB capacity. Callers
-    must never invoke this when ``average_fill`` is 0 -- section 5.3 (C7):
-    "if b_bar = 0 the group holds no data: the term is inactive" -- the
-    caller's own ``if average_fill:`` guard is what makes that true."""
+) -> tuple[Any, int]:
+    """(C7)'s per-storage scaled fill deviation, folded exactly like (C6)'s
+    `_cpsat_storage_lhs` (section 5.5: "(C7) folds exactly like (C6): the
+    per-(disk, storage) coefficient is round(K * z_d / (b_bar*C_s)), with
+    the constant K*(1 - Uext/(C_s*b_bar)) rounded once") -- on the same `K`
+    scale as (C6)'s `e_s`, not a separate, larger one (REVIEW.md AA-01: a
+    per-storage coefficient built from an aggregated MiB numerator and a
+    much larger scale reintroduced the very "obvious formulation" trap
+    section 5.5 warns the gamma term away from, six orders of magnitude
+    too strong at the default weights). Returns ``(lhs, bound)``, `lhs`
+    approximating `K*(b_s - b_bar)/b_bar` and `bound` a safe upper bound on
+    `|lhs|` for the caller's `d_s` domain. Callers must never invoke this
+    when ``average_fill`` is 0 -- section 5.3 (C7): "if b_bar = 0 the group
+    holds no data: the term is inactive" -- the caller's own
+    ``if average_fill:`` guard is what makes that true."""
     capacity_mib = _mib(s.capacity_bytes)
-    return round(_FILL_SCALE / (average_fill * capacity_mib)) if capacity_mib else 0
+    denom = average_fill * capacity_mib
+    if not denom:
+        return 0, 0
+    pinned_used = sum(_mib(d.size_bytes) for d in pinned_by_storage[s.id])
+    external_mib = pinned_used + _mib(s.foreign_used_bytes)
+    const = round(_LOAD_SCALE * (1 - external_mib / denom))
+    coeffs = {d.key: round(_LOAD_SCALE * _mib(d.size_bytes) / denom) for d in movable}
+    lhs = sum(coeffs[d.key] * x[d.key, s.id] for d in movable) - const
+    bound = sum(coeffs.values()) + abs(const)
+    return lhs, bound
 
 
 def _assert_nonzero_when_weighted(unscaled_weight: float, scaled: int, name: str) -> None:
@@ -544,8 +530,8 @@ def _assert_objective_magnitude_within_int64(
     cluster size, rather than merely unlikely. ``fill_bound_total`` is
     `Sum_s d_bound_s` -- the (C7) analogue of `load_bound * num_storages`,
     summed rather than multiplied because each storage's `d_s` domain
-    bound is its own (`_cpsat_fill_scale_for()` is per-storage, unlike
-    `_LOAD_SCALE`'s shared coefficient)."""
+    bound is its own (`_cpsat_storage_fill_lhs()` returns a per-storage
+    bound, unlike `_LOAD_SCALE`'s shared coefficient)."""
     worst_case = (
         beta_scaled * num_movable
         + sum(abs(g) for g in gamma_scaled_values)
@@ -566,7 +552,6 @@ def _cpsat_capacity_spread_term(
     pinned_by_storage: dict[str, tuple[Disk, ...]],
     objective: ObjectiveConfig,
     average_fill: float,
-    size_bound: int,
     x: dict[Any, Any],
     terms: list[Any],
 ) -> tuple[int, int]:
@@ -586,29 +571,13 @@ def _cpsat_capacity_spread_term(
         _assert_nonzero_when_weighted(objective.delta_capacity_spread, delta_scaled, "delta_scaled")
     fill_bound_total = 0
     if delta_scaled and average_fill:
-        fill_scale_by_storage = {
-            s.id: _cpsat_fill_scale_for(s, average_fill) for s in group.storages
-        }
+        d = {}
         for s in group.storages:
-            _assert_nonzero_when_weighted(
-                objective.delta_capacity_spread, fill_scale_by_storage[s.id], f"fill_scale[{s.id}]"
-            )
-        # d_s's exact worst case: the numerator ranges over [0, size_bound]
-        # and b_bar*C_s (a fixed constant, <= C_s <= size_bound) is the
-        # other side of the two-sided constraint below, so k_s * size_bound
-        # is a tight, always-safe domain bound -- not `size_bound` itself,
-        # which would silently make the model infeasible whenever k_s > 1.
-        d = {
-            s.id: model.NewIntVar(0, fill_scale_by_storage[s.id] * size_bound, f"d_{s.id}")
-            for s in group.storages
-        }
-        for s in group.storages:
-            k_s = fill_scale_by_storage[s.id]
-            b_bar_capacity = round(average_fill * _mib(s.capacity_bytes))
-            numerator = _cpsat_storage_used_mib(s, movable, pinned_by_storage, x)
-            model.Add(k_s * (numerator - b_bar_capacity) <= d[s.id])
-            model.Add(k_s * (b_bar_capacity - numerator) <= d[s.id])
-            fill_bound_total += k_s * size_bound
+            lhs, bound = _cpsat_storage_fill_lhs(s, movable, pinned_by_storage, average_fill, x)
+            d[s.id] = model.NewIntVar(0, bound, f"d_{s.id}")
+            model.Add(lhs <= d[s.id])
+            model.Add(-lhs <= d[s.id])
+            fill_bound_total += bound
         terms.append(delta_scaled * sum(d.values()))
     return delta_scaled, fill_bound_total
 
@@ -624,7 +593,6 @@ def _cpsat_objective_terms(
     u_star: float,
     average_fill: float,
     load_bound: int,
-    size_bound: int,
     x: dict[Any, Any],
     y: dict[Any, Any],
 ) -> list[Any]:
@@ -676,7 +644,7 @@ def _cpsat_objective_terms(
             terms.append(alpha_scaled * sum(e.values()))
 
     delta_scaled, fill_bound_total = _cpsat_capacity_spread_term(
-        model, group, movable, pinned_by_storage, objective, average_fill, size_bound, x, terms
+        model, group, movable, pinned_by_storage, objective, average_fill, x, terms
     )
 
     _assert_objective_magnitude_within_int64(
@@ -774,7 +742,6 @@ def _solve_cpsat(
         u_star,
         b_bar,
         load_bound,
-        size_bound,
         x2,
         y2,
     )

@@ -314,3 +314,61 @@ def test_scrub_audit_catches_a_findings_json_label_leak_the_value_checks_miss(
     )
     violations = vc.scrub_audit(corpus_bundle)
     assert any("host" in v for v in violations)
+
+
+@needs_full_checkout
+def test_scrub_manifest_group_names_flags_a_group_name_outside_the_configured_set(
+    tmp_path: Path,
+) -> None:
+    """AA-02: two committed corpus bundles carried a real, unpseudonymized
+    group name inside `_drive_group_series()`'s own "instant
+    quantile_over_time ... (<group name>)" call-log description -- a bare
+    group name has no punctuation shape any value-pattern regex can catch.
+    This is the structural check that closes it: the parenthesized
+    qualifier must be one of the bundle's own configured group names."""
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "calls": [
+                    {
+                        "description": (
+                            "instant quantile_over_time read_bytes q=0.95 (bzed-shared)"
+                        ),
+                        "detail": None,
+                        "outcome": "ok",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("groups:\n- name: group-448ef164\n", encoding="utf-8")
+    violations = vc._scrub_manifest_group_names(manifest_path, config_path)
+    assert len(violations) == 1
+    assert "bzed-shared" in violations[0]
+
+
+@needs_full_checkout
+def test_scrub_manifest_group_names_passes_the_pseudonymized_view(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "calls": [
+                    {
+                        "description": (
+                            "instant quantile_over_time read_bytes q=0.95 (group-448ef164)"
+                        ),
+                        "detail": None,
+                        "outcome": "ok",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("groups:\n- name: group-448ef164\n", encoding="utf-8")
+    assert vc._scrub_manifest_group_names(manifest_path, config_path) == []

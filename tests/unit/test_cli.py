@@ -1041,6 +1041,14 @@ def test_plan_json_output(
     group_payload = payload["groups"][0]
     assert group_payload["gate"]["act"] is True
     assert group_payload["gate"]["reserve_override"] is True
+    # REVIEW.md AA-05: plan --json's gate object claims "identical shape to
+    # show-load's" in docs/manual/27-plan.md, but was missing
+    # capacity_fraction -- show-load's own gate object has always carried it.
+    assert "capacity_fraction" in group_payload["gate"]
+    # REVIEW.md AA-01's own recommendation: the full six-term objective at
+    # true weights, re-scorable independently of either spread axis alone.
+    assert group_payload["before_objective_total"] is not None
+    assert group_payload["after_objective_total"] is not None
     assert len(group_payload["moves"]) == 1
     move = group_payload["moves"][0]
     assert move["disk_key"] == "101:scsi0"

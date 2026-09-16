@@ -780,9 +780,18 @@ def _capture_pve_storage_files(
             except TopologyError:
                 pass  # already surfaced by build_topology() itself; nothing to capture
             else:
-                real_node = real_node_by_pseudonym.get(new_node)
-                if real_node is not None:
-                    node_storage_pairs.add((real_node, storage.id))
+                # REVIEW.md AA-08(a): `new_node` is always drawn from
+                # `anonymized_storage_resources`, which `_anonymize_storage_resources()`
+                # has already filtered to `node in mapper.known_nodes` --
+                # and `real_node_by_pseudonym` is keyed by `mapper.node(node)`
+                # for that same `known_nodes` -- so `.get(new_node)` cannot
+                # legitimately miss (the only other way two different real
+                # names could disagree here, a pseudonym collision, is
+                # already fatal at `Mapper.__post_init__()`, before capture
+                # starts). Not defended against here for that reason: this
+                # project's own rule against handling what cannot happen.
+                real_node = real_node_by_pseudonym[new_node]
+                node_storage_pairs.add((real_node, storage.id))
             for disk in group.disks:
                 if disk.current_storage == storage.id:
                     node_storage_pairs.add((disk.node, storage.id))

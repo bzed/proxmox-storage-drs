@@ -370,7 +370,7 @@ call site cannot silently add an unnameable member.
 | `run_summary` | INFO | Once per invocation: groups visited, moves issued/succeeded/failed, bytes moved, wall time, exit code | built |
 | `gate_decision` | INFO | Per group: `act`, the computed drift/imbalance fractions and the thresholds they were compared against | built — section 2.1 required it; nothing implemented it |
 | `load_digest` | INFO | Per group: total load, per-storage `u_s`, disk count, how many disks were coverage-rejected | built — section 2.1 required it; nothing implemented it |
-| `plan_selected` | INFO | Per acting group: backend, solver status, move count, the five objective terms, before/after spread | built — section 2.1 required it; nothing implemented it |
+| `plan_selected` | INFO | Per acting group: backend, solver status, move count, the six objective terms, before/after spread | built — section 2.1 required it; nothing implemented it |
 | `payback_verdict` | INFO | Per acting group: benefit, cost, ratio, the configured minimum, and the accept/reject outcome | built — section 2.1 required it; nothing implemented it |
 | `move_started` | INFO | Immediately after `move_disk` returns, carrying **the UPID**, disk key, source, target, bytes | built — section 2.1 required it; nothing implemented it |
 | `move_finished` | INFO | Per move: UPID, outcome (`moved`/`failed`/`replan_needed`/`draining`), duration | built |
@@ -2028,7 +2028,6 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
   2. 101:scsi1  san-a → san-b   1.0 TiB   ~1.5h   Δimbalance −2.00   ℓ/z 1.00
 
   after: san-a u=3.00  san-b u=1.70  san-c u=2.70   spread 53% (from 255%)
-  data:  fill 25%/31%/25%   deviation 31% (from 215%)
   payback: benefit 2.35e8 load·s vs cost 2.62e4 load·s → ratio 8970 (need 10) ✓
 
   pinned (not movable this run):
@@ -2047,7 +2046,12 @@ line. That narration lives in `pve-storage-drs explain` instead (`docs/manual/29
 `pinned (not movable this run):`/`cannot fully consolidate:`/`pinned load ...` sections, including
 the per-pin `→` action hints shown above); `show-load` also names each pin inline, per disk, as
 `[pinned: <reason>]`. Read every "pinned block"/"plan output" reference above as `explain`'s
-output, not `plan`'s or `apply`'s.
+output, not `plan`'s or `apply`'s. There is likewise no dedicated `data:` fill-deviation line in
+any renderer's human output (an earlier revision of this example showed one, REVIEW.md AA-06): the
+fill deviation reaches a human only via `explain`'s own `objective:` line (its `spread` term, shown
+further down this section) and `plan`/`apply`/`explain --json`'s `before_capacity_spread`/
+`after_capacity_spread` scalars — the same asymmetry `show-load`'s `spread`-only human line already
+has relative to its own `--json`.
 
 **As built, added later:** none of the above covers the case where the gate decides to ACT and
 every disk is eligible (nothing pinned), yet the solver's own optimum is still to move nothing --
@@ -2646,7 +2650,7 @@ belonging to different VMs. So `u* = 5.0`, and:
 |---|---|---|---|
 | both on `roomy` (current) | **0** | 10.0 | 11.25 |
 | one moved to `cramped` | 1.0 TiB | **0.0** | 2.18 |
-| both moved to `cramped` | 2.0 TiB | 10.0 | 11.85 |
+| both moved to `cramped` | 2.0 TiB | 10.0 | 13.10 |
 
 Moving one disk balances the group *perfectly* and costs a 1 TiB reserve breach on `cramped`
 (`3 + 1 + 2·1 = 6 > 5`). That is the trade the reserve rule exists to forbid, and the three answers

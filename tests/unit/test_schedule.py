@@ -11,6 +11,8 @@ in as an expected constant, so a change to either would break this test.
 
 from __future__ import annotations
 
+import dataclasses
+
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.heuristic import run_heuristic
 from proxmox_storage_drs.schedule import order_moves, transient_invariant_ok
@@ -34,7 +36,12 @@ def make_disk(key: str, size_tib: float, storage: str) -> Disk:
     )
 
 
-def make_storage(id_: str, capacity_tib: float = 8.0, reserve_factor: float = 2.0) -> Storage:
+def make_storage(
+    id_: str,
+    capacity_tib: float = 8.0,
+    reserve_factor: float = 2.0,
+    foreign_used_tib: float = 0.0,
+) -> Storage:
     return Storage(
         id=id_,
         capability_weight=1.0,
@@ -42,7 +49,7 @@ def make_storage(id_: str, capacity_tib: float = 8.0, reserve_factor: float = 2.
         saturation_load=None,
         capacity_bytes=round(capacity_tib * TIB),
         used_bytes=0,
-        foreign_used_bytes=0,
+        foreign_used_bytes=round(foreign_used_tib * TIB),
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
     )
@@ -246,3 +253,44 @@ def test_reserve_resolving_move_is_scheduled_before_a_non_resolving_one() -> Non
     assert result.order[0].disk_key == "101:scsi0"
     assert result.order[0].resolves_reserve_violation
     assert [m.disk_key for m in result.order] == ["101:scsi0", "102:scsi0"]
+
+
+def test_ordering_prefers_the_larger_persistent_reduction_once_delta_matters() -> None:
+    """REVIEW.md AA-04: section 8.2 was revised to rank candidates by "the
+    alpha and delta terms of section 5.4 -- the parts whose improvement
+    persists", not by imbalance (alpha) alone -- but `order_moves()` kept
+    ranking by `imbalance_term` only, so a pending move trading I/O
+    balance for data spread could be scheduled in the wrong order. Two
+    disks, both starting on ``a``, moving to different destinations:
+    ``102:scsi0`` has the better imbalance-only ratio (it is picked first
+    at ``delta_capacity_spread=0``), but ``101:scsi0`` has the better
+    *combined* alpha+delta ratio once delta is large enough to matter --
+    the section 8.2 ranking must switch to it, not stay on 102:scsi0."""
+    storages = (
+        make_storage("a", capacity_tib=27.0, foreign_used_tib=10.0),
+        make_storage("b", capacity_tib=23.5),
+        make_storage("c", capacity_tib=25.0),
+    )
+    disks = (
+        make_disk("101:scsi0", 4.8, "a"),
+        make_disk("102:scsi0", 3.9, "a"),
+    )
+    group = Group(name="g", storages=storages, disks=disks)
+    loads = {"101:scsi0": 0.15, "102:scsi0": 8.2}
+    target_assignment = {"101:scsi0": "b", "102:scsi0": "c"}
+
+    imbalance_only = ObjectiveConfig(
+        alpha_spread=1.0,
+        beta_move_count=0.0,
+        gamma_move_bytes_per_tib=0.0,
+        kappa_vm_affinity=0.0,
+        delta_capacity_spread=0.0,
+    )
+    result_no_delta = order_moves(group, target_assignment, loads, imbalance_only, min_free_bytes=0)
+    assert result_no_delta.order[0].disk_key == "102:scsi0"
+
+    delta_matters = dataclasses.replace(imbalance_only, delta_capacity_spread=2.0)
+    result_with_delta = order_moves(
+        group, target_assignment, loads, delta_matters, min_free_bytes=0
+    )
+    assert result_with_delta.order[0].disk_key == "101:scsi0"

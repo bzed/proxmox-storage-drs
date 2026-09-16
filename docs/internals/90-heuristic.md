@@ -187,7 +187,7 @@ equals `2.533333` (three-move plan) and, at `beta_move_count: 0.50`,
 `3.158333` (two-move plan) — the exact totals `REVIEW.md` Appendix A
 independently re-derived by hand from the plan's own numbers, not values
 this module invented and then asserted against itself. Getting both to
-five decimal places is strong evidence the objective's five terms, their
+five decimal places is strong evidence the objective's six terms, their
 units (TiB for size, average in-flight I/O for load), and the search that
 picks among them are all correct together, not merely internally
 consistent.
@@ -218,7 +218,7 @@ consistent.
 `schedule.py` (section 8's move ordering) — see `95-schedule.md` and
 `docs/manual/27-plan.md`. `apply` is fully implemented (see `92-execute.md`);
 `explain` (section 12) reuses the identical `plan` pipeline
-(`cli._plan_group()`) and narrates `ObjectiveBreakdown`'s five terms
+(`cli._plan_group()`) and narrates `ObjectiveBreakdown`'s six terms
 individually — the reason this dataclass keeps them apart instead of
 collapsing to `.total` in the first place (its own docstring) — alongside
 which disks are pinned and which VMs that leaves fragmented across more

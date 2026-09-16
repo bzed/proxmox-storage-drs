@@ -156,62 +156,62 @@
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_bytes q=0.95 (bzed-shared)",
+      "description": "instant quantile_over_time read_bytes q=0.95 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_bytes q=0.99 (bzed-shared)",
+      "description": "instant quantile_over_time read_bytes q=0.99 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_ops q=0.95 (bzed-shared)",
+      "description": "instant quantile_over_time read_ops q=0.95 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_ops q=0.99 (bzed-shared)",
+      "description": "instant quantile_over_time read_ops q=0.99 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_time_ns q=0.95 (bzed-shared)",
+      "description": "instant quantile_over_time read_time_ns q=0.95 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_time_ns q=0.99 (bzed-shared)",
+      "description": "instant quantile_over_time read_time_ns q=0.99 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_bytes q=0.95 (bzed-shared)",
+      "description": "instant quantile_over_time write_bytes q=0.95 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_bytes q=0.99 (bzed-shared)",
+      "description": "instant quantile_over_time write_bytes q=0.99 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_ops q=0.95 (bzed-shared)",
+      "description": "instant quantile_over_time write_ops q=0.95 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_ops q=0.99 (bzed-shared)",
+      "description": "instant quantile_over_time write_ops q=0.99 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_time_ns q=0.95 (bzed-shared)",
+      "description": "instant quantile_over_time write_time_ns q=0.95 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_time_ns q=0.99 (bzed-shared)",
+      "description": "instant quantile_over_time write_time_ns q=0.99 (group-448ef164)",
       "detail": null,
       "outcome": "ok"
     },

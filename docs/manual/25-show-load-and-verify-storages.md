@@ -123,8 +123,10 @@ or `gate` from being reported. `gate` is `null` when `load_computed` is
 `false` (no `GroupLoad` to evaluate gates against) and otherwise an object
 with `act` (bool), `reason` (string, identical to the human line's text
 after the arrow), `reserve_override` (bool), and `drift_fraction`/
-`imbalance_fraction` (float or `null` — `null` means that gate was never
-reached, not that it evaluated to zero).
+`imbalance_fraction`/`capacity_fraction` (float or `null` — `null` means
+that gate was never reached, not that it evaluated to zero;
+`capacity_fraction` is section 6's capacity-gate ratio, section 5.3 (C7)'s
+fill fractions, `null` too whenever the group's mean fill is 0).
 
 **A config with several groups issues Prometheus queries per group.**
 Computing one group's load takes seven queries (six raw metrics plus one
