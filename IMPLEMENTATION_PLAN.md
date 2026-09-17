@@ -17,7 +17,10 @@ storages within each group by live-migrating individual VM disks, subject to:
 - every storage must always retain free space for snapshots — by default **2× its largest disk** —
   and this must hold *during* migrations, not merely before and after;
 - the number of migrations must be **minimal**;
-- a VM's disks should stay **together** on one storage unless space or I/O forces otherwise;
+- a VM's disks should stay **together** on one storage unless space or I/O forces otherwise — a
+  preference weighted by the VM's own I/O (§5.4) and backed by the cost model: reuniting a VM
+  counts as benefit in the payback test, and disks too small to cost anything move for free
+  (§7.1–§7.3);
 - data is spread evenly across a group's storages as a **second priority to I/O** — no single storage
   should hold a disproportionate share of the group's bytes, so the failure of any one storage costs
   a bounded share of the data;
@@ -839,11 +842,17 @@ failing, and that history is worth knowing only so nobody re-derives an obsolete
 search result: it does not apply to 9.2. They are ordinary members of `D`.
 
 Two practical notes. First, they are **small** — an EFI var store is a few MiB, TPM state likewise —
-so `γ·z_d` and the §7 payback cost are negligible for them, while `β` charges a full migration for
-each. A plan that drags a 4 MiB `efidisk0` across the group to satisfy `κ` therefore pays a real
-move-count penalty for near-zero bytes; that is the correct accounting (it *is* a task, with task
-overhead and a lock window), but it is the reason to tune `β` and `κ` together rather than in
-isolation. Second, PVE may not use the `drive-mirror` path for `tpmstate0`, because `swtpm` rather
+and below `migration.tiny_disk_bytes` (§5.4) that smallness is priced in: their `β` and `γ` charges
+are zero and §7's payback test does not apply to them, so `κ` may drag a 528 KiB `efidisk0` across
+the group for free. An earlier revision of this section charged such a move a full `β` on the
+grounds that it *is* a task, with task overhead and a lock window, and called the §7 cost
+"negligible" rather than zero; dogfooding overturned that judgement (found live, not by review):
+a four-move plan whose entire value was reuniting VMs — two of the moves 528 KiB EFI disks — was
+rejected wholesale by a payback arithmetic in which the affinity those moves bought was
+structurally worth zero (§7.2), so the tool refused the one action the operator most wanted. A tiny
+move occupies its VM's lock for seconds and transfers a rounding error of the mirror budget;
+pricing it as a migration priced affinity repair out of the tool. Second, PVE may not use the
+`drive-mirror` path for `tpmstate0`, because `swtpm` rather
 than QEMU holds that state. Do not depend on drive-mirror semantics for it. The transient invariant
 of §8.1 — the volume occupies **both** storages until the move completes — is the conservative
 assumption and stays correct under either mechanism, so no part of the model needs to know which one
@@ -1338,18 +1347,46 @@ counts managed disks and foreign volumes but **not** the snapshot reserve — th
 
 ```
 min   α · Σ_{s∈S} e_s                            (imbalance)
-    + β · Σ_{d∈D} (1 − x_{d,σ₀(d)})              (number of migrations)
-    + γ · Σ_{d∈D} z_d · (1 − x_{d,σ₀(d)})        (bytes migrated)
-    + κ · Σ_{v∈V} ( Σ_{s∈S} y_{v,s} − 1 )        (VM disk fragmentation)
+    + β · Σ_{d∈D^big} (1 − x_{d,σ₀(d)})          (number of migrations)
+    + γ · Σ_{d∈D^big} z_d · (1 − x_{d,σ₀(d)})    (bytes migrated)
+    + κ · Σ_{v∈V} w_v · ( Σ_{s∈S} y_{v,s} − 1 )  (VM disk fragmentation)
     + δ · Σ_{s∈S} d_s                            (data spread / failure risk)
     + P · Σ_{s∈S} r_s                            (reserve violation)
 ```
 
+with `D^big = { d ∈ D : z_d ≥ migration.tiny_disk_bytes }` (default 64 MiB) and
+`w_v = max(1, ℓ_v / ℓ̄)` defined below.
+
 `(1 − x_{d,σ₀(d)})` is exactly 1 when disk `d` moves and 0 when it stays, so `β` directly implements
-"minimize the number of migrations" and `γ` biases against moving *large* disks specifically. `κ`
-counts the number of **extra** storages a VM is spread across, so it is 0 for a VM whose disks are all
-together and grows by 1 per additional storage — a soft preference that free space (C5) or a strong
-imbalance can legitimately override, as required.
+"minimize the number of migrations" and `γ` biases against moving *large* disks specifically. Both
+terms range over `D^big`, not over `D`: a disk below `tiny_disk_bytes` transfers in under a second
+and holds its VM's lock for seconds, so charging it a migration count would price exactly the
+affinity-repair moves the `κ` term exists to enable out of the plan — a tiny disk rejoins its VM
+whenever that reduces spread, at zero objective cost. `κ` counts the number of **extra** storages a
+VM is spread across, so it is 0 for a VM whose disks are all together and grows by 1 per additional
+storage — a soft preference that free space (C5) or a strong imbalance can legitimately override,
+as required. Whether a VM *can* fit on one storage is (C5)'s business; where it cannot, `κ` still
+rewards keeping the spread as narrow as possible. Two strengthenings of the affinity term, both
+motivated by the same live finding (a plan of four pure affinity repairs rejected by the payback
+rule, §7.2):
+
+- **The preference is weighted by the VM's own I/O.** `w_v = max(1, ℓ_v / ℓ̄)`, where
+  `ℓ_v = Σ_{d ∈ D : v(d)=v} ℓ_d` is the VM's total load within the group (pinned disks included —
+  their I/O is the VM's I/O) and `ℓ̄ = T_g / |V|` the group's mean per-VM load. A VM doing several
+  times the average I/O is worth correspondingly more to keep together: its fragmentation is
+  measured in the same in-flight-I/O unit as everything else (§4), and comparing the full VM's I/O
+  against the single disks the balance term shuffles is exactly the comparison that decides whether
+  the VM should move as a unit or be scattered. The floor of 1 keeps a quiet VM's fragmentation
+  worth the same as before — the observed failures were quiet VMs whose reunions the solver *did*
+  want, killed later by payback — so only the ceiling is new; the default `κ` itself is deliberately
+  unchanged and remains the knob to turn if quiet-VM cohesion should tighten further. `w_v` is
+  data, not a variable, so this stays a plain per-VM coefficient, and the §14 fixture's optima
+  survive it (there the heaviest VM's cohesion rises 2.7× and the split still wins — §14.3 works
+  the new arithmetic).
+- **Disks too small to matter are free to place.** With `D^big` excluding them from `β` and `γ`,
+  and §7.1/§7.3 exempting them from cost and from the aggregate acceptance test, a tiny disk's
+  placement is decided by `κ` and the capacity constraints alone. Churn stays bounded: `κ` only
+  rewards *reducing* spread, and per-disk cooldowns (§6) still apply.
 
 `κ` measures **within-group** fragmentation only. Because the problem decomposes per group and a
 disk can never leave its group, a VM with disks in two different groups is not counted as
@@ -1417,12 +1454,15 @@ per-disk and needs no separate `γ_scaled`:
 
 ```
 min   Σ_s round(α·W)              · e_s^int                     (imbalance)
-    + Σ_d round(β·W·K)            · (1 − x_{d,σ₀(d)})           (number of migrations)
-    + Σ_d round(γ·W·K·z_d^TiB)    · (1 − x_{d,σ₀(d)})           (bytes migrated)
-    + Σ_v round(κ·W·K)            · (Σ_s y_{v,s} − 1)           (fragmentation)
+    + Σ_d round(β·W·K)            · (1 − x_{d,σ₀(d)})           (number of migrations, d ∈ D^big)
+    + Σ_d round(γ·W·K·z_d^TiB)    · (1 − x_{d,σ₀(d)})           (bytes migrated, d ∈ D^big)
+    + Σ_v round(κ·W·K·w_v)        · (Σ_s y_{v,s} − 1)           (fragmentation, I/O-weighted)
     + Σ_s round(δ·W)              · d_s^int                     (data spread)
     + Σ_s round(P·W·K / 2²⁰)      · r_s^MiB                     (reserve violation)
 ```
+
+`w_v` folds like any other constant (§5.4), and the `d`-sums are over `D^big`, whose tiny members
+deliberately carry zero `β`/`γ` coefficients.
 
 The `·K` on the count-valued terms puts them on the same footing as `α·W·e_s^int`, which already
 carries a factor `K` inside `e_s^int`.
@@ -1446,7 +1486,9 @@ disk, `round(0.05 · 10⁴ · 10⁶ · 0.5) = 2.5×10⁸`: exact, with no minimu
 `P = 1000`; a 1 TiB shortfall gives ≈ 10¹³. The imbalance term reaches `α·W·K·Σe_s ≈ 1.5×10¹¹` for
 `Σe_s = 15`. Both are comfortably inside int64, which is what CP-SAT requires. Assert at model-build
 time that every coefficient is a non-zero integer wherever its unscaled weight is non-zero — the
-regression test for the `γ` trap above — and that the maximum objective magnitude is below 2⁶².
+regression test for the `γ` trap above — with one deliberate exception: the `β`/`γ` coefficients
+of a disk below `migration.tiny_disk_bytes` are exactly zero by design (§5.4), and the assertion
+must expect that. Assert also that the maximum objective magnitude is below 2⁶².
 
 Warm-start from the current assignment via `AddHint(x[d, σ₀(d)], 1)`, which typically finds the
 incumbent immediately and spends the rest of the time limit proving the gap. Assert after solving
@@ -1584,6 +1626,14 @@ old volume with nothing happening on the target; `ω_wipe` (`migration.wipe_load
 lower it without touching the mirror weights. §7.3 charges the same quantity to the saturation guard
 for the whole `draining` window.
 
+**A disk below `migration.tiny_disk_bytes` costs nothing.** `cost_d = 0` when
+`z_d < tiny_disk_bytes` (default 64 MiB — comfortably above an EFI var store or TPM state, and far
+below any disk the payback rule was written for), and §7.3's aggregate test counts neither its cost
+nor needs its benefit. A 528 KiB `efidisk0` mirrors and wipes in seconds; asking it to justify
+itself against `λ` is a category error — this rule exists for the migration whose own traffic can
+outweigh its benefit, and no disk this small can generate such traffic. Together with §5.4's
+`D^big` exemption this is what makes affinity repair of tiny disks possible at all.
+
 **Why the wipe term is not a rounding detail.** PVE's LVM `saferemove` ("Wipe Removed Volumes" in the
 UI) defaults to a throughput of **10 MiB/s**. At that rate the 1.5 TiB disk of the §14 example takes
 about **44 hours** to wipe, against roughly 2.2 hours to mirror it at 200 MiB/s — the cleanup is
@@ -1599,19 +1649,21 @@ storage-level lock while it runs.
 
 ### 7.2 Benefit
 
-The plan improves the two *persistent* parts of the §5.4 objective — load balance and data spread —
-from `(E_before, F_before)` to `(E_after, F_after)`, where `E = Σ_s e_s` and `F = Σ_s d_s`
-(§5.3 (C7)). Both improvements persist for as long as the workloads keep running on the new
-placement, and we account them over the payback horizon `H`:
+The plan improves the three *persistent* parts of the §5.4 objective — load balance, data spread and
+VM affinity — from `(E_before, F_before, A_before)` to `(E_after, F_after, A_after)`, where
+`E = Σ_s e_s`, `F = Σ_s d_s` (§5.3 (C7)), and `A = Σ_{v∈V} w_v · ( Σ_{s∈S} y_{v,s} − 1 )` is the
+objective's affinity debt, weights included — the same sum the `κ` term charges, from the one
+shared implementation (AGENTS.md §5). All three improvements persist for as long as the workloads
+keep running on the new placement, and we account them over the payback horizon `H`:
 
 ```
-benefit  =  ( α·(E_before − E_after)  +  δ·(F_before − F_after) )  ·  H
+benefit  =  ( α·(E_before − E_after)  +  δ·(F_before − F_after)  +  κ·(A_before − A_after) )  ·  H
 ```
 
-also in load-seconds — `δ` converts relative fill deviation into load-deviation equivalents (§5.4),
-so both sides of §7.3's comparison stay in the unit that is the whole point of using I/O time as
-the load metric. `β` and `γ` charge the move itself and belong on the cost side; `κ` is a
-preference, not a physical benefit, and appears in neither.
+also in load-seconds — `δ` converts relative fill deviation, and `κ·w_v` a busy VM's fragmentation,
+into load-deviation equivalents (§5.4), so both sides of §7.3's comparison stay in the unit that
+is the whole point of using I/O time as the load metric. `β` and `γ` charge the move itself and
+belong on the cost side.
 
 **`H` defaults to 365d** (`migration.payback_horizon`), with `λ = 10`. The reasoning is the
 asymmetry of the two sides: a migration's cost is paid once and early — days of mirror I/O (§7.1),
@@ -1639,14 +1691,36 @@ Three things `H` is **not**, to keep the semantics honest:
   lab clusters) should lower it toward the actual lifetime of their VMs; §11.1 warns below 30d,
   where the test starts rejecting real benefits again.
 
+**`κ` belongs in this sum, and its earlier exclusion was a defect.** The original wording here read
+"`κ` is a preference, not a physical benefit, and appears in neither" — and dogfooding broke on
+exactly that sentence. A plan whose four moves were *all* affinity repairs (two of them 528 KiB
+EFI disks) scored `benefit = 9 load·s` against `cost = 232 load·s` — `ratio 0.0388`, reject — and
+the tool refused the one action the operator most wanted. No oversized balance move was involved;
+the rule rejected a plan it had never been given a way to value. Co-location persists exactly as
+long as balance does, and its worth is measurable — the fragmented VM's own I/O, which is what
+`w_v` weighs. Two properties of the corrected term, stated so they are not quietly reverted:
+
+- **`ΔA` may be negative**, and then it *reduces* the benefit: a balance move that splits a VM
+  must pay for the fragmentation out of its `α` gain. The §14 fixture's two-move plan carries
+  both signs at once (§14.5).
+- **At `H = 365d` any nonzero `κ·ΔA` dwarfs any achievable cost** (a 4 TiB mirror costs ~4×10⁴
+  load·s; one reunited average-load VM is worth `0.5 × 31 536 000`). For affinity-motivated plans
+  the aggregate test therefore defers to the solver's own `κ`-versus-`β`/`γ` pricing — a genuine
+  cost/benefit test in objective units, not a rubber stamp — and the test's remaining job stays
+  the one the second bullet above gives it: rejecting plans whose *physical* benefit is
+  negligible.
+
 ### 7.3 Acceptance
 
 ```
 accept plan   ⟺   benefit  ≥  migration.payback_ratio · Σ_d cost_d
 ```
 
-with `H = 365d` and `λ = 10` by default. Additional **hard** rules, applied per move, that reject
-individual migrations regardless of the aggregate test:
+with `H = 365d` and `λ = 10` by default. The sums — and the test itself — cover only disks with
+`z_d ≥ migration.tiny_disk_bytes`: a smaller disk's move carries `cost_d = 0` (§7.1) and needs no
+verdict, while every hard rule below applies to it exactly as to any other move. Additional
+**hard** rules, applied per move, that reject individual migrations regardless of the aggregate
+test:
 
 - `duration_d > migration.max_single_move_duration` (default 6h) → reject the move;
 - the move would push either endpoint above `migration.saturation_ceiling · saturation_load` during
@@ -1730,6 +1804,14 @@ This naturally converges on the smaller subset of high-value moves rather than a
 usually the one or two disks with the highest `ℓ_d / z_d` ratio, which is exactly the right thing to
 move.
 
+**As built:** none of the three changes this section and §7.2 specify — the `w_v` weighting of `κ`,
+the `tiny_disk_bytes` exemptions, `κ`'s place in the benefit — is implemented yet; `payback.py`'s
+`compute_benefit_load_seconds()` still computes the two-term formula, both solver backends still
+charge a flat per-VM `κ`, and the live run that exposed the gap printed `benefit 9 load·s vs cost
+232 load·s → ratio 0.0388 ✗` on a plan of four affinity repairs and refused to act, exactly as the
+pre-fix arithmetic predicts. The β/γ-doubling re-solve above is likewise still unimplemented (the
+run says so in its warning).
+
 `ℓ_d / z_d` — load per byte — is worth surfacing in `pve-storage-drs explain` output. It is the single best
 indicator of a good migration candidate: high I/O concentrated in a small disk.
 
@@ -1803,8 +1885,10 @@ while pending:
         else: report deadlock with the blocking storages; break
 
     m ← argmax over feasible of  (persistent-objective reduction) / cost_m
-                                 # the α and δ terms of §5.4 — the parts whose
-                                 # improvement persists; β/γ are one-time costs
+                                 # the α, δ and κ·w terms of §5.4 — the parts whose
+                                 # improvement persists; β/γ are one-time costs.
+                                 # cost_m = 0 (a tiny disk, §7.1) ranks first:
+                                 # free value, delivered before anything pays
     order.append(m)
     state ← apply(state, m)          # target charged immediately; the source is charged
                                      # until its volume is observed gone (see below)
@@ -2063,7 +2147,7 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
   2. 101:scsi1  san-a → san-b   1.0 TiB   ~1.5h   Δimbalance −2.00   ℓ/z 1.00
 
   after: san-a u=3.00  san-b u=1.70  san-c u=2.70   spread 53% (from 255%)
-  payback: benefit 2.35e8 load·s vs cost 2.62e4 load·s → ratio 8970 (need 10) ✓
+  payback: benefit 1.93e8 load·s vs cost 2.62e4 load·s → ratio 7344 (need 10) ✓
 
   pinned (not movable this run):
     106  snapshots present (2)      1.0 TiB  ℓ 0.9  on san-a  → clear snapshots to unblock
@@ -2292,6 +2376,7 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `window.lookback ≥ forecaster.required_range()` | See §10.1 — otherwise the model can never run |
 | `payback_ratio > 0`, `payback_horizon > 0` | Zero disables the safety test |
 | `payback_horizon ≥ 30d` (warn, not error) | A horizon of days rejects slow-accruing but real benefits; it should approximate VM lifetime, not operator patience (§7.2) |
+| `tiny_disk_bytes ≥ 0` | The size below which a disk moves free of `β`, `γ` and the payback test (§5.4, §7); `0` restores the old accounting |
 | `delta_capacity_spread ≥ 0`; warn when `> alpha_spread` | A negative weight would reward concentration; above `α`, data evenness outweighs I/O evenness in every comparison and the tool is no longer an I/O balancer first |
 | `capacity_spread_threshold > 0` where set, `null` disables | A ratio of fill fractions to the mean fill; it can legitimately exceed 1 (§14.2 measures 1.85) |
 | `saturation_ceiling ∈ (0,1]` | A fraction of `saturation_load`, not of `capability_weight` |
@@ -2484,7 +2569,7 @@ engine underneath was still being built.
 | VM live-migrated between nodes mid-plan | Re-fetch node before each move (§9.2); mismatch → abort move, re-plan |
 | Disk has an existing snapshot chain | Pinned, load and bytes still counted, reported at WARN every run with the pinned load/bytes per VM (§3.7). `move_disk delete=1` is rejected by PVE on such volumes and would not carry the snapshots anyway |
 | Snapshot created between planning and execution | Re-checked immediately before every move (§9.2 step 5); the move is dropped and the plan re-planned |
-| VM has `efidisk0` / `tpmstate0` | Ordinary movable disks on PVE 9.2 (verified on a live cluster). Small, so `γ`/payback are negligible while `β` charges a full move — tune `β` and `κ` together. Do not assume `drive-mirror` semantics for `tpmstate0`; §8.1's both-storages invariant holds either way (§3.6) |
+| VM has `efidisk0` / `tpmstate0` | Ordinary movable disks on PVE 9.2 (verified on a live cluster). Below `migration.tiny_disk_bytes` they move free of `β`, `γ` and the payback test, so `κ` reunites them with their VM (§3.6, §5.4, §7.3). Do not assume `drive-mirror` semantics for `tpmstate0`; §8.1's both-storages invariant holds either way (§3.6) |
 | VM has disks on `ide`/`sata`/`virtio`, not just `scsi` | Full bus regex in §3.5; enumerating only `scsi*` silently mis-accounts capacity |
 | `unused{N}` volumes | Movable with `ℓ_d = 0`, so the solver relocates them only to repair a reserve violation — the intended policy |
 | VM is `lock`ed (backup, snapshot, migrate, …) | Pinned at planning time, waited for at execution time up to `execution.locks.wait_timeout`; the lock value set is treated as open-ended and never whitelisted (§9.3) |
@@ -2495,6 +2580,7 @@ engine underneath was still being built.
 | Orphaned target volume after a failure | Detected and reported, never auto-deleted (§9.3) |
 | Storage already violating the reserve | Soft slack `r_s` keeps the model feasible; violation bypasses gates and is scheduled first |
 | Group I/O-balanced but data concentrated on few storages | The capacity gate (§6) triggers planning anyway and the `δ` term (§5.4) does the spreading; it still honours cooldowns, payback and the transient invariant |
+| Plan's entire value is affinity repair (`Δimbalance ≈ 0`) | Affinity improvement counts in the payback benefit and tiny moves are payback-exempt (§7.2, §7.3); acting with near-zero balance benefit is a correct outcome, not a defect |
 | Two DRS instances running | Advisory lock in `state.json` plus a startup scan for in-flight `move_disk` UPIDs owned by the DRS user. The lock is node-local; only the UPID scan crosses the cluster (§11) |
 | Config edited mid-run, cluster-wide | The config is read once at startup and never re-read; the resolved path and its SHA-256 are logged, so a plan can be traced to the exact file that produced it |
 | Storage `/…/` pattern matches nothing in the cluster | Hard error before planning, exactly like a literal id that does not exist: the likelier cause is a typo, and the alternative is a silently shrunken group (§11.4) |
@@ -2540,7 +2626,8 @@ scaling, since a scaling bug shows up as a different optimum.
 reserve-violating assignment is *also* worse on balance, so the lexicographic solve and the
 single-stage big-M solve agree here at **any** `P ≥ 0` — the fixture simply never exercises the
 distinction the two options of §5.3 exist to make. `tests/fixtures/reserve-tradeoff.yaml` is the
-companion fixture that does; see §14.6.
+companion fixture that does; see §14.6. §14.7's `affinity-repair.yaml` covers a third gap of the
+same kind: the payback rule's treatment of plans whose value is affinity.
 
 ### 14.1 Input
 
@@ -2615,18 +2702,23 @@ regression outweighs the move's net I/O gain:
 α·ΔE + β·1 + γ·0.5 TiB + δ·ΔF  =  −0.400 + 0.250 + 0.025 + 0.231  =  +0.106   → rejected
 ```
 
-The two-move plan is therefore the optimum at the defaults (full objectives: 2.812 against 2.918),
-and it is also ahead on migrations (2 < 3), bytes moved (2.5 < 3.0 TiB) and data spread. That is
+The two-move plan is therefore the optimum at the defaults (full objectives: 3.664 against 3.769 —
+both split VM 101, so both carry the same `κ·w₁₀₁ = 1.351` and this particular comparison is
+unchanged by the weighting), and it is also ahead on migrations (2 < 3), bytes moved (2.5 < 3.0 TiB)
+and data spread. That is
 the intended shape of the term: `α` decides how much imbalance to remove; `δ` helps decide when a
 further move would concentrate data more than it evens load. (At `beta_move_count: 0.5` the
 two-move plan wins with or without `δ`.)
 
 **The affinity trade-off, demonstrated.** The two-move plan splits VM 101 (`scsi0` on san-a,
-`scsi1` on san-b), incurring `κ = 0.5`. Keeping VM 101 together forces san-a to `L = 4.0` and the
-best reachable `E` becomes `3.133`. Comparing on the persistent terms (`E + κ + δ·F`):
-`3.133 + 0 + 0.5·0.769 = 3.52` (together) against `1.5333 + 0.5 + 0.5·0.308 = 2.19` (split).
-Splitting wins by 1.3, so high I/O legitimately overrides the affinity preference — precisely the
-intended behaviour.
+`scsi1` on san-b). VM 101 carries `ℓ_v = 4.0` against a group mean of `ℓ̄ = 7.4/5 = 1.48`, so
+`w₁₀₁ = 2.703` and the split incurs `κ·w = 1.351` where an unweighted term would charge `0.5` —
+the group's heaviest VM is worth 2.7 average ones to keep together (§5.4). Keeping VM 101
+together forces san-a to `L = 4.0` and the best reachable `E` becomes `3.133`. Comparing on the
+persistent terms (`E + κ·w + δ·F`): `3.133 + 0 + 0.5·0.769 = 3.52` (together) against
+`1.5333 + 1.351 + 0.5·0.308 = 3.04` (split). Splitting still wins — high I/O legitimately
+overrides the preference — but by 0.48 rather than the 1.3 an unweighted `κ` would have given, and
+a somewhat busier VM 101 would flip the comparison entirely, which is what the weighting is for.
 
 ### 14.4 Ordering
 
@@ -2664,10 +2756,13 @@ different number in a named field rather than a silent discrepancy.
 | | | **Σ** | **26 214 load·s** |
 
 ```
-benefit = (α·ΔE + δ·ΔF) · H
-        = (6.5333 + 0.5 × 1.8462) × 31 536 000        (ΔF = 2.1538 − 0.3077)
-        = 7.4564 × 31 536 000 = 235 145 354 ≈ 2.35×10⁸ load·s
-ratio   = 235 145 354 / 26 214 = 8 970   ≥ λ = 10   → ACCEPT
+benefit = (α·ΔE + δ·ΔF + κ·ΔA) · H
+        = (6.5333 + 0.5 × 1.8462 − 0.5 × 2.7027) × 31 536 000
+                             (ΔF = 2.1538 − 0.3077;  ΔA = 0 − 2.7027: the plan splits
+                              VM 101 — the group's heaviest, w₁₀₁ = 2.703 — and §7.2
+                              charges that fragmentation against the benefit)
+        = 6.1050 × 31 536 000 = 192 527 280 ≈ 1.93×10⁸ load·s
+ratio   = 192 527 280 / 26 214 ≈ 7 344   ≥ λ = 10   → ACCEPT
 ```
 
 **A move that fails payback.** Consider instead a 4.0 TiB archive disk with `ℓ = 0.1` whose relocation
@@ -2730,6 +2825,37 @@ Disk `201:scsi0` and `202:scsi0` are interchangeable here; the recorded move nam
 because that is how the enumerator breaks the tie. An implementation may pick either — assert on the
 move *count* and the resulting slack, not on the disk identity.
 
+### 14.7 Companion fixture: affinity repair under the payback rule
+
+`tests/fixtures/affinity-repair.yaml` isolates what §5.4's strengthenings and §7.2's corrected
+benefit exist for: a group whose I/O is perfectly balanced and whose only improving moves are a
+VM's tiny disks reuniting with it. Three 8 TiB storages `stor-a`/`stor-b`/`stor-c`, `f = 2.0`,
+equal capabilities, `saferemove` off:
+
+| Disk | VM | `z_d` | `ℓ_d` | On |
+|---|---|---|---|---|
+| `301:scsi0` | 301 | 1.0 TiB | 2.0 | stor-a |
+| `301:efidisk0` | 301 | 528 KiB | 0.0 | stor-c |
+| `301:tpmstate0` | 301 | 1 MiB | 0.0 | stor-b |
+| `302:scsi0` | 302 | 1.0 TiB | 2.0 | stor-b |
+| `309:scsi0` | 309 | 1.0 TiB | 2.0 | stor-c (pinned: `exclude.vmids`) |
+
+plus 4.0 TiB of foreign volumes on `stor-c`. Loads read 2.0/2.0/2.0, so the imbalance gate stays
+shut; fills read 0.125/0.125/0.625 against `b̄ = 0.25`, so the capacity gate fires on a spread of
+2.0. VM 301 sits on three storages; `ℓ̄ = 6.0/3 = 2.0`, so `w₃₀₁ = 1`.
+
+The optimum is exactly two moves — `301:efidisk0 stor-c → stor-a` and `301:tpmstate0 stor-b →
+stor-a` — worth `κ·w₃₀₁·2 = 1.0` at zero `β`/`γ` cost. The alternatives all improve less: joining
+`scsi0` to its tiny disks costs `β + γ·1.0 TiB = 0.3` for half the affinity gain and a large
+fill-deviation regression, and every other byte-moving candidate worsens `δ` more than it helps
+anything. Payback accepts with `benefit ≈ κ·ΔA·H = 3.15×10⁷ load·s` against `cost = 0`.
+
+The fixture discriminates at the verdict, exactly where the live cluster failed: the pre-§7.2
+solver emits the same two moves (`κ·2 = 1.0` outweighs `β·2 = 0.5`), and the pre-§7.2 payback then
+rejects them — `ΔE = 0` exactly (both disks carry `ℓ = 0`) and `ΔF` is *negative* by a rounding
+error's worth of fill deviation, so `benefit ≈ −8 load·s < λ·cost`. Any silent revert of §7.2's
+`κ` term flips this fixture's verdict from accept to reject and fails the test.
+
 ---
 
 ## 15. Requirements traceability
@@ -2747,7 +2873,7 @@ move *count* and the resulting slack, not on the disk identity.
 | Minimal number of migrations | §5.4 `β` term; demonstrated §14.3 |
 | Min % changed traffic before acting (10%) | §6 drift gate |
 | % I/O difference across the group | §6 imbalance gate |
-| Keep a VM's disks together, unless space/IO forces otherwise | §5.3 (C3), §5.4 `κ`; demonstrated §14.3 |
+| Keep a VM's disks together, unless space/IO forces otherwise | §5.3 (C3), §5.4 `κ` (I/O-weighted, tiny disks free), §7.2 payback benefit; demonstrated §14.3, §14.7 |
 | Spread data evenly over the storages (failure risk) | §5.3 (C7), §5.4 `δ`, §6 capacity gate; demonstrated §14.3 |
 | Mathematical optimization formulation | §5 |
 | Migration order planned | §8 |
@@ -2783,6 +2909,7 @@ bug waiting to happen; this table is the audit.
 | `migration.max_single_move_duration` | §7.3 hard per-move rule; compared against `duration_d` *including* the wipe |
 | `migration.account_saferemove_wipe` | §7.1 `duration_wipe_d` |
 | `migration.wipe_load_weight` | §7.1 `ω_wipe` in `cost_d`; §7.3 `ω_role(m,s)` while `draining` |
+| `migration.tiny_disk_bytes` | §5.4 `D^big` (β/γ exemption); §7.1 `cost_d = 0`; §7.3 aggregate-test exemption |
 | `execution.locks.*` | §9.3 lock wait loop; §5.3 (C2) planning-time pin |
 | `execution.source_release.*` | §9.3 completion criterion; §8.2 `draining` state |
 | `exclude.include_unused_disks` | §3.6 membership of `D` |
@@ -2791,7 +2918,7 @@ bug waiting to happen; this table is the audit.
 | `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
 | `migration.saturation_ceiling` | §7.3 `L_during(s) ≤ saturation_ceiling · N_s` |
 | `groups[].storages[].saturation_load` | §7.3 `N_s`; guard skipped when unset |
-| `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity/delta_capacity_spread` | §5.4 (the `δ` term also enters §7.2's benefit) |
+| `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity/delta_capacity_spread` | §5.4 (the `δ` term and the I/O-weighted `κ` term also enter §7.2's benefit) |
 | `objective.reserve_violation_penalty` | §5.3 (C5), *floor* for the single-stage `P` alternative |
 | `metrics.pvestatd_push_interval` | §11.1 `rate_window` validation; §3.3 `verify-metrics` |
 | `objective.spread_metric` | §5.3 (C6), L1 vs min–max |
