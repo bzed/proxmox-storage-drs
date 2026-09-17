@@ -102,6 +102,7 @@ from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.heuristic import (
     Assignment,
     ObjectiveBreakdown,
+    compute_vm_weights,
     evaluate_assignment,
     group_average_fill,
     group_average_utilization,
@@ -249,6 +250,7 @@ def solve(
     mip_gap: float,
     cooldown_storages: frozenset[str] = frozenset(),
     probing: bool = False,
+    tiny_disk_bytes: int = 0,
 ) -> OptimizeResult | None:
     """Solve one group with ``backend`` (``"cpsat"`` or ``"cbc"``).
 
@@ -257,6 +259,8 @@ def solve(
     whether a missing optional dependency is worth a warning: ``auto``
     *means* "use the best solver installed here", so probing for CP-SAT and
     not finding it is that option working, not degrading (section 2.3).
+    ``tiny_disk_bytes`` is ``config.migration.tiny_disk_bytes`` (section
+    5.4's ``D^big``).
 
     Returns ``None`` -- never raises -- when ``backend``'s library is not
     importable, or when the lexicographic solve cannot produce even one
@@ -270,7 +274,14 @@ def solve(
     average_fill = group_average_fill(group)
     initial = seed_assignment(group)
     initial_breakdown = evaluate_assignment(
-        group, initial, load_by_key, objective, min_free_bytes, average_utilization, average_fill
+        group,
+        initial,
+        load_by_key,
+        objective,
+        min_free_bytes,
+        average_utilization,
+        average_fill,
+        tiny_disk_bytes,
     )
 
     if not movable:
@@ -297,13 +308,21 @@ def solve(
         mip_gap,
         cooldown_storages,
         probing,
+        tiny_disk_bytes,
     )
 
     if outcome is None:
         return None
     assignment, status = outcome
     breakdown = evaluate_assignment(
-        group, assignment, load_by_key, objective, min_free_bytes, average_utilization, average_fill
+        group,
+        assignment,
+        load_by_key,
+        objective,
+        min_free_bytes,
+        average_utilization,
+        average_fill,
+        tiny_disk_bytes,
     )
     return OptimizeResult(
         assignment=assignment,
@@ -510,11 +529,10 @@ def _assert_nonzero_when_weighted(unscaled_weight: float, scaled: int, name: str
 def _assert_objective_magnitude_within_int64(
     beta_scaled: int,
     gamma_scaled_values: list[int],
-    kappa_scaled: int,
+    kappa_scaled_values: list[int],
     alpha_scaled: int,
     delta_scaled: int,
-    num_movable: int,
-    num_vmids: int,
+    num_big_movable: int,
     num_storages: int,
     load_bound: int,
     fill_bound_total: int,
@@ -531,11 +549,17 @@ def _assert_objective_magnitude_within_int64(
     `Sum_s d_bound_s` -- the (C7) analogue of `load_bound * num_storages`,
     summed rather than multiplied because each storage's `d_s` domain
     bound is its own (`_cpsat_storage_fill_lhs()` returns a per-storage
-    bound, unlike `_LOAD_SCALE`'s shared coefficient)."""
+    bound, unlike `_LOAD_SCALE`'s shared coefficient). ``kappa_scaled_values``
+    is one ``w_v``-weighted coefficient per vmid (section 5.4) -- summed
+    like ``gamma_scaled_values`` rather than multiplied by a single flat
+    value, then scaled by ``num_storages`` since each vmid's own term still
+    ranges over every storage's ``y_{v,s}``. ``num_big_movable`` is
+    ``|D^big|`` among the movable disks (section 5.4): beta ranges only
+    over that subset."""
     worst_case = (
-        beta_scaled * num_movable
+        beta_scaled * num_big_movable
         + sum(abs(g) for g in gamma_scaled_values)
-        + abs(kappa_scaled) * num_vmids * num_storages
+        + sum(abs(k) for k in kappa_scaled_values) * num_storages
         + abs(alpha_scaled) * load_bound * num_storages
         + abs(delta_scaled) * fill_bound_total
     )
@@ -595,17 +619,21 @@ def _cpsat_objective_terms(
     load_bound: int,
     x: dict[Any, Any],
     y: dict[Any, Any],
+    tiny_disk_bytes: int,
 ) -> list[Any]:
     """Section 5.5's stage-2 objective coefficients -- (C6)/(C7) plus the
     beta/gamma/kappa terms -- factored out of `_solve_cpsat()` to keep
     that function's own branching within this project's complexity limit."""
     terms: list[Any] = []
     beta_scaled = round(objective.beta_move_count * _WEIGHT_SCALE * _LOAD_SCALE)
-    kappa_scaled = round(objective.kappa_vm_affinity * _WEIGHT_SCALE * _LOAD_SCALE)
     _assert_nonzero_when_weighted(objective.beta_move_count, beta_scaled, "beta_scaled")
-    _assert_nonzero_when_weighted(objective.kappa_vm_affinity, kappa_scaled, "kappa_scaled")
+    # Section 5.4's D^big: beta/gamma range only over movable disks at or
+    # above tiny_disk_bytes -- a disk below it is deliberately excluded
+    # from both sums (not merely zeroed), so neither term's assertion
+    # applies to it either.
+    big_movable = [d for d in movable if d.size_bytes >= tiny_disk_bytes]
     gamma_scaled_values: list[int] = []
-    for d in movable:
+    for d in big_movable:
         moved = 1 - x[d.key, d.current_storage]
         if beta_scaled:
             terms.append(beta_scaled * moved)
@@ -621,9 +649,23 @@ def _cpsat_objective_terms(
         gamma_scaled_values.append(gamma_scaled)
         if gamma_scaled:
             terms.append(gamma_scaled * moved)
-    if kappa_scaled:
-        for v in vmids:
-            terms.append(kappa_scaled * (sum(y[v, s.id] for s in group.storages) - 1))
+
+    # Section 5.4's w_v = max(1, l_v/l_bar): a per-vmid coefficient, not the
+    # single flat kappa_scaled of before -- w_v is data (computed from
+    # load_by_key, never a solver variable), so it folds into the
+    # coefficient exactly like every other per-(disk,storage)/per-vmid
+    # constant section 5.5 already folds.
+    vm_weights = compute_vm_weights(group, load_by_key, vmids)
+    kappa_scaled_values: dict[int, int] = {}
+    for v in vmids:
+        kappa_scaled_values[v] = round(
+            objective.kappa_vm_affinity * _WEIGHT_SCALE * _LOAD_SCALE * vm_weights[v]
+        )
+        _assert_nonzero_when_weighted(
+            objective.kappa_vm_affinity, kappa_scaled_values[v], f"kappa_scaled[{v}]"
+        )
+        if kappa_scaled_values[v]:
+            terms.append(kappa_scaled_values[v] * (sum(y[v, s.id] for s in group.storages) - 1))
 
     alpha_scaled = round(objective.alpha_spread * _WEIGHT_SCALE)
     _assert_nonzero_when_weighted(objective.alpha_spread, alpha_scaled, "alpha_scaled")
@@ -650,11 +692,10 @@ def _cpsat_objective_terms(
     _assert_objective_magnitude_within_int64(
         beta_scaled,
         gamma_scaled_values,
-        kappa_scaled,
+        list(kappa_scaled_values.values()),
         alpha_scaled,
         delta_scaled,
-        len(movable),
-        len(vmids),
+        len(big_movable),
         len(group.storages),
         load_bound,
         fill_bound_total,
@@ -672,6 +713,7 @@ def _solve_cpsat(
     mip_gap: float,
     cooldown_storages: frozenset[str] = frozenset(),
     probing: bool = False,
+    tiny_disk_bytes: int = 0,
 ) -> tuple[Assignment, str] | None:
     try:
         from ortools.sat.python import cp_model
@@ -744,6 +786,7 @@ def _solve_cpsat(
         load_bound,
         x2,
         y2,
+        tiny_disk_bytes,
     )
     model2.Minimize(sum(terms))
     solver2 = cp_model.CpSolver()
@@ -892,9 +935,14 @@ def _cbc_objective_terms(
     average_fill: float,
     x: dict[Any, Any],
     y: dict[Any, Any],
+    tiny_disk_bytes: int,
 ) -> list[Any]:
     terms: list[Any] = []
+    # Section 5.4's D^big: beta/gamma range only over movable disks at or
+    # above tiny_disk_bytes.
     for d in movable:
+        if d.size_bytes < tiny_disk_bytes:
+            continue
         moved = 1 - x[d.key, d.current_storage]
         if objective.beta_move_count:
             terms.append(objective.beta_move_count * moved)
@@ -902,10 +950,15 @@ def _cbc_objective_terms(
             terms.append(
                 objective.gamma_move_bytes_per_tib * (d.size_bytes / _BYTES_PER_TIB) * moved
             )
+    # Section 5.4's w_v = max(1, l_v/l_bar) -- see _cpsat_objective_terms()'s
+    # identical comment on why this is data, folded per vmid.
     if objective.kappa_vm_affinity:
+        vm_weights = compute_vm_weights(group, load_by_key, vmids)
         for v in vmids:
             terms.append(
-                objective.kappa_vm_affinity * (pulp.lpSum(y[v, s.id] for s in group.storages) - 1)
+                objective.kappa_vm_affinity
+                * vm_weights[v]
+                * (pulp.lpSum(y[v, s.id] for s in group.storages) - 1)
             )
 
     if objective.spread_metric == "minmax":
@@ -967,6 +1020,7 @@ def _solve_cbc(
     mip_gap: float,
     cooldown_storages: frozenset[str] = frozenset(),
     probing: bool = False,
+    tiny_disk_bytes: int = 0,
 ) -> tuple[Assignment, str] | None:
     try:
         import pulp
@@ -1044,6 +1098,7 @@ def _solve_cbc(
         b_bar,
         x2,
         y2,
+        tiny_disk_bytes,
     )
     prob2 += pulp.lpSum(terms)
     status2 = _pulp_solve(pulp, prob2, solver_cmd, probing)
