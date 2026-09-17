@@ -228,6 +228,13 @@ migration:
   # may drive it to. Inactive for any storage whose saturation_load is null.
   saturation_ceiling: 0.85
   assume_thick_provisioning: true      # cost by provisioned size, not allocated
+  # Below this size, a disk carries zero beta/gamma and needs no payback verdict
+  # (plan sections 5.4, 7.1, 7.3) -- comfortably above an EFI var store or TPM
+  # state, far below anything the payback rule was written for. Together with
+  # kappa_vm_affinity below, this is what lets a tiny disk rejoin its VM for
+  # free instead of being priced like a real migration. 0 restores the old
+  # accounting for every disk.
+  tiny_disk_bytes: 67108864            # 64 MiB
 
 # ------------------------------------------------------------ objective weights
 objective:

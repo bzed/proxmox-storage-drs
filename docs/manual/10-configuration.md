@@ -625,6 +625,30 @@ Cost and reserve arithmetic use each disk's *provisioned* size rather than
 its currently allocated size. Set `false` only for genuinely thin-provisioned
 storage, and note that allocation can *grow* during a move even then.
 
+### `migration.tiny_disk_bytes`
+
+Size, default `67108864` (64 MiB).
+
+A disk smaller than this carries zero `beta_move_count`/`gamma_move_bytes_per_tib`
+cost in the objective and zero `cost_d` in the payback model (section 5.4's
+`D^big`, sections 7.1/7.3) — it still counts as a scheduled move and every hard
+per-move safety rule (`max_single_move_duration`, the saturation guard, the
+transient reserve invariant) still applies to it exactly like any other move,
+but it needs no payback verdict and cannot make a plan fail the aggregate
+`payback_ratio` test. Together with `objective.kappa_vm_affinity`, this is what
+lets a tiny volume — an `efidisk0` var store or `tpmstate0`, both normally a
+few hundred KiB to a few MiB — rejoin its VM for free instead of being priced
+like a real migration (see section 3.6's `efidisk0`/`tpmstate0` note).
+
+The default sits comfortably above either of those and far below any disk the
+payback rule was written for, so a 528 KiB EFI disk always qualifies and a
+64 GiB data disk never does. Set it to `0` to restore the pre-section-12
+accounting, where every disk — however small — is charged a full migration.
+Setting it too high (larger than disks you actually want cost-accounted) lets
+real, meaningfully-sized migrations bypass the payback safety test entirely;
+there is no upper bound enforced beyond `≥ 0`, so this is an operator
+judgement call, not a validated range.
+
 ## `objective` — the solver's trade-off weights
 
 See `IMPLEMENTATION_PLAN.md` section 5.4 for the full objective and section
