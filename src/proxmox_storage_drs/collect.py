@@ -69,6 +69,7 @@ from proxmox_storage_drs.metrics import (
     raw_metric_name,
     resolve_node_selector,
     safe_range_step_seconds,
+    stitch_range_results,
     verify_metrics,
 )
 from proxmox_storage_drs.pve import PveClient
@@ -1288,26 +1289,20 @@ def _stitch_range_captures(
     text -- whichever combination of chunking and repeat calls produced
     them -- into one ``(start, end, step, result)``: the widest start/end
     span, the (uniform) step, and one series per disk with every point from
-    every chunk, deduplicated by timestamp and sorted."""
+    every chunk, deduplicated by timestamp and sorted. The per-disk merge
+    itself is ``metrics.stitch_range_results()`` -- shared with
+    ``loadmodel._issue_chunked_range_query()``'s own chunked live fetch, so
+    the "dedup by timestamp, one series per disk" rule has exactly one
+    implementation; this wrapper only adds the start/end/step bookkeeping
+    a captured bundle's range file needs that a live fetch's caller does
+    not."""
     overall_start = min(c[0] for c in captures)
     overall_end = max(c[1] for c in captures)
     step = captures[0][2]
-    by_disk: dict[tuple[tuple[str, str], ...], dict[float, float]] = {}
-    for _start, _end, _step, result in captures:
-        for series in result or []:
-            key = tuple(sorted(series.get("metric", {}).items()))
-            points = by_disk.setdefault(key, {})
-            for ts, value in series.get("values", []):
-                points[float(ts)] = value
-    stitched = [
-        {"metric": dict(key), "values": sorted(points.items())} for key, points in by_disk.items()
-    ]
-    return (
-        overall_start,
-        overall_end,
-        step,
-        sorted(stitched, key=lambda s: sorted(s["metric"].items())),
+    stitched = stitch_range_results(
+        [(start, end, result) for start, end, _step, result in captures]
     )
+    return (overall_start, overall_end, step, stitched)
 
 
 # ---------------------------------------------------------------- findings

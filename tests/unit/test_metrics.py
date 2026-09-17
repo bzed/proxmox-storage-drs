@@ -28,6 +28,7 @@ from proxmox_storage_drs.metrics import (
     raw_metric_name,
     resolve_node_selector,
     safe_range_step_seconds,
+    stitch_range_results,
     verify_metrics,
 )
 
@@ -208,6 +209,56 @@ def test_decimate_to_configured_step_keeps_every_nth_point() -> None:
         (0.0, "a"),
         (300.0, "c"),
         (600.0, "e"),
+    ]
+
+
+def test_stitch_range_results_merges_disjoint_chunks_in_timestamp_order() -> None:
+    """The common case: a wide range chunked by
+    ``loadmodel._issue_chunked_range_query()`` into several non-overlapping
+    ``(start, end, result)`` captures, one disk each contributing a
+    disjoint set of timestamps -- merged into one series per disk, sorted."""
+    captures = [
+        (0.0, 86400.0, [{"metric": {"vmid": "101", "instance": "scsi0"}, "values": [[0.0, "1"]]}]),
+        (
+            86400.0,
+            172800.0,
+            [{"metric": {"vmid": "101", "instance": "scsi0"}, "values": [[90000.0, "2"]]}],
+        ),
+    ]
+    result = stitch_range_results(captures)
+    assert result == [
+        {"metric": {"vmid": "101", "instance": "scsi0"}, "values": [(0.0, "1"), (90000.0, "2")]}
+    ]
+
+
+def test_stitch_range_results_dedupes_overlapping_timestamps() -> None:
+    """A repeat capture of the same query (not just adjacent chunks) can
+    carry the same timestamp twice -- collapsed to one point, not
+    duplicated, the same way collect.py's own ``_stitch_range_captures``
+    behaves."""
+    series = {"metric": {"vmid": "101", "instance": "scsi0"}, "values": [[0.0, "1"], [300.0, "2"]]}
+    captures = [(0.0, 300.0, [series]), (0.0, 600.0, [series])]
+    result = stitch_range_results(captures)
+    assert result == [
+        {"metric": {"vmid": "101", "instance": "scsi0"}, "values": [(0.0, "1"), (300.0, "2")]}
+    ]
+
+
+def test_stitch_range_results_keeps_series_per_disk_separate() -> None:
+    captures = [
+        (
+            0.0,
+            300.0,
+            [
+                {"metric": {"vmid": "101", "instance": "scsi0"}, "values": [[0.0, "1"]]},
+                {"metric": {"vmid": "102", "instance": "scsi0"}, "values": [[0.0, "9"]]},
+            ],
+        )
+    ]
+    result = stitch_range_results(captures)
+    assert result == [
+        {"metric": {"vmid": "101", "instance": "scsi0"}, "values": [(0.0, "1")]},
+        {"metric": {"vmid": "102", "instance": "scsi0"}, "values": [(0.0, "9")]},
     ]
 
 

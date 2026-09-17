@@ -342,6 +342,23 @@ forecast:
   #   holt_winters    -> 2 * seasonal_periods * step           (48h)
   # NOTE: with seasonal_periods=288 at a 5m step, holt_winters needs 48h. A 24h
   # lookback alone can never satisfy it -- it would fall back to quantile forever.
+  #
+  # To switch model to holt_winters with the daily-cycle default below, also
+  # raise window.lookback (above) to at least 48h -- it stays the DECISION
+  # window (what load is balanced over), so most deployments just set it to
+  # match: 48h. Both plan/apply's saturation guard and collect-testdata
+  # fetch this history in day-sized chunks regardless of how wide it gets
+  # (see the RANGE_QUERY_CHUNK_SECONDS note in docs/internals/30-metrics.md),
+  # so this is a Prometheus-request-count cost, never a backend point-per-
+  # series-resolution-limit risk, even for the weekly example below.
+  #
+  # For WEEKLY seasonality instead (weekends look different from weekdays):
+  #   window:
+  #     lookback: 28d               # >= 2 * seasonal_periods * step
+  #   forecast:
+  #     model: holt_winters
+  #     holt_winters:
+  #       seasonal_periods: 2016     # 7d at 5m step
   seasonal_lookback_days: 7    # used by seasonal_naive; 0 disables
   holt_winters:
     seasonal_periods: 288      # 24h at 5m step

@@ -129,6 +129,37 @@ percentile is taken over, a small but real shift in the reduced statistic
 existed, at the plain configured step) both account for this step, not the
 configured one, for the same reason (REVIEW.md Z-05).
 
+## `RANGE_QUERY_CHUNK_SECONDS` / `stitch_range_results()`: chunking a wide `query_range`
+
+A range wide enough -- `IMPLEMENTATION_PLAN.md` section 10.2's backtest-gate floor
+(`2 · window.lookback`) alone can double it -- issued as a single `query_range` call can exceed a
+VictoriaMetrics/gigapipe backend's own max-points-per-timeseries limit (11,000 by default),
+confirmed live with a 500 `"exceeded maximum resolution of 11,000 points per timeseries"`.
+`collect.py`'s capture path (`_issue_range_chunks`, section 16.2) was already immune to this --
+day-sized chunking there predates the live-fetch bug -- but `loadmodel.py`'s own raw-series fetch,
+the one that feeds a `plan`/`apply` run's section 7.3 saturation guard, issued one unchunked
+request regardless of range.
+
+`stitch_range_results(captures)` is the shared merge both paths now use: given several
+`(start, end, result)` captures of the *same* query -- any combination of chunking and repeat
+calls -- it returns one logical result, one series per `(vmid, device)` pair with every point from
+every chunk, deduplicated by timestamp and sorted. Order-independent (a duplicate timestamp across
+overlapping captures just overwrites with the same value), so it does not matter whether the
+captures arrived in chunk order. `collect.py`'s own `_stitch_range_captures` is now a thin wrapper
+around it that adds the `(start, end, step)` bookkeeping a captured bundle's range file needs.
+
+`loadmodel._issue_chunked_range_query()` is `_fetch_raw_quantity_series()`'s own counterpart to
+`collect.py`'s `_issue_range_chunks`: it splits `[start, end]` into `RANGE_QUERY_CHUNK_SECONDS`
+(one day, matching `collect.py`'s own chunk size) sub-requests, boundaries falling on
+`start_epoch_seconds` never on wall-clock "now" (deterministic across repeated calls -- matters
+under `--replay`, where the same promql text is looked up per chunk from one stored bundle file and
+trimmed to each chunk's own window by `replay.py`'s `_trim_range_result()`), then stitches. It
+carries the same `RangeStepMismatch`/`BundleError` fallback the unchunked call always had, applied
+per chunk: both exceptions are a property of the query text (a `--replay` bundle's own recorded
+step, or "no recorded response for this query at all"), not of which chunk asks for it, so once the
+step has fallen back once, every later chunk reuses it directly without re-entering the fallback
+branch.
+
 ## `verify_metrics()`: six checks, six functions
 
 Each `_check_*` function implements exactly one `IMPLEMENTATION_PLAN.md`
