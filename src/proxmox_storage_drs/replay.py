@@ -174,7 +174,7 @@ class ReplayPveClient(PveClient):
 
 def _parse_step_seconds(step_text: str) -> float:
     """The inverse of ``metrics._format_promql_duration()``, which this
-    project only ever emits as ``f"{seconds:g}s"``."""
+    project only ever emits as a trimmed ``f"{seconds:.6f}s"``."""
     if step_text.endswith("s"):
         try:
             return float(step_text[:-1])

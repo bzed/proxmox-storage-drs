@@ -1051,7 +1051,7 @@ def _anonymize_captured_prometheus(
 
 def _parse_step_param(step_text: str) -> float:
     """The inverse of ``metrics._format_promql_duration()``, which this
-    project only ever emits as ``f"{seconds:g}s"``."""
+    project only ever emits as a trimmed ``f"{seconds:.6f}s"``."""
     return float(step_text[:-1]) if step_text.endswith("s") else float(step_text)
 
 
