@@ -560,9 +560,12 @@ As `migration.source_load_weight`, for the target (one sequential writer).
 
 Duration, default `365d`.
 
-The horizon `H` over which a plan's imbalance and data-spread reduction are
-assumed to persist — `benefit = (alpha_spread * ΔE + delta_capacity_spread *
-ΔF) * H`. Setting this to `0` disables the payback test entirely
+The horizon `H` over which a plan's imbalance, data-spread and VM-affinity
+reduction are assumed to persist — `benefit = (alpha_spread * ΔE +
+delta_capacity_spread * ΔF + kappa_vm_affinity * ΔA) * H`. `ΔA` may be
+negative (a balance move that splits a VM pays for that fragmentation out
+of its other gains — `IMPLEMENTATION_PLAN.md` section 7.2). Setting this to
+`0` disables the payback test entirely
 (`IMPLEMENTATION_PLAN.md` section 11.1 rejects that at config-load time:
 `payback_horizon > 0` is required). This is an explicit assumption about how
 long a placement lasts, not about operator patience: a migration's cost is
@@ -642,7 +645,7 @@ like a real migration (see section 3.6's `efidisk0`/`tpmstate0` note).
 
 The default sits comfortably above either of those and far below any disk the
 payback rule was written for, so a 528 KiB EFI disk always qualifies and a
-64 GiB data disk never does. Set it to `0` to restore the pre-section-12
+64 GiB data disk never does. Set it to `0` to restore the pre-section-7.2
 accounting, where every disk — however small — is charged a full migration.
 Setting it too high (larger than disks you actually want cost-accounted) lets
 real, meaningfully-sized migrations bypass the payback safety test entirely;
@@ -695,7 +698,12 @@ Weight, default `0.50`.
 
 Penalty per extra storage a VM's disks are spread across, counted only
 **within** a group (a VM split across two groups is structural and cannot be
-repaired by any migration, so it is not counted). A soft preference: a
+repaired by any migration, so it is not counted) and weighted by the VM's
+own I/O share (`w_v = max(1, ℓ_v / ℓ̄)`, `IMPLEMENTATION_PLAN.md` section
+5.4) — a VM doing several times the group's average I/O is worth
+correspondingly more to keep together than this configured weight alone
+suggests; a quiet VM's fragmentation is weighted exactly as configured. A
+soft preference: a
 strong imbalance or a capacity constraint can legitimately override it.
 
 ### `objective.delta_capacity_spread`

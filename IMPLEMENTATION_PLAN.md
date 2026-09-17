@@ -1372,7 +1372,13 @@ rule, §7.2):
 
 - **The preference is weighted by the VM's own I/O.** `w_v = max(1, ℓ_v / ℓ̄)`, where
   `ℓ_v = Σ_{d ∈ D : v(d)=v} ℓ_d` is the VM's total load within the group (pinned disks included —
-  their I/O is the VM's I/O) and `ℓ̄ = T_g / |V|` the group's mean per-VM load. A VM doing several
+  their I/O is the VM's I/O) and `ℓ̄ = T_g / |V_all|` the group's mean per-VM load, with `V_all`
+  **every distinct VM owning a disk in the group, pinned-only VMs included** — deliberately wider
+  than (C3)'s `V`, which by default ranges over movable-disk VMs only. A pinned-only VM's I/O is
+  still real traffic on the group's storages, and diluting it out of the mean would make `ℓ̄`
+  depend on which disks happen to be movable this run rather than on the group's actual load; the
+  §14.7 fixture is worked with VM 309 pinned entirely out of `V` and still divides by all three of
+  the group's VMs (`ℓ̄ = 6.0/3`, not `6.0/2`). A VM doing several
   times the average I/O is worth correspondingly more to keep together: its fragmentation is
   measured in the same in-flight-I/O unit as everything else (§4), and comparing the full VM's I/O
   against the single disks the balance term shuffles is exactly the comparison that decides whether
@@ -2843,8 +2849,9 @@ equal capabilities, `saferemove` off:
 | `309:scsi0` | 309 | 1.0 TiB | 2.0 | stor-c (pinned: `exclude.vmids`) |
 
 plus 4.0 TiB of foreign volumes on `stor-c`. Loads read 2.0/2.0/2.0, so the imbalance gate stays
-shut; fills read 0.125/0.125/0.625 against `b̄ = 0.25`, so the capacity gate fires on a spread of
-2.0. VM 301 sits on three storages; `ℓ̄ = 6.0/3 = 2.0`, so `w₃₀₁ = 1`.
+shut; fills read 0.125/0.125/0.625 against `b̄ = (3.0 + 4.0)/24 = 0.2917`, so the capacity gate
+fires on a spread of `(0.625 − 0.125)/0.2917 = 1.714`. VM 301 sits on three storages;
+`ℓ̄ = 6.0/3 = 2.0`, so `w₃₀₁ = 1`.
 
 The optimum is exactly two moves — `301:efidisk0 stor-c → stor-a` and `301:tpmstate0 stor-b →
 stor-a` — worth `κ·w₃₀₁·2 = 1.0` at zero `β`/`γ` cost. The alternatives all improve less: joining
@@ -2852,11 +2859,19 @@ stor-a` — worth `κ·w₃₀₁·2 = 1.0` at zero `β`/`γ` cost. The alternat
 fill-deviation regression, and every other byte-moving candidate worsens `δ` more than it helps
 anything. Payback accepts with `benefit ≈ κ·ΔA·H = 3.15×10⁷ load·s` against `cost = 0`.
 
-The fixture discriminates at the verdict, exactly where the live cluster failed: the pre-§7.2
-solver emits the same two moves (`κ·2 = 1.0` outweighs `β·2 = 0.5`), and the pre-§7.2 payback then
-rejects them — `ΔE = 0` exactly (both disks carry `ℓ = 0`) and `ΔF` is *negative* by a rounding
-error's worth of fill deviation, so `benefit ≈ −8 load·s < λ·cost`. Any silent revert of §7.2's
-`κ` term flips this fixture's verdict from accept to reject and fails the test.
+This fixture pins §5.4/§7.2's *value*, not a verdict flip: the affinity repair is worth
+31 536 000 of the plan's `benefit_load_seconds: 31 536 006.65` (`κ·ΔA·H`, 99.99998 % of it) at
+exactly zero cost, and `test_affinity_repair_fixture.py` asserts that by value rather than by
+pass/fail. It is **not** the fixture that flips reject-to-accept — replayed through the pre-§7.2
+formula (no `κ·ΔA` term, `tiny_disk_bytes = 0` so both tiny disks are charged their real,
+nonzero mirror cost), this same two-move plan still *accepts*: `ΔE = 0` exactly, `ΔF` is
+positive (the tiny disks leave above-mean storages for a below-mean one), giving
+`benefit ≈ δ·ΔF·H = +6.65 load·s` against `cost ≈ 0.0152 load·s` — ratio ≈ 438, the same ✓ the
+fix produces. The verdict flip the live cluster actually suffered belongs to the *pre-§12*
+formula alone (`benefit = ΔE·H` at the old 7d horizon, §12's phase table): that formula scores
+this plan `benefit = 0 < λ·cost` and rejects it. What a silent revert of `κ`/`w_v` does catch on
+this fixture is the test's exact-value assertions (`benefit ≈ 31 536 006.65`,
+`cost_load_seconds == 0.0`), not the verdict.
 
 ---
 

@@ -28,8 +28,8 @@ Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   4. 105:scsi0      san-c → san-a   512.00 GiB   ~43.7m   Δimbalance -0.40   ℓ/z 0.40
   after: san-a=2.50  san-b=2.90  san-c=3.00
   spread: 257.1% → 17.9%
-  payback: benefit 5.2e+06 load·s vs cost 4.72e+04 load·s → ratio 110 (need 10) ✓
-  objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 0.5 + spread 0.25 + reserve 0 = 2.57
+  payback: benefit 2.52e+08 load·s vs cost 4.72e+04 load·s → ratio 5.34e+03 (need 10) ✓
+  objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 1.43 + spread 0.25 + reserve 0 = 3.5
   measured load:
   san-a  used 5.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 1.50 TiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
     101:scsi0        2.00 TiB  raw     ℓ 3.00
@@ -58,8 +58,10 @@ how to read the move lines and the payback verdict. What follows is new.
 The section 5.4 objective the solver actually minimized, broken into its
 six terms rather than only the total — `imbalance` (`alpha` times the
 spread metric), `moves` (`beta` times the move count), `bytes` (`gamma`
-times TiB moved), `fragmentation` (`kappa` times each VM's extra storage
-count beyond one), `spread` (`delta` times the section 5.3 (C7) data-spread
+times TiB moved), `fragmentation` (`kappa` times each VM's I/O-weighted
+extra storage count beyond one — section 5.4's `w_v`, so a VM doing
+several times the group's average I/O costs correspondingly more to
+split), `spread` (`delta` times the section 5.3 (C7) data-spread
 deviation), and `reserve` (the penalty for any remaining (C5) shortfall,
 zero on a plan that resolves or never had one). This is the same
 `heuristic.ObjectiveBreakdown` the solver itself compares candidate
@@ -86,10 +88,10 @@ one-move neighbourhood) — and shows the term-by-term arithmetic that
 rejected it:
 
 ```
-  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + reserve 0 = 0.576
+  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + spread 0 + reserve 0 = 0.576
   no moves made: the objective is lowest at the current assignment
   closest alternative: 110:scsi1 VM-krbd → VM
-    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, reserve 0→0
+    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, spread 0→0, reserve 0→0
     total 0.576 → 0.8  (worse by 0.223 -- rejected)
 ```
 

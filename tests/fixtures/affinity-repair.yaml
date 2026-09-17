@@ -4,13 +4,16 @@
 # exemption, and section 7.2's kappa*dA benefit term, from the payback rule
 # (migration.tiny_disk_bytes, objective.kappa_vm_affinity).
 #
-# The fixture that discriminates at the verdict, exactly where the live
-# cluster failed: the pre-section-12 solver already finds the two-move plan
-# (kappa alone outweighs beta), but the pre-section-12 payback rule -- no
-# affinity term in the benefit, a full beta/gamma charge on every disk
-# regardless of size -- rejects it. Section 5.4/7.2's fix is what flips this
-# fixture's verdict from reject to accept; a silent revert of either change
-# flips it back.
+# This fixture pins section 5.4/7.2's *value*, not a verdict flip: the
+# solver already finds the two-move plan pre-fix (kappa alone outweighs
+# beta), and the pre-section-7.2 payback rule (no affinity term in the
+# benefit, a full beta/gamma charge on every disk regardless of size) still
+# *accepts* it too -- ΔE = 0 exactly and the tiny disks' fill-deviation
+# improvement alone clears the bar (see IMPLEMENTATION_PLAN.md section
+# 14.7). The verdict flip the live cluster actually suffered belongs to the
+# older pre-section-12 formula (benefit = ΔE*H at the old 7d horizon) alone.
+# What a silent revert of either change breaks on this fixture is the exact
+# benefit/cost values the test asserts, not the accept/reject verdict.
 #
 # VM 309's disk is PINNED (`pinned: true`, modelling `exclude.vmids`): never
 # a candidate for `all_assignments()`'s product, but its bytes and load still

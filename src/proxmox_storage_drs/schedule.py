@@ -282,6 +282,11 @@ def order_moves(
             # regardless of its own persistent_reduction, not merely
             # ranked by persistent_reduction alone (which would not
             # dominate a competing large candidate's higher ratio).
+            # Always +inf at zero cost, regardless of persistent_reduction's own
+            # sign -- "free value, delivered before anything pays" presumes the
+            # value is positive. Unreachable today: the solver only proposes
+            # tiny moves that reduce kappa, so a negative persistent_reduction
+            # here would contradict the solver's own optimum (REVIEW.md AB-07).
             cost = 0.0 if disk.size_bytes < tiny_disk_bytes else float(disk.size_bytes)
             ratio = float("inf") if cost == 0.0 else persistent_reduction / cost
             if ratio > best_ratio:
