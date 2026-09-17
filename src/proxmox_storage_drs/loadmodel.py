@@ -17,12 +17,13 @@ weights) is calibrated against it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 from proxmox_storage_drs.config import LoadWeights, MetricsConfig, WindowConfig
 from proxmox_storage_drs.exceptions import BundleError, RangeStepMismatch
 from proxmox_storage_drs.forecast import TimeSeries
 from proxmox_storage_drs.metrics import (
+    RANGE_QUERY_CHUNK_SECONDS,
     RAW_METRIC_FIELDS,
     DiskKey,
     PrometheusClient,
@@ -34,6 +35,7 @@ from proxmox_storage_drs.metrics import (
     parse_disk_series,
     raw_metric_name,
     safe_range_step_seconds,
+    stitch_range_results,
 )
 from proxmox_storage_drs.topology import Group
 
@@ -190,6 +192,63 @@ def _fetch_all_raw_quantities(
 _RawTimeSeries = tuple[tuple[float, float], ...]
 
 
+def _issue_chunked_range_query(
+    client: PrometheusClient,
+    promql: str,
+    start_epoch_seconds: float,
+    end_epoch_seconds: float,
+    query_step: float,
+    configured_step: float,
+) -> tuple[float, list[dict[str, Any]]]:
+    """``client.range_query()``, issued in ``RANGE_QUERY_CHUNK_SECONDS``-sized
+    sub-requests and stitched back into one logical result
+    (:func:`~proxmox_storage_drs.metrics.stitch_range_results`) -- mirrors
+    ``collect.py``'s own ``_issue_range_chunks``/``_stitch_range_captures``
+    (section 16.2) for this, the live plan/apply fetch path, which used to
+    issue one unchunked request over the caller's full range regardless of
+    size. A wide range -- the section 10.2 backtest gate alone can double
+    ``window.lookback``, combined with a fine ``metrics.step`` -- could
+    exceed a VictoriaMetrics/gigapipe backend's own max-points-per-timeseries
+    limit (11,000 by default) with a 500 "exceeded maximum resolution",
+    confirmed live.
+
+    Carries the same ``RangeStepMismatch``/``BundleError`` fallback
+    :func:`_fetch_raw_quantity_series` always had, applied per chunk: both
+    exceptions are properties of the query text (a ``--replay`` bundle's own
+    recorded step, or "no recorded response for this query at all"), not of
+    which chunk asks for it, so every chunk hits (or does not hit) them
+    identically -- once ``query_step`` has fallen back to ``configured_step``
+    (at most once, on whichever chunk hits it first), every later chunk
+    reuses that same step without re-entering the fallback branches at all.
+    Chunk boundaries fall on ``start_epoch_seconds``, never on wall-clock
+    "now", so they are deterministic across repeated calls -- matters under
+    ``--replay``, where the same promql text is looked up per chunk from one
+    stored bundle file and trimmed to each chunk's own window."""
+    captures: list[tuple[float, float, list[dict[str, Any]]]] = []
+    chunk_start = start_epoch_seconds
+    step = query_step
+    while chunk_start < end_epoch_seconds:
+        chunk_end = min(chunk_start + RANGE_QUERY_CHUNK_SECONDS, end_epoch_seconds)
+        try:
+            result = client.range_query(promql, chunk_start, chunk_end, step)
+        except RangeStepMismatch as exc:
+            # collect-testdata --step overrode config.metrics.step for this
+            # bundle's capture (manifest.json's capture.step_seconds, never
+            # written to config.yaml) -- use the step it actually has.
+            step = exc.actual_step_seconds
+            result = client.range_query(promql, chunk_start, chunk_end, step)
+        except BundleError:
+            if step == configured_step:
+                raise
+            step = configured_step
+            result = client.range_query(promql, chunk_start, chunk_end, step)
+        captures.append((chunk_start, chunk_end, result))
+        chunk_start = chunk_end
+    if not captures:
+        return step, []
+    return step, stitch_range_results(captures)
+
+
 def _fetch_raw_quantity_series(
     client: PrometheusClient,
     metrics: MetricsConfig,
@@ -215,35 +274,23 @@ def _fetch_raw_quantity_series(
         metrics.rate_window_seconds,
         selector=node_selector,
     )
-    # safe_range_step_seconds()/decimate_to_configured_step(): see
-    # compute_disk_coverage()'s own use of the same pair (and its
-    # docstring on the try/except below) in metrics.py -- this is the
-    # forecaster's raw-series counterpart of that same
-    # gigapipe-step-vs-range workaround. Decimation matters more here than
-    # there: forecast.py's Holt-Winters model treats its input as a plain
-    # index-spaced array (`seasonal_periods` samples per cycle), so handing
-    # it a finer-than-configured grid would silently misalign the season
-    # length, not just look "extra precise".
+    # safe_range_step_seconds(): see compute_disk_coverage()'s own use of it
+    # in metrics.py -- this is the forecaster's raw-series counterpart of
+    # that same gigapipe-step-vs-range workaround. Decimation matters more
+    # here than there: forecast.py's Holt-Winters model treats its input as
+    # a plain index-spaced array (`seasonal_periods` samples per cycle), so
+    # handing it a finer-than-configured grid would silently misalign the
+    # season length, not just look "extra precise".
     query_step = safe_range_step_seconds(step_seconds, metrics.rate_window_seconds)
-    try:
-        result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, query_step)
-    except RangeStepMismatch as exc:
-        # collect-testdata --step overrode config.metrics.step for this
-        # bundle's capture (manifest.json's capture.step_seconds, never
-        # written to config.yaml) -- use the step it actually has.
-        query_step = exc.actual_step_seconds
-        result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, query_step)
-    except BundleError:
-        if query_step == step_seconds:
-            raise
-        query_step = step_seconds
-        result = client.range_query(rate_expr, start_epoch_seconds, end_epoch_seconds, query_step)
-    if query_step < step_seconds:
+    actual_step, result = _issue_chunked_range_query(
+        client, rate_expr, start_epoch_seconds, end_epoch_seconds, query_step, step_seconds
+    )
+    if actual_step < step_seconds:
         result = [
             {
                 **series,
                 "values": decimate_to_configured_step(
-                    series.get("values", []), step_seconds, query_step
+                    series.get("values", []), step_seconds, actual_step
                 ),
             }
             for series in result

@@ -2186,6 +2186,20 @@ seasonal model is a statement that the history exists to support it.
 - Validate by backtesting: fit on `[t−2T, t−T]`, predict `[t−T, t]`, compare against actual. Refuse
   to let a model whose backtest error exceeds the imbalance threshold drive migrations.
 
+**As built (bug fix):** the live §7.3 saturation-guard fetch (`cli.py`'s
+`_saturation_forecast_inputs()`, via `loadmodel.compute_disk_load_series()`) used to issue one
+**unchunked** `query_range` over its whole computed range — `2 · window.lookback` from §10.2's own
+backtest-gate floor above, combined with a fine `metrics.step`, confirmed live to exceed a
+VictoriaMetrics/gigapipe backend's own max-points-per-timeseries limit (11,000 by default) with a
+500 "exceeded maximum resolution" error, something §16.2's `collect-testdata` capture path was
+already immune to. The live fetch (`loadmodel._fetch_raw_quantity_series()`, via the new
+`_issue_chunked_range_query()`) is now chunked exactly like §16.2's capture path — day-sized
+sub-queries (`metrics.RANGE_QUERY_CHUNK_SECONDS`), boundaries falling on the range's own start, never
+on wall-clock "now", stitched back into one series (`metrics.stitch_range_results()`, factored out of
+`collect.py`'s own `_stitch_range_captures` so both paths share one merge implementation) — every
+`plan`/`apply` run with a backtested forecaster active, not just `collect-testdata`, so neither path
+depends on Prometheus retention or `metrics.step` staying small enough to fit one request.
+
 ---
 
 ## 11. Configuration

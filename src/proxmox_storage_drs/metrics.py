@@ -199,6 +199,42 @@ def decimate_to_configured_step(
     return list(points[::divisor])
 
 
+#: One day, in seconds -- the default chunk size for a live ``query_range``
+#: fetch (:func:`stitch_range_results`, ``loadmodel._fetch_raw_quantity_series``),
+#: matching ``collect.py``'s own ``_CHUNK_SECONDS`` (section 16.2): chosen so
+#: a request never runs into a backend's own max-points-per-timeseries limit
+#: (VictoriaMetrics/gigapipe's default 11,000, confirmed live -- a single
+#: unchunked request over a wide range, e.g. the section 10.2 backtest gate's
+#: ``2 * window.lookback_seconds`` floor combined with a fine ``metrics.step``,
+#: can exceed it with a 500 "exceeded maximum resolution").
+RANGE_QUERY_CHUNK_SECONDS = 86400.0
+
+
+def stitch_range_results(
+    captures: Sequence[tuple[float, float, list[dict[str, Any]]]],
+) -> list[dict[str, Any]]:
+    """Merges several ``(start, end, result)`` ``query_range`` captures of
+    the *same* query -- whichever combination of chunking and repeat calls
+    produced them -- into one logical result: one series per disk with
+    every point from every chunk, deduplicated by timestamp and sorted.
+    Order-independent, so it does not matter whether the captures arrived
+    in chunk order. The same merge collect.py's own ``_stitch_range_captures``
+    (section 16.2) performs for a captured bundle's range files, generalized
+    here (result list only, no start/end/step bookkeeping) for a live
+    fetch's own chunked retry (``loadmodel._fetch_raw_quantity_series``)."""
+    by_disk: dict[tuple[tuple[str, str], ...], dict[float, Any]] = {}
+    for _start, _end, result in captures:
+        for series in result or []:
+            key = tuple(sorted(series.get("metric", {}).items()))
+            points = by_disk.setdefault(key, {})
+            for ts, value in series.get("values", []):
+                points[float(ts)] = value
+    stitched = [
+        {"metric": dict(key), "values": sorted(points.items())} for key, points in by_disk.items()
+    ]
+    return sorted(stitched, key=lambda s: sorted(s["metric"].items()))
+
+
 _PROMQL_REGEX_SPECIAL = re.compile(r"([.^$|()\[\]{}*+?\\])")
 
 

@@ -29,7 +29,7 @@ from proxmox_storage_drs.config import (
     PrometheusConfig,
     WindowConfig,
 )
-from proxmox_storage_drs.exceptions import BundleError
+from proxmox_storage_drs.exceptions import BundleError, RangeStepMismatch
 from proxmox_storage_drs.loadmodel import (
     GroupLoad,
     _fetch_raw_quantity_series,
@@ -694,6 +694,117 @@ def test_fetch_raw_quantity_series_falls_back_to_the_plain_step_on_bundle_error(
     assert [ts for ts, _v in result[key]] == [0.0, 300.0]
 
 
+class _WindowTrackingFakeClient(PrometheusClient):
+    """A ``range_query`` stand-in that returns caller-supplied data keyed by
+    the exact ``(start, end)`` it is asked for and records every
+    ``(start, end, step)`` -- for exercising
+    ``_issue_chunked_range_query()``'s own chunk-then-stitch behaviour
+    without a real multi-day Prometheus history."""
+
+    def __init__(self, data_by_window: dict[tuple[float, float], list[dict[str, Any]]]) -> None:
+        super().__init__(PROM_CONFIG)
+        self._data_by_window = data_by_window
+        self.requested_windows: list[tuple[float, float, float]] = []
+
+    def range_query(
+        self,
+        promql: str,
+        start_epoch_seconds: float,
+        end_epoch_seconds: float,
+        step_seconds: float,
+    ) -> list[dict[str, Any]]:
+        del promql
+        self.requested_windows.append((start_epoch_seconds, end_epoch_seconds, step_seconds))
+        return self._data_by_window.get((start_epoch_seconds, end_epoch_seconds), [])
+
+
+def test_fetch_raw_quantity_series_chunks_and_stitches_a_wide_range() -> None:
+    """A range wider than ``metrics.RANGE_QUERY_CHUNK_SECONDS`` (1d) is
+    split into several ``range_query()`` calls -- one per day-sized chunk,
+    boundaries falling on the range's own start -- and stitched back into
+    one series in timestamp order (``_issue_chunked_range_query()``). 2.5d
+    is exactly 3 chunks: [0, 86400), [86400, 172800), [172800, 216000].
+    ``rate_window=7200 > step=3600`` keeps ``safe_range_step_seconds()`` a
+    no-op, isolating this test to chunking alone."""
+    metrics = MetricsConfig(rate_window_seconds=7200.0, step_seconds=3600.0, labels=MetricLabels())
+    data_by_window = {
+        (0.0, 86400.0): [range_series(101, "scsi0", [(0.0, 1.0)])],
+        (86400.0, 172800.0): [range_series(101, "scsi0", [(90000.0, 2.0)])],
+        (172800.0, 216000.0): [range_series(101, "scsi0", [(200000.0, 3.0)])],
+    }
+    client = _WindowTrackingFakeClient(data_by_window)
+
+    result = _fetch_raw_quantity_series(client, metrics, "read_ops", 0.0, 216000.0, 3600.0, None)
+
+    assert client.requested_windows == [
+        (0.0, 86400.0, 3600.0),
+        (86400.0, 172800.0, 3600.0),
+        (172800.0, 216000.0, 3600.0),
+    ]
+    key = DiskKey(vmid=101, device="scsi0")
+    assert result[key] == ((0.0, 1.0), (90000.0, 2.0), (200000.0, 3.0))
+
+
+def test_fetch_raw_quantity_series_bundle_error_fallback_fires_once_across_chunks() -> None:
+    """The BundleError fallback (see
+    ``test_fetch_raw_quantity_series_falls_back_to_the_plain_step_on_bundle_error``)
+    applies per chunk in ``_issue_chunked_range_query()``, but the fallback
+    step is only ever DISCOVERED once: the first chunk pays for the failed
+    attempt at the gigapipe-workaround step, every later chunk goes
+    straight to the corrected (configured) step without re-raising. A 2.5d
+    range (3 chunks) makes this directly observable in ``requested_steps``:
+    [150 (fails), 300 (chunk 1 retry), 300 (chunk 2), 300 (chunk 3)]."""
+    metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
+    real = range_series(101, "scsi0", [(0.0, 1.0)])
+    client = _StepAwareFakeClient(working_step=300.0, result=[real])
+
+    _fetch_raw_quantity_series(client, metrics, "read_ops", 0.0, 216000.0, 300.0, None)
+
+    assert client.requested_steps == [150.0, 300.0, 300.0, 300.0]
+
+
+def test_fetch_raw_quantity_series_range_step_mismatch_fallback_fires_once_across_chunks() -> None:
+    """``RangeStepMismatch`` (a ``--replay`` bundle captured with
+    ``collect-testdata --step`` overriding ``config.metrics.step``) is a
+    property of the query text, not of which chunk asks for it -- the same
+    "corrected once, reused after" shape as the ``BundleError`` case above,
+    exercised here via the exception that carries its own replacement step
+    instead of falling back to ``configured_step``."""
+    metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
+    real = range_series(101, "scsi0", [(0.0, 1.0)])
+    client = _RangeStepMismatchFakeClient(bundle_step=900.0, result=[real])
+
+    _fetch_raw_quantity_series(client, metrics, "read_ops", 0.0, 216000.0, 300.0, None)
+
+    assert client.requested_steps == [150.0, 900.0, 900.0, 900.0]
+
+
+class _RangeStepMismatchFakeClient(PrometheusClient):
+    """Like ``_StepAwareFakeClient``, but raises ``RangeStepMismatch``
+    (carrying its own replacement step) instead of a plain ``BundleError``
+    -- the ``collect-testdata --step``-override bundle shape, distinct from
+    the "captured before the gigapipe workaround existed" shape
+    ``_StepAwareFakeClient`` models."""
+
+    def __init__(self, bundle_step: float, result: list[dict[str, Any]]) -> None:
+        super().__init__(PROM_CONFIG)
+        self._bundle_step = bundle_step
+        self._result = result
+        self.requested_steps: list[float] = []
+
+    def range_query(
+        self, promql: str, start_epoch_seconds: float, end_epoch_seconds: float, step_seconds: float
+    ) -> list[dict[str, Any]]:
+        del promql, start_epoch_seconds, end_epoch_seconds
+        self.requested_steps.append(step_seconds)
+        if step_seconds != self._bundle_step:
+            raise RangeStepMismatch(
+                "simulated --replay bundle: recorded at a different step",
+                actual_step_seconds=self._bundle_step,
+            )
+        return self._result
+
+
 # ------------------------------------------------------------- compute_disk_load_series
 
 
@@ -861,10 +972,17 @@ def test_compute_disk_load_series_uses_the_given_range_not_window_lookback() -> 
     """`range_seconds`/`step_seconds`/`now_epoch_seconds` are the caller's
     own choice, not `window.lookback_seconds` (300.0 in this fixture) --
     confirmed by using a wildly different range/step/step and checking the
-    actual `start`/`end`/`step` params a range query carried. 500s (not
+    actual `start`/`end`/`step` params the range queries carried. 500s (not
     METRICS.rate_window_seconds's 600s or higher) keeps
     safe_range_step_seconds() a no-op, since that workaround is exercised on
-    its own elsewhere and isn't what this test is about."""
+    its own elsewhere and isn't what this test is about.
+
+    604800s (7d) at RANGE_QUERY_CHUNK_SECONDS (1d) chunks into exactly 7
+    requests per raw field (`_issue_chunked_range_query`) -- covering the
+    whole [0, 604800] span, each request's own `step` unaffected by
+    chunking. `compute_disk_load_series()` fetches all six raw fields
+    (`RAW_METRIC_FIELDS`), so this filters `range_params` down to one
+    field's own query text before checking the per-field chunk sequence."""
     group = Group(
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
@@ -880,11 +998,16 @@ def test_compute_disk_load_series_uses_the_given_range_not_window_lookback() -> 
         now_epoch_seconds=604800.0,
     )
 
-    assert session.range_params  # at least one range query was actually issued
-    params = session.range_params[0]
-    assert float(params["start"]) == pytest.approx(0.0)  # 604800 - 604800
-    assert float(params["end"]) == pytest.approx(604800.0)
-    assert params["step"] == "500s"
+    read_time_params = [p for p in session.range_params if "rd_total_time_ns" in p["query"]]
+    assert len(read_time_params) == 7  # one per 1d chunk, 604800s / 86400s
+    assert all(params["step"] == "500s" for params in read_time_params)
+    assert float(read_time_params[0]["start"]) == pytest.approx(0.0)  # 604800 - 604800
+    assert float(read_time_params[-1]["end"]) == pytest.approx(604800.0)
+    # Adjacent chunk boundaries fall on `start_epoch_seconds`, never overlap.
+    starts = [float(p["start"]) for p in read_time_params]
+    ends = [float(p["end"]) for p in read_time_params]
+    assert starts == sorted(starts)
+    assert ends[:-1] == starts[1:]
 
 
 def test_load_by_disk_key_matches_disks_tuple() -> None:

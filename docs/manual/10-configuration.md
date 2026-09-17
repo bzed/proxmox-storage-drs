@@ -1045,6 +1045,20 @@ Samples per seasonal cycle. Combined with `metrics.step`, this determines
 `holt_winters`'s required history: `2 * seasonal_periods * metrics.step`
 — 48h at the defaults, which a 24h `window.lookback` can never satisfy.
 
+To fit **weekly** seasonality instead of daily (e.g. weekends look
+different from weekdays), widen this together with `window.lookback`:
+`seasonal_periods: 2016` (7d at the default 5m step) needs
+`window.lookback` of at least 28 days (`2 * 2016 * 5m`). The fetch behind
+this — both the live `plan`/`apply` saturation guard and
+`collect-testdata` — is chunked into day-sized requests regardless of how
+wide the range gets, so a large `seasonal_periods`/`window.lookback`
+combination no longer risks exceeding a Prometheus-compatible backend's
+own per-series resolution limit (VictoriaMetrics/gigapipe's default
+11,000 points) the way an unchunked request over the same range once
+could; it costs more Prometheus requests per run instead (one per day of
+range, per raw metric, per group) — a real cost worth sizing
+deliberately, not a reason to keep the range artificially small.
+
 ### `forecast.holt_winters.trend`
 
 One of `add`, `mul`, `none`; default `add`.
