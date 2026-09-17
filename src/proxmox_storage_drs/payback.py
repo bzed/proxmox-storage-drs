@@ -117,7 +117,8 @@ class PaybackResult:
     ``saturation_load`` configured."""
 
     move_costs: tuple[MoveCost, ...]
-    # (alpha*(E_before-E_after) + delta*(F_before-F_after)) * migration.payback_horizon
+    # (alpha*(E_before-E_after) + delta*(F_before-F_after) + kappa*(A_before-A_after))
+    # * migration.payback_horizon
     benefit_load_seconds: float
     rejected_moves: tuple[str, ...]  # disk keys failing the hard per-move duration rule
     aggregate_ok: bool
@@ -230,9 +231,17 @@ def compute_move_cost(
         if wipe is not None:
             duration_wipe = wipe
 
+    # Section 7.1: "a disk below migration.tiny_disk_bytes costs nothing" --
+    # cost_load_seconds alone is zeroed, not duration_mirror/duration_wipe:
+    # every hard per-move rule below (exceeds/deferred) still applies to a
+    # tiny disk exactly like any other move (section 7.3).
     cost = (
-        duration_mirror * (migration.source_load_weight + migration.target_load_weight)
-        + duration_wipe * migration.wipe_load_weight
+        0.0
+        if move.size_bytes < migration.tiny_disk_bytes
+        else (
+            duration_mirror * (migration.source_load_weight + migration.target_load_weight)
+            + duration_wipe * migration.wipe_load_weight
+        )
     )
     exceeds = (duration_mirror + duration_wipe) > migration.max_single_move_duration_seconds
     deferred = (
@@ -260,37 +269,50 @@ def compute_benefit_load_seconds(
     capacity_spread_before: float,
     capacity_spread_after: float,
     payback_horizon_seconds: float,
+    kappa_vm_affinity: float = 0.0,
+    affinity_debt_before: float = 0.0,
+    affinity_debt_after: float = 0.0,
 ) -> float:
     """Section 7.2: ``benefit = (alpha*(E_before - E_after) +
-    delta*(F_before - F_after)) * H``. ``imbalance_before``/
-    ``imbalance_after`` and ``capacity_spread_before``/
-    ``capacity_spread_after`` must be the *raw*, unweighted section 7.2
+    delta*(F_before - F_after) + kappa*(A_before - A_after)) * H``.
+    ``imbalance_before``/``imbalance_after``, ``capacity_spread_before``/
+    ``capacity_spread_after`` and ``affinity_debt_before``/
+    ``affinity_debt_after`` must be the *raw*, unweighted section 7.2
     quantities -- ``heuristic.raw_spread()``'s ``sum(e_s)`` (``"l1"``) or
-    ``max(u_s)`` (``"minmax"``) for ``E``, and
-    ``heuristic.raw_capacity_spread()``'s ``sum(d_s)`` for ``F`` --
-    evaluated at the pre-plan and post-plan assignments respectively.
-    **Not** ``ObjectiveBreakdown.imbalance_term``/``.capacity_spread_term``:
-    those are the same quantities already scaled by
-    ``objective.alpha_spread``/``objective.delta_capacity_spread`` for the
-    section 5.4 *solver* objective, and passing them here would double
-    -apply the weight (REVIEW.md R-01 -- earlier code passed
-    ``imbalance_term`` directly; only invisible while ``alpha_spread``'s
-    default of ``1.0`` made the two numerically identical). Unlike the
-    pre-section-12 formula, ``alpha_spread``/``delta_capacity_spread`` are
-    now explicit parameters here rather than baked into the inputs --
-    section 7.2's formula genuinely weights both terms, and passing the
-    weights in visibly, applied once, in the one place that computes
-    ``benefit``, is what keeps R-01's underlying principle (no weight
-    smuggled in through an already-scaled quantity) intact under the new
-    formula. A negative result (the plan made imbalance or spread *worse*,
-    which a beta/gamma/kappa-dominated objective can in principle choose)
-    is returned as computed, not clamped -- ``evaluate_plan_payback()``'s
-    acceptance test already rejects it correctly without special-casing
-    the sign here.
+    ``max(u_s)`` (``"minmax"``) for ``E``, ``heuristic.raw_capacity_spread()``'s
+    ``sum(d_s)`` for ``F``, and ``heuristic.raw_affinity_debt()``'s
+    ``sum(w_v * extra storages)`` for ``A`` -- evaluated at the pre-plan
+    and post-plan assignments respectively. **Not**
+    ``ObjectiveBreakdown.imbalance_term``/``.capacity_spread_term``/
+    ``.fragmentation_term``: those are the same quantities already scaled
+    by ``objective.alpha_spread``/``objective.delta_capacity_spread``/
+    ``objective.kappa_vm_affinity`` for the section 5.4 *solver* objective,
+    and passing them here would double-apply the weight (REVIEW.md R-01 --
+    earlier code passed ``imbalance_term`` directly; only invisible while
+    ``alpha_spread``'s default of ``1.0`` made the two numerically
+    identical). ``alpha_spread``/``delta_capacity_spread``/
+    ``kappa_vm_affinity`` are explicit parameters here rather than baked
+    into the inputs -- section 7.2's formula genuinely weights all three
+    terms, and passing the weights in visibly, applied once, in the one
+    place that computes ``benefit``, is what keeps R-01's underlying
+    principle (no weight smuggled in through an already-scaled quantity)
+    intact.
+
+    ``kappa``/``A`` default to ``0.0`` so an existing caller that has not
+    been updated to pass affinity data keeps computing the pre-section-12
+    two-term formula unchanged.
+
+    A negative result (the plan made imbalance, spread or affinity
+    *worse* -- section 7.2: "``dA`` may be negative, and then it *reduces*
+    the benefit: a balance move that splits a VM must pay for the
+    fragmentation out of its alpha gain") is returned as computed, not
+    clamped -- ``evaluate_plan_payback()``'s acceptance test already
+    rejects it correctly without special-casing the sign here.
     """
     return (
         alpha_spread * (imbalance_before - imbalance_after)
         + delta_capacity_spread * (capacity_spread_before - capacity_spread_after)
+        + kappa_vm_affinity * (affinity_debt_before - affinity_debt_after)
     ) * payback_horizon_seconds
 
 

@@ -4,9 +4,10 @@
 
 Cross-checked against IMPLEMENTATION_PLAN.md section 14.5's worked
 example exactly: the two-move plan's per-move durations/costs, the
-accepted ratio (~8970 at the 365d default horizon, with the delta*F term
-folded in per section 12), and the separate failed-payback example (a
-4 TiB archive disk, ratio 7.5, rejected).
+accepted ratio (~7344 at the 365d default horizon, with the delta*F and
+kappa*A terms folded in per sections 12 and 5.4/7.2's affinity-payback
+fix), and the separate failed-payback example (a 4 TiB archive disk,
+ratio 7.5, rejected).
 """
 
 from __future__ import annotations
@@ -91,7 +92,13 @@ def test_section_14_5_move_durations_and_costs_match_exactly() -> None:
     assert total_cost == pytest.approx(26214.4, abs=0.1)  # plan: "26 214 load*s"
 
 
-def test_section_14_5_two_move_plan_is_accepted_at_ratio_8970() -> None:
+def test_section_14_5_two_move_plan_is_accepted_at_ratio_7344() -> None:
+    """Reworked by section 5.4/7.2's affinity-payback fix: the plan splits
+    VM 101 (both disks on san-a before, scsi1 moves to san-b), so
+    ``kappa*(A_before - A_after)`` -- A_before=0 (together), A_after=w_101
+    (one extra storage), w_101=max(1, 4.0/(7.4/5))=2.7027 -- now enters the
+    benefit as a negative term the split must pay for out of its alpha
+    gain, lowering the pre-section-12 ratio from ~8970 to ~7344."""
     san_a = no_saferemove_storage("san-a")
     moves = [
         move("102:scsi0", "san-a", "san-c", 1.5),
@@ -103,14 +110,23 @@ def test_section_14_5_two_move_plan_is_accepted_at_ratio_8970() -> None:
     # the two-move plan, at the defaults alpha_spread=1.0,
     # delta_capacity_spread=0.5, and the 365d horizon (section 12/7.2).
     benefit = compute_benefit_load_seconds(
-        1.0, 8.066667, 1.533333, 0.5, 2.153846, 0.307692, 31_536_000.0
+        1.0,
+        8.066667,
+        1.533333,
+        0.5,
+        2.153846,
+        0.307692,
+        31_536_000.0,
+        kappa_vm_affinity=0.5,
+        affinity_debt_before=0.0,
+        affinity_debt_after=20 / 7.4,  # w_101 = 4.0 / (7.4/5), section 14.3
     )
-    assert benefit == pytest.approx(235145375.0, rel=1e-6)  # plan: "~2.35e8"
+    assert benefit == pytest.approx(192527280.0, rel=1e-4)  # plan: "~1.93e8"
 
     result = evaluate_plan_payback(costs, benefit, SECTION_14_5_MIGRATION.payback_ratio)
 
     assert result.total_cost_load_seconds == pytest.approx(26214.4, abs=0.1)
-    assert result.ratio == pytest.approx(8970.0, abs=1.0)
+    assert result.ratio == pytest.approx(7344.0, abs=1.0)
     assert result.aggregate_ok
     assert result.accepted
     assert result.rejected_moves == ()
@@ -522,3 +538,109 @@ def test_negative_benefit_is_never_accepted() -> None:
     result = evaluate_plan_payback([cost], benefit, migration.payback_ratio)
     assert not result.aggregate_ok
     assert not result.accepted
+
+
+# ------------------------------------------------------- tiny_disk_bytes (section 7.1/7.3)
+
+
+def test_compute_move_cost_is_zero_below_tiny_disk_bytes() -> None:
+    """Section 7.1: ``cost_d = 0`` when ``z_d < tiny_disk_bytes`` -- but
+    duration and the hard per-move rules are still computed normally
+    (section 7.3: "every hard rule below applies to it exactly as to any
+    other move"), so a tiny disk that happens to exceed
+    ``max_single_move_duration`` (an absurdly throttled ``bwlimit``, here)
+    is still correctly flagged even though its cost is zero."""
+    source = no_saferemove_storage("san-a")
+    migration = MigrationConfig(
+        bwlimit_bytes_per_sec=1,  # absurdly slow, to make even a tiny move exceed the duration rule
+        max_single_move_duration_seconds=1.0,
+        tiny_disk_bytes=2 * MIB,
+    )
+    efidisk = move(
+        "301:efidisk0", "san-a", "san-b", 1 / (1024 * 1024)
+    )  # 1 MiB, below tiny_disk_bytes
+    cost = compute_move_cost(efidisk, source, migration)
+    assert cost.cost_load_seconds == 0.0
+    assert cost.duration_mirror_seconds > 0.0  # duration itself is still real
+    assert cost.exceeds_max_duration  # the hard rule still applies to a tiny disk
+
+
+def test_compute_move_cost_is_nonzero_at_tiny_disk_bytes_threshold() -> None:
+    """The boundary is inclusive on the ``D^big`` side: a disk exactly at
+    ``tiny_disk_bytes`` still carries a real cost (section 5.4: ``D^big =
+    {d : z_d >= tiny_disk_bytes}``)."""
+    source = no_saferemove_storage("san-a")
+    migration = MigrationConfig(bwlimit_bytes_per_sec=200 * MIB, tiny_disk_bytes=2 * MIB)
+    at_threshold = ScheduledMove(
+        disk_key="301:efidisk0",
+        vmid=301,
+        device="efidisk0",
+        from_storage="san-a",
+        to_storage="san-b",
+        size_bytes=2 * MIB,
+        imbalance_reduction=0.0,
+        resolves_reserve_violation=False,
+    )
+    cost = compute_move_cost(at_threshold, source, migration)
+    assert cost.cost_load_seconds > 0.0
+
+
+def test_negative_delta_affinity_reduces_benefit() -> None:
+    """Section 7.2: "dA may be negative, and then it reduces the benefit: a
+    balance move that splits a VM must pay for the fragmentation out of
+    its alpha gain." A plan that improves imbalance but splits a heavy VM
+    (A_before=0, together -> A_after=3.0, split) sees its benefit cut by
+    kappa*3.0*H."""
+    without_split = compute_benefit_load_seconds(
+        1.0, 5.0, 2.0, 0.0, 0.0, 0.0, 604800.0, kappa_vm_affinity=0.5
+    )
+    with_split = compute_benefit_load_seconds(
+        1.0,
+        5.0,
+        2.0,
+        0.0,
+        0.0,
+        0.0,
+        604800.0,
+        kappa_vm_affinity=0.5,
+        affinity_debt_before=0.0,
+        affinity_debt_after=3.0,
+    )
+    assert with_split < without_split
+    assert with_split == pytest.approx(without_split - 0.5 * 3.0 * 604800.0)
+
+
+def test_all_tiny_disk_plan_accepts_on_affinity_benefit_alone() -> None:
+    """Section 14.7's affinity-repair fixture in miniature: two tiny disks
+    reunite with their VM, each costing 0 (section 7.1), so the aggregate
+    test degrades to ``benefit >= payback_ratio * 0`` -- accepted purely on
+    the kappa*dA term, exactly the live dogfooding case section 5.4/7.2
+    exist to fix."""
+    source = no_saferemove_storage("stor-c")
+    migration = MigrationConfig(bwlimit_bytes_per_sec=200 * MIB, tiny_disk_bytes=2 * MIB)
+    moves = [
+        move("301:efidisk0", "stor-c", "stor-a", 1 / (1024 * 1024)),  # 1 MiB
+        move("301:tpmstate0", "stor-b", "stor-a", 1 / (1024 * 1024)),  # 1 MiB
+    ]
+    costs = [compute_move_cost(m, source, migration) for m in moves]
+    assert all(c.cost_load_seconds == 0.0 for c in costs)
+
+    benefit = compute_benefit_load_seconds(
+        1.0,
+        0.0,
+        0.0,
+        0.5,
+        0.0,
+        0.0,
+        31_536_000.0,
+        kappa_vm_affinity=0.5,
+        affinity_debt_before=2.0,  # VM spread over 2 extra storages, w_v=1
+        affinity_debt_after=0.0,  # reunited
+    )
+    assert benefit > 0
+
+    result = evaluate_plan_payback(costs, benefit, migration.payback_ratio)
+    assert result.total_cost_load_seconds == 0.0
+    assert result.ratio == float("inf")
+    assert result.aggregate_ok
+    assert result.accepted
