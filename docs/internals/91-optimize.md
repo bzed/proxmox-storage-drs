@@ -144,6 +144,35 @@ that fails for some other reason (a malformed model, a killed subprocess)
 — either way, still "this backend cannot produce a plan", never a bare
 traceback.
 
+## `kappa*w_v` and `D^big`: the same weighting in both backends
+
+Section 5.4's `w_v = max(1, l_v/l_bar)` is data, not a variable — computed
+once per group by `heuristic.compute_vm_weights()` (imported by this
+module, never recomputed here) and folded into a **per-vmid** `kappa`
+coefficient, exactly like `u*`/`b_bar` are already folded elsewhere in this
+file. CP-SAT builds `kappa_scaled_values: dict[int, int]` in place of the
+old single flat `kappa_scaled` — `round(kappa·W·K·w_v)` per vmid, each
+still guarded by `_assert_nonzero_when_weighted()` — and
+`_assert_objective_magnitude_within_int64()`'s own worst-case bound sums
+`abs(k)` over that dict instead of multiplying one flat value by
+`num_vmids`. CBC does the continuous equivalent: `kappa · w_v` multiplies
+each vmid's own `pulp.lpSum(y[v, s.id] ...)` term directly.
+
+`D^big = {d : z_d >= migration.tiny_disk_bytes}` restricts `beta`/`gamma`
+to `movable` disks at or above the configured threshold — not a coefficient
+of `0` for an excluded disk, but the disk's terms skipped entirely (so
+`_assert_nonzero_when_weighted()` never fires for one; a deliberately
+excluded coefficient is not the rounding-to-zero bug that assertion
+exists to catch). Both changes are exercised end to end, not just at the
+coefficient level, by `test_optimize.py`'s
+`test_tiny_disk_bytes_lets_a_tiny_disk_reunite_with_its_vm_for_free` — a
+1 MiB `efidisk0` that is not worth a full `beta` migration at
+`tiny_disk_bytes: 0` becomes free to reunite with its VM once the
+threshold covers it, on both backends — and by
+`tests/unit/test_affinity_repair_fixture.py`, which runs section 14.7's
+whole fixture through `solve()` for both backends and confirms they agree
+with the heuristic.
+
 ## `(C1)`/`(C3)`/`(C4)`/`(C5)` are shared code, factored once per backend
 
 `_cpsat_feasibility_constraints()`/`_cbc_feasibility_constraints()` build

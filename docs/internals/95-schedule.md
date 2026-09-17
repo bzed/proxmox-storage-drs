@@ -8,33 +8,50 @@ happens when no order exists? Describes `proxmox_storage_drs/schedule.py`.
 
 `order_moves()` implements section 8.2's pseudocode directly: while there
 are pending moves, find the ones that are transient-feasible right now,
-schedule the best by imbalance-reduction-per-byte (moves that resolve a
-currently-violating storage win outright, regardless of that ratio), apply
-it, repeat. "Imbalance reduction" is computed by calling
-`heuristic.evaluate_assignment()` twice (before/after the candidate move)
-and diffing `.imbalance_term` — not a second formula, the same one
-`heuristic.py` already computes, so a plan's ordering agrees with whatever
-`objective.spread_metric` is configured exactly the way the assignment
-that produced it did.
+schedule the best by persistent-objective-reduction-per-byte (moves that
+resolve a currently-violating storage win outright, regardless of that
+ratio), apply it, repeat. "Persistent-objective reduction" sums the
+`alpha`, `delta` **and** `kappa*w_v` terms — the parts of section 5.4's
+objective whose improvement outlives the plan, as opposed to `beta`/`gamma`,
+which are one-time migration costs a completed move has already paid —
+computed by calling `heuristic.evaluate_assignment()` twice (before/after
+the candidate move) and diffing `.imbalance_term + .capacity_spread_term +
+.fragmentation_term`. Not a second formula: the same one `heuristic.py`
+already computes, so a plan's ordering agrees with whatever
+`objective.spread_metric`/`kappa_vm_affinity` is configured exactly the way
+the assignment that produced it did. The `kappa*w_v` term joined this sum
+alongside section 5.4's `w_v` weighting itself (previously alpha+delta
+only) — a fragmenting move now visibly costs more in the ranking, not only
+in the target assignment the solver already chose.
 
-## `cost_m` is `z_d` — and that is not an approximation today
+## `cost_m` is `z_d` — except below `tiny_disk_bytes`, where it is `0`
 
-Section 8.2's ratio is "imbalance reduction / `cost_m`". `cost_m` here is
-simply the disk's size in bytes, not `payback.py`'s real duration-based
-cost (mirror time plus, when `saferemove` is on, wipe time — and wipe
-*throughput* is a per-storage config value, so two candidate moves off
-different sources can have genuinely different wipe costs even for the
+Section 8.2's ratio is "persistent-objective reduction / `cost_m`". `cost_m`
+here is simply the disk's size in bytes, not `payback.py`'s real
+duration-based cost (mirror time plus, when `saferemove` is on, wipe time —
+and wipe *throughput* is a per-storage config value, so two candidate moves
+off different sources can have genuinely different wipe costs even for the
 same `z_d`). `migration.bwlimit_bytes_per_sec` is one global config value,
 so every move's *mirror* duration alone is `z_d / bwlimit`, a constant
-divided into every disk's size equally — dividing an imbalance reduction
-by `z_d` and dividing it by `z_d / bwlimit` produce the **same ordering**
-(`bwlimit` is a positive constant common to every candidate). So
-`cost_m = z_d` reproduces the true mirror-only ordering exactly, but is an
-approximation once a group has moves whose `saferemove` wipe cost differs
-enough to change the ranking `payback.py`'s full cost would produce.
-Scoring candidates by `payback.compute_move_cost()` instead of `z_d` is a
-natural follow-up, not yet done: this module predates `payback.py` and
-has not been revisited to consume it (REVIEW.md R-04).
+divided into every disk's size equally — dividing a reduction by `z_d` and
+dividing it by `z_d / bwlimit` produce the **same ordering** (`bwlimit` is
+a positive constant common to every candidate). So `cost_m = z_d`
+reproduces the true mirror-only ordering exactly, but is an approximation
+once a group has moves whose `saferemove` wipe cost differs enough to
+change the ranking `payback.py`'s full cost would produce. Scoring
+candidates by `payback.compute_move_cost()` instead of `z_d` is a natural
+follow-up, not yet done: this module predates `payback.py` and has not
+been revisited to consume it (REVIEW.md R-04).
+
+One exception is implemented today: a disk below
+`migration.tiny_disk_bytes` gets `cost_m = 0` regardless of its real
+`z_d`, and the ratio is `+inf` rather than a division — section 8.2's own
+words, "cost_m = 0 ranks first: free value, delivered before anything
+pays." This is not merely "falls back to raw reduction" (which would not
+necessarily beat a competing large candidate's own high ratio): a zero-cost
+move is ranked ahead of *every* nonzero-cost one outright, so a tiny
+`efidisk0`/`tpmstate0` reunion is always scheduled before a real migration
+that happens to reduce the objective by more in absolute terms.
 
 ## The transient invariant, called with a single-move set always
 

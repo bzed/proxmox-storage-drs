@@ -1804,13 +1804,15 @@ This naturally converges on the smaller subset of high-value moves rather than a
 usually the one or two disks with the highest `ℓ_d / z_d` ratio, which is exactly the right thing to
 move.
 
-**As built:** none of the three changes this section and §7.2 specify — the `w_v` weighting of `κ`,
-the `tiny_disk_bytes` exemptions, `κ`'s place in the benefit — is implemented yet; `payback.py`'s
-`compute_benefit_load_seconds()` still computes the two-term formula, both solver backends still
-charge a flat per-VM `κ`, and the live run that exposed the gap printed `benefit 9 load·s vs cost
-232 load·s → ratio 0.0388 ✗` on a plan of four affinity repairs and refused to act, exactly as the
-pre-fix arithmetic predicts. The β/γ-doubling re-solve above is likewise still unimplemented (the
-run says so in its warning).
+**As built:** the three changes this section and §7.2 specify — the `w_v` weighting of `κ`, the
+`tiny_disk_bytes` exemptions, `κ`'s place in the benefit — are implemented: `payback.py`'s
+`compute_benefit_load_seconds()` takes the three-term formula, both solver backends fold a per-vmid
+`κ·w_v` coefficient (`heuristic.compute_vm_weights()`, one implementation shared by both MILP
+backends and the heuristic), and the four-affinity-repair plan that previously scored `benefit 9
+load·s vs cost 232 load·s → ratio 0.0388 ✗` and refused to act now prices the reunions correctly (see
+§14.7's `affinity-repair.yaml`, the fixture built to prove exactly this). The β/γ-doubling re-solve
+above remains unimplemented — a separate, still-open scope decision (`payback.py`'s own module
+docstring lists it under "deliberately not implemented in this pass"), not part of this fix.
 
 `ℓ_d / z_d` — load per byte — is worth surfacing in `pve-storage-drs explain` output. It is the single best
 indicator of a good migration candidate: high I/O concentrated in a small disk.
