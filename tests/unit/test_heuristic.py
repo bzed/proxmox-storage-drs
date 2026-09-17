@@ -20,8 +20,10 @@ from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.heuristic import (
     _repair,
     best_single_disk_alternative,
+    compute_vm_weights,
     evaluate_assignment,
     group_average_utilization,
+    raw_affinity_debt,
     run_heuristic,
     seed_assignment,
 )
@@ -98,6 +100,62 @@ DEFAULT_OBJECTIVE = ObjectiveConfig(
     kappa_vm_affinity=0.50,
     delta_capacity_spread=0.0,
 )
+
+
+# ------------------------------------------------------------- compute_vm_weights
+
+
+def test_compute_vm_weights_matches_section_14_3_exactly() -> None:
+    group = section_14_group()
+    loads = section_14_loads()
+    weights = compute_vm_weights(group, loads, [101, 102, 103, 104, 105])
+    # w_101 = max(1, 4.0 / (7.4/5)) = 2.7027 -- the group's heaviest VM.
+    assert weights[101] == pytest.approx(2.702703, abs=1e-5)
+    assert weights[102] == pytest.approx(1.689189, abs=1e-5)
+    assert weights[103] == 1.0  # below the mean -- floored, not negative
+    assert weights[104] == 1.0
+    assert weights[105] == 1.0
+
+
+def test_compute_vm_weights_returns_empty_dict_for_no_vmids() -> None:
+    group = section_14_group()
+    loads = section_14_loads()
+    assert compute_vm_weights(group, loads, []) == {}
+
+
+def test_compute_vm_weights_floors_every_vm_at_one_when_the_group_is_idle() -> None:
+    """An idle group (every disk's load is 0) has no basis to weight one VM
+    over another -- l_bar itself is 0, so the division that would normally
+    produce w_v is skipped and every VM gets the floor."""
+    group = section_14_group()
+    idle_loads = {key: 0.0 for key, *_ in _SECTION_14_DISKS}
+    weights = compute_vm_weights(group, idle_loads, [101, 102, 103, 104, 105])
+    assert weights == {101: 1.0, 102: 1.0, 103: 1.0, 104: 1.0, 105: 1.0}
+
+
+def test_compute_vm_weights_includes_a_pinned_disks_load_in_l_v() -> None:
+    """Section 5.4: "l_v ... pinned disks included -- their I/O is the
+    VM's I/O", regardless of objective.affinity_counts_pinned_disks (which
+    only decides V's own membership, never l_v's disk set)."""
+    pinned = make_disk("201:scsi1", 1.0, 3.0, "san-b", pinned="locked: backup")
+    movable = make_disk("201:scsi0", 1.0, 1.0, "san-a")
+    other = make_disk("202:scsi0", 1.0, 1.0, "san-a")
+    storages = (make_storage("san-a"), make_storage("san-b"))
+    group = Group(name="g", storages=storages, disks=(pinned, movable, other))
+    loads = {"201:scsi0": 1.0, "201:scsi1": 3.0, "202:scsi0": 1.0}
+    weights = compute_vm_weights(group, loads, [201, 202])
+    # l_201 = 1.0 + 3.0 = 4.0 (pinned scsi1 counted); l_bar = 5.0/2 = 2.5.
+    assert weights[201] == pytest.approx(4.0 / 2.5)
+    assert weights[202] == 1.0  # 1.0/2.5 < 1, floored
+
+
+def test_raw_affinity_debt_matches_breakdowns_own_field() -> None:
+    group = section_14_group()
+    loads = section_14_loads()
+    breakdown = evaluate_assignment(
+        group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0, 7.4 / 3, 0.0
+    )
+    assert raw_affinity_debt(breakdown) == breakdown.affinity_debt
 
 
 # ------------------------------------------------------------------------ seeding
