@@ -181,7 +181,8 @@ class MigrationConfig:
     # Below this size, a disk carries zero beta/gamma and needs no payback
     # verdict (section 5.4 D^big, section 7.1/7.3) -- comfortably above an
     # EFI var store or TPM state, far below anything the payback rule was
-    # written for. 0 restores the pre-section-12 accounting for every disk.
+    # written for. 0 restores the pre-section-7.2 accounting for every disk
+    # (every disk charged a full migration, however small).
     tiny_disk_bytes: int = 67_108_864  # 64 MiB
 
 

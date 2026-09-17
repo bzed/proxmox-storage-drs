@@ -205,6 +205,27 @@ and AA-08(a)'s underlying concern are fixed (AA-08(a) itself is refuted as unrea
 strongly than the finding claimed); AA-07 is acknowledged without a process change, and
 AA-08(b) without a code change, both per the operator's own direction.
 
+A **nineteenth pass** (section 37) reviews everything after the AA-fixes: the section 3.8
+pending-change pin, releases 0.1.5 and 0.1.6, four dogfooding fixes (the `move_disk` task-lock
+race and `min_wipe_seconds`, the section 10.2 backtest history floor, fixed-point PromQL
+durations, day-chunked live range fetches), and the affinity-payback rework — section 5.4's
+I/O-weighted `κ` (`w_v`) and `D^big` tiny-disk exemption, section 7.2's `κ·ΔA` benefit term, and
+the new section 14.7 `affinity-repair` fixture — nineteen non-merge commits. Seven findings
+(AB-01..AB-07) are identified: one Medium — section 14.7's headline claim that its fixture
+"discriminates at the verdict" is false: replayed through the repository's own code, the
+pre-fix (0.1.6) payback arithmetic **accepts** the fixture at ratio ≈ 438 (its `ΔF` is positive,
+not the "negative by a rounding error" the plan prints; the "benefit ≈ −8 load·s" rejection
+exists in no state newer than pre-phase-12), and reverts are caught only by the test's
+exact-value assertions, not by any verdict flip. Five Low: section 14.7's own `b̄`/gate-spread
+arithmetic disagrees with its committed fixture; section 5.4's `ℓ̄ = T_g/|V|` contradicts its own
+worked example under the default `affinity_counts_pinned_disks`; a manual-staleness cluster
+around the reworked `κ`/payback arithmetic (one worked example verified wrong by execution);
+a three-location "pre-section-12" mislabel; and 0.1.6's changelog crediting 0.1.4 with the
+capacity-spread term that shipped in 0.1.5. One Info. **Section 38** records the resolution:
+AB-01 through AB-05 and AB-07 are fixed (documentation/comment corrections only, no behavioural
+change); AB-06 is acknowledged without a change, since the changelog entry it names is already
+tagged and released.
+
 ---
 
 ## 0. Overall assessment
@@ -5439,6 +5460,315 @@ actually a stale `docs/.build/pdf.fdb_latexmk` from an earlier failed run: `late
 before rebuilding fixed it outright; all three PDFs (`IMPLEMENTATION_PLAN.pdf` at 64 pages,
 `internals.pdf` at 53, the manual at 47) and their stamps are rebuilt and committed alongside this
 pass's Markdown changes, per AGENTS.md §7.4.
+
+---
+
+## 37. Nineteenth-pass review — the §3.8 pending pin, releases 0.1.5/0.1.6, four dogfooding fixes, and the affinity-payback rework (`w_v`, `D^big`, `κ·ΔA`, §14.7)
+
+Reviewed commit range `44dd6ff..HEAD` — everything after the eighteenth-pass fixes, whose
+resolutions section 36 already records (several were re-verified incidentally during this pass
+and hold: AA-01's folded (C7) coefficients and the `before/after_objective_total` cross-backend
+check, AA-02's repaired bundles with their `submission.yaml` records, AA-04's persistent
+ranking, AA-05's `capacity_fraction` in `plan --json`). Nineteen non-merge commits: `6edf2f3`
+(section 3.8: disks with an unapplied PVE pending change are pinned — `vm_pending()` per VM, a
+sixth preflight re-check, wired through collect/anonymize/replay with a new `vm-pending/`
+bundle file), `244d6f8` (Release 0.1.5), `baf7596` (Release 0.1.6), `4535675` (the `move_disk`
+task-lock race: a `min_wipe_seconds` floor in the §9.3.2 completion criterion plus a narrow
+retry on PVE's own `can't lock file ... - got timeout` exitstatus, with
+`execution.locks.task_retry_limit`/`task_retry_backoff`), `c2c9075` (the §10.2 backtest gate's
+history fetch widened to `2·window.lookback` for backtested models, mirrored in
+`collect-testdata`'s capture range), `79b841e` (PromQL durations rendered in fixed-point —
+`%g`'s scientific notation past 6 significant digits was rejected live by Prometheus's duration
+parser), `63bc278` (the live saturation-guard fetch chunked into day-sized `query_range`s and
+stitched, sharing `metrics.stitch_range_results()` with the capture path), and the twelve-commit
+affinity-payback arc: `f21a15b` (the plan change), `ec2e1f6` (`migration.tiny_disk_bytes`),
+`d12fa17`/`8260e9d` (`w_v` and `D^big` in the heuristic and both MILP backends), `5c1251c`
+(§8.2's ranking), `1337779` (§7.1's zero cost below `tiny_disk_bytes`, §7.2's `κ·ΔA`),
+`a181cd9`/`aac29a4`/`edd3cdc` (tests, CLI wiring, and the `ℓ̄`-divides-by-every-VM fix),
+`2e7abaf`/`d0cde4b` (the oracle and the corpus regeneration), `1d0aea6` (the internals docs).
+
+Process, up front, because the eighteenth pass had to report its absence as a finding (AA-07):
+**every commit in this range landed through a `--no-ff` branch merge** — the first-parent chain
+from `ee2d805` to HEAD is merges only — and every commit touching `IMPLEMENTATION_PLAN.md`
+rebuilt and re-stamped the PDF in the same commit. The branch-first rule is being followed, not
+just written down.
+
+### 37.1 Verification run
+
+- `make check` at HEAD (`d0c94b8`): green end to end — fmt-check, lint, typecheck, **941 passed,
+  1 warning** (the same benign statsmodels `ConvergenceWarning` noted since the eleventh pass),
+  **96.38% line coverage**, `generate_expected.py --check` OK, `validate_corpus.py --check` OK,
+  docs-check OK.
+- Release hygiene: 0.1.5 and 0.1.6 both have version agreement across `debian/changelog`,
+  `pyproject.toml` and `__init__.py`; both changelog entries cover their whole ranges (one
+  release-attribution error — AB-06); annotated tags `debian/0.1.5` (on `23f03db`) and
+  `debian/0.1.6` (on `0a0570a`), tagger `Bernd Zeimetz <bernd@bzed.de>`, messages
+  `pve-storage-drs 0.1.5`/`0.1.6` — both comply with `32db294`'s three-part release rule.
+- §14's reworked numbers re-derived by hand: §14.3's full objectives 3.664/3.769, the
+  β-knob arithmetic (−0.400 + 0.250 + 0.025 + 0.231 = +0.106), and the affinity comparison
+  3.52 (together) vs 3.04 (split, `w₁₀₁ = 4.0/1.48 = 2.703`, `κ·w = 1.351`); §14.5's benefit
+  `(6.5333 + 0.9231 − 1.3514)·31 536 000 = 1.93×10⁸`, ratio 7 344; the archive reject at
+  ratio 7.5 — all matching the regenerated `fc-tier1.expected.json` (`expected_objective`
+  3.663531, `benefit_load_seconds` 192 529 137.63, `ratio` 7344.4, archive 7.519).
+- `w_v`/`D^big` cross-checked for implementation agreement: `compute_vm_weights()` is the one
+  implementation the heuristic, both MILP backends and the fixture oracle all call; the `D^big`
+  comparison (`size_bytes >= tiny_disk_bytes`, β/γ exempt, everything else untouched) is built
+  identically in `evaluate_assignment()`, both objective-term builders, `compute_move_cost()`,
+  `order_moves()` and the oracle; `raw_affinity_debt()` extends R-01's
+  never-pass-a-weighted-quantity discipline to the third benefit term, and the one production
+  `compute_benefit_load_seconds()` call site passes it correctly.
+- §14.7's pre-/post-fix payback arithmetic replayed through the repository's own code (the
+  reproduction behind AB-01), and the manual's `explain` worked example re-evaluated through
+  `evaluate_assignment()` at HEAD (the reproduction behind AB-04).
+- The five dogfooding fixes were read in full (plan, code, tests, docs, packaging): no defects
+  found. `4535675`'s `min_wipe_seconds` lives inside the drain poll that is only entered when
+  `source.saferemove` holds, its retry regex matches PVE's exact wording narrowly, and the
+  sequential/concurrent asymmetry (blocking backoff vs next-cycle retry) is the right shape;
+  `c2c9075`'s `2·lookback` floor correctly exempts `quantile` on the live fetch while the
+  capture range keeps it unconditionally (a bundle must replay under any model); `79b841e`'s
+  trimmed `:.6f` and `63bc278`'s chunking/stitching both check out, and the §16.2 docstring
+  claim that bundles predate-then-fallback (`vm-pending` absent → "nothing pending") is matched
+  by `replay.py`'s deliberate soft miss.
+- The corpus regeneration is real dogfooding, not bookkeeping: on `bzed-dev-cluster-24h`, VM
+  92831's stranded `efidisk0` now reunites at zero cost and is scheduled first — §8.2's "free
+  value, delivered before anything pays" playing out on a real captured topology — and the
+  skip-reason entries stay environment-independent (Y-02's property holds).
+
+### 37.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| AB-01 | Med | plan §14.7, `affinity-repair.yaml`, `test_affinity_repair_fixture.py` | §14.7's closing claim — "the fixture discriminates at the verdict ... the pre-§7.2 payback then rejects them — ΔE = 0 exactly ... ΔF is *negative* by a rounding error ..., benefit ≈ −8 load·s < λ·cost. Any silent revert of §7.2's κ term flips this fixture's verdict from accept to reject and fails the test" — is false in every number: replayed through the repo's own code, the fixture's ΔF is **positive** (+4.2×10⁻⁷; the committed expected.json's own `benefit 31 536 006.65` = `κ·ΔA·H + δ·ΔF·H` with `δ·ΔF·H = +6.65`), the pre-fix (0.1.6) arithmetic **accepts** at benefit +6.65 vs cost 0.0152 (ratio ≈ 438), no verdict flip exists in any state newer than pre-phase-12, and reverts are caught only by the test's exact-value assertions, not the verdict |
+| AB-02 | Low | plan §14.7 | "fills read 0.125/0.125/0.625 against `b̄ = 0.25`, so the capacity gate fires on a spread of 2.0" — `b̄ = 7/24 = 0.29167` and the spread is 1.714, exactly what the committed `affinity-repair.expected.json` records (`b_bar: 0.291667`, `capacity_spread_before: 1.714285`); inert (the gate fires either way) but §14 is the hand-verifiable worked example — AA-03's class |
+| AB-03 | Low | plan §5.4 vs §14.7, `heuristic.compute_vm_weights()` | §5.4 defines `ℓ̄ = T_g/|V|`, but (C3)'s `V` ranges over movable-disk VMs only by default — a literal reading gives `ℓ̄ = 6.0/2` in §14.7's own group, while §14.7's own worked number (and the code, and the oracle) divide by all three VMs (`6.0/3`); masked by the `max(1,·)` floor in this fixture, but the two denominators give different weights in general (loads 3/3 plus a zero-load pinned-only VM: 1.5 vs 1.0) — the formula text should say what is implemented |
+| AB-04 | Low | `docs/manual/29-explain.md`, `27-plan.md`, `28-apply.md`, `10-configuration.md` | The `w_v`/`κ·ΔA`/`D^big` rework changed three operator-visible numbers and the manual was not swept: `29-explain.md`'s worked example still prints `fragmentation 0.5 ... = 2.57` where the engine now computes **1.43/3.50** on that exact scenario (verified by execution; `w₁₀₁ = 2.857`), its payback sample is one-term 7d arithmetic (5.2e6 = ΔE×604 800), its §9.5 mirror prints five terms though the renderer always prints six, `27-plan.md`'s payback guide still describes `(E_before − E_after)·H` with no δ, no κ and no tiny-disk cost exemption around a 7d-era sample (4.19e6/ratio 133, "the three-move plan at the default weights" — the default optimum has been two moves since 0.1.5), and `10-configuration.md`'s `payback_horizon`/`kappa_vm_affinity` entries omit `κ·ΔA` and `w_v`; `1d0aea6` rebuilt and re-stamped the manual PDF with all of it, so docs-check now enforces the stale text |
+| AB-05 | Low | `docs/manual/10-configuration.md:645`, `config.py:184`, `affinity-repair.yaml:8` | Three locations say `tiny_disk_bytes: 0` (or the fixture's pre-fix rejection) "restores the pre-section-12 accounting" — §12 is the phase table whose phase 12 is the capacity-spread/365d wave, which changed nothing about per-disk charging; the accounting named is the pre-**affinity-fix** one (§5.4/§7.1–7.3), which the plan's own §14.7 calls "pre-§7.2"; the yaml's verdict claim is true only for the literal pre-phase-12 formula, not for the §7.2/§7.1 gaps its own parentheticals attribute it to (AB-01) |
+| AB-06 | Low | `debian/changelog` (0.1.6 entry) | "(the objective gained a sixth, capacity-spread term in 0.1.4)" — `71c306f` is first contained by tag `debian/0.1.5` (`git tag --contains` confirms), and 0.1.5's own entry correctly records shipping it; W-04's precedent, and unfixable in place per §9.2's no-backfill rule |
+| AB-07 | Info | `schedule.py`, `payback.py`, `27-plan.md` | (a) `order_moves()` ranks any zero-cost move at `+inf` regardless of its own `persistent_reduction` sign — §8.2's pseudocode semantics would rank a negative-reduction zero-cost move last, and "free value" presumes positive value; unreachable today and mirrored by the oracle, noted for the next reader; (b) an all-tiny plan's human payback line renders `ratio inf (need 10) ✓` — honest, but the reading guide never mentions the `inf` shape |
+
+### 37.3 AB-01 — §14.7's "discriminates at the verdict" is false; the pre-fix arithmetic accepts
+
+**Severity:** Medium
+**Files:** `IMPLEMENTATION_PLAN.md` §14.7 (closing paragraph), `tests/fixtures/affinity-repair.yaml`
+(header comment), `tests/unit/test_affinity_repair_fixture.py`
+(`test_end_to_end_plan_accepts_payback_at_zero_cost`'s docstring)
+
+`f21a15b`'s commit message introduces §14.7 as "the acceptance fixture that flips from reject to
+accept under the new arithmetic", and the section closes by naming the mechanism:
+
+> The fixture discriminates at the verdict, exactly where the live cluster failed: the pre-§7.2
+> solver emits the same two moves (`κ·2 = 1.0` outweighs `β·2 = 0.5`), and the pre-§7.2 payback
+> then rejects them — `ΔE = 0` exactly (both disks carry `ℓ = 0`) and `ΔF` is *negative* by a
+> rounding error's worth of fill deviation, so `benefit ≈ −8 load·s < λ·cost`. Any silent revert
+> of §7.2's `κ` term flips this fixture's verdict from accept to reject and fails the test.
+
+Replayed through the repository's own code at HEAD — the fixture group constructed verbatim,
+"pre-fix" meaning exactly the 0.1.6 state §7.3's own former "As built" paragraph described
+(two-term `compute_benefit_load_seconds()`, `compute_move_cost()` with `tiny_disk_bytes = 0`) —
+every number in that paragraph is wrong:
+
+- The solver half is true: with `tiny_disk_bytes = 0` the heuristic still returns exactly the
+  two tiny moves (`κ·2 = 1.0` vs `β·2 + γ·~0 = 0.5`) — verified by running it.
+- `ΔE = 0` is true, but `ΔF` is **positive** (`+4.215×10⁻⁷`), not negative: both tiny disks
+  leave above-mean `stor-c`/below-mean `stor-b` for below-mean `stor-a`, so the fill deviation
+  shrinks. The committed `affinity-repair.expected.json` itself encodes this:
+  `benefit_load_seconds: 31 536 006.65` is `κ·ΔA·H = 31 536 000` **plus** `δ·ΔF·H = +6.65`.
+- The pre-fix benefit is therefore **+6.65 load·s**, not "≈ −8"; the pre-fix cost is
+  `2·(528 KiB + 1 MiB)/200 MiB/s = 0.0152 load·s`; the aggregate test reads
+  `6.65 ≥ 10 × 0.0152 = 0.152` → **ACCEPT, ratio ≈ 438**. The pre-fix verdict on this fixture is
+  the same ✓ the fix produces. There is no verdict flip, so "any silent revert ... flips this
+  fixture's verdict from accept to reject and fails the test" is wrong on both halves: nothing
+  flips, and what fails on a revert is not the verdict but the test's exact-value assertions
+  (`benefit ≈ 31 536 006.65`, `cost_load_seconds == 0.0`, `move_count_term == 0.0`) — which do
+  catch every revert variant this pass constructed (κ-term-only, D^big-only, full), so the
+  fixture is not useless, merely not the discriminator the plan says it is.
+- The "−8" exists in no state newer than pre-phase-12, and not exactly there either: the
+  pre-phase-12 formula (`benefit = ΔE·H` at `H = 7d`) scores this plan `benefit = 0`, which does
+  reject (`0 < 0.152`) — that is the state `affinity-repair.yaml`'s comment actually names
+  ("pre-section-12"), while attributing the rejection to the §7.2/§7.1 gaps ("no affinity term
+  in the benefit, a full beta/gamma charge on every disk") that alone do not produce it; a
+  sign-flipped exact `ΔF` would give −6.65, a sign-flipped rounded one −15.8. The test
+  docstring's "the pre-fix formula scored this same plan `benefit ~-8 load*s` and rejected it"
+  inherits the same unverifiable figure.
+
+**Why Medium rather than Low:** §14 is the plan's executable acceptance example and the plan is
+normative (AGENTS §7). This paragraph is not an inert typo — it is the fixture's *stated
+verification property*, and it is false in a direction that matters: a future maintainer who
+trusts it (writes a verdict-only regression test, or believes verdict-level discrimination
+exists) gets silent protection that is not there, which is the same failure shape as AA-01's
+"every gate is blind", caught one gate earlier.
+
+**Recommendation:** no code change. Rewrite §14.7's closing paragraph to say what the fixture
+actually pins: the affinity repair is worth 31 536 000 of its 31 536 006.65 benefit (`κ·ΔA`,
+99.99998 % of it) at exactly zero cost, asserted by value — while the *verdict-level* flip the
+live cluster exhibited belongs to the pre-phase-12 arithmetic (one-term benefit, 7d horizon)
+alone. Fix the yaml comment's attribution and drop the "−8" from the test docstring in the same
+commit.
+
+### 37.4 AB-02 — §14.7's own `b̄` and gate spread disagree with its committed fixture
+
+**Severity:** Low
+**Files:** `IMPLEMENTATION_PLAN.md` §14.7
+
+"fills read 0.125/0.125/0.625 against `b̄ = 0.25`, so the capacity gate fires on a spread of
+2.0." Per §5.3 (C7)'s own definition, `b̄ = (3.0 managed + 4.0 foreign)/24 TiB = 0.29167` — the
+mean of the three fills quoted in the same sentence (0.875/3) is not 0.25 — and the gate reads
+`(0.625 − 0.125)/0.29167 = 1.714`. The committed `affinity-repair.expected.json` agrees with
+the arithmetic, not the prose: `b_bar: 0.291667`, `capacity_spread_before: 1.714285`.
+Inert to every conclusion in the section (the gate fires at the 0.25 threshold either way), but
+§14 is the plan's hand-verifiable worked example and this paragraph is two sentences above the
+one AB-01 corrects — fix both together. AA-03's class.
+
+### 37.5 AB-03 — §5.4's `ℓ̄ = T_g / |V|` contradicts §14.7 and the implementation under the default affinity flag
+
+**Severity:** Low
+**Files:** `IMPLEMENTATION_PLAN.md` §5.4 (`w_v` bullet), §5.3 (C3) (the definition of `V`),
+`heuristic.compute_vm_weights()`, `generate_expected.py`
+
+§5.4 defines `w_v = max(1, ℓ_v/ℓ̄)` with "`ℓ̄ = T_g / |V|` the group's mean per-VM load", and
+`ℓ_v` explicitly sums "pinned disks included". But `V` elsewhere in §5 is (C3)'s set, which by
+default ("unless `objective.affinity_counts_pinned_disks` is set") ranges over **movable** disks
+only. In §14.7's own group — VM 309 pinned out of `V` entirely — a literal `T_g/|V|` reads
+`6.0/2 = 3.0`, while §14.7's own worked number, `compute_vm_weights()` (`all_vmids = {disk.vmid
+for disk in group.disks}`), and the fixture oracle all divide by all three of the group's VMs
+(`6.0/3 = 2.0`). `edd3cdc`'s commit message itself frames the code's choice as "divides by
+every VM with a disk, **not just V**" — an honest description of a divergence from §5.4's
+formula text that was never folded back into the formula.
+
+Masked in §14.7 (the floor gives `w₃₀₁ = 1` under either denominator), but the two rules differ
+in general: with per-VM loads 3/3 and a zero-load pinned-only third VM, the implemented rule
+weights the busy VMs at 1.5 where the literal formula gives 1.0. That is a real semantic choice
+— a pinned-only VM dilutes the mean — and it is currently made by §14.7 and the code against
+§5.4's own symbols. **Recommendation:** define the denominator in §5.4 explicitly, e.g.
+`ℓ̄ = T_g / |{v : v owns at least one disk in the group}|` (pinned-only VMs included), matching
+§14.7, the heuristic, both MILP backends and the oracle.
+
+### 37.6 AB-04 — the manual was not swept for the reworked `κ`/payback arithmetic; one worked example is now provably wrong
+
+**Severity:** Low
+**Files:** `docs/manual/29-explain.md`, `docs/manual/27-plan.md`, `docs/manual/28-apply.md`,
+`docs/manual/10-configuration.md`
+
+The rework changed three operator-visible quantities — the fragmentation term (now `κ·w_v`), the
+payback benefit (now three-term), and a move's cost (zero below `tiny_disk_bytes`) — and while
+`1d0aea6` documented all of it in `docs/internals/` and rebuilt the manual PDF, the manual's own
+pages kept their old numbers, which `make docs-check` now enforces as current:
+
+- **`29-explain.md:32`** — `objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation
+  0.5 + spread 0.25 + reserve 0 = 2.57`. Re-evaluated through the engine's own
+  `evaluate_assignment()` on the exact scenario the page shows (§14 plus VM 106; the page's own
+  `pinned load 0.90 of 8.40` fixes the group), the fragmentation term is
+  `κ·w₁₀₁ = 0.5 × 2.857 = 1.43` (`ℓ̄ = 8.4/6`, `w₁₀₁ = 4.0/1.4` — verified by execution, weights
+  `{101: 2.8571, 102: 1.7857, …}`) and the total is **3.50**, not 2.57. The 2.57 was correct at
+  0.1.6 (AA-05 recomputed it then) and went stale with `d12fa17`. Line 61's prose ("`fragmentation`
+  (`kappa` times each VM's extra storage count beyond one)") and
+  `10-configuration.md`'s `objective.kappa_vm_affinity` entry describe the unweighted term.
+- **`29-explain.md:31`** — `payback: benefit 5.2e+06`: one-term, 7d-horizon arithmetic
+  (`ΔE·604 800 = 8.6 × 604 800 = 5.2×10⁶` exactly); the three-term formula at the 365d default
+  gives ≈ 2.5×10⁸ on the same scenario. **`29-explain.md:89-93`** — the §9.5 mirror still prints
+  **five** terms (no `spread 0`) although `_render_objective_breakdown_line()` unconditionally
+  prints six — an instance AA-05's "five terms" sweep missed — and its `fragmentation 0→0.5` is
+  `w_v`-dependent now and needs re-derivation from the live capture it came from.
+- **`27-plan.md:99-109`** (the `payback:` line's reading guide, its sample quoted verbatim at
+  `28-apply.md:30`) — `benefit` is described as `(E_before − E_after) · payback_horizon`: stale
+  twice over (δ missing since 0.1.5, κ now too), and the cost description omits §7.1's zero cost
+  below `tiny_disk_bytes`. The sample block above it — "at the default weights (the three-move
+  plan)", `benefit 4.19e+06`, `ratio 133` — is pre-phase-12 in full: `4.19e6 = ΔE × 604 800`
+  exactly, and the default-weight optimum has been the two-move plan since 0.1.5 (§14.3,
+  `fc-tier1.expected.json`), with §14.5's current numbers 1.93×10⁸ / 7 344.
+- **`10-configuration.md:559`** (`migration.payback_horizon`) — the entry spells out
+  `benefit = (alpha_spread * ΔE + delta_capacity_spread * ΔF) * H`, missing the
+  `kappa_vm_affinity * ΔA` term §7.2 now includes (and §7.2's own point that `ΔA` may be
+  negative is exactly the behaviour an operator reading this entry would want to know about).
+
+No behavioural defect; all of it is AGENTS §8.6 same-commit material that should have ridden
+with `1337779`/`1d0aea6`, and the PDF re-stamping makes it mechanically current. One sweep:
+recompute `29-explain.md`'s two samples through the engine (as AA-05 did), rewrite `27-plan.md`'s
+payback guide and sample from §14.5's current numbers, add `κ·ΔA` to the horizon entry and
+`w_v` to the κ entries.
+
+### 37.7 AB-05 — "pre-section-12" names the wrong change in three places
+
+**Severity:** Low
+**Files:** `docs/manual/10-configuration.md:645`, `src/proxmox_storage_drs/config.py:184`,
+`tests/fixtures/affinity-repair.yaml:8-9`
+
+`migration.tiny_disk_bytes`'s manual entry and `config.py`'s field comment say setting it to 0
+"restores the pre-section-12 accounting ... where every disk — however small — is charged a full
+migration", and `affinity-repair.yaml`'s header describes its pre-fix rejection as "the
+pre-section-12 solver"/"the pre-section-12 payback rule". Section 12 of the plan is the
+implementation-phase table; its phase 12 is the capacity-spread/365d wave, which changed nothing
+about per-disk β/γ charging or the benefit's term set. The accounting being named is the
+pre-**affinity-fix** one (§5.4/§7.1–7.3) — the plan's own §14.7 calls the same distinction
+"pre-§7.2". The yaml's usage is additionally load-bearing in the wrong direction: its verdict
+claim ("rejects it") is true only of the literal pre-phase-12 formula (benefit 0 < λ·0.0152),
+not of the §7.2/§7.1 gaps its own parentheticals attribute it to (AB-01). Fix together with
+AB-01/AB-04.
+
+### 37.8 AB-06 — 0.1.6's changelog credits the capacity-spread term to 0.1.4
+
+**Severity:** Low
+**Files:** `debian/changelog` (0.1.6 entry)
+
+"...swept a stale 'five objective terms' claim to six throughout the plan and both the manual
+and internals documentation (the objective gained a sixth, capacity-spread term in 0.1.4)".
+`71c306f` — the term's implementation — is first contained by tag `debian/0.1.5`
+(`git tag --contains 71c306f` → `debian/0.1.5 debian/0.1.6`; `git merge-base --is-ancestor`
+against `036617c` fails), and 0.1.5's own first bullet correctly records shipping it. W-04's
+precedent (phase mislabelling in the 0.1.0 entry). §9.2 forbids backfilling an already-released
+entry, so the correction can only be recorded forward (the next entry's "also" notes, or left as
+a known erratum); report-only.
+
+### 37.9 AB-07 — Info: two zero-cost edge shapes worth a line where they are consumed
+
+**Severity:** Info
+**Files:** `src/proxmox_storage_drs/schedule.py` (`order_moves`), `src/proxmox_storage_drs/payback.py`
+(`PaybackResult.ratio`), `docs/manual/27-plan.md`
+
+(a) `order_moves()` assigns a zero-cost (below `tiny_disk_bytes`) move the ratio `+inf`
+outright, regardless of its own `persistent_reduction` sign. §8.2's pseudocode ranks by
+`reduction / cost_m`; under IEEE semantics a *negative*-reduction zero-cost move would rank
+last (`−inf`) and `0/0` is NaN — the code's unconditional `+inf` implements the annotation's
+"free value, delivered before anything pays", which presumes the value is positive. Unreachable
+today (the solver only proposes tiny moves that reduce `κ`, and a mid-sequence negative
+persistent reduction for the remaining tiny moves would contradict the solver's own optimum)
+and mirrored exactly by the fixture oracle, so behaviour and oracle agree; this note exists so
+the next reader of that `+inf` knows its sign assumption. (b) an all-tiny plan's human
+`payback:` line renders `ratio inf (need 10) ✓` (`:.3g` on `PaybackResult.ratio`, which returns
+`inf` for zero cost) — honest and correct, but `27-plan.md`'s reading guide for that line does
+not mention the `inf` shape a zero-cost plan now produces; one sentence there would close it.
+
+---
+
+## 38. Resolution of nineteenth-pass findings (AB-01..AB-07)
+
+Six findings fixed (all documentation/comment corrections, no behavioural change), one
+(AB-06) acknowledged without a change because the entry it names is already tagged and
+released.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AB-01 | Resolved | Reproduced the finding's own arithmetic against the repository's code (`compute_benefit_load_seconds()` with `kappa=0`/`compute_move_cost()` with `tiny_disk_bytes=0`, matching the pre-`1337779` state exactly): pre-fix benefit is `+6.646 load·s` against cost `0.01516 load·s`, ratio ≈ 438, **accepted** — confirming the finding's numbers to five figures. §14.7's closing paragraph rewritten to state what the fixture actually pins (the affinity repair is worth 31 536 000 of its 31 536 006.65 benefit at zero cost, asserted by value) rather than a verdict flip that does not exist in any post-phase-12 state; `affinity-repair.yaml`'s header comment and `test_end_to_end_plan_accepts_payback_at_zero_cost`'s docstring (the "`benefit ~-8 load*s`" claim) corrected the same way, in the same commit. |
+| AB-02 | Resolved | §14.7's `b̄ = 0.25`/spread-of-2.0 sentence corrected to the arithmetic the committed `affinity-repair.expected.json` already carries: `b̄ = (3.0+4.0)/24 = 0.2917`, spread `(0.625-0.125)/0.2917 = 1.714`. |
+| AB-03 | Resolved | §5.4's `ℓ̄ = T_g / |V|` redefined as `ℓ̄ = T_g / |V_all|` with `V_all` spelled out explicitly (every VM owning a disk in the group, pinned-only VMs included) and the divergence from (C3)'s narrower `V` called out in the same sentence, matching `heuristic.compute_vm_weights()`'s own docstring and §14.7's worked `6.0/3`. No code change — the implementation was already correct; only the plan's symbol was ambiguous. |
+| AB-04 | Resolved | Recomputed both `29-explain.md` worked examples through the actual engine (constructing the exact scenario each page describes — §14.1 plus VM 106 for the first, and running `evaluate_assignment()`/`compute_vm_weights()` for the fragmentation term): `fragmentation` corrected `0.5 -> 1.43` and the total `2.57 -> 3.5` (`w_101 = (4.0)/(8.4/6) = 2.857`, verified by execution), and `payback: benefit` recomputed under the real three-term/365d formula (`5.2e+06 -> 2.52e+08`, ratio `110 -> 5.34e+03`) from `E`/`F`/`A` before/after values re-derived from the page's own printed loads and move list. The second example's `objective:` line and its `closest alternative:` breakdown both gained the `spread` term the renderer always prints (`_render_no_moves_lines()`) but this sample omitted, at the value (`0`) consistent with its own printed totals. `27-plan.md`'s example and payback-guide sample replaced outright with the current default two-move plan and §14.5's own numbers (`benefit 1.93e+08`, `ratio 7.34e+03`) rather than patched in place, since the default optimum itself changed from three moves to two in 0.1.5; its payback formula prose extended with the `kappa_vm_affinity * ΔA` term and the `tiny_disk_bytes` zero-cost exemption. `28-apply.md`'s confirm-mode transcript (built on the same stale three-move plan, one move already declined) reconstructed for the current two-move plan with the operator declining move 1 and executing only move 2, all downstream numbers (`after:`/`spread:`/`payback:`) recomputed through `order_moves()`/`compute_move_cost()`/`compute_benefit_load_seconds()` for that partial execution. `10-configuration.md`'s `migration.payback_horizon` entry gained the `kappa_vm_affinity * ΔA` term (and its possible negative sign), and `objective.kappa_vm_affinity`'s entry gained a description of `w_v`'s I/O weighting. |
+| AB-05 | Resolved | All three "pre-section-12" mislabels (`10-configuration.md:645`, `config.py:184`, `affinity-repair.yaml`'s header) corrected to name the actual change: "pre-section-7.2" (the affinity-fix accounting), not section 12's capacity-spread/365d-horizon phase, which the finding correctly identified as changing nothing about per-disk `beta`/`gamma` charging. |
+| AB-06 | Acknowledged, no action | The 0.1.6 changelog entry is already released and tagged (`debian/0.1.6`); §9.2 forbids backfilling an already-released entry, and this project does not rewrite committed/tagged history. The misattribution (crediting 0.1.4 rather than 0.1.5 with the capacity-spread term) is confirmed by `git tag --contains 71c306f` (`debian/0.1.5 debian/0.1.6`, not any earlier tag) and left as a known erratum, per the finding's own recommendation — a future release's changelog may note it in passing if one is cut before this is otherwise forgotten. |
+| AB-07 | Resolved | (a) A one-line comment added at `schedule.py`'s `order_moves()` ratio computation, naming the `+inf`-regardless-of-sign assumption and why it is unreachable today, so the next reader does not have to re-derive it. (b) `27-plan.md`'s payback-line reading guide gained one sentence describing the `ratio inf (need N) ✓` shape an all-tiny-disk plan produces. |
+
+No new regression tests: every fix in this pass is a documentation or comment correction: the
+underlying code was already correct (AB-03), or the finding's own recommendation was explicitly
+"no code change" (AB-01, AB-05), or the change is cosmetic (AB-07(a)'s comment). AB-04's
+recomputed manual numbers were independently verified by running the real production code
+(`heuristic.evaluate_assignment()`/`compute_vm_weights()`, `schedule.order_moves()`,
+`payback.compute_move_cost()`/`compute_benefit_load_seconds()`) against each scenario as
+described, not derived from the prose being corrected.
+
+Verification: `make check` -- fmt-check, lint, typecheck, **941 passed**, **96.38% line
+coverage** (unchanged: no production logic changed beyond one added comment), `generate_expected.py
+--check` and `validate_corpus.py --check` both clean, `docs-check` clean (`IMPLEMENTATION_PLAN.pdf`
+and the manual PDF rebuilt and re-stamped in the same commit as their Markdown, per AGENTS.md
+§7.4).
 
 ---
 

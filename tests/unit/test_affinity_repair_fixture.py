@@ -168,9 +168,13 @@ def test_end_to_end_plan_accepts_payback_at_zero_cost() -> None:
     """The full pipeline -- solve, order, cost, benefit, accept -- exactly
     reproducing section 14.7's proven numbers (affinity-repair.expected.json's
     own `payback_two_move_plan`): benefit ~3.15e7 load*s against cost 0,
-    accepted. This is the scenario that failed live before section 5.4/7.2's
-    fix: the pre-fix formula scored this same plan `benefit ~-8 load*s`
-    (ΔE=0 exactly, ΔF slightly negative) and rejected it."""
+    accepted. This fixture pins section 5.4/7.2's *value*, not a verdict
+    flip: replayed with the pre-fix formula (no kappa*dA term,
+    tiny_disk_bytes=0), this same plan still accepts (ΔE=0 exactly, ΔF
+    positive, benefit ~+6.65 load*s against a nonzero cost, ratio ~438) --
+    see IMPLEMENTATION_PLAN.md section 14.7 for the live scenario that
+    actually did flip reject-to-accept (the pre-section-12 one-term, 7d
+    formula)."""
     group = _affinity_repair_group()
     loads = _loads()
     solve_outcome = run_heuristic(

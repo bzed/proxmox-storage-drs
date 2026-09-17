@@ -20,7 +20,7 @@ For each group, `plan`:
    section 7's payback rule.
 
 This example uses the same section 14 worked example `show-load`'s manual
-page does, at the default weights (the three-move plan) and
+page does, at the default weights (the two-move plan) and
 `solver.backend: auto` with neither MILP library installed, so it falls
 back to the heuristic — the numbers are traceable to that section either
 way, since every backend reports through the identical objective
@@ -32,10 +32,9 @@ Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the 
   solver: heuristic
   1. 102:scsi0      san-a → san-c     1.50 TiB   ~2.2h   Δimbalance -4.53   ℓ/z 1.67
   2. 101:scsi1      san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00
-  3. 105:scsi0      san-c → san-b   512.00 GiB   ~43.7m   Δimbalance -0.40   ℓ/z 0.40
-  after: san-a=3.00  san-b=1.90  san-c=2.50
-  spread: 255.4% → 44.6%
-  payback: benefit 4.19e+06 load·s vs cost 3.15e+04 load·s → ratio 133 (need 10) ✓
+  after: san-a=3.00  san-b=1.70  san-c=2.70
+  spread: 255.4% → 52.7%
+  payback: benefit 1.93e+08 load·s vs cost 2.62e+04 load·s → ratio 7.34e+03 (need 10) ✓
 ```
 
 The `solver:` line names whichever backend actually produced this plan --
@@ -50,7 +49,7 @@ is not installed or cannot solve within the time limit -- see
 
 The `after:`/`spread:` lines (and the payback numbers) reflect what the
 scheduler actually managed to order, not the solver's target assignment —
-identical here since all three moves scheduled cleanly, but see the
+identical here since both moves scheduled cleanly, but see the
 deadlock note below for when a plan cannot schedule everything it proposed.
 
 A group the gate does not act on prints one line and stops:
@@ -97,16 +96,22 @@ picture the undeliverable ones would have produced.
 ## The `payback:` line
 
 Section 7.3's acceptance test: `benefit >= migration.payback_ratio * cost`,
-both sides in load-seconds. `benefit` is `(E_before - E_after) *
-migration.payback_horizon` (section 7.2's own *unweighted* `E`, not the
-solver's `alpha_spread`-scaled objective term — the two agree numerically
-at the default `alpha_spread: 1.0`, but the payback ratio must not depend
-on that tuning knob); `E_after` is evaluated against what `plan`'s own
-scheduler actually managed to order, not the solver's aspirational target,
-so a partially-deadlocked plan is scored on the moves it can really make,
-not ones it cannot. `cost` sums every *scheduled* move's `duration_mirror *
-(source_load_weight + target_load_weight) + duration_wipe *
-wipe_load_weight` (section 7.1). A ✓ plan passed; a ✗ one did not.
+both sides in load-seconds. `benefit` is `(alpha_spread * ΔE +
+delta_capacity_spread * ΔF + kappa_vm_affinity * ΔA) *
+migration.payback_horizon` (section 7.2's own *unweighted* `E`/`F`/`A`, not the
+solver's already-scaled objective terms — passing those instead would
+double-apply the weight); `ΔA` may be negative, and then it reduces the
+benefit — a balance move that splits a VM pays for that fragmentation out
+of its other gains. `E_after`/`F_after`/`A_after` are evaluated against
+what `plan`'s own scheduler actually managed to order, not the solver's
+aspirational target, so a partially-deadlocked plan is scored on the moves
+it can really make, not ones it cannot. `cost` sums every *scheduled*
+move's `duration_mirror * (source_load_weight + target_load_weight) +
+duration_wipe * wipe_load_weight`, except a disk below
+`migration.tiny_disk_bytes`, which costs `0` regardless of duration
+(section 7.1). A ✓ plan passed; a ✗ one did not. A plan made entirely of
+moves below `migration.tiny_disk_bytes` has `cost = 0` and renders as
+`ratio inf (need 10) ✓` — a real, correct verdict, not a formatting bug.
 
 A ✗ plan can fail for two different reasons, reported as two different
 lines, because they call for different fixes:
