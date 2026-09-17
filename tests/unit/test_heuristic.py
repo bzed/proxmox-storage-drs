@@ -201,7 +201,11 @@ def test_beta_025_reproduces_the_three_move_solution() -> None:
     }
     assert result.breakdown.moves == 3
     assert result.breakdown.imbalance_term == pytest.approx(1.1333, abs=1e-4)
-    assert result.breakdown.total == pytest.approx(2.533333, abs=1e-5)
+    # Section 5.4's w_v reweights the flat kappa term: VM 101 (l_v=4.0
+    # against l_bar=7.4/5=1.48) carries w=2.7027 instead of 1, so the split
+    # it incurs here (fragmentation_term 0.5*2.7027=1.3514, not 0.5) raises
+    # the total from the pre-w_v 2.533333 to 3.384685 (section 14.3).
+    assert result.breakdown.total == pytest.approx(3.384685, abs=1e-5)
     assert not result.breakdown.reserve_statuses["san-a"].violated  # repaired
     assert result.repair_moves == 1  # 102:scsi0 alone repairs san-a
 
@@ -222,7 +226,11 @@ def test_beta_050_reproduces_the_two_move_solution() -> None:
     }
     assert result.breakdown.moves == 2
     assert result.breakdown.imbalance_term == pytest.approx(1.5333, abs=1e-4)
-    assert result.breakdown.total == pytest.approx(3.158333, abs=1e-5)
+    # This plan also splits VM 101 (scsi0 on san-a, scsi1 on san-b, section
+    # 14.3), so it carries the same w_101=2.7027-weighted fragmentation_term
+    # (0.5*2.7027=1.3514) as the three-move plan above, raising total from
+    # the pre-w_v 3.158333 to 4.009685.
+    assert result.breakdown.total == pytest.approx(4.009685, abs=1e-5)
 
 
 def test_beta_knob_crossover_matches_section_14_3_exactly() -> None:
@@ -255,14 +263,22 @@ def test_heuristic_iterations_bounds_the_descend_search() -> None:
     """``heuristic_iterations`` caps descend's own loop: capped at 1, only
     the single best-improving move after repair is applied, not the full
     local optimum -- a real, bounded-computation guarantee worth its own
-    test, not just an implementation detail."""
+    test, not just an implementation detail.
+
+    Repair moves `101:scsi1` off san-a (san-a -> san-c) to fix the reserve
+    violation, splitting VM 101. With section 5.4's w_v reweighting VM 101's
+    fragmentation at 2.7027 (its load is well above the group's mean), the
+    single most valuable move descend can make in one step is now a *swap*
+    that reunites VM 101 on san-a while relocating `102:scsi0` to san-c in
+    the same step -- one net move from the original assignment (`102:scsi0`
+    only), not two, since it also undoes repair's own move."""
     group = section_14_group()
     loads = section_14_loads()
     result = run_heuristic(
         group, loads, DEFAULT_OBJECTIVE, min_free_bytes=0, heuristic_iterations=1
     )
     assert result.repair_moves == 1
-    assert result.breakdown.moves == 2  # repair's move + exactly one descend step
+    assert result.breakdown.moves == 1  # the swap above nets to one move from the original
 
 
 def test_reserve_violation_is_repaired_even_with_beta_high_enough_to_forbid_balance_moves() -> None:
@@ -339,12 +355,20 @@ def test_descend_blocks_new_arrivals_onto_a_cooldown_storage() -> None:
 
 
 def test_descend_still_allows_a_disk_to_move_away_from_a_cooldown_storage() -> None:
-    """san-a is only ever a *source* in the section 14 three-move optimum
-    -- nothing arrives there -- so putting it in cooldown must not change
-    the result at all: cooldown blocks incoming moves, never outgoing
-    ones."""
+    """Cooldown blocks incoming moves, never outgoing ones -- structural,
+    like ``test_descend_blocks_new_arrivals_onto_a_cooldown_storage``
+    above, rather than an exact-assignment check: section 5.4's w_v
+    reweighting (VM 101's fragmentation now costs 2.7027x a flat VM's, see
+    ``test_beta_025_reproduces_the_three_move_solution``) can steer
+    descend's local search through an intermediate swap that would
+    otherwise use san-a as a target, so blocking san-a as a destination can
+    legitimately land on a *different* three-move local optimum than the
+    unconstrained search finds -- the invariant that matters is that
+    nothing new ever arrives there, and that a disk already there remains
+    free to leave."""
     group = section_14_group()
     loads = section_14_loads()
+    original_storage = {key: storage for key, _s, _l, storage in _SECTION_14_DISKS}
 
     result = run_heuristic(
         group,
@@ -354,14 +378,16 @@ def test_descend_still_allows_a_disk_to_move_away_from_a_cooldown_storage() -> N
         cooldown_storages=frozenset({"san-a"}),
     )
 
-    assert result.assignment == {
-        "101:scsi0": "san-a",
-        "101:scsi1": "san-b",
-        "102:scsi0": "san-c",
-        "103:scsi0": "san-b",
-        "104:scsi0": "san-b",
-        "105:scsi0": "san-b",
-    }
+    for disk_key, target in result.assignment.items():
+        if target == "san-a":
+            assert original_storage[disk_key] == "san-a"  # never a *new* arrival
+    # The cooldown had a real effect: at least one disk originally on san-a
+    # still leaves it (cooldown only blocks arrivals, not departures).
+    assert any(
+        result.assignment[key] != "san-a"
+        for key, storage in original_storage.items()
+        if storage == "san-a"
+    )
 
 
 def test_run_heuristic_repair_ignores_storage_cooldown() -> None:
@@ -522,10 +548,12 @@ def test_best_single_disk_alternative_picks_the_lowest_total_candidate() -> None
     bigger move (or the VM's other disk) would overshoot or fragment its
     way out of. Hand-verified: baseline l1 spread is 0.5 (0.25 + 0.25 from
     u* = 0.75); moving `2:scsi1` (load 0.1) alone leaves s1=0.6/s2=0.9, l1
-    0.3, plus 0.25 (one move) + 0.05 (1 TiB) + 0.5 (fragments VM 2) = 1.1
-    total -- worse than doing nothing (0.5), but the least-worse of the
-    three single-disk moves available (moving `1:scsi0` gives 1.8; moving
-    `2:scsi0` gives 2.1)."""
+    0.3, plus 0.25 (one move) + 0.05 (1 TiB) + a fragmentation_term of
+    0.6667 (VM 2's l_v=1.0 against l_bar=1.5/2=0.75 gives w_2=1.3333,
+    section 5.4, so the split costs kappa*w_2 = 0.5*1.3333, not the flat
+    0.5) = 1.2667 total -- worse than doing nothing (0.5), but the
+    least-worse of the three single-disk moves available (moving `1:scsi0`
+    gives 1.8; moving `2:scsi0` gives 2.1)."""
     vm1 = make_disk("1:scsi0", 1.0, 0.5, "s1")
     vm2_big = make_disk("2:scsi0", 1.0, 0.9, "s2")
     vm2_small = make_disk("2:scsi1", 1.0, 0.1, "s2")
@@ -549,8 +577,9 @@ def test_best_single_disk_alternative_picks_the_lowest_total_candidate() -> None
     assert candidate.from_storage == "s2"
     assert candidate.to_storage == "s1"
     assert candidate.baseline is baseline
-    assert candidate.breakdown.total == pytest.approx(1.1)
-    assert candidate.worse_by == pytest.approx(0.6)
+    assert candidate.breakdown.vm_weights[2] == pytest.approx(4 / 3)
+    assert candidate.breakdown.total == pytest.approx(1.266667, abs=1e-5)
+    assert candidate.worse_by == pytest.approx(0.766667, abs=1e-5)
 
 
 def test_best_single_disk_alternative_returns_none_with_only_one_storage() -> None:
