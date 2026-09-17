@@ -2892,14 +2892,21 @@ a multiple of it. The write path is never touched: this command has no code path
 - the `sum by (vmid, device) (rate(...))` **range** query of §3.4 over the **capture range**:
 
 ```
-capture_range = max over every registered forecaster of required_range()
+capture_range = max(  over every registered forecaster of required_range(),
+                       2 · window.lookback )
               = max(window.lookback,
                     forecast.seasonal_lookback_days,
-                    2 · holt_winters.seasonal_periods · metrics.step)
+                    2 · holt_winters.seasonal_periods · metrics.step,
+                    2 · window.lookback)
 ```
 
 at `metrics.step` resolution — the union of §10.1's table, not the row the operator happens to have
-selected. With the defaults that is `max(24h, 7d, 48h) = 7d`.
+selected, **plus** `2 · window.lookback`: §10.2's backtest gate fits on `[now-2W, now-W)` and checks
+against `[now-W, now]` for whichever of `seasonal_naive`/`holt_winters` a bundle is replayed with,
+so a capture sized only to a forecaster's own minimum (which can equal `window.lookback` exactly,
+e.g. `holt_winters` tuned so `2 · seasonal_periods · metrics.step == window.lookback`) would replay
+the backtest gate as permanently "not enough history", independent of how much real history
+Prometheus actually had. With the defaults that is `max(24h, 7d, 48h, 48h) = 7d`.
 
 This is cheap in *queries* and expensive in *bytes*, which is the right way round. Each range query
 returns every disk in the group as one response, so the query count is

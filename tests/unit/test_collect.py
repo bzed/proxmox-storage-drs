@@ -204,6 +204,30 @@ def test_capture_range_seconds_auto_is_the_union_maximum(tmp_path: Path) -> None
     assert seconds == 7 * 86400.0  # seasonal_lookback_days dominates here
 
 
+def test_capture_range_seconds_covers_twice_the_lookback_for_the_backtest_gate(
+    tmp_path: Path,
+) -> None:
+    """Section 10.2's backtest gate fits on ``[now-2W, now-W)`` and checks
+    against ``[now-W, now]`` for whichever of ``seasonal_naive``/
+    ``holt_winters`` a bundle is replayed with -- a capture sized only to
+    each forecaster's own (smaller) minimum would leave that fit half
+    permanently outside the captured series, so ``2 * window.lookback``
+    must be one of the terms in the union regardless of the *configured*
+    model, the same "superset, not the configured path" reasoning that
+    already governs every other term here."""
+    resolved = make_config(
+        tmp_path,
+        window={"lookback": "50h"},  # 180000s
+        forecast={
+            "model": "quantile",
+            "seasonal_lookback_days": 1,  # 86400s
+            "holt_winters": {"seasonal_periods": 10},  # 2*10*300 = 6000s
+        },
+    )
+    seconds = collect.capture_range_seconds(resolved.config, None)
+    assert seconds == 2 * (50 * 3600.0)  # 2*lookback dominates every other term here
+
+
 def test_capture_range_seconds_override_wins(tmp_path: Path) -> None:
     resolved = make_config(tmp_path)
     assert collect.capture_range_seconds(resolved.config, 3600.0) == 3600.0

@@ -2033,9 +2033,23 @@ def _saturation_forecast_inputs(
     check", at no Prometheus cost -- fetching a history no storage in
     this group could ever use would contradict that.
 
-    ``range_seconds`` is the *configured forecaster's* own requirement
-    (``forecast.required_range_seconds()``), not ``window.lookback`` --
-    section 10.1's own "genuinely different things" (`docs/internals/20-forecasting.md`).
+    ``range_seconds`` is at least the *configured forecaster's* own
+    requirement (``forecast.required_range_seconds()``), not ``window.lookback``
+    -- section 10.1's own "genuinely different things"
+    (`docs/internals/20-forecasting.md`) -- but, for a model
+    ``_backtest_gated_forecaster()`` below actually backtests
+    (``seasonal_naive``/``holt_winters``; ``quantile`` never is), never less
+    than ``2 * window.lookback_seconds`` either: the backtest fits on
+    ``[now-2W, now-W)`` and checks against ``[now-W, now]`` (section 10.2),
+    so it needs a full ``2W`` of history regardless of how little the
+    forecaster itself demands. A model tuned to the plan's own minimum --
+    ``required_range_seconds() == window.lookback_seconds``, e.g.
+    ``holt_winters`` with ``2 * seasonal_periods * step == lookback`` --
+    would otherwise have its backtest fit half fall entirely outside the
+    fetched series every single run, `backtest_error()` always returning
+    `None` for "not enough history" regardless of how much real history
+    Prometheus actually has. ``quantile`` is left alone: widening it would
+    only add Prometheus cost this model never spends.
     """
     if not any(s.saturation_load is not None for s in group.storages):
         return None
@@ -2045,6 +2059,8 @@ def _saturation_forecast_inputs(
     range_seconds = required_range_seconds(
         forecast_config, window.lookback_seconds, metrics.step_seconds
     )
+    if forecast_config.model != "quantile":
+        range_seconds = max(range_seconds, 2 * window.lookback_seconds)
     now_epoch = now.timestamp()
     forecaster = build_forecaster(
         forecast_config,

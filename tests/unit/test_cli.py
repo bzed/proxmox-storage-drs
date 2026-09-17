@@ -1245,6 +1245,106 @@ def test_plan_json_output_saturation_guard_is_skipped_without_any_saturation_loa
     assert payback["deferred_moves"] == []
 
 
+# ------------------------------------------------------- saturation guard history range
+
+
+def _saturated_one_disk_group() -> Group:
+    group = _one_disk_group()
+    storages = tuple(
+        dataclasses.replace(s, saturation_load=10.0 if s.id == "san-a" else s.saturation_load)
+        for s in group.storages
+    )
+    return Group(name=group.name, storages=storages, disks=group.disks)
+
+
+def test_saturation_forecast_inputs_widens_history_for_a_backtested_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model that §10.2 backtests (anything but ``quantile``) must fetch
+    at least ``2 * window.lookback_seconds`` of history, even when the
+    forecaster's own ``required_range_seconds()`` is smaller -- otherwise
+    ``backtest_error()``'s fit half always falls outside the fetched
+    series and the gate can never validate the model (the bug this test
+    guards against: ``holt_winters`` tuned so
+    ``2 * seasonal_periods * step == window.lookback`` used to fetch
+    exactly ``window.lookback``, one half of what the backtest needs)."""
+    captured: dict[str, float] = {}
+
+    def fake_compute_disk_load_series(
+        client: object,
+        metrics: object,
+        load_weights: object,
+        group: object,
+        range_seconds: float,
+        step_seconds: object,
+        now_epoch: object,
+        node_selector: object = None,
+    ) -> dict[str, object]:
+        captured["range_seconds"] = range_seconds
+        return {}
+
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.compute_disk_load_series", fake_compute_disk_load_series
+    )
+    resolved = _resolved_config(
+        tmp_path,
+        window={"lookback": "50h"},  # 180000s -> 2W = 360000s
+        forecast={
+            "model": "holt_winters",
+            "holt_winters": {"seasonal_periods": 10},  # 2*10*300 = 6000s, well under 2W
+        },
+    )
+    result = cli._saturation_forecast_inputs(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        _saturated_one_disk_group(),
+        datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc),
+        None,
+    )
+    assert result is not None
+    assert captured["range_seconds"] == 2 * 180000.0
+
+
+def test_saturation_forecast_inputs_does_not_widen_history_for_quantile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``quantile`` is never backtested (`_backtest_gated_forecaster()`
+    returns immediately for it) -- widening its history fetch to
+    ``2 * window.lookback_seconds`` would only add Prometheus cost this
+    model never spends, so it must keep fetching exactly its own
+    ``required_range_seconds()`` (``window.lookback_seconds`` itself)."""
+    captured: dict[str, float] = {}
+
+    def fake_compute_disk_load_series(
+        client: object,
+        metrics: object,
+        load_weights: object,
+        group: object,
+        range_seconds: float,
+        step_seconds: object,
+        now_epoch: object,
+        node_selector: object = None,
+    ) -> dict[str, object]:
+        captured["range_seconds"] = range_seconds
+        return {}
+
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.compute_disk_load_series", fake_compute_disk_load_series
+    )
+    resolved = _resolved_config(
+        tmp_path, window={"lookback": "50h"}, forecast={"model": "quantile"}
+    )
+    result = cli._saturation_forecast_inputs(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        _saturated_one_disk_group(),
+        datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc),
+        None,
+    )
+    assert result is not None
+    assert captured["range_seconds"] == 180000.0
+
+
 # ------------------------------------------------------- backtest validation gate
 
 
