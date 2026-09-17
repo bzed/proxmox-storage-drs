@@ -142,7 +142,14 @@ class CaptureEstimate:
 def capture_range_seconds(config: Config, override: float | None) -> float:
     """Section 16.2's ``capture_range = max(...)`` -- the union of every
     forecaster's ``required_range()``, not just the configured one, unless
-    ``--range``/``override`` was given."""
+    ``--range``/``override`` was given. Also never less than
+    ``2 * window.lookback_seconds``: section 10.2's backtest gate
+    (``cli._saturation_forecast_inputs()``) fits on ``[now-2W, now-W)`` and
+    checks against ``[now-W, now]`` for *any* backtested model
+    (``seasonal_naive``/``holt_winters``), so a bundle captured with only
+    the configured forecaster's own minimum would replay the backtest gate
+    as permanently "not enough history" regardless of how much real
+    history Prometheus actually had at capture time."""
     if override is not None:
         return override
     configured = config.support.capture_range
@@ -152,6 +159,7 @@ def capture_range_seconds(config: Config, override: float | None) -> float:
         config.window.lookback_seconds,
         config.forecast.seasonal_lookback_days * 86400.0,
         2 * config.forecast.holt_winters.seasonal_periods * config.metrics.step_seconds,
+        2 * config.window.lookback_seconds,
     )
 
 
