@@ -1,0 +1,110 @@
+# Section 14.7: a group whose I/O is already balanced (loads 2.0/2.0/2.0) and
+# whose only improving moves are VM 301's tiny disks (efidisk0/tpmstate0)
+# reuniting with its scsi0 -- isolates section 5.4's w_v weighting and D^big
+# exemption, and section 7.2's kappa*dA benefit term, from the payback rule
+# (migration.tiny_disk_bytes, objective.kappa_vm_affinity).
+#
+# The fixture that discriminates at the verdict, exactly where the live
+# cluster failed: the pre-section-12 solver already finds the two-move plan
+# (kappa alone outweighs beta), but the pre-section-12 payback rule -- no
+# affinity term in the benefit, a full beta/gamma charge on every disk
+# regardless of size -- rejects it. Section 5.4/7.2's fix is what flips this
+# fixture's verdict from reject to accept; a silent revert of either change
+# flips it back.
+#
+# VM 309's disk is PINNED (`pinned: true`, modelling `exclude.vmids`): never
+# a candidate for `all_assignments()`'s product, but its bytes and load still
+# count everywhere a real disk's would (reserve, E/F, and -- section 5.4's
+# explicit rule -- l_v, though VM 309 has only the one disk so this never
+# actually changes any other VM's own weight here).
+#
+# Regenerate expectations with `python3 generate_expected.py`; do not
+# hand-edit affinity-repair.expected.json. `generate_expected.py --check`
+# asserts it is current and runs in CI. Sizes and capacities are TiB; loads
+# are in average-in-flight-I/O units (plan section 4). Field-naming
+# convention: see reserve-tradeoff.yaml's own comment on this -- a knob that
+# exists in config/drs.example.yaml uses the same name here, including the
+# new `migration.tiny_disk_bytes` (bytes, not TiB, matching the config field
+# exactly).
+schema_version: 1
+description: A group whose I/O is already balanced and whose only improving
+  moves are a VM's tiny disks reuniting with it -- proves section 5.4's D^big
+  exemption and w_v weighting, and section 7.2's kappa*dA payback benefit,
+  together. Verified by exhaustive enumeration of all 3^4 movable-disk
+  assignments (301:scsi0, 301:efidisk0, 301:tpmstate0, 302:scsi0) --
+  309:scsi0 alone is pinned (see below), never part of the enumerated
+  product.
+group:
+  name: affinity-repair
+  reserve_factor: 2.0
+  storages:
+  - id: stor-a
+    capability_weight: 1.0
+    capacity_tib: 8.0
+    foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+  - id: stor-b
+    capability_weight: 1.0
+    capacity_tib: 8.0
+    foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+  - id: stor-c
+    capability_weight: 1.0
+    capacity_tib: 8.0
+    # Volumes DRS does not manage (plan section 5.1.1), same role as
+    # reserve-tradeoff.yaml's own foreign_used_tib.
+    foreign_used_tib: 4.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+disks:
+- key: 301:scsi0
+  vmid: 301
+  device: scsi0
+  size_tib: 1.0
+  load: 2.0
+  current_storage: stor-a
+- key: 301:efidisk0
+  vmid: 301
+  device: efidisk0
+  size_tib: 0.00000049173832  # 528 KiB
+  load: 0.0
+  current_storage: stor-c
+- key: 301:tpmstate0
+  vmid: 301
+  device: tpmstate0
+  size_tib: 0.00000095367432  # 1 MiB
+  load: 0.0
+  current_storage: stor-b
+- key: 302:scsi0
+  vmid: 302
+  device: scsi0
+  size_tib: 1.0
+  load: 2.0
+  current_storage: stor-b
+- key: 309:scsi0
+  vmid: 309
+  device: scsi0
+  size_tib: 1.0
+  load: 2.0
+  current_storage: stor-c
+  pinned: true  # exclude.vmids in the real config -- never a move candidate
+migration:
+  bwlimit_bytes_per_sec: 209715200
+  source_load_weight: 1.0
+  target_load_weight: 1.0
+  wipe_load_weight: 1.0
+  account_saferemove_wipe: false
+  payback_horizon_seconds: 31536000  # 365d, section 12 default
+  payback_ratio: 10.0
+  # 64 MiB, the section 5.4/11.1 default -- comfortably above the 528 KiB
+  # efidisk0 and 1 MiB tpmstate0 above, far below the 1 TiB scsi0 disks.
+  tiny_disk_bytes: 67108864
+objective:
+  alpha_spread: 1.0
+  beta_values: [0.25]
+  delta_values: [0.5]
+  gamma_move_bytes_per_tib: 0.05
+  kappa_vm_affinity: 0.5
+  reserve_violation_penalty: 1000.0

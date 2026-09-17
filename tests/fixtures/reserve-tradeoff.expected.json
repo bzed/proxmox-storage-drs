@@ -42,7 +42,7 @@
       "expected_move_count": 0,
       "expected_E_after": 10.0,
       "expected_F_after": 2.5,
-      "expected_fragmentation": 0,
+      "expected_fragmentation": 0.0,
       "expected_moves": [],
       "expected_order": [],
       "expected_final_loads": {

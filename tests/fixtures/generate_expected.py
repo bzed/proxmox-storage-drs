@@ -15,6 +15,10 @@ Fixtures:
   reserve-tradeoff  A group where the reserve and the balance objective genuinely
                     conflict, so the two solve paths disagree unless P is large
                     enough. fc-tier1 cannot show that (see its threshold).
+  affinity-repair   Section 14.7: a group whose I/O is already balanced and whose
+                    only improving moves are a VM's tiny disks reuniting with it --
+                    isolates section 5.4's w_v weighting and D^big exemption, and
+                    section 7.2's kappa*dA benefit term, from the payback rule.
 
 Usage:  python3 tests/fixtures/generate_expected.py [--check]
 """
@@ -37,7 +41,7 @@ Assignment = Dict[str, str]
 StorageState = Dict[str, Any]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FIXTURES = ("fc-tier1", "reserve-tradeoff")
+FIXTURES = ("fc-tier1", "reserve-tradeoff", "affinity-repair")
 R = 6  # rounding for recorded values
 TIB = 1 << 40
 
@@ -48,7 +52,14 @@ class Deadlock(Exception):
 
 @dataclass(frozen=True)
 class Fixture:
-    """One group: its storages, its disks and the weights to solve it with."""
+    """One group: its storages, its disks and the weights to solve it with.
+
+    ``keys`` is movable disks only -- the set ``all_assignments()`` takes its
+    product over. ``pinned_keys`` (section 14.7's ``exclude.vmids`` VMs) never
+    appears in a generated assignment; every other per-disk dict (``size``,
+    ``load``, ``vmid``, ``current``) spans *both* -- section 5.4's ``l_v``
+    sums a VM's full load, pinned disks included, and (C4)/(C5)/(C6)/(C7)
+    all count a pinned disk's bytes and load exactly like a movable one's."""
 
     name: str
     storages: List[str]
@@ -59,12 +70,17 @@ class Fixture:
     wipe_bps: Dict[str, float]
     reserve_factor: float
     keys: List[str]
+    pinned_keys: List[str]
     size: Dict[str, float]
     load: Dict[str, float]
     vmid: Dict[str, int]
     current: Assignment
     objective: Dict[str, Any]
     migration: Dict[str, Any]
+
+    @property
+    def all_keys(self) -> List[str]:
+        return self.keys + self.pinned_keys
 
     @property
     def total_load(self) -> float:
@@ -86,12 +102,54 @@ class Fixture:
     def big_m_p(self) -> float:
         return float(self.objective.get("reserve_violation_penalty", 1000.0))
 
+    @property
+    def tiny_disk_tib(self) -> float:
+        """Section 5.4's `D^big` threshold, converted from the fixture's
+        `migration.tiny_disk_bytes` (bytes, matching config.py's own field
+        name and unit) into the TiB unit every disk size here is expressed
+        in."""
+        return float(self.migration.get("tiny_disk_bytes", 0)) / TIB
+
+    @property
+    def vm_weights(self) -> Dict[int, float]:
+        """Section 5.4's `w_v = max(1, l_v / l_bar)`. `V` (the vmids this
+        returns weights for) is derived from movable disks only
+        (`objective.affinity_counts_pinned_disks` defaults to false, and no
+        fixture here sets it true); `l_v` sums a VM's *entire* load across
+        `all_keys`, pinned included. `l_bar`'s own denominator is wider
+        still -- every distinct vmid with a disk in the group at all, not
+        just `V` -- section 14.7's own worked number is explicit about this
+        (`l_bar = 6.0/3`, dividing by all three of the group's VMs even
+        though VM 309, pinned-only, never appears in `V`)."""
+        vmids = sorted({self.vmid[k] for k in self.keys})
+        if not vmids:
+            return {}
+        all_vmids = {self.vmid[k] for k in self.all_keys}
+        load_per_vm: Dict[int, float] = {v: 0.0 for v in vmids}
+        for k in self.all_keys:
+            v = self.vmid[k]
+            if v in load_per_vm:
+                load_per_vm[v] += self.load[k]
+        average = sum(self.load[k] for k in self.all_keys) / len(all_vmids)
+        if not average:
+            return {v: 1.0 for v in vmids}
+        return {v: max(1.0, load_per_vm[v] / average) for v in vmids}
+
+
+def storage_of(f: Fixture, assign: Assignment, key: str) -> str:
+    """A disk's storage under `assign` -- `assign` only ever has entries for
+    movable disks (`all_assignments()`'s own product), so a pinned disk
+    always falls through to its fixed `f.current`."""
+    return assign.get(key, f.current[key])
+
 
 def load_fixture(stem: str) -> Fixture:
     with open(os.path.join(HERE, f"{stem}.yaml")) as fh:
         fx: Dict[str, Any] = yaml.safe_load(fh)
     g = fx["group"]
     disks = fx["disks"]
+    movable = [d for d in disks if not d.get("pinned", False)]
+    pinned = [d for d in disks if d.get("pinned", False)]
     return Fixture(
         name=stem,
         storages=[s["id"] for s in g["storages"]],
@@ -103,7 +161,8 @@ def load_fixture(stem: str) -> Fixture:
             s["id"]: float(s.get("saferemove_throughput_bytes_per_sec", 0.0)) for s in g["storages"]
         },
         reserve_factor=float(g["reserve_factor"]),
-        keys=[d["key"] for d in disks],
+        keys=[d["key"] for d in movable],
+        pinned_keys=[d["key"] for d in pinned],
         size={d["key"]: float(d["size_tib"]) for d in disks},
         load={d["key"]: float(d["load"]) for d in disks},
         vmid={d["key"]: int(d["vmid"]) for d in disks},
@@ -125,11 +184,11 @@ def all_assignments(f: Fixture) -> Iterator[Assignment]:
 
 
 def largest_on(f: Fixture, assign: Assignment, s: str) -> float:
-    return max((f.size[k] for k in f.keys if assign[k] == s), default=0.0)
+    return max((f.size[k] for k in f.all_keys if storage_of(f, assign, k) == s), default=0.0)
 
 
 def used_on(f: Fixture, assign: Assignment, s: str) -> float:
-    return f.foreign[s] + sum(f.size[k] for k in f.keys if assign[k] == s)
+    return f.foreign[s] + sum(f.size[k] for k in f.all_keys if storage_of(f, assign, k) == s)
 
 
 def per_storage(f: Fixture, assign: Assignment) -> Dict[str, StorageState]:
@@ -139,7 +198,7 @@ def per_storage(f: Fixture, assign: Assignment) -> Dict[str, StorageState]:
         used = used_on(f, assign, s)
         largest = largest_on(f, assign, s)
         out[s] = {
-            "load": round(sum(f.load[k] for k in f.keys if assign[k] == s), R),
+            "load": round(sum(f.load[k] for k in f.all_keys if storage_of(f, assign, k) == s), R),
             "used_tib": round(used, R),
             "largest_tib": round(largest, R),
             "required_tib": round(used + f.reserve_factor * largest, R),
@@ -151,7 +210,10 @@ def per_storage(f: Fixture, assign: Assignment) -> Dict[str, StorageState]:
 def E_of(f: Fixture, assign: Assignment) -> float:
     """Section 5.3 (C6) L1 spread, Sum_s |u_s - u*|."""
     return sum(
-        abs(sum(f.load[k] for k in f.keys if assign[k] == s) / f.weight[s] - f.u_star)
+        abs(
+            sum(f.load[k] for k in f.all_keys if storage_of(f, assign, k) == s) / f.weight[s]
+            - f.u_star
+        )
         for s in f.storages
     )
 
@@ -176,10 +238,16 @@ def slack_of(f: Fixture, assign: Assignment) -> float:
     )
 
 
-def fragmentation(f: Fixture, assign: Assignment) -> int:
-    """Section 5.4 kappa term: extra storages a VM's disks are spread over."""
+def fragmentation(f: Fixture, assign: Assignment) -> float:
+    """Section 5.4 kappa term, `A = Sum_v w_v * (extra storages)` -- V from
+    movable disks only (objective.affinity_counts_pinned_disks defaults to
+    false; no fixture here overrides it), each vmid's own extra-storage
+    count weighted by `f.vm_weights` (section 5.4's `w_v`, which sums a
+    VM's *entire* load, pinned included -- see that property's docstring).
+    """
+    weights = f.vm_weights
     return sum(
-        len({assign[k] for k in f.keys if f.vmid[k] == v}) - 1
+        weights[v] * (len({assign[k] for k in f.keys if f.vmid[k] == v}) - 1)
         for v in sorted({f.vmid[k] for k in f.keys})
     )
 
@@ -190,12 +258,16 @@ def fragmentation(f: Fixture, assign: Assignment) -> int:
 
 
 def objective_nonreserve(f: Fixture, assign: Assignment, beta: float, delta: float) -> float:
-    """The section 5.4 objective without the reserve term."""
+    """The section 5.4 objective without the reserve term. `beta`/`gamma`
+    range over `D^big` only (moved disks at or above `tiny_disk_bytes`,
+    section 5.4) -- a tiny disk still counts as "moved" for every other
+    purpose (`moves_of()`, ordering), just not for these two terms."""
     moved = [k for k in f.keys if assign[k] != f.current[k]]
+    big_moved = [k for k in moved if f.size[k] >= f.tiny_disk_tib]
     return float(
         f.objective["alpha_spread"] * E_of(f, assign)
-        + beta * len(moved)
-        + f.objective["gamma_move_bytes_per_tib"] * sum(f.size[k] for k in moved)
+        + beta * len(big_moved)
+        + f.objective["gamma_move_bytes_per_tib"] * sum(f.size[k] for k in big_moved)
         + f.objective["kappa_vm_affinity"] * fragmentation(f, assign)
         + delta * F_of(f, assign)
     )
@@ -255,12 +327,19 @@ def big_m_agreement_threshold(f: Fixture, beta: float, delta: float) -> float:
 
 
 def computed_p_min(f: Fixture, beta: float, delta: float) -> float:
-    """The section 5.3 build-time bound: U_obj / eps_r, with eps_r = 1 MiB."""
+    """The section 5.3 build-time bound: U_obj / eps_r, with eps_r = 1 MiB.
+    The kappa term's per-vmid worst case is `max_v w_v`, not a flat 1 --
+    section 5.4's w_v can exceed 1 for an above-average-load VM, and this
+    bound must stay a genuine upper bound regardless."""
+    max_w = max(f.vm_weights.values(), default=1.0)
     u_obj = (
         2 * f.objective["alpha_spread"] * f.total_load
         + beta * len(f.keys)
         + f.objective["gamma_move_bytes_per_tib"] * sum(f.size.values())
-        + f.objective["kappa_vm_affinity"] * len(set(f.vmid.values())) * (len(f.storages) - 1)
+        + f.objective["kappa_vm_affinity"]
+        * max_w
+        * len(set(f.vmid.values()))
+        * (len(f.storages) - 1)
         + delta * 2 * len(f.storages)
     )
     return float(u_obj * (1 << 20))
@@ -293,7 +372,11 @@ def duration(f: Fixture, key: str) -> float:
 
 
 def cost(f: Fixture, key: str) -> float:
-    """Section 7.1 cost in load-seconds: mirror on both ends, wipe on the source."""
+    """Section 7.1 cost in load-seconds: mirror on both ends, wipe on the
+    source. Zero below `tiny_disk_bytes` (section 5.4/7.1) -- duration
+    itself is unaffected, only the cost charged for it."""
+    if f.size[key] < f.tiny_disk_tib:
+        return 0.0
     omega_mirror = float(f.migration["source_load_weight"] + f.migration["target_load_weight"])
     omega_wipe = float(f.migration.get("wipe_load_weight", 1.0))
     return duration_mirror(f, key) * omega_mirror + duration_wipe(f, key) * omega_wipe
@@ -325,18 +408,24 @@ def order_moves(f: Fixture, target: Assignment, delta: float) -> List[Dict[str, 
             raise Deadlock(f"no feasible move among {sorted(pending)}")
 
         def ratio(k: str, _state: Assignment = state) -> float:
-            # Section 8.2's revised ranking: "the persistent-objective
-            # reduction ... the alpha and delta terms of section 5.4 --
-            # the parts whose improvement persists; beta/gamma are
-            # one-time costs" -- both alpha-weighted imbalance and
-            # delta-weighted data spread, not imbalance alone.
+            # Section 8.2's revised ranking: "the alpha, delta and kappa*w
+            # terms of section 5.4 -- the parts whose improvement persists;
+            # beta/gamma are one-time costs." A move below tiny_disk_bytes
+            # (cost 0) ranks first outright -- "free value, delivered
+            # before anything pays" -- not merely via its own raw
+            # persistent_reduction, which would not dominate a competing
+            # nonzero-cost candidate.
             nxt = dict(_state)
             nxt[k] = target[k]
             alpha = float(f.objective["alpha_spread"])
-            persistent_reduction = alpha * (E_of(f, _state) - E_of(f, nxt)) + delta * (
-                F_of(f, _state) - F_of(f, nxt)
+            kappa = float(f.objective["kappa_vm_affinity"])
+            persistent_reduction = (
+                alpha * (E_of(f, _state) - E_of(f, nxt))
+                + delta * (F_of(f, _state) - F_of(f, nxt))
+                + kappa * (fragmentation(f, _state) - fragmentation(f, nxt))
             )
-            return persistent_reduction / cost(f, k)
+            c = cost(f, k)
+            return float("inf") if c == 0.0 else persistent_reduction / c
 
         pick = max(feasible, key=ratio)
         b = target[pick]
@@ -405,11 +494,12 @@ def case_for(f: Fixture, beta: float, delta: float) -> Dict[str, Any]:
         # Unrounded, for the payback arithmetic; not written to the expected file.
         "_exact_E_after": E_of(f, a),
         "_exact_F_after": F_of(f, a),
+        "_exact_A_after": fragmentation(f, a),
         "expected_objective": round(val, R),
         "expected_move_count": len(moves_of(f, a)),
         "expected_E_after": round(E_of(f, a), R),
         "expected_F_after": round(F_of(f, a), R),
-        "expected_fragmentation": fragmentation(f, a),
+        "expected_fragmentation": round(fragmentation(f, a), R),
         "expected_moves": moves_of(f, a),
         "expected_order": order_moves(f, a, delta),
         "expected_final_loads": {s: final[s]["load"] for s in f.storages},
@@ -452,14 +542,23 @@ def case_for(f: Fixture, beta: float, delta: float) -> Dict[str, Any]:
     return case
 
 
-def payback(f: Fixture, case: Dict[str, Any], e_after: float, f_after: float) -> Dict[str, Any]:
+def payback(
+    f: Fixture, case: Dict[str, Any], e_after: float, f_after: float, a_after: float
+) -> Dict[str, Any]:
     """Section 7.2 payback arithmetic for one case:
-    ``benefit = (alpha*(E_before-E_after) + delta*(F_before-F_after)) * H``.
+    ``benefit = (alpha*(E_before-E_after) + delta*(F_before-F_after) +
+    kappa*(A_before-A_after)) * H``.
 
-    `e_after`/`f_after` are the EXACT objective of the chosen assignment. Taking
-    them from `case["expected_E_after"]`/`case["expected_F_after"]` instead would
-    mix an exact *_before with a 6-decimal-rounded *_after and shift the recorded
-    benefit off the section 14.5 value by a fraction of a load-second.
+    `e_after`/`f_after`/`a_after` are the EXACT objective of the chosen
+    assignment. Taking them from `case["expected_E_after"]`/
+    `case["expected_F_after"]`/`case["expected_fragmentation"]` instead would
+    mix an exact *_before with a 6-decimal-rounded *_after and shift the
+    recorded benefit off the section 14.5 value by a fraction of a
+    load-second. A plan whose every move is below `tiny_disk_bytes` costs
+    0 (section 7.1) -- `ratio` is then `inf`, matching `payback.py`'s own
+    `PaybackResult.ratio` property, and `accepted` needs no guard since
+    `benefit >= payback_ratio * 0` degrades to `benefit >= 0` correctly on
+    its own.
     """
     keys = [m.split(":")[0] + ":" + m.split(":")[1] for m in case["expected_moves"]]
     per_move = [
@@ -475,10 +574,12 @@ def payback(f: Fixture, case: Dict[str, Any], e_after: float, f_after: float) ->
     ]
     total_cost = sum(cost(f, k) for k in keys)
     alpha = float(f.objective["alpha_spread"])
+    kappa = float(f.objective["kappa_vm_affinity"])
     delta_weight = float(case["delta_capacity_spread"])
     delta_e = E_of(f, f.current) - e_after
     delta_f = F_of(f, f.current) - f_after
-    benefit = (alpha * delta_e + delta_weight * delta_f) * float(
+    delta_a = fragmentation(f, f.current) - a_after
+    benefit = (alpha * delta_e + delta_weight * delta_f + kappa * delta_a) * float(
         f.migration["payback_horizon_seconds"]
     )
     return {
@@ -487,8 +588,12 @@ def payback(f: Fixture, case: Dict[str, Any], e_after: float, f_after: float) ->
         "per_move": per_move,
         "total_cost_load_seconds": round(total_cost, 2),
         "benefit_load_seconds": round(benefit, 2),
-        "ratio": round(benefit / total_cost, 2),
-        "accepted": benefit / total_cost >= float(f.migration["payback_ratio"]),
+        # null (not a JSON-unsafe Infinity) when every move costs 0 --
+        # matching payback.py's own PaybackResult.ratio, which returns
+        # float("inf") for the identical case (see "big_m_agreement_
+        # threshold_p" above for the same None-for-unbounded convention).
+        "ratio": round(benefit / total_cost, 2) if total_cost else None,
+        "accepted": benefit >= float(f.migration["payback_ratio"]) * total_cost,
     }
 
 
@@ -537,7 +642,11 @@ def build(f: Fixture) -> Dict[str, Any]:
     if two_move:
         chosen = two_move[0]
         out["payback_two_move_plan"] = payback(
-            f, chosen, chosen["_exact_E_after"], chosen["_exact_F_after"]
+            f,
+            chosen,
+            chosen["_exact_E_after"],
+            chosen["_exact_F_after"],
+            chosen["_exact_A_after"],
         )
         # Section 14.5's counter-example: a 4 TiB archive disk whose
         # relocation improves E by only 0.01 and leaves the data spread
