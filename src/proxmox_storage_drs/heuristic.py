@@ -193,13 +193,19 @@ def compute_vm_weights(
     one of its disks in the group -- **pinned disks included**, since their
     I/O is the VM's I/O regardless of whether `objective.
     affinity_counts_pinned_disks` counts them toward the fragmentation
-    *count* itself. `l_bar = T_g / |V|`, the group's total load divided by
-    the number of VMs in ``vmids`` -- the same `V` the caller's own kappa
-    sum ranges over, never recomputed here. Both are constants under any
-    reassignment of `D` (a disk's `vmid` never changes), exactly like
-    `group_average_utilization()`/`group_average_fill()` above -- computed
-    once per group and folded into the objective as data, never a solver
-    variable (section 5.4: "w_v is data, not a variable").
+    *count* itself. `l_bar = T_g / |V|` -- but here `|V|` is **every
+    distinct vmid with a disk in the group at all**, pinned-only VMs
+    included, not merely the (possibly narrower) `vmids` this function
+    returns weights *for* -- section 14.7's own worked number is explicit
+    about this: with VM 309 pinned out of the kappa sum entirely, `l_bar`
+    still reads `6.0/3`, dividing by all three of the group's VMs, not the
+    two left in `V` once 309 drops out. A VM's contribution to "what a
+    typical VM's load looks like" does not depend on whether its own disks
+    happen to be movable right now. Both `l_v` and `l_bar` are constants
+    under any reassignment of `D` (a disk's `vmid` never changes), exactly
+    like `group_average_utilization()`/`group_average_fill()` above --
+    computed once per group and folded into the objective as data, never a
+    solver variable (section 5.4: "w_v is data, not a variable").
 
     The floor of 1 keeps a quiet VM's fragmentation weighted exactly as it
     was before this term existed; only VMs doing above-average I/O are
@@ -210,12 +216,13 @@ def compute_vm_weights(
     vmid_list = list(vmids)
     if not vmid_list:
         return {}
+    all_vmids = {disk.vmid for disk in group.disks}
     load_per_vm: dict[int, float] = {v: 0.0 for v in vmid_list}
     for disk in group.disks:
         if disk.vmid in load_per_vm:
             load_per_vm[disk.vmid] += load_by_key.get(disk.key, 0.0)
     total_load = sum(load_by_key.get(d.key, 0.0) for d in group.disks)
-    average_load_per_vm = total_load / len(vmid_list)
+    average_load_per_vm = total_load / len(all_vmids)
     if not average_load_per_vm:
         return {v: 1.0 for v in vmid_list}
     return {v: max(1.0, load_per_vm[v] / average_load_per_vm) for v in vmid_list}

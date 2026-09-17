@@ -149,6 +149,27 @@ def test_compute_vm_weights_includes_a_pinned_disks_load_in_l_v() -> None:
     assert weights[202] == 1.0  # 1.0/2.5 < 1, floored
 
 
+def test_compute_vm_weights_l_bar_divides_by_every_vmid_including_pinned_only_ones() -> None:
+    """Section 14.7's own worked number: l_bar divides by every VM with a
+    disk in the group -- including one pinned entirely out of V, like VM
+    309 there -- not merely the vmids this call is asked to weight. Chosen
+    so the two denominators (2 vs. 3) give genuinely different, non-floored
+    answers: dividing by 2 (the old, wrong behaviour, before this VM
+    existed to catch it) would give w_301 = 4.0/3.0 = 1.333; dividing by 3
+    (correct) gives w_301 = 4.0/2.0 = 2.0."""
+    vm301 = make_disk("301:scsi0", 1.0, 4.0, "san-a")
+    vm302 = make_disk("302:scsi0", 1.0, 1.0, "san-b")
+    vm309_pinned = make_disk("309:scsi0", 1.0, 1.0, "san-c", pinned="excluded")
+    storages = (make_storage("san-a"), make_storage("san-b"), make_storage("san-c"))
+    group = Group(name="g", storages=storages, disks=(vm301, vm302, vm309_pinned))
+    loads = {"301:scsi0": 4.0, "302:scsi0": 1.0, "309:scsi0": 1.0}
+    # V (what the kappa sum ranges over) excludes VM 309 -- only 301/302 are
+    # passed in, matching affinity_counts_pinned_disks=false's own V.
+    weights = compute_vm_weights(group, loads, [301, 302])
+    assert set(weights) == {301, 302}  # 309 never appears -- not part of V
+    assert weights[301] == pytest.approx(2.0)  # 4.0 / (6.0/3) = 2.0, not 4.0/(6.0/2)=1.333
+
+
 def test_raw_affinity_debt_matches_breakdowns_own_field() -> None:
     group = section_14_group()
     loads = section_14_loads()
