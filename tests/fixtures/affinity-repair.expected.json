@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "generated_by": "tests/fixtures/generate_expected.py (exhaustive enumeration)",
+  "assumptions": {
+    "account_saferemove_wipe": false,
+    "wipe_load_weight": 1.0,
+    "saferemove_by_storage": {
+      "stor-a": false,
+      "stor-b": false,
+      "stor-c": false
+    }
+  },
+  "derived": {
+    "total_load": 6.0,
+    "u_star": 2.0,
+    "b_bar": 0.291667,
+    "initial": {
+      "stor-a": {
+        "load": 2.0,
+        "used_tib": 1.0,
+        "largest_tib": 1.0,
+        "required_tib": 3.0,
+        "violates_reserve": false
+      },
+      "stor-b": {
+        "load": 2.0,
+        "used_tib": 1.000001,
+        "largest_tib": 1.0,
+        "required_tib": 3.000001,
+        "violates_reserve": false
+      },
+      "stor-c": {
+        "load": 2.0,
+        "used_tib": 5.0,
+        "largest_tib": 1.0,
+        "required_tib": 7.0,
+        "violates_reserve": false
+      }
+    },
+    "E_before": 0.0,
+    "F_before": 2.285714,
+    "spread_before": 0.0,
+    "capacity_spread_before": 1.714285
+  },
+  "cases": [
+    {
+      "beta_move_count": 0.25,
+      "delta_capacity_spread": 0.5,
+      "expected_objective": 1.142857,
+      "expected_move_count": 2,
+      "expected_E_after": 0.0,
+      "expected_F_after": 2.285713,
+      "expected_fragmentation": 0.0,
+      "expected_moves": [
+        "301:efidisk0:stor-c->stor-a",
+        "301:tpmstate0:stor-b->stor-a"
+      ],
+      "expected_order": [
+        {
+          "move": "301:efidisk0:stor-c->stor-a",
+          "transient_target_used_tib": 1.0,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 3.0,
+          "capacity_tib": 8.0,
+          "ok": true
+        },
+        {
+          "move": "301:tpmstate0:stor-b->stor-a",
+          "transient_target_used_tib": 1.000001,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 3.000001,
+          "capacity_tib": 8.0,
+          "ok": true
+        }
+      ],
+      "expected_final_loads": {
+        "stor-a": 2.0,
+        "stor-b": 2.0,
+        "stor-c": 2.0
+      },
+      "expected_final_reserve": {
+        "stor-a": {
+          "load": 2.0,
+          "used_tib": 1.000001,
+          "largest_tib": 1.0,
+          "required_tib": 3.000001,
+          "violates_reserve": false
+        },
+        "stor-b": {
+          "load": 2.0,
+          "used_tib": 1.0,
+          "largest_tib": 1.0,
+          "required_tib": 3.0,
+          "violates_reserve": false
+        },
+        "stor-c": {
+          "load": 2.0,
+          "used_tib": 5.0,
+          "largest_tib": 1.0,
+          "required_tib": 7.0,
+          "violates_reserve": false
+        }
+      },
+      "expected_spread_after": 0.0,
+      "expected_capacity_spread_after": 1.714285,
+      "lexicographic": {
+        "min_total_slack_tib": 0.0,
+        "expected_objective_nonreserve": 1.142857,
+        "expected_move_count": 2,
+        "expected_moves": [
+          "301:efidisk0:stor-c->stor-a",
+          "301:tpmstate0:stor-b->stor-a"
+        ],
+        "agrees_with_big_m_at_configured_p": true,
+        "big_m_agreement_threshold_p": -9.45713,
+        "big_m_p_configured": 1000.0,
+        "big_m_p_min_computed": 20080230.476
+      }
+    }
+  ],
+  "payback_two_move_plan": {
+    "beta_move_count": 0.25,
+    "delta_capacity_spread": 0.5,
+    "per_move": [
+      {
+        "disk": "301:efidisk0",
+        "size_tib": 4.9173832e-07,
+        "duration_mirror_seconds": 0.0,
+        "duration_wipe_seconds": 0.0,
+        "duration_seconds": 0.0,
+        "cost_load_seconds": 0.0
+      },
+      {
+        "disk": "301:tpmstate0",
+        "size_tib": 9.5367432e-07,
+        "duration_mirror_seconds": 0.01,
+        "duration_wipe_seconds": 0.0,
+        "duration_seconds": 0.01,
+        "cost_load_seconds": 0.0
+      }
+    ],
+    "total_cost_load_seconds": 0.0,
+    "benefit_load_seconds": 31536006.65,
+    "ratio": null,
+    "accepted": true
+  },
+  "payback_rejected_archive_disk": {
+    "size_tib": 4.0,
+    "delta_E": 0.01,
+    "delta_F": 0.0,
+    "cost_load_seconds": 41943.04,
+    "benefit_load_seconds": 315360.0,
+    "ratio": 7.519,
+    "accepted": false
+  }
+}

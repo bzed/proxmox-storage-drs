@@ -11,29 +11,47 @@ verdict — and why does a reserve-fixing plan always pass? Describes
 source `topology.Storage` — no new fetch, no new state. `duration_mirror`
 is `z_d / migration.bwlimit_bytes_per_sec`; `duration_wipe` is `z_d /
 saferemove_throughput` when `migration.account_saferemove_wipe` and the
-source has `saferemove` on, else zero.
+source has `saferemove` on, else zero. `cost_load_seconds` is zero below
+`migration.tiny_disk_bytes` (section 5.4/7.1) — `duration_mirror`/
+`duration_wipe` are still the real numbers, so `exceeds_max_duration`/
+`saturation_deferred` still fire normally for a tiny disk that happens to
+be throttled hard enough; only the economic charge is waived.
 
 `compute_benefit_load_seconds()` implements section 7.2's `benefit =
-(alpha_spread*(E_before-E_after) + delta_capacity_spread*(F_before-F_after))
-* H` (section 12): it takes the pre-plan/post-plan pair of
-`heuristic.raw_spread()` values (E, the *raw*, unweighted imbalance
-quantity) and the pre-plan/post-plan pair of `heuristic.raw_capacity_spread()`
-values (F, the raw data-spread quantity, section 5.3 (C7)), plus
-`objective.alpha_spread`/`objective.delta_capacity_spread` as explicit
-weight parameters, and multiplies the weighted sum by
-`migration.payback_horizon_seconds`. **Never** pass
-`ObjectiveBreakdown.imbalance_term`/`.capacity_spread_term`: those are the
-same quantities already scaled by `alpha_spread`/`delta_capacity_spread`
-for the section 5.4 *solver* objective, and passing them here would
-double-apply the weight (REVIEW.md R-01 — earlier code passed
-`imbalance_term` directly; only invisible while `alpha_spread`'s default
-of `1.0` made the two numerically identical). Applying the weights
-*inside* `compute_benefit_load_seconds()`, as explicit parameters rather
-than baked into an already-scaled input, is what keeps R-01's principle
-intact under section 12's formula, which — unlike the pre-section-12
-one — genuinely does weight both terms. `cli.py`'s `plan` handler
-computes all four raw values for the pre-plan and post-plan assignments
-and passes them, and both weights, through.
+(alpha_spread*(E_before-E_after) + delta_capacity_spread*(F_before-F_after) +
+kappa_vm_affinity*(A_before-A_after)) * H` (sections 12 and, for the third
+term, 5.4/7.2's affinity-payback fix): it takes the pre-plan/post-plan
+pair of `heuristic.raw_spread()` values (E, the *raw*, unweighted
+imbalance quantity), `heuristic.raw_capacity_spread()` values (F, the raw
+data-spread quantity, section 5.3 (C7)) and `heuristic.raw_affinity_debt()`
+values (A, the raw — `w_v`-weighted but not `kappa`-scaled — affinity debt,
+section 5.4), plus `objective.alpha_spread`/`delta_capacity_spread`/
+`kappa_vm_affinity` as explicit weight parameters, and multiplies the
+weighted sum by `migration.payback_horizon_seconds`. **Never** pass
+`ObjectiveBreakdown.imbalance_term`/`.capacity_spread_term`/
+`.fragmentation_term`: those are the same quantities already scaled by
+`alpha_spread`/`delta_capacity_spread`/`kappa_vm_affinity` for the section
+5.4 *solver* objective, and passing them here would double-apply the
+weight (REVIEW.md R-01 — earlier code passed `imbalance_term` directly;
+only invisible while `alpha_spread`'s default of `1.0` made the two
+numerically identical). Applying the weights *inside*
+`compute_benefit_load_seconds()`, as explicit parameters rather than baked
+into an already-scaled input, is what keeps R-01's principle intact — now
+extended to all three terms, not just the first two. `cli.py`'s `plan`
+handler computes all six raw values for the pre-plan and post-plan
+assignments and passes them, and all three weights, through.
+
+The `kappa` term's own inclusion here is itself the fix for a real live
+failure: a plan whose entire value was reuniting VMs (two 528 KiB
+`efidisk0`s among its four moves) scored `benefit 9 load·s vs cost 232
+load·s → ratio 0.0388` and was refused, because the pre-fix formula had no
+way to value affinity at all — see `IMPLEMENTATION_PLAN.md` section 7.2's
+own account, and `tests/fixtures/affinity-repair.yaml` (section 14.7) for
+the fixture built to reproduce it. `A_before - A_after` can be negative —
+a balance move that *splits* a VM must pay for the fragmentation out of its
+`alpha` gain — and `compute_benefit_load_seconds()` returns that negative
+contribution as computed, never clamped; `evaluate_plan_payback()`'s own
+acceptance test already rejects a genuinely negative benefit correctly.
 
 ## `headroom_src`/`headroom_dst`: a plan formula this project cannot fill in
 

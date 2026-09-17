@@ -2799,6 +2799,7 @@ def test_render_explain_json_includes_objective_pins_fragmentation_and_pinned_lo
                 warn_fraction=0.25,
                 min_free_bytes=0,
                 objective=resolved.config.objective,
+                tiny_disk_bytes=resolved.config.migration.tiny_disk_bytes,
             )
         )
     )
@@ -2869,6 +2870,7 @@ def test_render_group_explain_json_includes_rejected_alternative_when_act_but_no
                 warn_fraction=0.25,
                 min_free_bytes=0,
                 objective=resolved.config.objective,
+                tiny_disk_bytes=resolved.config.migration.tiny_disk_bytes,
             )
         )
     )
@@ -2897,6 +2899,7 @@ def test_render_group_explain_json_omits_rejected_alternative_when_gate_did_not_
                 warn_fraction=0.25,
                 min_free_bytes=0,
                 objective=resolved.config.objective,
+                tiny_disk_bytes=resolved.config.migration.tiny_disk_bytes,
             )
         )
     )
@@ -2927,6 +2930,7 @@ def test_render_group_explain_json_omits_rejected_alternative_once_a_move_is_sch
                 warn_fraction=0.25,
                 min_free_bytes=0,
                 objective=resolved.config.objective,
+                tiny_disk_bytes=resolved.config.migration.tiny_disk_bytes,
             )
         )
     )
@@ -3571,6 +3575,7 @@ def test_solve_group_uses_the_milp_result_when_available(
         mip_gap: object,
         cooldown_storages: object = frozenset(),
         probing: bool = False,
+        tiny_disk_bytes: object = 0,
     ) -> object:
         calls.append(backend)
         return fake_result

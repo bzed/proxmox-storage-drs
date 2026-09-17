@@ -71,6 +71,7 @@ from proxmox_storage_drs.heuristic import (
     evaluate_assignment,
     group_average_fill,
     group_average_utilization,
+    raw_affinity_debt,
     raw_capacity_spread,
     raw_spread,
     run_heuristic,
@@ -1469,7 +1470,11 @@ def _objective_breakdown_json(breakdown: ObjectiveBreakdown) -> dict[str, float]
 
 
 def _render_no_moves_lines(
-    group: Group, group_plan: "_GroupPlan", objective: ObjectiveConfig, min_free_bytes: int
+    group: Group,
+    group_plan: "_GroupPlan",
+    objective: ObjectiveConfig,
+    min_free_bytes: int,
+    tiny_disk_bytes: int,
 ) -> list[str]:
     """Only called when the gate decided to ACT but the *final* assignment
     moves nothing -- an operator reading `plan`'s one-line verdict has no
@@ -1499,6 +1504,7 @@ def _render_no_moves_lines(
         group_plan.group_load.average_utilization,
         group_average_fill(group),
         group_plan.final_breakdown,
+        tiny_disk_bytes,
     )
     if candidate is None:
         if deadlocked_count:
@@ -1611,6 +1617,7 @@ def _render_group_explain_human(
                     group_plan,
                     resolved.config.objective,
                     resolved.config.snapshot_reserve.min_free_bytes,
+                    resolved.config.migration.tiny_disk_bytes,
                 )
             )
     # The measured load every number above derives from -- show-load's own
@@ -1678,6 +1685,7 @@ def _render_group_explain_json(
     warn_fraction: float,
     min_free_bytes: int,
     objective: ObjectiveConfig,
+    tiny_disk_bytes: int,
 ) -> dict[str, object]:
     out = _render_group_plan_json(
         group,
@@ -1759,6 +1767,7 @@ def _render_group_explain_json(
             group_plan.group_load.average_utilization,
             group_average_fill(group),
             breakdown,
+            tiny_disk_bytes,
         )
         if candidate is not None:
             out["rejected_alternative"] = {
@@ -1825,6 +1834,7 @@ def _render_explain_json(
             warn_fraction,
             min_free_bytes,
             resolved.config.objective,
+            resolved.config.migration.tiny_disk_bytes,
         )
         for group in topology.groups
     ]
@@ -1958,6 +1968,7 @@ def _solve_group(
             # solver is installed, and a missing one is the expected
             # answer, not a warning (section 2.3).
             probing=solver.backend == "auto",
+            tiny_disk_bytes=resolved.config.migration.tiny_disk_bytes,
         )
         if result is not None:
             return _SolveOutcome(
@@ -1985,6 +1996,7 @@ def _solve_group(
         min_free_bytes,
         solver.heuristic_iterations,
         cooldown_storages,
+        resolved.config.migration.tiny_disk_bytes,
     )
     return _SolveOutcome(
         assignment=heuristic_result.assignment,
@@ -2348,6 +2360,7 @@ def _plan_group(
         group_load.load_by_disk_key(),
         resolved.config.objective,
         min_free_bytes,
+        resolved.config.migration.tiny_disk_bytes,
     )
 
     # The heuristic's own `.breakdown` is the *target* assignment's
@@ -2366,6 +2379,7 @@ def _plan_group(
         min_free_bytes,
         group_average_utilization(group, group_load.load_by_disk_key()),
         group_average_fill(group),
+        resolved.config.migration.tiny_disk_bytes,
     )
 
     storages_by_id = {s.id: s for s in group.storages}
@@ -2394,6 +2408,9 @@ def _plan_group(
         raw_capacity_spread(solve_outcome.initial_breakdown),
         raw_capacity_spread(final_breakdown),
         resolved.config.migration.payback_horizon_seconds,
+        resolved.config.objective.kappa_vm_affinity,
+        raw_affinity_debt(solve_outcome.initial_breakdown),
+        raw_affinity_debt(final_breakdown),
     )
     payback_result = evaluate_plan_payback(
         move_costs, benefit, resolved.config.migration.payback_ratio

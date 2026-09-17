@@ -235,7 +235,10 @@ def test_beta_025_reproduces_the_three_move_solution(backend: str) -> None:
         "105:scsi0": "san-b",
     }
     assert result.breakdown.moves == 3
-    assert result.breakdown.total == pytest.approx(2.533333, abs=1e-4)
+    # Section 5.4's w_v reweights kappa: VM 101 (l_v=4.0, l_bar=7.4/5=1.48)
+    # carries w=2.7027, raising the pre-section-12 2.533333 the same way
+    # test_heuristic.py's identical fixture does (section 14.3).
+    assert result.breakdown.total == pytest.approx(3.384685, abs=1e-4)
     assert not result.breakdown.reserve_statuses["san-a"].violated  # repaired
     assert result.backend == backend
     assert result.status == "optimal"
@@ -255,7 +258,52 @@ def test_beta_050_reproduces_the_two_move_solution(backend: str) -> None:
         "105:scsi0": "san-c",  # stays -- the third move is not worth it at beta=0.50
     }
     assert result.breakdown.moves == 2
-    assert result.breakdown.total == pytest.approx(3.158333, abs=1e-4)
+    # This plan also splits VM 101 (section 14.3), carrying the same
+    # w_101=2.7027-weighted fragmentation_term as the three-move plan above.
+    assert result.breakdown.total == pytest.approx(4.009685, abs=1e-4)
+
+
+# --------------------------------------------------------- tiny_disk_bytes (D^big)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_tiny_disk_bytes_lets_a_tiny_disk_reunite_with_its_vm_for_free(backend: str) -> None:
+    """Section 5.4's D^big: at beta_move_count=1.0, moving `201:efidisk0`
+    (1 MiB) to rejoin `201:scsi0` costs a full migration (1.0) against a
+    fragmentation benefit of only kappa*w=0.5*1=0.5 -- not worth it, so
+    with tiny_disk_bytes=0 (no exemption) the solver leaves it split. Above
+    the 1 MiB disk's own size, the same move costs zero beta/gamma, so the
+    kappa benefit alone makes it worth taking -- reproducing, in miniature,
+    the live dogfooding failure section 5.4/7.2 exist to fix."""
+    disks = (
+        make_disk("201:scsi0", 1.0, 3.0, "san-a"),
+        make_disk("201:efidisk0", 1 / (1024 * 1024), 0.0, "san-b"),  # 1 MiB
+        make_disk("202:scsi0", 1.0, 3.0, "san-b"),
+    )
+    group = Group(name="g", storages=(make_storage("san-a"), make_storage("san-b")), disks=disks)
+    loads = {"201:scsi0": 3.0, "201:efidisk0": 0.0, "202:scsi0": 3.0}
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, beta_move_count=1.0)
+
+    without_exemption = solve(
+        group, loads, objective, 0, backend, time_limit_seconds=10.0, mip_gap=0.0
+    )
+    assert without_exemption is not None
+    assert without_exemption.assignment["201:efidisk0"] == "san-b"  # not worth a full migration
+
+    with_exemption = solve(
+        group,
+        loads,
+        objective,
+        0,
+        backend,
+        time_limit_seconds=10.0,
+        mip_gap=0.0,
+        tiny_disk_bytes=2 * 1024 * 1024,  # 2 MiB -- above the 1 MiB efidisk0
+    )
+    assert with_exemption is not None
+    assert with_exemption.assignment["201:efidisk0"] == "san-a"  # free to reunite
+    assert with_exemption.breakdown.move_count_term == 0.0
+    assert with_exemption.breakdown.bytes_moved_term == 0.0
 
 
 # ---------------------------------------------------- capacity-spread (C7)/delta
@@ -602,11 +650,10 @@ def test_assert_objective_magnitude_within_int64_passes_for_realistic_sizes() ->
     _assert_objective_magnitude_within_int64(
         beta_scaled=2_500_000,
         gamma_scaled_values=[500_000, 500_000],
-        kappa_scaled=5_000_000,
+        kappa_scaled_values=[5_000_000, 5_000_000],
         alpha_scaled=10_000,
         delta_scaled=5_000,
-        num_movable=2,
-        num_vmids=2,
+        num_big_movable=2,
         num_storages=3,
         load_bound=10_000_000,
         fill_bound_total=10_000_000,
@@ -618,11 +665,10 @@ def test_assert_objective_magnitude_within_int64_raises_when_over_the_bound() ->
         _assert_objective_magnitude_within_int64(
             beta_scaled=0,
             gamma_scaled_values=[],
-            kappa_scaled=0,
+            kappa_scaled_values=[],
             alpha_scaled=2**60,
             delta_scaled=0,
-            num_movable=0,
-            num_vmids=0,
+            num_big_movable=0,
             num_storages=1000,
             load_bound=2**60,
             fill_bound_total=0,

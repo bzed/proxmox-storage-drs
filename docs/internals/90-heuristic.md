@@ -182,15 +182,46 @@ second-worst one score identically under minmax and differently under l1.
 ## Proof this reproduces the plan, not just itself
 
 `tests/unit/test_heuristic.py` doesn't stop at "the assignment matches the
-prose." At the default weights it asserts `ObjectiveBreakdown.total`
-equals `2.533333` (three-move plan) and, at `beta_move_count: 0.50`,
-`3.158333` (two-move plan) — the exact totals `REVIEW.md` Appendix A
-independently re-derived by hand from the plan's own numbers, not values
-this module invented and then asserted against itself. Getting both to
-five decimal places is strong evidence the objective's six terms, their
-units (TiB for size, average in-flight I/O for load), and the search that
-picks among them are all correct together, not merely internally
-consistent.
+prose." At `delta_capacity_spread: 0` it asserts `ObjectiveBreakdown.total`
+equals `3.384685` (three-move plan) and, at `beta_move_count: 0.50`,
+`4.009685` (two-move plan) — the exact totals section 14.3's reworked
+arithmetic gives once `kappa` is weighted by `w_v` (below), not values this
+module invented and then asserted against itself. Getting both to six
+decimal places is strong evidence the objective's six terms, their units
+(TiB for size, average in-flight I/O for load), and the search that picks
+among them are all correct together, not merely internally consistent.
+
+## `w_v`: `kappa` weighted by a VM's own I/O, and `D^big`
+
+Section 5.4's two strengthenings of the affinity term, added after live
+dogfooding found a plan whose entire value was reuniting VMs rejected by
+`payback.py`'s aggregate test (the plan whose entire value had nowhere to
+be counted — see `96-payback.md`). `compute_vm_weights()` computes
+`w_v = max(1, l_v / l_bar)` once per group — `l_v` a VM's total load across
+*every* one of its disks (pinned included), `l_bar = T_g / |V|` where `T_g`
+is the group's total load and `|V|` is the count of **every** distinct
+vmid with a disk in the group, not only the (possibly narrower) set of
+vmids the `kappa` sum itself ranges over once
+`objective.affinity_counts_pinned_disks` has excluded a pinned-only VM
+from it — section 14.7's own worked number (`l_bar = 6.0/3`, not `6.0/2`,
+with VM 309 pinned out of the sum but still counted here) is what caught
+this the first implementation got wrong. `evaluate_assignment()` folds
+`w_v` into `fragmentation_term` in place of the old flat per-VM count; both
+MILP backends (`optimize.py`) import the identical function so a per-vmid
+coefficient is folded into their own `kappa` term the same way, rather
+than reimplementing the weighting twice (AGENTS.md section 5).
+
+`D^big = {d : z_d >= migration.tiny_disk_bytes}` (default 64 MiB) is the
+second change: `move_count_term`/`bytes_moved_term` sum only over moved
+disks at or above that threshold, so an `efidisk0`/`tpmstate0` reunion
+costs nothing on the `beta`/`gamma` side of the ledger — `moved_disk_keys`
+itself is untouched, so a tiny disk still shows up as a real move
+everywhere else (reporting, `schedule.py`'s ordering, `payback.py`'s move
+list). `ObjectiveBreakdown.affinity_debt` (the raw, `w_v`-weighted-but-not-
+`kappa`-scaled `A`) and `raw_affinity_debt()` exist purely so
+`payback.py`'s benefit can consume the identical quantity `kappa` charges
+here, never a second, independently-derived one (REVIEW.md R-01's
+discipline, extended to the third term).
 
 ## What this pass deliberately does not do
 

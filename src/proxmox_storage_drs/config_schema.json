@@ -147,7 +147,8 @@
         "account_saferemove_wipe": { "type": "boolean" },
         "wipe_load_weight": { "type": "number", "minimum": 0 },
         "saturation_ceiling": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
-        "assume_thick_provisioning": { "type": "boolean" }
+        "assume_thick_provisioning": { "type": "boolean" },
+        "tiny_disk_bytes": { "type": ["string", "number"], "minimum": 0 }
       }
     },
     "objective": {

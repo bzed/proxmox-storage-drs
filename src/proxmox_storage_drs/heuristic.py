@@ -62,7 +62,7 @@ accept the same format) and does not exercise this gap.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
 from proxmox_storage_drs.config import ObjectiveConfig
@@ -90,9 +90,10 @@ class ObjectiveBreakdown:
     example need each term individually."""
 
     imbalance_term: float  # alpha * (sum(e_s) [l1] or max(u_s) [minmax] -- objective.spread_metric)
-    move_count_term: float  # beta * number of disks that moved
-    bytes_moved_term: float  # gamma * TiB moved
-    fragmentation_term: float  # kappa * sum(extra storages per VM)
+    # beta * number of disks that moved AT OR ABOVE migration.tiny_disk_bytes (D^big, section 5.4)
+    move_count_term: float
+    bytes_moved_term: float  # gamma * TiB moved, D^big only (section 5.4)
+    fragmentation_term: float  # kappa * affinity_debt -- affinity_debt = sum(w_v * extra storages)
     capacity_spread_term: float  # delta * sum(d_s), section 5.3 (C7)
     reserve_penalty_term: float  # objective.reserve_violation_penalty * TiB short
     spread_e: dict[str, float]  # storage id -> e_s = |u_s - u*|, for reporting (both metrics)
@@ -100,7 +101,12 @@ class ObjectiveBreakdown:
     fill_fraction: dict[str, float]  # storage id -> b_s = used/capacity, section 5.3 (C7)
     fill_deviation: dict[str, float]  # storage id -> d_s = |b_s - b_bar| / b_bar
     reserve_statuses: dict[str, ReserveStatus]  # storage id -> (C4)/(C5) at this assignment
-    moved_disk_keys: frozenset[str]
+    moved_disk_keys: frozenset[str]  # every disk that moved, tiny disks included (for reporting)
+    # Section 7.2's raw (kappa-unscaled) A = sum(w_v * extra storages) -- payback.py's
+    # compute_benefit_load_seconds() needs this via raw_affinity_debt(), never fragmentation_term
+    # (REVIEW.md R-01's discipline: never pass an already-weighted quantity across that boundary).
+    affinity_debt: float = 0.0
+    vm_weights: dict[int, float] = field(default_factory=dict)  # vmid -> w_v
 
     @property
     def total(self) -> float:
@@ -175,6 +181,53 @@ def group_average_fill(group: Group) -> float:
     return total_used / total_capacity if total_capacity else 0.0
 
 
+def compute_vm_weights(
+    group: Group, load_by_key: Mapping[str, float], vmids: Iterable[int]
+) -> dict[int, float]:
+    """Section 5.4's `w_v = max(1, l_v / l_bar)` -- the per-VM weight that
+    scales `kappa`'s fragmentation term, shared by `evaluate_assignment()`
+    below and both `optimize.py` MILP backends (AGENTS.md section 5: one
+    implementation, every caller).
+
+    `l_v = Sum_{d in D: v(d)=v} l_d` is the VM's total load across *every*
+    one of its disks in the group -- **pinned disks included**, since their
+    I/O is the VM's I/O regardless of whether `objective.
+    affinity_counts_pinned_disks` counts them toward the fragmentation
+    *count* itself. `l_bar = T_g / |V|` -- but here `|V|` is **every
+    distinct vmid with a disk in the group at all**, pinned-only VMs
+    included, not merely the (possibly narrower) `vmids` this function
+    returns weights *for* -- section 14.7's own worked number is explicit
+    about this: with VM 309 pinned out of the kappa sum entirely, `l_bar`
+    still reads `6.0/3`, dividing by all three of the group's VMs, not the
+    two left in `V` once 309 drops out. A VM's contribution to "what a
+    typical VM's load looks like" does not depend on whether its own disks
+    happen to be movable right now. Both `l_v` and `l_bar` are constants
+    under any reassignment of `D` (a disk's `vmid` never changes), exactly
+    like `group_average_utilization()`/`group_average_fill()` above --
+    computed once per group and folded into the objective as data, never a
+    solver variable (section 5.4: "w_v is data, not a variable").
+
+    The floor of 1 keeps a quiet VM's fragmentation weighted exactly as it
+    was before this term existed; only VMs doing above-average I/O are
+    weighted up. Returns an empty dict for an empty `vmids` (no VMs to
+    weight) and weights every VM at 1.0 when the group's total load is 0
+    (division would otherwise be undefined, and an idle group has no basis
+    to weight one VM over another)."""
+    vmid_list = list(vmids)
+    if not vmid_list:
+        return {}
+    all_vmids = {disk.vmid for disk in group.disks}
+    load_per_vm: dict[int, float] = {v: 0.0 for v in vmid_list}
+    for disk in group.disks:
+        if disk.vmid in load_per_vm:
+            load_per_vm[disk.vmid] += load_by_key.get(disk.key, 0.0)
+    total_load = sum(load_by_key.get(d.key, 0.0) for d in group.disks)
+    average_load_per_vm = total_load / len(all_vmids)
+    if not average_load_per_vm:
+        return {v: 1.0 for v in vmid_list}
+    return {v: max(1.0, load_per_vm[v] / average_load_per_vm) for v in vmid_list}
+
+
 def raw_capacity_spread(breakdown: ObjectiveBreakdown) -> float:
     """Section 7.2's unweighted ``F`` -- ``sum(d_s)``, always L1 regardless of
     ``objective.spread_metric`` (section 5.4: "the term is L1 and stays L1
@@ -201,6 +254,18 @@ def raw_spread(breakdown: ObjectiveBreakdown, spread_metric: str) -> float:
     return sum(breakdown.spread_e.values())
 
 
+def raw_affinity_debt(breakdown: ObjectiveBreakdown) -> float:
+    """Section 7.2's unweighted (by ``kappa``, but ``w_v``-weighted) ``A`` --
+    ``Sum_v w_v * (extra storages)``, as distinct from
+    ``breakdown.fragmentation_term``, which is that same quantity multiplied
+    by ``objective.kappa_vm_affinity`` for section 5.4's *solver* objective.
+    ``payback.py``'s ``compute_benefit_load_seconds()`` needs this raw
+    quantity for the same reason ``raw_spread()``/``raw_capacity_spread()``
+    do (REVIEW.md R-01): passing the already-``kappa``-scaled term would
+    double-apply the weight."""
+    return breakdown.affinity_debt
+
+
 def evaluate_assignment(
     group: Group,
     assignment: Assignment,
@@ -209,6 +274,7 @@ def evaluate_assignment(
     min_free_bytes: int,
     average_utilization: float,
     average_fill: float,
+    tiny_disk_bytes: int = 0,
 ) -> ObjectiveBreakdown:
     """Section 5.4's objective for one candidate ``assignment``.
 
@@ -259,7 +325,13 @@ def evaluate_assignment(
     moved = frozenset(
         d.key for d in group.disks if assignment.get(d.key, d.current_storage) != d.current_storage
     )
-    bytes_moved_tib = sum(d.size_bytes for d in group.disks if d.key in moved) / _BYTES_PER_TIB
+    # Section 5.4's D^big: beta/gamma range only over moved disks at or above
+    # tiny_disk_bytes -- `moved` itself (and moved_disk_keys below, and the
+    # reported move count elsewhere) still includes a tiny disk, since it is
+    # a real scheduled move, just a free one for these two terms.
+    big_moved_disks = [d for d in group.disks if d.key in moved and d.size_bytes >= tiny_disk_bytes]
+    moved_big = frozenset(d.key for d in big_moved_disks)
+    bytes_moved_tib = sum(d.size_bytes for d in big_moved_disks) / _BYTES_PER_TIB
     reserve_shortfall_tib = (
         sum(s.shortfall_bytes for s in reserve_statuses.values()) / _BYTES_PER_TIB
     )
@@ -270,13 +342,22 @@ def evaluate_assignment(
     storages_per_vm: dict[int, set[str]] = {}
     for disk in fragmentation_disks:
         storages_per_vm.setdefault(disk.vmid, set()).add(storage_of(disk))
-    fragmentation = sum(max(0, len(storages) - 1) for storages in storages_per_vm.values())
+    # Section 5.4's w_v = max(1, l_v/l_bar): V is exactly the set of vmids
+    # the fragmentation sum ranges over (respecting
+    # objective.affinity_counts_pinned_disks), but l_v itself always sums a
+    # VM's *entire* load, pinned disks included (compute_vm_weights()'s own
+    # docstring) -- affinity_counts_pinned_disks only decides V's
+    # membership, never which disks count toward a member's own l_v.
+    vm_weights = compute_vm_weights(group, load_by_key, sorted(storages_per_vm))
+    affinity_debt = sum(
+        vm_weights[v] * max(0, len(storages) - 1) for v, storages in storages_per_vm.items()
+    )
 
     return ObjectiveBreakdown(
         imbalance_term=objective.alpha_spread * spread,
-        move_count_term=objective.beta_move_count * len(moved),
+        move_count_term=objective.beta_move_count * len(moved_big),
         bytes_moved_term=objective.gamma_move_bytes_per_tib * bytes_moved_tib,
-        fragmentation_term=objective.kappa_vm_affinity * fragmentation,
+        fragmentation_term=objective.kappa_vm_affinity * affinity_debt,
         capacity_spread_term=objective.delta_capacity_spread * capacity_spread,
         reserve_penalty_term=objective.reserve_violation_penalty * reserve_shortfall_tib,
         spread_e=spread_e,
@@ -285,6 +366,8 @@ def evaluate_assignment(
         fill_deviation=fill_deviation,
         reserve_statuses=reserve_statuses,
         moved_disk_keys=moved,
+        affinity_debt=affinity_debt,
+        vm_weights=vm_weights,
     )
 
 
@@ -321,6 +404,7 @@ def best_single_disk_alternative(
     average_utilization: float,
     average_fill: float,
     baseline: ObjectiveBreakdown,
+    tiny_disk_bytes: int = 0,
 ) -> RejectedCandidate | None:
     """The single-disk move closest to being worth taking, among every
     (movable disk, other group storage) pair -- section 5.3's neighbourhood
@@ -346,6 +430,7 @@ def best_single_disk_alternative(
                 min_free_bytes,
                 average_utilization,
                 average_fill,
+                tiny_disk_bytes,
             )
             if best is None or breakdown.total < best.breakdown.total:
                 best = RejectedCandidate(
@@ -515,6 +600,7 @@ def _best_of(
     average_fill: float,
     best_value: float,
     best_assignment: Assignment | None,
+    tiny_disk_bytes: int = 0,
 ) -> tuple[float, Assignment | None]:
     """Evaluates every candidate in ``trials`` against the shared
     section 5.4 objective, keeping whichever (including the incumbent
@@ -524,7 +610,14 @@ def _best_of(
     and so all three score candidates through the exact same comparison."""
     for trial in trials:
         value = evaluate_assignment(
-            group, trial, load_by_key, objective, min_free_bytes, average_utilization, average_fill
+            group,
+            trial,
+            load_by_key,
+            objective,
+            min_free_bytes,
+            average_utilization,
+            average_fill,
+            tiny_disk_bytes,
         ).total
         if value < best_value:
             best_value = value
@@ -591,6 +684,7 @@ def _descend(
     average_fill: float,
     max_iterations: int,
     cooldown_storages: frozenset[str] = frozenset(),
+    tiny_disk_bytes: int = 0,
 ) -> Assignment:
     """Section 5.5 step 3: repeatedly apply whichever single-disk move,
     pairwise swap, or whole-VM co-relocation (below) most improves the
@@ -635,7 +729,14 @@ def _descend(
     movable = _movable_disks(group)
     vm_relocation_candidates = _vm_relocation_candidates(movable)
     current = evaluate_assignment(
-        group, assignment, load_by_key, objective, min_free_bytes, average_utilization, average_fill
+        group,
+        assignment,
+        load_by_key,
+        objective,
+        min_free_bytes,
+        average_utilization,
+        average_fill,
+        tiny_disk_bytes,
     ).total
 
     for _ in range(max_iterations):
@@ -659,6 +760,7 @@ def _descend(
                 average_fill,
                 best_value,
                 best_assignment,
+                tiny_disk_bytes,
             )
 
         if best_assignment is None:
@@ -676,6 +778,7 @@ def run_heuristic(
     min_free_bytes: int,
     heuristic_iterations: int = 5000,
     cooldown_storages: frozenset[str] = frozenset(),
+    tiny_disk_bytes: int = 0,
 ) -> HeuristicResult:
     """Section 5.5's four-step heuristic (minus "polish"; see the module
     docstring), producing a :class:`HeuristicResult` for one group.
@@ -686,13 +789,21 @@ def run_heuristic(
     ``gates.cooldown_per_storage`` (``state.active_storage_cooldowns()``,
     bare ids for this group) -- is passed to ``_descend()`` only, never to
     ``_repair()``; see ``_repair()``'s own docstring for why a (C5) repair
-    move is never blocked by it.
+    move is never blocked by it. ``tiny_disk_bytes`` is
+    ``config.migration.tiny_disk_bytes`` (section 5.4's ``D^big``).
     """
     average_utilization = group_average_utilization(group, load_by_key)
     average_fill = group_average_fill(group)
     initial = seed_assignment(group)
     initial_breakdown = evaluate_assignment(
-        group, initial, load_by_key, objective, min_free_bytes, average_utilization, average_fill
+        group,
+        initial,
+        load_by_key,
+        objective,
+        min_free_bytes,
+        average_utilization,
+        average_fill,
+        tiny_disk_bytes,
     )
 
     repaired, repair_moves = _repair(group, initial, min_free_bytes)
@@ -706,9 +817,17 @@ def run_heuristic(
         average_fill,
         heuristic_iterations,
         cooldown_storages,
+        tiny_disk_bytes,
     )
     final_breakdown = evaluate_assignment(
-        group, final, load_by_key, objective, min_free_bytes, average_utilization, average_fill
+        group,
+        final,
+        load_by_key,
+        objective,
+        min_free_bytes,
+        average_utilization,
+        average_fill,
+        tiny_disk_bytes,
     )
     return HeuristicResult(
         assignment=final,

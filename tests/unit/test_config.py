@@ -421,6 +421,36 @@ def test_delta_capacity_spread_negative_is_a_structural_error(tmp_path: Path) ->
         config.load_config(str(path), env={})
 
 
+def test_tiny_disk_bytes_default_is_64mib(tmp_path: Path) -> None:
+    path = write_config(tmp_path, minimal_config_dict())
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.migration.tiny_disk_bytes == 67_108_864
+
+
+def test_tiny_disk_bytes_accepts_a_size_string(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["migration"] = {"tiny_disk_bytes": "128MiB"}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.migration.tiny_disk_bytes == 128 * 1024 * 1024
+
+
+def test_tiny_disk_bytes_zero_is_legal(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["migration"] = {"tiny_disk_bytes": 0}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.migration.tiny_disk_bytes == 0
+
+
+def test_tiny_disk_bytes_negative_is_a_structural_error(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["migration"] = {"tiny_disk_bytes": -1}
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match="tiny_disk_bytes"):
+        config.load_config(str(path), env={})
+
+
 def test_capacity_spread_threshold_default_is_quarter(tmp_path: Path) -> None:
     path = write_config(tmp_path, minimal_config_dict())
     resolved = config.load_config(str(path), env={})

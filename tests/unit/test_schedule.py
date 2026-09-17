@@ -106,7 +106,13 @@ def test_section_14_4_ordering_reproduced_exactly() -> None:
     )
 
     assert not result.deadlocked
-    assert [m.disk_key for m in result.order] == ["102:scsi0", "101:scsi1", "105:scsi0"]
+    # 102:scsi0 first (resolves the reserve violation), same as before.
+    # 105:scsi0 now ranks ahead of 101:scsi1 -- section 5.4's fragmentation
+    # term joined the persistent-objective ranking (section 8.2), and
+    # applying 101:scsi1's own move splits VM 101 (still whole on san-a
+    # after move 1), a cost 105:scsi0's move does not pay, so its
+    # persistent_reduction is now the larger one.
+    assert [m.disk_key for m in result.order] == ["102:scsi0", "105:scsi0", "101:scsi1"]
     assert result.order[0].from_storage == "san-a"
     assert result.order[0].to_storage == "san-c"
     assert result.order[0].resolves_reserve_violation
@@ -294,3 +300,50 @@ def test_ordering_prefers_the_larger_persistent_reduction_once_delta_matters() -
         group, target_assignment, loads, delta_matters, min_free_bytes=0
     )
     assert result_with_delta.order[0].disk_key == "101:scsi0"
+
+
+def test_tiny_disk_bytes_ranks_a_zero_cost_move_first_regardless_of_its_own_reduction() -> None:
+    """Section 8.2: "cost_m = 0 (a tiny disk, section 7.1) ranks first --
+    free value, delivered before anything pays". Two VMs each have an
+    efidisk0 stranded off their big disk's storage; VM 302 is much busier
+    (five near-idle filler VMs push its w_v to ~7, section 5.4), so
+    302:efidisk0's reunion is worth far more than 301:efidisk0's -- with no
+    exemption, it ranks first purely on that larger persistent_reduction
+    per byte. Covering only 301:efidisk0's 1 MiB (not 302:efidisk0's 4 MiB)
+    with tiny_disk_bytes must still put it first: a zero-cost move beats
+    any nonzero-cost one outright, not merely by comparing magnitudes."""
+    storages = (
+        make_storage("san-a", capacity_tib=80.0),
+        make_storage("san-b", capacity_tib=80.0),
+        make_storage("san-c", capacity_tib=80.0),
+    )
+    disks = [
+        make_disk("301:scsi0", 1.0, "san-a"),
+        make_disk("301:efidisk0", 1 / (1024 * 1024), "san-b"),
+        make_disk("302:scsi0", 1.0, "san-a"),
+        make_disk("302:efidisk0", 4 / (1024 * 1024), "san-c"),
+    ]
+    loads = {"301:scsi0": 1.0, "301:efidisk0": 0.0, "302:scsi0": 1000.0, "302:efidisk0": 0.0}
+    for i in range(5):
+        key = f"{400 + i}:scsi0"
+        disks.append(make_disk(key, 1.0, "san-a"))
+        loads[key] = 0.001
+    group = Group(name="g", storages=storages, disks=tuple(disks))
+    target = {d.key: d.current_storage for d in disks}
+    target["301:efidisk0"] = "san-a"
+    target["302:efidisk0"] = "san-a"
+    objective = ObjectiveConfig(
+        alpha_spread=1.0,
+        beta_move_count=0.25,
+        gamma_move_bytes_per_tib=0.05,
+        kappa_vm_affinity=0.5,
+        delta_capacity_spread=0.0,
+    )
+
+    no_exemption = order_moves(group, target, loads, objective, min_free_bytes=0)
+    assert no_exemption.order[0].disk_key == "302:efidisk0"  # bigger reduction wins on ratio
+
+    with_exemption = order_moves(
+        group, target, loads, objective, min_free_bytes=0, tiny_disk_bytes=2 * 1024 * 1024
+    )
+    assert with_exemption.order[0].disk_key == "301:efidisk0"  # zero cost wins outright

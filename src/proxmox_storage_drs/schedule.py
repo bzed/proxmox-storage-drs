@@ -195,6 +195,7 @@ def order_moves(
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
     min_free_bytes: int,
+    tiny_disk_bytes: int = 0,
 ) -> ScheduleResult:
     """Section 8.2's scheduling loop for one group.
 
@@ -203,6 +204,9 @@ def order_moves(
     the same inputs :func:`heuristic.evaluate_assignment` takes, reused
     here (not re-derived) to score each candidate move's imbalance
     reduction with whichever ``objective.spread_metric`` is configured.
+    ``tiny_disk_bytes`` is ``config.migration.tiny_disk_bytes`` (section
+    5.4's ``D^big``) -- used below to rank a tiny disk's move first,
+    regardless of its own reduction, since it costs nothing to schedule.
     """
     storages_by_id = {s.id: s for s in group.storages}
     state: Assignment = {d.key: d.current_storage for d in group.disks}
@@ -213,19 +217,23 @@ def order_moves(
     order: list[ScheduledMove] = []
     while pending:
         current_breakdown = evaluate_assignment(
-            group, state, load_by_key, objective, min_free_bytes, u_star, b_bar
+            group, state, load_by_key, objective, min_free_bytes, u_star, b_bar, tiny_disk_bytes
         )
         current_imbalance = current_breakdown.imbalance_term
-        # Section 8.2's revised ranking: "the persistent-objective
-        # reduction ... the alpha and delta terms of section 5.4 -- the
-        # parts whose improvement persists; beta/gamma are one-time
-        # costs". `imbalance_term`/`capacity_spread_term` are already
-        # alpha-/delta-weighted (heuristic.ObjectiveBreakdown), so the
-        # persistent objective is just their sum -- ranking candidates
+        # Section 8.2's revised ranking: "the alpha, delta and kappa*w
+        # terms of section 5.4 -- the parts whose improvement persists;
+        # beta/gamma are one-time costs". `imbalance_term`/
+        # `capacity_spread_term`/`fragmentation_term` are already
+        # alpha-/delta-/kappa*w-weighted (heuristic.ObjectiveBreakdown), so
+        # the persistent objective is just their sum -- ranking candidates
         # differently from `imbalance_reduction` (still alpha-only,
         # reported on `ScheduledMove` unchanged) whenever a pending move
-        # trades I/O balance for data spread.
-        current_persistent = current_imbalance + current_breakdown.capacity_spread_term
+        # trades I/O balance for data spread or VM affinity.
+        current_persistent = (
+            current_imbalance
+            + current_breakdown.capacity_spread_term
+            + current_breakdown.fragmentation_term
+        )
 
         feasible: list[str] = []
         for key, disk in pending.items():
@@ -252,13 +260,30 @@ def order_moves(
             trial = dict(state)
             trial[key] = target_assignment[key]
             trial_breakdown = evaluate_assignment(
-                group, trial, load_by_key, objective, min_free_bytes, u_star, b_bar
+                group,
+                trial,
+                load_by_key,
+                objective,
+                min_free_bytes,
+                u_star,
+                b_bar,
+                tiny_disk_bytes,
             )
-            trial_persistent = trial_breakdown.imbalance_term + trial_breakdown.capacity_spread_term
+            trial_persistent = (
+                trial_breakdown.imbalance_term
+                + trial_breakdown.capacity_spread_term
+                + trial_breakdown.fragmentation_term
+            )
             reduction = current_imbalance - trial_breakdown.imbalance_term
             persistent_reduction = current_persistent - trial_persistent
-            cost = disk.size_bytes
-            ratio = persistent_reduction / cost if cost > 0 else persistent_reduction
+            # Section 8.2: "cost_m = 0 (a tiny disk, section 7.1) ranks
+            # first: free value, delivered before anything pays" -- a tiny
+            # disk's move is scheduled ahead of any nonzero-cost candidate
+            # regardless of its own persistent_reduction, not merely
+            # ranked by persistent_reduction alone (which would not
+            # dominate a competing large candidate's higher ratio).
+            cost = 0.0 if disk.size_bytes < tiny_disk_bytes else float(disk.size_bytes)
+            ratio = float("inf") if cost == 0.0 else persistent_reduction / cost
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_key = key

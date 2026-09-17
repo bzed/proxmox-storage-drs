@@ -178,6 +178,11 @@ class MigrationConfig:
     wipe_load_weight: float = 1.0
     saturation_ceiling: float = 0.85
     assume_thick_provisioning: bool = True
+    # Below this size, a disk carries zero beta/gamma and needs no payback
+    # verdict (section 5.4 D^big, section 7.1/7.3) -- comfortably above an
+    # EFI var store or TPM state, far below anything the payback rule was
+    # written for. 0 restores the pre-section-12 accounting for every disk.
+    tiny_disk_bytes: int = 67_108_864  # 64 MiB
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +564,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         wipe_load_weight=mig_raw.get("wipe_load_weight", 1.0),
         saturation_ceiling=mig_raw.get("saturation_ceiling", 0.85),
         assume_thick_provisioning=mig_raw.get("assume_thick_provisioning", True),
+        tiny_disk_bytes=parse_size_bytes(mig_raw.get("tiny_disk_bytes", 67_108_864)),
     )
 
     obj_raw = raw.get("objective", {})
