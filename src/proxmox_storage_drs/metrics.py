@@ -85,8 +85,16 @@ def _format_promql_duration(duration_seconds: float) -> str:
 
     Always in seconds: PromQL accepts any of ``s``/``m``/``h``/``d`` but
     seconds needs no unit-choice logic and is exact for a non-round value.
+
+    Deliberately *not* ``f"{duration_seconds:g}s"``: ``%g`` switches to
+    scientific notation past 6 significant digits (e.g. a 14-day lookback,
+    1209600s, becomes ``"1.2096e+06s"``), which PromQL's duration parser
+    rejects outright (``unknown unit "." in duration``) -- confirmed live.
+    ``:f`` never uses scientific notation; trimming trailing zeros (and a
+    then-bare trailing ``.``) keeps the same exact, no-unit-choice output
+    for the whole-second case this project sends almost everywhere.
     """
-    return f"{duration_seconds:g}s"
+    return f"{duration_seconds:.6f}".rstrip("0").rstrip(".") + "s"
 
 
 def build_rate_promql(

@@ -144,6 +144,22 @@ def test_build_quantile_over_time_promql() -> None:
     assert expr == "quantile_over_time(0.95, (sum(x))[86400s:300s])"
 
 
+def test_build_quantile_over_time_promql_large_lookback_is_not_scientific_notation() -> None:
+    """A 14-day lookback is 1209600s -- ``f"{1209600:g}s"`` renders as
+    ``"1.2096e+06s"``, which Prometheus's duration parser rejects outright
+    (``unknown unit "." in duration``). Confirmed live against a real
+    backend."""
+    expr = build_quantile_over_time_promql("sum(x)", 0.95, 1_209_600, 300)
+    assert "e+" not in expr
+    assert expr == "quantile_over_time(0.95, (sum(x))[1209600s:300s])"
+
+
+def test_build_rate_promql_large_window_is_not_scientific_notation() -> None:
+    expr = build_rate_promql("blockstat_rd_operations", "vmid", "instance", 1_209_600)
+    assert "e+" not in expr
+    assert expr == "sum by (vmid, instance) (rate(blockstat_rd_operations[1209600s]))"
+
+
 # ------------------------------------------------------- gigapipe step/range
 
 
