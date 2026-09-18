@@ -273,6 +273,34 @@ with `max()` (the fail-safe union) and adding the rule to §11.1's table, AD-02 
 13's row, AD-03/AD-04 by correcting the two §14.8 lines, AD-05 by arguing the outcome trigger's
 breadth in both directions, AD-06 by qualifying the exception-2 scheduling claim.
 
+A **twenty-second pass** (section 43) verifies the AD-01..AD-06 fixes in commit `0feb648` and
+re-derives the two §14.8 lines they corrected (`5.0` and `9.3` both check, and the fix
+incidentally reconciles a third line that only holds at the corrected `Z_roomy = 0`). All six
+are resolved, `make check` is green on the tree and the PDF stamp matches the Markdown, so §42's
+verification line holds. Seven new findings (AE-01..AE-07), all in the fix commit's own new
+material: three Medium — AD-01's `max()` is specified at the **global** level, where a
+percentage has no single value and a per-storage `free_space.soft` still silently lowers the
+deprecated floor (the built key is a floor on *every* storage, so taking the `max()` per storage
+fixes both); that rule landed in §11.1's table, whose preamble says every row is a hard error
+and **never** a warning-and-continue; and phase 13's artefact sweep still misses the two shipped
+docs that document the flag being replaced (`docs/manual/27-plan.md`'s `--json` field list,
+`docs/internals/96-payback.md`'s normative statement of the exemption) plus the example config
+AD-01's own rationale now leans on — three Low (two further sweep gaps, the unpinned meaning of
+"final assignment", and the deprecated key inheriting the new `soft_s < C_s` startup error) and
+one Info (the outcome trigger is a strict *subset* of both §6's override and today's
+`has_reserve_override`, which is a stronger and more useful claim than the "same condition" the
+paragraph makes). **Section 44** records the resolution: all seven fixed in the plan — AE-01 by
+taking the `max()` per storage after percent conversion (matching what `min_free_bytes` means in
+the built code, and making the percentage case well defined), AE-02 by moving the both-set rule
+out of §11.1's hard-error table into a new warn-and-continue resolution list, AE-03/AE-04 by
+replacing phase 13's enumerated sweep with the two greps (`git grep -l resolves_reserve_violation`,
+`git grep -l evaluate_plan_payback`) and naming the shipped docs, the corpus bundles, the fifth
+call site and the example config, AE-05 by pinning "final assignment" to the R-02 scheduled state
+and naming the `reserve_statuses` source for the threaded sums, AE-06 by exempting the folded
+deprecated value from the `soft_s < C_s` startup error (warn and report as the unfixable shortfall
+it always was), AE-07 by stating the strict-subset property in place of the "same condition"
+claim.
+
 ---
 
 ## 0. Overall assessment
@@ -5987,6 +6015,108 @@ by hand.
 | AD-04 | Resolved | §14.8's reversed-order second move corrected to `max(2·max(0, 0.5), 3.0)`: with `603` gone `roomy` holds no managed disk (the 5.8 TiB is foreign, `601` has not arrived), so the inner term is `max(0, 0.5) = 0.5` and the `hard` floor of 3.0 dominates either way — `9.3` stands, now derived from the correct `Z_roomy = 0`. |
 | AD-05 | Resolved | §7.3 now argues the outcome trigger's breadth in both directions: the narrow side as before (narrower than the built `has_reserve_override`), and the wide side as a deliberate documented cost — one byte of shortfall reduction exempts the whole plan, so on a permanently-short cluster (§5.3.1's thrash paragraph) every shortfall-reducing plan is fully payback-exempt for as long as the shortfall stands. The paragraph gives the reason (the mandate does not grade repairs by size, and the plan-level benefit of §7.2 leaves no principled way to price only part of a repairing plan) and the bounds (the three hard rules still apply per move, the plan output carries every move's cost and `repair` marker, and the trigger requires an actual shortfall reduction — the same condition §6's override singles out). |
 | AD-06 | Resolved | §7.3's converse example no longer asserts the scheduling half unconditionally: the move is marked `repair: true`, and scheduled first only "once §8.2's exception 2 is implemented (it is spec-only today, as §14.8 records)". |
+
+Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
+`docs-check` (the plan PDF rebuilt and re-stamped in the same commit as the Markdown, per
+AGENTS.md §7.4). No production code changed; every fix is to the plan text and to this file.
+
+---
+
+## 43. Twenty-second-pass review — verification of the AD-01..AD-06 fixes
+
+Reviewed commit `0feb648` ("plan: fix twenty-first-pass review findings (AD-01..AD-06)") — 50
+lines of `IMPLEMENTATION_PLAN.md` and 103 of this file, the PDF rebuilt and re-stamped in the
+same commit (`3c7ab684…` verified matching the Markdown on both sides). No production code
+touched, as the message states. `make check` runs clean on the tree (941 passed, 96.38%
+coverage, `generate_expected.py --check` and `validate_corpus.py --check` both OK), so §42's
+verification line holds.
+
+### 43.1 Verification of the AD-fixes
+
+All six are resolved, and the two arithmetic ones were re-derived rather than taken:
+
+- **AD-03 ✓.** With `603 → swapme` scheduled first, `swapme` holds 1.0 used (`604:scsi0`),
+  `z_d = 1.0`, `Z_swapme = 1.0`, so §8.1's predicate is
+  `1.0 + 1.0 + max(2·max(1.0, 1.0), 3.0) = 5.0 ≤ 10` ✓ — as the line now reads.
+- **AD-04 ✓, and it repairs a line the finding did not name.** With `603` gone `roomy` holds
+  only the 5.8 TiB of foreign volumes, so `Z_roomy = 0` and `601` arriving gives
+  `5.8 + 0.5 + max(2·max(0, 0.5), 3.0) = 9.3 ≤ 10` ✓. The `hard: "10%"` bullet's parenthetical
+  — `5.8 + 0.5 + max(1.0, 1.0) = 7.3` — was already written against `Z_roomy = 0` (at the stale
+  `Z = 1.0` it would read `8.3`), so the two derivations agreed only after this fix; they
+  contradicted each other before it.
+- **AD-01/AD-02/AD-05/AD-06 ✓** are in the plan as §42 describes. The code claims in AD-02's new
+  row check out: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` at
+  `payback.py:319`, its sole production call site at `cli.py:2415`, `test_payback.py:334`/`:369`
+  and `test_execute.py`'s `ScheduledMove` constructions.
+- **AD-05's substance is right and its conclusion understated** — the true relation between the
+  outcome trigger and the conditions it is compared to is a strict subset, not a rough match;
+  see AE-07.
+
+The findings below are all in this commit's own new material, and none of them reopens a
+decision the plan has made: AD-01's resolution rule is right, and AE-01/AE-02 are about *where*
+it applies and *where* it is written down.
+
+### 43.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| AE-01 | Medium | plan §5.3.1, `reserve.py:143` | The `max()` is specified at the **global** level — "the global soft floor is `max(min_free_bytes, free_space.soft)`" — then handed to most-specific-wins inheritance. Two gaps. (a) **A percentage has no global value**: §5.3.1's own grammar makes `"10%"` a per-storage number ("one `"10%"` … demands 2 TiB and 200 GiB"), so with `soft: "10%"` and `min_free_bytes: 1 TiB` there is no single `max()` to take and no single "resolved floor" for the warning to name — the percentage wins on the 20 TiB LUN, the deprecated scalar on the 2 TiB one. (b) **A per-storage `free_space.soft` still silently lowers the deprecated floor**: fold-to-global-then-override means `storages[].free_space.soft: 100 GiB` beats a global `min_free_bytes: 1 TiB` on that storage — AD-01's hazard exactly, one level down, in the same mid-migration config shape. The built semantics settles both: `min_free_bytes` is applied today as a floor on *every* storage (`reserve.py:143`, `required = max(round(reserve_factor * largest), min_free_bytes)`), with no per-storage form, so resolving it per storage — `soft_s = max(soft_s_resolved, min_free_bytes)`, after percent conversion — preserves what the key means today *and* makes the percentage case well defined. The warning then says the deprecated floor applies as a lower bound to every storage instead of naming one number |
+| AE-02 | Medium | plan §11.1 | The new row is in the wrong table, and the table says so itself: §11.1's preamble reads "Every one of them is a failure that produces a clear error and a non-zero exit, **never a warning-and-continue** — a misconfigured balancer moving production disks is worse than one that refuses to start." The row immediately below it is a warn-and-continue *resolution* rule — the one `free_space` case §5.3.1 explicitly does not fail. An implementer working from §11.1 (where load-time rules are supposed to live) would make a both-set config a startup refusal, contradicting §5.3.1's "the old key keeps working" and turning the routine upgrade shape AD-01 is about into a hard stop. AD-01 asked for the rule to be normative alongside the other config rules; the table it landed in inverts its semantics. A short "resolution rules (warn and continue)" list under the table fixes it — the `free_space` rows that *are* errors stay where they are |
+| AE-03 | Medium | plan §12 (phase 13 row), `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, `config/drs.example.yaml` | The sweep AD-02 extended covers the tests but not the **shipped documentation** of the field being replaced. `docs/manual/27-plan.md:208` lists `resolves_reserve_violation` as a `moves[]` field of `--json` output and `:86-94` documents its meaning in prose; `docs/internals/96-payback.md:105` states the exemption normatively — "a plan containing any move with `resolves_reserve_violation=True` always passes the aggregate ratio test". §7.3 replaces both: the field becomes the per-move `repair` marker with a revert-test definition, and the exemption becomes plan-level. The manual's prose is not even a rename — it fuses the scheduling rule (§8.2 priority 1, which *keeps* the current-state form) with the payback exemption (which does not), so phase 13 has to split it in two. Neither file appears in the row, which says only "the manual documents the block" — a different edit, about `free_space`. AGENTS.md §8.0 (every shipped artefact stands without the plan) makes a stale `--json` field list and a false normative sentence a shipped defect, not a docs chore. The row also omits `config/drs.example.yaml`, which AD-01's rationale now leans on ("the new example config … spells out `free_space: soft: 0`"): it is a shipped artefact (§0, line 235) and today carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all |
+| AE-04 | Low | plan §12 (phase 13 row), §7.3 | Two more items the sweep list misses. (a) `evaluate_plan_payback()` has a **fifth** call site: `tests/unit/test_affinity_repair_fixture.py:226` calls it positionally with three arguments and asserts nothing about the flag — it breaks on the *signature* change the row now asserts, not on the flag removal, so "all four modules asserting the old flag" does not cover it. (b) `tests/corpus/*.expected.json` record the flag 41 times across the two bundles, and §7.3 sends the reader to §12's row for them ("re-validated in phase 13 with everything else that asserts the old flag — see §12's row") — but the row never mentions `tests/corpus/` |
+| AE-05 | Low | plan §7.3, §12 (phase 13 row), `cli.py:2374` | §7.3 triggers on "its final assignment's `Σ r_s`" without saying *which* final assignment, and the codebase has already decided this once: `cli.py:2374` evaluates `final_breakdown` against `schedule_result.final_assignment` — "the state reachable by the moves that actually got ordered … not an aspirational one a partial deadlock never reaches (REVIEW.md R-02)" — while the solver's own `.breakdown` is the target. A partially deadlocked plan can reach `Σ r_s = 0` in the target and not move the needle in the scheduled plan; taking the target would exempt a plan that does not repair. One clause, citing R-02, pins it. While there: the two numbers the row wants threaded in already exist at that call site — `ObjectiveBreakdown.reserve_statuses` carries `shortfall_bytes` per storage (`heuristic.py:103`, `:335`), and both `solve_outcome.initial_breakdown` and `final_breakdown` are in hand two lines above the `evaluate_plan_payback()` call. Naming that source makes the "data-flow change" actionable and bounds it: two sums over objects already passed to the benefit computation, no new plumbing through the solver |
+| AE-06 | Low | plan §5.3.1, §11.1 | Folding the deprecated key into `free_space.soft` also subjects it to the new `soft_s < C_s` **hard error**, and the `max()` rule can only raise the folded value. Today a `min_free_bytes` above some storage's capacity is not an error: `reserve.py:143` simply makes `R_s` unsatisfiable, that storage reports a permanent shortfall, and the tool keeps balancing (§9.5's unfixable-shortfall line is this case). After the fold the tool refuses to start — on upgrade, for a config that has been running. Defensible as typo-catching, but it is not "the old key keeps working". Either exempt the folded value from `soft_s < C_s` (warn, and let it report as an unfixable shortfall as today), or say in §5.3.1 that the fold deliberately promotes it to a startup error |
+| AE-07 | Info | plan §7.3 | The new bounding sentence says the trigger "requires an actual shortfall reduction, the same condition §6's override already singles out". Not the same condition: §6 fires on a storage **being** in violation at plan time, the outcome trigger on the plan **reducing** the total. The real relation is stronger and worth stating, because it is a migration-safety property: `Σ r_s` can only fall if some storage's `used_s` or `Z_s` falls, which requires a disk to *leave* that storage — and that storage was in violation. So every outcome-exempt plan is also exempt under today's `has_reserve_override`, and §6's override was already open for it: the change can only **remove** exemptions, never create one. The rarity argument survives intact (a subset of a rare condition is at least as rare), and "deliberately narrower" becomes a provable claim rather than a comparison |
+
+### 43.3 Assessment
+
+The commit does what its message says, and the two arithmetic fixes are right — including one
+line the AD-04 finding did not name, which only becomes consistent with the rest of §14.8 now.
+Nothing here reopens a decision: AD-01's `max()` is the correct resolution, AD-05's wide-side
+argument is honest about a real cost, and AD-06's qualification is exactly the scope the
+as-built code supports.
+
+**AE-01 is the one that should not ship as written.** It is the only finding left that can still
+lower a configured floor on a running cluster, and it does so through the two config shapes
+§5.3.1 itself blesses — a percentage soft, and a per-storage override. The fix is smaller than
+the rule it replaces: take the `max()` per storage after percent conversion, which is also
+precisely what `min_free_bytes` means in the built code today. AE-02 is next by cost-to-fix
+ratio (a misplaced row that tells an implementer to fail a config the prose says must keep
+working), then AE-03, which is the difference between phase 13 shipping with a manual that
+documents a `--json` field the code no longer emits.
+
+One structural note, since this is the third consecutive pass to find the same shape of defect:
+every one of AD-02, AE-03 and AE-04 is an *enumerated* sweep list that turned out to be one or
+two items short. The enumeration is the defect. Phase 13's row could say instead: "every file
+that mentions `resolves_reserve_violation` — `git grep -l` gives the list — is updated with it,"
+which is self-maintaining, shorter than the sentence it replaces, and today returns exactly the
+thirteen files at issue (four test modules, two corpus expected files, two shipped docs, three
+source modules, plus the plan and this file). The signature change needs its own grep — `git
+grep -l evaluate_plan_payback`, which is what surfaces AE-04's fifth call site, the one file
+that touches the function without ever naming the flag.
+
+---
+
+## 44. Resolution of twenty-second-pass findings (AE-01..AE-07)
+
+All seven findings are fixed in `IMPLEMENTATION_PLAN.md` (plan-only, as with the three commits the
+findings are about; phase 13 builds all of it). None is refuted — each was verified against the
+built code before fixing (`reserve.py:143`'s per-storage `max(round(f_s·largest), min_free_bytes)`,
+`95-schedule.md`'s documented fold of the same floor into the transient check, `27-plan.md`'s
+`--json` field list and fused prose, `96-payback.md:105`'s normative exemption sentence,
+`test_affinity_repair_fixture.py:226`'s positional call, the 41 corpus flag records,
+`cli.py:2374`'s R-02 comment), and both greps were run to confirm the file lists the structural
+note names.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AE-01 | Resolved | §5.3.1's fold is now per storage, after percent-to-bytes conversion: `soft_s = max(soft_s_resolved, min_free_bytes)` for every storage. The paragraph states both reasons: the built key is a floor on *every* storage (`reserve.py` applies it per storage, and the built transient check charges it on every in-flight state the same way), and a percentage has no global value to fold into (`"10%"` is 2 TiB on one LUN and 200 GiB on another). The warning now reports the deprecated key as a lower bound on every storage rather than one resolved number, and the paragraph notes the transient side needs no rule of its own (`hard: null` default keeps §8.1 exactly as strong as the built check). Phase 13's row carries the same per-storage fold. |
+| AE-02 | Resolved | The both-set rule is out of §11.1's hard-error table and into a new "Resolution rules (warn and continue)" list directly under it, which states explicitly that everything in the table is a hard error and that these two situations are resolutions that warn and continue by design. The `free_space` rows that are errors stay in the table. |
+| AE-03 | Resolved | Phase 13's row no longer enumerates the sweep: it is defined by `git grep -l resolves_reserve_violation` (with today's file list recorded: three source modules, four test modules, both corpus expected bundles, `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, plus the plan and REVIEW.md) and `git grep -l evaluate_plan_payback` (adding `test_affinity_repair_fixture.py` and `docs/internals/00-overview.md`). The row names the manual's prose as a *split*, not a rename — its scheduling half keeps §8.2 priority 1's current-state form, its exemption half becomes the plan-level outcome trigger — and adds `config/drs.example.yaml` to the phase (it gains the `free_space` block in the same commit; today it carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all). |
+| AE-04 | Resolved | Both sub-items are covered by the grep-defined sweep: the fifth `evaluate_plan_payback` call site (`test_affinity_repair_fixture.py`, whose positional three-argument call breaks on the signature change without ever naming the flag) is named explicitly in the row as the reason the second grep exists, and the corpus bundles are in the first grep's recorded list. |
+| AE-05 | Resolved | §7.3 pins "final assignment" to the **scheduled** one — `schedule_result.final_assignment`, the same R-02 distinction the payback benefit already draws — and says why: a partially deadlocked plan is scored on what it will really run, and a plan whose target repairs but whose schedule never gets there is not exempt. §5.3 point 3 and the revert-test sentence carry the same pinning. Phase 13's row names the data source for the threaded sums: `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses`, with `solve_outcome.initial_breakdown` and the R-02 `final_breakdown` already in hand at the call site — two sums over objects already passed to the benefit computation, no new plumbing through the solver. |
+| AE-06 | Resolved | §5.3.1 states the deliberate non-promotion: the fold does not subject the deprecated value to the `soft_s < C_s` startup error — a `min_free_bytes` above some storage's capacity has never been a startup failure (the built code reports it as that storage's permanent shortfall, §9.5), and "the old key keeps working" cannot mean a running config refuses to start on upgrade. The error applies to the new knob's own value; an oversized deprecated floor warns and reports as the unfixable shortfall it always was. The rule is also the second entry of §11.1's new resolution list. |
+| AE-07 | Resolved | §7.3's bounding sentence now states the strict-subset property instead of the "same condition" claim: `Σ r_s` can only fall if some storage's `used_s` or `Z_s` falls, which requires a disk to *leave* that storage — and a storage whose shortfall a move reduces was in violation when the move left it — so every outcome-exempt plan is also exempt under today's `has_reserve_override` and §6's override was already open for it. The change can only remove exemptions, never create one, which is what makes "deliberately narrower" a provable claim rather than a comparison. The rarity argument survives (a subset of a rare condition is at least as rare). |
 
 Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
 `docs-check` (the plan PDF rebuilt and re-stamped in the same commit as the Markdown, per
