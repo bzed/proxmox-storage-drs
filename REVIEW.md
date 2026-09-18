@@ -327,6 +327,25 @@ scoping the claim to the plan endpoint, AF-05 by fixing the example config's val
 `soft: 0` / `hard: null` — and AF-06 recorded rather than rewritten, because it is a defect in
 a commit message already in history.
 
+A **twenty-fourth pass** (section 47) reviews the accumulated `feat/free-space-requirements`
+branch as a whole — the full diff of `IMPLEMENTATION_PLAN.md` against `main` (five commits: the
+§5.3.1 redesign plus the AC-, AD-, AE- and AF-fix rounds), rather than the individual commits
+passes 20-23 already covered. Per §46's own request it re-checks the AF fixes (all six hold),
+re-runs the three sweep greps the phase-13 row is defined by (all three recorded lists exact),
+and re-derives §5.3.1/§7.3/§8.1/§14.8's arithmetic against the final accumulated text. Eight
+findings (AG-01..AG-08) are identified — five Low, three Info, none reopening a design decision.
+The headline is a §14.8 parenthetical whose payback arithmetic does not verify: the as-built
+one-move repair's benefit is negative (−6.2×10⁴ load·s) and it passes payback only via the same
+exemption the sentence implies it does not need.
+
+All eight are **resolved** (section 48), none refuted. Each was re-checked before being accepted
+— AG-01 by re-deriving all three §14.8 assignments from §5.3/§5.4/§7.1-7.2 (the table in §48
+reproduces every figure the plan states, and the one it does not), AG-04 against
+`payback.py:352-354` and `cli.py`'s execution gate, where the composition hole is real in the
+built code as well as in the specification. Two are fixed wider than the finding asked: AG-02 had
+a second instance of the same stale attribution one paragraph further down, and AG-04's fix
+covers the saturation deferral alongside the duration rejection.
+
 ---
 
 ## 0. Overall assessment
@@ -6250,6 +6269,384 @@ verification: a later pass should re-check it the way §45 re-checked §44.
 Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
 `docs-check` (the plan PDF rebuilt and re-stamped alongside the Markdown, per AGENTS.md §7.4).
 No production code changed; every fix is to the plan text and to this file.
+
+---
+
+## 47. Twenty-fourth-pass review — the free-space branch as a whole
+
+Reviewed the accumulated `feat/free-space-requirements` branch against `main`: the full diff of
+`IMPLEMENTATION_PLAN.md` (+477/−21 over five commits — `9b44ba9`'s §5.3.1 redesign and the
+`15a8982`/`0feb648`/`2622e6b`/`b089bc6` AC/AD/AE/AF fix rounds), REVIEW.md's own passes 20-23,
+and the rebuilt PDF stamps. The four fix commits were each reviewed on landing (§§39, 41, 43,
+45); this pass reviews what none of them could see — the final accumulated text, where four
+rounds of fixes sit on top of one another — and, per §46's own request ("a later pass should
+re-check it the way §45 re-checked §44"), independently verifies the AF fixes, whose finder and
+fixer were the same reviewer.
+
+The accumulated design is sound and, for the first time in this feature's history, internally
+consistent on every load-bearing rule: the grammar, the two-level `null` semantics, the
+per-storage fold, the validate-as-written-then-fold order, the outcome trigger and the revert
+test now say the same thing in §5.3, §5.3.1, §7.3, §11.1, §12 and §14.8. What remains is
+residue of the fix rounds themselves: one number in §14.8 that does not verify (AG-01), three
+sentences that survived a later fix's blast radius (AG-02, AG-03, AG-06), one composition edge
+the newly precise trigger definition left unpinched (AG-04), and two small specification gaps
+(AG-05, AG-08).
+
+### 47.1 Verification run
+
+- `make check` at branch tip (`b089bc6`): green end to end — fmt-check, lint, typecheck,
+  **941 passed, 1 warning**, **96.38% line coverage**, `generate_expected.py --check` OK,
+  `validate_corpus.py --check` OK, and the PDF stamp matching the Markdown
+  (`sha256sum --check docs/IMPLEMENTATION_PLAN.pdf.sha256` → OK).
+- **All three sweep greps re-run; the phase-13 row's recorded lists are exact.**
+  `git grep -l resolves_reserve_violation` → 13 files, exactly the row's list (3 source modules,
+  4 test modules, both corpus expected files, `docs/manual/27-plan.md`,
+  `docs/internals/96-payback.md`, the plan, this file). `git grep -l evaluate_plan_payback` → 9
+  files; relative to the first list it adds exactly `test_affinity_repair_fixture.py` and
+  `docs/internals/00-overview.md`, as recorded. `git grep -l min_free_bytes` → **30 files**,
+  matching the row's count and its enumeration category by category (8 `src/` files — `config`,
+  `reserve`, `heuristic`, `schedule`, `optimize`, `execute`, `cli`, `collect`; 7 test modules —
+  including `test_gates.py` and `test_reserve.py`, which no enumeration had ever named; both
+  corpus `config.yaml` replay inputs; `config_schema.json`; `config/drs.example.yaml`; 4 manual
+  pages; 3 internals pages; both `.agents/` files; the plan and this file). No file outside the
+  recorded sweep.
+- **The row's artefact claims verified**: `config/drs.example.yaml:196` carries
+  `min_free_bytes: 0` under `snapshot_reserve` with no `free_space` block anywhere, exactly as
+  the row states; the corpus expected files record `resolves_reserve_violation` **41 times, all
+  `false`**, exactly as §7.3's fc-tier1 paragraph claims.
+- **§14.8 re-derived in full against the final text** (the pass-20/21/22 tradition, on the
+  accumulated wording rather than per commit): the initial table (`r_packed = 10.5 − 10 = 0.5`,
+  free 2.5/3.2/9.0), `b̄ = 0.51`, gate 127% (1.2745), `F_before = 0.82/0.51 = 1.6078`, both
+  `Σ r = 0` candidates with the γ tiebreak (5.2828 vs 5.3078 — the uniqueness claim holds), the
+  final table (roomy 6.3 used, `Z = 0.5`, free 3.7), `E: 0 → 4.10`, `F → 0.62/0.51 = 1.2157`,
+  benefit `(−4.1 + 0.098) × 31 536 000 = −123 114 071 ≈ −1.23×10⁸`, cost 15 728.64, ratio
+  **−7 827.4**, the soft:0 counterfactual optimum 0.8039, both `hard`-sweep orders (10.3 > 10
+  infeasible; 5.0, 9.3, 7.3 all ≤ 10; the 2.7-TiB dip and the 3.7 endpoint), and both
+  revert-test scores (holding `601` → `Σ r = 0.5`; holding `603` → 0.3 — both moves marked
+  `repair: true`, which §7.3's marker rule and §14.8's text are jointly consistent on). Every
+  number checks — **except the as-built one-move parenthetical (AG-01)**, whose benefit is
+  negative where the plan says positive.
+- **AE-07's strict-subset property re-proven from the accumulated definitions**: `Σ r_s` is a
+  sum of non-negative per-storage slacks; each `r_s` depends only on `used_s`, `Z_s` and the
+  fixed `R_s = max(f_s·Z_s, soft_s)`; so `Σ r_s` strictly falling requires some `r_s` to fall,
+  which requires a managed disk to leave that storage, and that storage had `r_s > 0` in the
+  current assignment — the exact condition `has_reserve_override` and §6's override test. Every
+  outcome-exempt plan is exempt today; the change only removes exemptions.
+- **The AF fixes all hold** as §46 records them: the schema listed first with its shape (AF-01),
+  the third grep and its 30 files (AF-02), the validate-then-fold paragraph with both §11.1 rows
+  qualified (AF-03), the scoped "plan-endpoint" claim (AF-04), `soft: 0`/`hard: null` with the
+  load-bearing reason (AF-05), and the "phase 13's own commit" wording (AF-06). §46's
+  self-verification is accurate on every row.
+
+### 47.2 Findings summary
+
+| ID | Severity | Location | Summary |
+|----|----------|----------|---------|
+| AG-01 | Low | §14.8 | The as-built one-move parenthetical "(objective 1.081, positive benefit, payback passes)" does not verify: the plan's benefit is **−61 835 load·s** (`α·ΔE + δ·ΔF = −0.10 + 0.098 < 0`; ratio −11.8; the aggregate test fails at λ·cost = 52 429), and it passes payback only via the repair exemption — which its own `Σ r_s: 0.5 → 0` grants under both the built override and the outcome trigger. The sentence's contrast (as-built passes on merit; "the negative benefit and the whole exemption demonstration depend on phase 13") is wrong in both halves: both variants have negative benefit and both are exemption cases; the format rule changes the plan's *shape* (two moves, the indirect repair, the revert-test marker), not its exemption status |
+| AG-02 | Low | §5.3.1 | The percentage grammar's stale dash-clause: the bullet narrows to `0 ≤ N < 100` (AC-09's fix) and then says "`100%` is rejected by §11.1's `soft_s < C_s` rule rather than accepted here and failed there" — the pre-AC-09 mechanism, contradicting the grammar bound in the same bullet, §11.1's own row (which carries `0 ≤ N < 100` as a load-time rule), and AC-09's recorded resolution ("rejected by the grammar itself"). Parse-time and inventory-time rejection are different error surfaces; the plan names both |
+| AG-03 | Low | §5.3 point 3 | "decided on the plan's outcome ... **exactly as** the built `payback.py`'s `has_reserve_override` short-circuits the aggregate test" equates the new outcome trigger with the built source-violating trigger that §7.3, five sections later, explicitly calls narrower-than-built — the mirror image of AE-07's "same condition" claim. A reader of §5.3 alone — the section an implementer builds (C5)'s repair semantics from — would implement (or believe already built) the wrong trigger |
+| AG-04 | Low | §7.3 | The trigger is pinned to `schedule_result.final_assignment`, but duration-rule rejections happen at the payback gate, *after* scheduling: a repair move exceeding `max_single_move_duration` sits in the order, makes the scheduled assignment repairing, grants the exemption, is then dropped as refused — and the remaining balance moves execute with no economic test on a plan that no longer repairs. The transient-invariant half is self-consistent (`order_moves` enforces §8.1, so a breaching move never reaches the order); the duration half is the hole |
+| AG-05 | Low | §9.5, §7.3, §16.6 | The exemption has no specified machine-readable surface: the pending note names only the per-move `repair` field reaching `--json`; the plan-level exemption note exists only in the human sample, nothing emits the `Σ r_s` pair it could be derived from (the X-07/Y-04 gap), and the corpus expected files' "payback arithmetic" would conflate accepted-on-merit with accepted-by-exemption in a bare `accepted: true` — the exact distinction §14.8's demonstration turns on |
+| AG-06 | Info | §13 | The hazard row's "its repair moves are scheduled first" is contradicted by §14.8's own worked example: `603 → swapme` is marked `repair: true` and scheduled *second* — exception 1 (built, and kept by phase 13) ranks only the direct repair first; the indirect, revert-test-marked repair waits for exception 2, which is spec-only and not scoped in phase 13 |
+| AG-07 | Info | §14.8 | Fix-round residue: the capacity-gate rationale appears twice (the "Second," prerequisite paragraph AC-04 added, and the original parenthetical it paraphrases), and the `hard: "10%"` bullet scopes roomy's dip "for the duration of the mirror" — 601's mirror — when the dip (7.3 used, 2.7 free) persists until 603's source release, through 603's entire mirror. The invariant claims are unaffected |
+| AG-08 | Info | §3.5 | `verify-storages` is untouched by the branch: it reports `saferemove`, sizes and the largest disk, but not the resolved per-storage `soft_s`/`hard_s` — the number that now drives the §6 override, the §7.3 exemption and §9.5's shortfall lines, and the one place where a percentage, a pattern-level setting and the deprecated-key fold resolve differently per LUN. Phase 13 does not scope it |
+
+### 47.3 AG-01 — the as-built one-move parenthetical's payback arithmetic does not verify
+
+**Severity:** Low
+**Where:** §14.8, the "Two prerequisites" paragraph.
+
+The sentence: "under that as-built behaviour the fixture's optimum is the *one*-move repair
+`601:scsi0 packed → swapme` (objective 1.081, positive benefit, payback passes) — the two-move
+shape, the negative benefit and the whole exemption demonstration depend on phase 13 landing the
+format rule first."
+
+The objective figure verifies (1.0809 = `E 0.10 + β 0.25 + γ 0.025 + δ·F 0.706`). Neither payback
+claim does. The one-move plan relocates the ℓ = 0.05 disk off a perfectly balanced group: loads
+become 2.00/2.05/2.10 (`E: 0 → 0.10`, so `ΔE = −0.10`) and fills become 0.70/0.68/0.15
+(`F: 1.6078 → 1.4118`, so `ΔF = +0.196`), giving
+
+```
+benefit = (α·ΔE + δ·ΔF) · H = (−0.10 + 0.5 × 0.196) × 31 536 000 ≈ −6.2×10⁴ load·s
+cost    = 2 × (0.5 TiB / 200 MiB/s) = 5 243 load·s
+ratio   = −11.8   <   λ = 10   → the aggregate test REJECTS
+```
+
+(Computed with the same script that reproduces every other §14.8 number to the digit.) The plan
+passes payback anyway — **via the exemption**: its final `Σ r_s` is also 0 (packed 7.0 + 3.0 =
+10.0, swapme 1.5 + 3.0 = 4.5), so both the built `has_reserve_override` (601's source is
+violating at scheduling time) and §7.3's outcome trigger (0.5 → 0) exempt it. So "positive
+benefit" is false, "payback passes" is true only for the reason the same sentence says the
+two-move variant alone needs, and the dash-clause is wrong on two of its three items: the
+negative benefit and the exemption demonstration do *not* depend on the format rule — the
+one-move counterfactual has both. What actually depends on it is the plan's *shape*: two moves
+instead of one, the indirect repair, the revert-test marker and the `hard`-sweep ordering flip.
+
+The claim entered the plan through AC-03's own finding text ("objective ≈ 1.081, Σ r_s = 0,
+positive benefit, payback passes") and was copied into §14.8 by the AC fixes unverified; the
+twentieth pass's verification run (§39.2) re-derived the two-move, counterfactual and γ-tiebreak
+numbers but never the one-move *payback* figures. This is AA-03/AB-02's class — a §14 number
+that does not hand-derive — with a behavioural edge: an implementer writing the fixture's
+partial-landing test from this sentence would assert the aggregate test passes and find that it
+does not. Inert to the mechanism the sentence serves (the `requires_format_eligibility: true`
+loud-failure marker does not depend on the payback numbers), hence Low.
+
+**Recommendation:** correct the parenthetical to "(objective 1.081, benefit ≈ −6.2×10⁴ load·s —
+it too passes only via the repair exemption)" and re-scope the dash-clause to what actually
+depends on the format rule: "the two-move shape, the indirect repair and both `hard`-sweep
+orders".
+
+### 47.4 AG-02 — the percentage bullet names two rejection mechanisms for one typo
+
+**Severity:** Low
+**Where:** §5.3.1, the grammar's percentage bullet.
+
+The bullet reads: "a string ending in `%` (`"10%"`), resolved as `round(C_s · N/100)` against
+*that storage's own capacity*, with `0 ≤ N < 100` — `100%` is rejected by §11.1's `soft_s < C_s`
+rule rather than accepted here and failed there." AC-09 narrowed the grammar to `N < 100`
+precisely so that, per its own recorded resolution (§40), "`100%` is rejected by the grammar
+itself rather than accepted here and failed by `soft_s < C_s` later" — and the trailing clause,
+which predates that fix, still attributes the rejection to the old mechanism. As the bullet now
+stands it contradicts itself (the bound rejects N = 100 at parse time; the clause says the
+semantic check does), contradicts §11.1's own row (which carries `0 ≤ N < 100` as a load-time
+validation rule), and specifies two different failure surfaces for the same typo: a
+config-parse error at load time versus the inventory-load error the `soft_s < C_s` row itself
+describes ("caught only once the inventory is loaded"). An implementer must pick one, and a test
+writer cannot know which failure mode a `"100%"` config should produce.
+
+**Recommendation:** one clause — "`100%` is rejected by the grammar itself, so §11.1's
+`soft_s < C_s` rule never needs to see it" — or delete the clause outright (§11.1's row already
+carries the bound).
+
+### 47.5 AG-03 — §5.3 point 3's "exactly as" equates the outcome trigger with the built one
+
+**Severity:** Low
+**Where:** §5.3 (C5)'s mandate paragraph, point 3.
+
+"The exemption is **plan-level** — decided on the plan's outcome, the `Σ r_s` of the scheduled
+assignment it ends at ... against the current assignment's — **exactly as** the built
+`payback.py`'s `has_reserve_override` short-circuits the aggregate test for a plan containing a
+reserve-resolving move." §7.3, five sections later, says the opposite about the same built
+function: "This is deliberately narrower in its trigger than the built `payback.py` already
+implements (`has_reserve_override` fires when *any* move's source was violating at scheduling
+time — a plan that moves a disk off a violating storage but ends no less short is exempt today
+and will not be under the outcome trigger)". The two sections share a plan-level *shape*
+(skip the aggregate test for the whole plan) but not a *trigger*, and "exactly as" asserts
+equivalence of the whole exemption. This is AE-07's mirror image: that pass replaced §7.3's
+"same condition" claim with the strict-subset property, and §5.3's phrase survived because
+grammatically it can be read as attaching to "short-circuits the aggregate test". But §5.3 is
+the section an implementer builds (C5)'s repair semantics from, and the risk is the
+T-03/V-01 family: confident prose describing machinery that works differently — here, a reader
+would either implement the source-violating trigger to match what they believe is built, or
+assume no change is needed because it already works that way.
+
+**Recommendation:** "— in the same plan-level way as the built `payback.py`'s
+`has_reserve_override` short-circuits the aggregate test, a trigger §7.3 then deliberately
+narrows."
+
+### 47.6 AG-04 — the exemption is granted on a schedule the duration rule then amputates
+
+**Severity:** Low
+**Where:** §7.3.
+
+The trigger's evaluation point is pinned (AE-05): the scheduled assignment,
+`schedule_result.final_assignment`. But the three hard per-move rules fire at the payback gate,
+*after* scheduling — the built gate drops `rejected_moves` from the order and only then consults
+`aggregate_ok` (the S-02 fix), and §7.3 keeps that shape ("the three hard rules above still
+apply to every move in an exempt plan"). Compose them: a repair move whose `duration_d` exceeds
+`max_single_move_duration` **is in the order** — scheduling knows nothing of the duration rule —
+so the scheduled assignment repairs, the outcome trigger grants the plan-level exemption, the
+gate then drops the repair move as refused, and the remaining balance moves — the ones the
+aggregate test exists to price — execute with no economic test, on a plan that no longer
+repairs and whose shortfall §9.5 now reports as unmet. The transient-invariant half of the same
+sentence is self-consistent by construction (`order_moves` enforces §8.1, so a
+transient-breaching move deadlocks out of the order and the trigger already scores the real
+schedule); the duration half is the hole. The closing sentence ("A repair that cannot finish
+inside `max_single_move_duration` ... is rejected like any other move and the shortfall
+reported as unfixable") addresses the move's fate, not the exemption of what remains. The same
+composition exists in the built override today, but phase 13 is the moment the trigger acquires
+a precise evaluation point, and the pinning should say which move set it scores.
+
+**Recommendation:** one sentence in §7.3: the trigger is evaluated on the order *after* the
+hard per-move rules' refusals — the plan's outcome is what it will actually run — with the
+phase-13 row naming where in `cli.py`'s gate sequence the sums are taken (after
+`_apply_payback_gate`'s drops, not before).
+
+### 47.7 AG-05 — the exemption has no machine-readable surface
+
+**Severity:** Low
+**Where:** §9.5's pending note, §7.3, §16.6 check 4.
+
+§9.5's "As built, phase 13 pending" note names exactly one JSON arrival: "The
+`repair: true`/`false` field likewise reaches `--json` only with phase 13". The exemption
+itself — the fact that the aggregate test was skipped, which §7.3 calls the plan's headline
+verdict and §9.5's human sample renders as the note under the payback line — has no specified
+`--json` field, and nothing emits the before/after `Σ r_s` from which it could be derived:
+`plan --json` carries no reserve-shortfall totals (the X-07/Y-04 gap, already documented twice
+in this file), and the per-move marker alone cannot distinguish "accepted, and would have
+passed anyway" (fc-tier1) from "accepted only because exempt" (§14.8) — the exact distinction
+§14.8's demonstration turns on. Downstream, §16.6's check 4 records "the payback arithmetic"
+per variant in the corpus expected files, where a bare `accepted: true` would conflate the two
+cases in a regression artefact. The cheapest closure rides with AE-05's data flow: the current
+and final slack are already threaded to `evaluate_plan_payback()` in phase 13 — one
+serialization of either the flag or the two sums into the payback block, named in §9.5's
+pending-note list.
+
+### 47.8 AG-06 — §13's "repair moves are scheduled first" vs §14.8's own second-scheduled repair
+
+**Severity:** Info
+**Where:** §13, the `free_space.soft` hazard row.
+
+The row: "a repairing plan is payback-exempt (§7.3) and its repair moves are scheduled first".
+§14.8's preferred order schedules `601 → roomy` first (exception 1: its source is violating)
+and `603 → swapme` — marked `repair: true` by the very test §7.3 defines — *second*, and §14.8
+says so ("exception 2 applies to that move too ..., but rule 1 outranks rule 2"). Exception 1
+is a current-state rule and cannot rank an indirect repair; exception 2, which would, is
+spec-only and explicitly not scoped in phase 13. "Its *direct* repair is scheduled first" is
+what both the build and phase 13 deliver; the unconditional plural over-promises against the
+plan's own worked example.
+
+### 47.9 AG-07 — two fix-round residues inside §14.8
+
+**Severity:** Info
+**Where:** §14.8.
+
+(a) The capacity-gate rationale now appears twice: the "Second, ..." prerequisite paragraph
+AC-04's fix added ("the group's fills (0.75/0.68/0.10) put the capacity gate at ... 127%, far
+above the 25% default — the gate is what lets the engine *plan* here, and the fixture sets
+`gates.capacity_spread_threshold: null` ...") and the older parenthetical after the initial
+state ("The capacity gate is open on this group — 127%, above — which is why the fixture nulls
+it: the gate's ACT is what lets the engine plan ..."), which the fix paraphrased rather than
+replaced. (b) The `hard: "10%"` bullet scopes roomy's dip "below its 3.0 soft requirement for
+the duration of the mirror" — 601's mirror — but the dip (roomy at 7.3 used, 2.7 free) begins
+with 601's target allocation and persists until 603's *source release*, i.e. through 603's
+entire mirror and drain; "for the duration of the repair" would be accurate. Both invariant
+claims (never below `hard`; endpoint back to 3.7) are unaffected, as is every number.
+
+### 47.10 AG-08 — `verify-storages` does not surface the resolved requirement
+
+**Severity:** Info
+**Where:** §3.5, `pve-storage-drs verify-storages`.
+
+The branch touches every consumer of the free-space policy except the one command whose §3.5
+charter is storage-config diagnosis: `verify-storages` reports `type`, `shared`, `content`,
+`saferemove`, throughput, sizes and the largest disk, but not the resolved per-storage
+`soft_s`/`hard_s` — the number that now drives the §6 override, the §7.3 exemption and §9.5's
+shortfall lines, and the one quantity whose *derivation* (pattern expansion, percentage
+conversion against each LUN's own capacity, the deprecated-key fold) an operator cannot
+predict without exactly the display this command exists to provide. §3.5's own justification
+for showing the pattern expansion there — "so an over-broad or dead pattern is visible before
+any plan relies on it" — is the same argument one feature later. Not a defect (once phase 13
+lands, `show-load`/`plan` reserve status carries the shortfall), but phase 13's row does not
+scope it, and the row is where it would naturally belong.
+
+### 47.11 What this pass confirms
+
+- **The accumulated text is self-consistent on every rule the four fix rounds touched**: the
+  grammar ↔ §11.1's rows ↔ the resolution list; the fold's position ↔ both row qualifications;
+  the two `null`s; the trigger ↔ the marker ↔ §5.3 point 3's numbers; §8.1's predicate ↔
+  §14.8's two orders; the phase-13 row ↔ the greps that define it (verified exact, all three).
+  Passes 20-23 each fixed the commit in front of them; this pass confirms the fixes compose.
+- **§46's self-verification is accurate.** All six AF resolutions hold as described, including
+  the two a same-person fix is most likely to overstate: AF-02's 30-file list is exact to the
+  file, and AF-03's ordering constraint is carried in all three places it needs to be (§5.3.1,
+  both §11.1 rows, the row).
+- **§14.8's specified arithmetic verifies to the digit**, including the γ tiebreak's second
+  candidate (5.3078), both `hard`-sweep orders, and both revert-test scores — the fixture's
+  future generator has a fully checked target. The one failure (AG-01) is in the *as-built
+  counterfactual* paragraph, the only part of §14.8 no previous pass had computed.
+- **AE-07's strict-subset property holds as a proof**, not a plausibility argument, on the
+  accumulated definitions — and AG-03 notwithstanding, it is stated correctly in §7.3 itself.
+- **The branch's process discipline held where the eighteenth pass's did not**: five commits,
+  each on the feature branch, each rebuilding and re-stamping the PDF in the same commit
+  (AF-06's commit-message erratum aside — already recorded in §46), no production code touched,
+  `make check` green at tip.
+
+### 47.12 Assessment
+
+Four fix rounds in five commits have converged: every design decision this review series has
+examined — the outcome trigger over the per-move exemption, the revert test as marker rather
+than trigger, the per-storage fold, the validate-as-written-then-fold order, the strict-subset
+property — survives independent re-derivation from the final text, and the grep-defined sweeps
+that replaced three consecutive passes of one-short enumerations are exact against the tree.
+What is left is small and mostly cosmetic: one wrong parenthetical (AG-01, the only §14.8
+number that fails verification, and the one an implementer writing the partial-landing test
+will read), two stale sentences naming superseded mechanisms (AG-02, AG-03), one scheduling
+claim §14.8 itself contradicts (AG-06), one edge to pinch while the trigger is being
+implemented (AG-04 — a sentence, but one that decides whether an economic test runs at all in
+its corner), and two gaps an afternoon covers (AG-05's JSON field, AG-08's display line). Fix
+AG-01 before phase 13 starts; AG-02/AG-03/AG-04 belong in phase 13's specification tidying;
+the rest is optional. None of the eight blocks the branch's purpose: the free-space
+requirements design is now specified completely enough to build.
+
+---
+
+## 48. Resolution of twenty-fourth-pass findings (AG-01..AG-08)
+
+All eight are fixed in `IMPLEMENTATION_PLAN.md`. Every one was independently re-checked against
+the plan text and, where it makes a claim about behaviour, against `src/` before being accepted —
+none was taken on the finding's own word, and none was refuted. Two are fixed slightly wider than
+the finding asked: AG-02 had a second instance the finding did not name, and AG-04's fix covers
+the saturation deferral as well as the duration rejection, which have the same shape.
+
+**Verification of AG-01 before fixing it.** The §14.8 fixture was re-derived from scratch — all
+three assignments (current, the as-built one-move optimum, the two-move optimum) scored against
+§5.3 (C5)/(C6)/(C7), §5.4 and §7.1/§7.2 with the fixture's own weights (`α = 1.0`, `β = 0.25`,
+`γ = 0.05`, `δ = 0.5`, `f = 2.0`, `soft = 3.0`, `H = 365d`, `λ = 10`, 200 MiB/s, `ω = 2`):
+
+| | used | loads | `E` | `F` | `Σ r_s` | objective | benefit | cost | ratio |
+|---|---|---|---|---|---|---|---|---|---|
+| current | 7.5 / 6.8 / 1.0 | 2.05 / 2.05 / 2.05 | 0 | 1.6078 | 0.5 | 0.8039 | — | — | — |
+| one-move (as built) | 7.0 / 6.8 / 1.5 | 2.00 / 2.05 / 2.10 | 0.10 | 1.4118 | 0 | 1.0809 | **−61 835** | 5 243 | **−11.79** |
+| two-move (with C2) | 7.0 / 6.3 / 2.0 | 2.00 / 0.05 / 4.10 | 4.10 | 1.2157 | 0 | 5.2828 | −123 114 071 | 15 729 | −7 827.4 |
+
+Every figure §14.8 states is reproduced to the digit — the initial table, `b̄ = 0.51`, both
+objectives, the `soft: 0` counterfactual's 0.8039, the two-move benefit/cost/ratio. The only
+figure that is *not* reproduced is the one AG-01 names: the as-built one-move plan's benefit is
+**−61 835 load·s**, not positive, its ratio is −11.79 against `λ = 10`, and the aggregate test
+therefore fails on it (`λ·cost = 52 429`). It clears the gate through the repair exemption, its
+own `Σ r_s` falling 0.5 → 0 — which both the built `has_reserve_override` (601's source is
+violating when the move leaves it) and §7.3's outcome trigger grant. The finding is exactly
+right, including its reading of why the dash-clause is wrong in two of its three items.
+
+**Verification of AG-04 against the built pipeline.** The composition hole is real in the code as
+well as in the specification. `payback.py:352-354` computes `aggregate_ok = has_reserve_override
+or benefit >= λ·cost` and `rejected` from `exceeds_max_duration` in the same call, and
+`cli.py`'s execution gate then tests `aggregate_ok` *first* and only afterwards filters
+`rejected_moves | deferred_moves` out of the order (`excluded_keys`, the S-02 fix). So a plan
+whose repair move exceeds `max_single_move_duration` today: sets the override, passes
+`aggregate_ok`, loses the repair move to the filter, and executes its remaining balance moves
+with no economic test on a plan that no longer repairs. Phase 13 inherits the shape unless the
+trigger's evaluation point says otherwise, which is what AG-04 asked for.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AG-01 | Resolved | §14.8's as-built parenthetical now states the arithmetic instead of asserting the opposite of it: objective 1.081, `E: 0 → 0.10` against `F: 1.608 → 1.412`, benefit ≈ −6.2×10⁴ load·s against a 5 243 load·s cost, ratio −11.8, clearing the gate only through the same repair exemption the two-move plan needs (its own `Σ r_s: 0.5 → 0`, which both the built override and the outcome trigger fire on). The dash-clause is re-scoped to what actually depends on the format rule — the plan's **shape**: the two-move repair, the indirect repair the revert test marks, and both `hard`-sweep orders — with "not its economics" said outright, since the one-move counterfactual carries the negative benefit and the exemption too. |
+| AG-02 | Resolved, and wider | The grammar bullet now attributes the rejection to the grammar itself, at config-parse time, and names §11.1's `soft_s < C_s` rule as the *other*, inventory-time surface it therefore never reaches. **A second instance the finding did not name got the same fix**: §5.3.1's "Two validation rules" paragraph closed with "Percentages above 100 are therefore rejected by the same rule", the identical pre-AC-09 attribution, and now says they never reach that rule. Fixing only the bullet would have left the contradiction one paragraph further down. |
+| AG-03 | Resolved | §5.3 point 3's "exactly as" is gone. The sentence now says the exemption is plan-level *in the same way* the built `has_reserve_override` short-circuits the aggregate test for the whole plan, but on a deliberately **narrower trigger** than that flag's "some move's source was violating at scheduling time" — with a pointer to §7.3, which states the difference and proves the strict subset, and an explicit "do not read 'plan-level' as 'already built'" for the implementer who reads §5.3 alone. |
+| AG-04 | Resolved | §7.3's pinning gains the move set, not just the assignment: "what it will really run" is defined as *after* the hard per-move rules have taken their moves out, the sums are taken over the order minus the refused and deferred moves, and the reason it is well-defined is stated (neither refusal depends on the exemption — both are per-move verdicts on `cost_d`/`duration_d`, computed before the aggregate test is consulted). The saturation deferral is covered alongside the duration rejection: same shape, same hole. §8.1's transient invariant is explicitly excluded, since `order_moves()` enforces it while building the order. Phase 13's row carries the implementation consequence: the refusal computation that today lives inside `evaluate_plan_payback()` must produce its verdicts *before* the trigger's sums are taken, and `_execute_group_plan()`'s `excluded_keys` filtering stops being the only place the drop is applied. |
+| AG-05 | Resolved | §9.5's pending note now specifies the surface: `repair_exempt` plus the `reserve_shortfall_bytes_before`/`_after` pair the trigger is computed from, in `--json`'s payback block. The note says why the existing fields do not cover it (`aggregate_ok`/`accepted` do not say *why* the test passed; the per-move `repair` markers cannot, since the redundant-repair plan is exempt with no marked move) and concedes the one thing the finding did not: a consumer *can* re-derive it as `aggregate_ok and ratio < λ`, but only by supplying a `payback_ratio` the block does not carry — re-deriving a verdict the tool already reached is not a specification. The pair is also the first instalment on §16.6's X-07/Y-04 gap: it makes check 2's `Σ r_s = 0` invariant checkable from `plan --json` without the emitted order, and lets check 4's expected files distinguish accepted-on-merit from accepted-by-exemption. Named in phase 13's row too. |
+| AG-06 | Resolved | §13's `free_space.soft` hazard row now says the **direct** repair — the move off the short storage — is scheduled first, cites §8.2 exception 1 as the rule that does it, and says an *indirect* repair waits for the spec-only exception 2, "as §14.8's second move shows". The row and the worked example now agree. |
+| AG-07 | Resolved | (a) The older capacity-gate parenthetical no longer restates the 127% figure and the fixture's nulling of the gate — it keeps only what the prerequisite paragraph does not say (the gate's ACT lets the engine plan, the requirement makes the solver move, and the isolation claim is about the objective rather than the gate stack) and points at the prerequisite for the arithmetic. (b) The `hard: "10%"` bullet's dip is re-scoped from "for the duration of the mirror" to its actual span: from `601`'s target allocation until `603`'s source volume is observed gone — both mirrors and the drain between them. No number changed; both invariant claims were already correct. |
+| AG-08 | Resolved | §3.5's `verify-storages` report gains the resolved `soft_s`/`hard_s` per storage with the level each came from, and the paragraph gives the same argument that put the pattern expansion there: a percentage resolves against each LUN's own capacity, a pattern entry's `free_space` lands on every storage it matched, and the deprecated `min_free_bytes` folds in per storage on top — three ways for one line of config to mean a different number per LUN, and `soft_s` now drives §6's override, §7.3's exemption and §9.5's shortfall lines. Phase 13's row scopes it, **and names the sweep consequence the finding did not**: `docs/manual/25-show-load-and-verify-storages.md` matches none of the row's three greps today, so it joins the phase's file set explicitly rather than being missed by a grep re-run that comes back "exact". |
+
+### 48.1 What a later pass should re-check
+
+As with §46, **these fixes were written by the reviewer who raised the findings** — §47's own
+caveat applies again. Three specific things to re-check rather than take on trust:
+
+- **AG-04's fix is the only one with build consequences.** It changes where `Σ r_s` is summed,
+  which is a sequencing constraint on a signature change phase 13 has not made yet. Re-check
+  that §7.3's wording and the phase-13 row's wording describe the same order of operations, and
+  that neither contradicts §7.2's benefit, which is still evaluated against the unfiltered
+  `final_breakdown` at `cli.py:2374` — the plan does not (yet) say whether the benefit should
+  move with the trigger, and that is a real open question, not an oversight this section closed.
+- **AG-05 and AG-08 add specified output** — two JSON fields and one `verify-storages` line —
+  to a phase that is already the largest in §12. Neither is load-bearing for the mandate; if
+  phase 13 is split, both belong with the reporting half.
+- **The §14.8 arithmetic is now verified in full**, as-built counterfactual included, by the
+  derivation above. A future change to the fixture's weights invalidates the table in this
+  section, not just §14.8's prose.
 
 ---
 
