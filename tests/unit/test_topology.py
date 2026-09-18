@@ -643,6 +643,38 @@ def test_build_topology_count_foreign_volumes_false(tmp_path: Path) -> None:
     assert storages_by_id["san-a"].foreign_used_bytes == 0
 
 
+def test_build_topology_keeps_a_negative_saferemove_throughput_verbatim(tmp_path: Path) -> None:
+    """Section 7.1: the value is a `cstream -t` argument whose sign picks
+    the throttling mode, not the rate, and it is reported verbatim by
+    `verify-storages --json`. Taking the magnitude is
+    `payback.compute_wipe_duration_seconds()`'s job, in one place --
+    normalizing it away here would quietly change what the operator is
+    shown when they compare it against their own storage.cfg."""
+    defs = [
+        {"storage": "san-a", "type": "rbd", "shared": 1, "content": "images"},
+        {
+            "storage": "san-b",
+            "type": "lvm",
+            "shared": 1,
+            "content": "images",
+            "saferemove": 1,
+            "saferemove_throughput": "-1073741824",
+        },
+    ]
+    config = make_config(tmp_path)
+    responses: dict[str, Any] = {
+        "cluster/resources": lambda type: ([] if type == "vm" else STORAGE_RESOURCES),
+        "storage": defs,
+    }
+    for storage, status in STORAGE_STATUS.items():
+        responses[f"nodes/node1/storage/{storage}/status"] = status
+        responses[f"nodes/node1/storage/{storage}/content"] = []
+    topology = build_topology(PveClient(fake_api(responses)), config)
+
+    storages_by_id = {s.id: s for s in topology.groups[0].storages}
+    assert storages_by_id["san-b"].saferemove_throughput_bytes_per_sec == -1073741824.0
+
+
 def test_build_topology_reserve_factor_override(tmp_path: Path) -> None:
     config = make_config(
         tmp_path,

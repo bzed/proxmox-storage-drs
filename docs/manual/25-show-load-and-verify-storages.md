@@ -167,6 +167,42 @@ Group fc-tier1
 Storage types without `saferemove` at all (Ceph RBD, ZFS) always report
 `saferemove=off` and skip the check — there is nothing to wipe.
 
+### A negative `saferemove_throughput` is normal
+
+If your `storage.cfg` reads
+
+```
+saferemove_throughput -1073741824
+```
+
+that is **1 GiB/s**, not an error and not a negative rate. PVE passes the
+value straight to `cstream -t`, where the sign chooses how the limit is
+enforced and the magnitude is the rate:
+
+- **positive** — a session average. The wipe may exceed the rate for a
+  while to make good on earlier underutilization, so that the run as a
+  whole converges on it.
+- **negative** — an upper limit on each individual read/write, never
+  exceeded.
+
+`verify-storages` reports the implied wipe time from the magnitude, so
+`-1073741824` and `1073741824` give the same duration; the `--json`
+output's `saferemove_throughput_bytes_per_sec` still echoes the value
+exactly as PVE has it, sign included, so you can compare it against
+`storage.cfg` without arithmetic. Everything that consumes the number —
+section 7.1's move cost, section 7.3's `max_single_move_duration` check,
+`apply`'s source-release wait — reads it the same way.
+
+Versions up to 0.1.6 divided by the signed value instead, which produced
+a *negative* wipe time (`implied wipe time for the largest disk (1.00
+TiB): -17.1m`). If you are on one of those, the two warnings above could
+never fire on a storage configured this way, and — where
+`|saferemove_throughput|` happens to equal
+`migration.bwlimit_bytes_per_sec`, a natural thing to configure — every
+move's total duration came out as exactly zero, so
+`migration.max_single_move_duration` was not enforced at all. Upgrading
+is the fix; no configuration change is needed.
+
 If any `groups[].storages[].id` is written as a `/regex/` pattern
 (`IMPLEMENTATION_PLAN.md` section 11.4), `verify-storages` also prints what
 each one matched this run, and lists any cluster storage matched by no

@@ -121,7 +121,9 @@ A move is not finished when the `move_disk` task itself succeeds.
 task reports `exitstatus: OK`, the source volume is gone from the source
 storage's own content listing, and the VM's config lock is clear again. A
 storage with `saferemove` enabled zeroes the old volume afterwards at
-`saferemove_throughput` (default 10 MiB/s) — for a large disk, that can
+`saferemove_throughput` (default 10 MiB/s; a negative value in `storage.cfg`
+is a rate too, see [`verify-storages`](25-show-load-and-verify-storages.md))
+— for a large disk, that can
 run for hours after the task itself is long done. While it runs, `apply`
 reports the move as `draining`, not `moved` and not `failed`: it is a
 normal, expected state, bounded by `execution.source_release.timeout`

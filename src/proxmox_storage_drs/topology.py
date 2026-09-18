@@ -811,6 +811,13 @@ def _build_storages(
                     )
         else:
             foreign_bytes = 0
+        # Kept exactly as PVE reports it, sign included: the value is a
+        # `cstream -t` argument whose sign selects the throttling mode, not
+        # the rate (section 7.1), and `verify-storages --json` reports it
+        # verbatim so an operator can match it against their storage.cfg.
+        # Every consumer of it goes through
+        # `payback.compute_wipe_duration_seconds()`, which is where the
+        # magnitude is taken -- do not normalize it here.
         throughput = definition.get("saferemove_throughput")
         storages.append(
             Storage(

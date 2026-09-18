@@ -769,7 +769,7 @@ silently.
 **`pve-storage-drs verify-storages`.** A companion to `verify-metrics` (§3.3), run once per storage before
 relying on any plan. For every storage in every group it reports `type`, `shared`, `content`,
 `saferemove`, `saferemove_throughput`, total/used, and the largest disk currently on it; then it
-derives the implied wipe time `z_max / saferemove_throughput` and warns when that exceeds
+derives the implied wipe time `z_max / |saferemove_throughput|` (§7.1 on that sign) and warns when that exceeds
 `migration.max_single_move_duration` or `gates.cooldown_per_storage` (§9.3). It also prints the
 expansion of every `/…/` storage pattern (§11.4) — the entry and the storages it matched — and
 lists cluster storages matched by no group, so an over-broad or dead pattern is visible before any
@@ -1615,7 +1615,7 @@ pass**, throttled and often far slower than the mirror it follows:
 ```
 duration_mirror_d = z_d / min(bwlimit, headroom_src, headroom_dst)
 
-duration_wipe_d   = z_d / saferemove_throughput(σ₀(d))     if saferemove is enabled there
+duration_wipe_d   = z_d / |saferemove_throughput(σ₀(d))|   if saferemove is enabled there
                   = 0                                       otherwise
 
 duration_d        = duration_mirror_d + duration_wipe_d
@@ -1646,8 +1646,33 @@ about **44 hours** to wipe, against roughly 2.2 hours to mirror it at 200 MiB/s 
 twenty times the move. A cost model that stops at the mirror understates such a migration by that
 factor and will happily schedule a plan that occupies the source array for two days.
 
+**`saferemove_throughput` is signed, and the sign is not part of the rate.** PVE passes the
+configured value straight through to `cstream -t`, where the sign selects *how* the limit is
+enforced and the magnitude is the rate in bytes/second (`cstream(1)`, confirmed by the operator
+against a production cluster):
+
+- **positive** — a session average. cstream accumulates its own error and may exceed the rate for
+  a while to make good on earlier underutilization, so the whole session converges on it.
+- **negative** — an upper limit on each individual read/write syscall pair, never exceeded.
+
+So `-1073741824` means 1 GiB/s, not minus anything, and negative values are ordinary in PVE
+configurations — they are what an operator writes when they want a rate the wipe can never burst
+above. Hence the `| … |` in the formula. `z_d / |throughput|` is the right estimate under either
+sign; under the negative one it is additionally a hard floor, since the wipe cannot finish ahead of
+a rate that is never exceeded.
+
+Dividing by the signed value is not a cosmetic error. `duration_wipe_d` would come out **negative**,
+`duration_d = duration_mirror_d + duration_wipe_d` would collapse towards zero — to *exactly* zero
+on the common configuration where the operator sets `|saferemove_throughput|` equal to
+`migration.bwlimit_bytes_per_sec` — and §7.3's `max_single_move_duration` rejection, along with
+`verify-storages`' cooldown-versus-wipe warning, would then be unable to fire for a disk of any
+size. This is not hypothetical: it was found by replaying a real bundle from a cluster whose three
+LVM storages all carry `saferemove_throughput -1073741824` against a `bwlimit_bytes_per_sec` of
+`1073741824`, where a hypothetical 100 TiB move reported a total duration of 0 s and passed a 6 h
+limit.
+
 Read `saferemove` and `saferemove_throughput` from `GET /storage` (§3.5 — the list form, not
-`GET /storage/{id}`) per storage; never assume.
+`GET /storage/{id}`) per storage; never assume, and never assume a sign either.
 `migration.account_saferemove_wipe: false` disables the term for an operator who has verified their
 storages do not wipe, but the default is to account for it. Note the knock-on effects, all covered in
 §9.3: the wipe also determines when the source's space is actually released, and it holds a
@@ -2074,8 +2099,9 @@ move m from a to b is DONE  ⟺  task(upid) exitstatus == OK
                             ∧  elapsed(drain) ≥ min_wipe_seconds(m)
 ```
 
-`min_wipe_seconds(m)` is `size_bytes(m) / storage.saferemove_throughput` — PVE's own configured
-wipe rate, already read live off the storage definition (§3.5) — or, when that throughput is not
+`min_wipe_seconds(m)` is `size_bytes(m) / |storage.saferemove_throughput|` — PVE's own configured
+wipe rate, already read live off the storage definition (§3.5), magnitude taken because the sign
+selects `cstream`'s throttling mode rather than the rate (§7.1) — or, when that throughput is not
 configured (the storage type has no such concept, e.g. Ceph RBD or ZFS, or `saferemove` is off
 there), simply absent from the criterion (the first three conditions alone still govern, exactly as
 before this term existed). **Found dogfooding against a real cluster: the first three conditions

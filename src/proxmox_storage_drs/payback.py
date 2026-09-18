@@ -148,10 +148,29 @@ def compute_wipe_duration_seconds(
     ``compute_move_cost()`` below and ``cli.py``'s ``verify-storages``,
     which needs the identical number for its own, unrelated warning about
     cooldowns and move-duration limits being shorter than the implied
-    wipe -- one implementation of the formula (AGENTS.md section 5)."""
+    wipe -- one implementation of the formula (AGENTS.md section 5).
+
+    **A negative ``saferemove_throughput`` is normal, and its magnitude
+    is the rate.** PVE passes the configured value straight through to
+    ``cstream -t`` (section 7.1), whose sign selects *how* the limit is
+    enforced, never how fast: a positive number is an average the whole
+    session converges on, so a run may exceed the rate for a while to
+    make good on earlier underutilization; a negative number is a hard
+    ceiling on each individual read/write syscall pair, which is never
+    exceeded. Both describe the same |num| bytes/second, so the duration
+    is ``disk_bytes / abs(throughput)`` in both cases -- and if anything
+    the negative form is the more dependable estimate of the two, since
+    the wipe can never finish ahead of it. Dividing by the signed value
+    instead yields a *negative duration*, which is not merely a cosmetic
+    wrong number: it cancels ``duration_mirror_seconds`` in
+    ``compute_move_cost()`` and silently disables section 7.3's
+    ``max_single_move_duration`` rejection and ``verify-storages``'
+    cooldown warning. Found by replaying a real bundle whose three LVM
+    storages all carry ``saferemove_throughput -1073741824``.
+    """
     if not throughput_bytes_per_sec:
         return None
-    return disk_bytes / throughput_bytes_per_sec
+    return disk_bytes / abs(throughput_bytes_per_sec)
 
 
 def mirror_duration_seconds(move: ScheduledMove, migration: MigrationConfig) -> float:

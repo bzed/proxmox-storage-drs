@@ -244,6 +244,59 @@ def test_compute_wipe_duration_seconds_returns_none_without_throughput() -> None
     assert compute_wipe_duration_seconds(1 * TIB, 10 * MIB) == pytest.approx(1 * TIB / (10 * MIB))
 
 
+def test_negative_saferemove_throughput_is_a_rate_not_a_negative_duration() -> None:
+    """Section 7.1: PVE hands `saferemove_throughput` straight to
+    `cstream -t`, where a negative value is a per-syscall ceiling rather
+    than a session average -- the sign picks the throttling mode, the
+    magnitude is the rate. Both signs must therefore give the same,
+    positive duration."""
+    assert compute_wipe_duration_seconds(1 * TIB, -(10 * MIB)) == pytest.approx(
+        1 * TIB / (10 * MIB)
+    )
+    assert compute_wipe_duration_seconds(1 * TIB, -(10 * MIB)) == compute_wipe_duration_seconds(
+        1 * TIB, 10 * MIB
+    )
+
+
+def test_negative_throughput_cannot_cancel_the_mirror_and_hide_an_overlong_move() -> None:
+    """The regression this fixes, at the exact shape that found it: a real
+    cluster whose LVM storages carry `saferemove_throughput -1073741824`
+    against a `bwlimit_bytes_per_sec` of the same magnitude. Dividing by
+    the signed value made `duration_wipe` exactly `-duration_mirror`, so
+    `duration_d` was 0 for *every* disk size and section 7.3's
+    `max_single_move_duration` rejection could never fire."""
+    gib = 1 << 30
+    source = Storage(
+        id="san-a",
+        capability_weight=1.0,
+        reserve_factor=2.0,
+        saturation_load=None,
+        capacity_bytes=8 * TIB,
+        used_bytes=0,
+        foreign_used_bytes=0,
+        saferemove=True,
+        saferemove_throughput_bytes_per_sec=-float(gib),
+    )
+    migration = MigrationConfig(
+        bwlimit_bytes_per_sec=gib,
+        account_saferemove_wipe=True,
+        wipe_load_weight=1.0,
+        max_single_move_duration_seconds=21600.0,  # 6h
+    )
+
+    cost = compute_move_cost(move("101:scsi0", "san-a", "san-b", 1.0), source, migration)
+
+    # 1 TiB at 1 GiB/s: 1024s to mirror, 1024s to wipe -- both positive.
+    assert cost.duration_mirror_seconds == pytest.approx(1024.0)
+    assert cost.duration_wipe_seconds == pytest.approx(1024.0)
+    assert cost.cost_load_seconds == pytest.approx(3 * 1024.0)  # 2*mirror + 1*wipe
+
+    # And a move that genuinely cannot fit the 6h limit is seen to.
+    huge = compute_move_cost(move("101:scsi1", "san-a", "san-b", 100.0), source, migration)
+    assert huge.duration_mirror_seconds + huge.duration_wipe_seconds > 21600.0
+    assert huge.exceeds_max_duration
+
+
 # ------------------------------------------------------------------ hard duration rule
 
 

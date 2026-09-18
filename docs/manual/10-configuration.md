@@ -528,7 +528,9 @@ Duration, default `1h`.
 
 A storage involved in a migration within this long accepts no new incoming
 moves. **Must exceed the implied wipe time of that storage's largest disk**
-(`largest_disk / saferemove_throughput`) or the next run will plan onto a
+(`largest_disk / |saferemove_throughput|` — the magnitude, see
+[`verify-storages`](25-show-load-and-verify-storages.md) on why that value is
+often negative) or the next run will plan onto a
 storage that is still draining and stall — `pve-storage-drs verify-storages` computes
 this and warns when the configured cooldown is too short.
 
@@ -924,7 +926,7 @@ storages verified not to wipe.
 Duration, default `48h`.
 
 Bound on the wait above, sized for a multi-TiB disk wiping at the default 10
-MiB/s. Must be at least `largest_disk / saferemove_throughput` for every
+MiB/s. Must be at least `largest_disk / |saferemove_throughput|` for every
 storage where `saferemove` is on — `verify-storages` checks this.
 
 ### `execution.time_windows[].days`

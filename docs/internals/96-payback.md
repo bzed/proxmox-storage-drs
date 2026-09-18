@@ -10,7 +10,7 @@ verdict — and why does a reserve-fixing plan always pass? Describes
 `compute_move_cost()` needs only a `schedule.ScheduledMove` and its
 source `topology.Storage` — no new fetch, no new state. `duration_mirror`
 is `z_d / migration.bwlimit_bytes_per_sec`; `duration_wipe` is `z_d /
-saferemove_throughput` when `migration.account_saferemove_wipe` and the
+|saferemove_throughput|` when `migration.account_saferemove_wipe` and the
 source has `saferemove` on, else zero. `cost_load_seconds` is zero below
 `migration.tiny_disk_bytes` (section 5.4/7.1) — `duration_mirror`/
 `duration_wipe` are still the real numbers, so `exceeds_max_duration`/
@@ -52,6 +52,42 @@ a balance move that *splits* a VM must pay for the fragmentation out of its
 `alpha` gain — and `compute_benefit_load_seconds()` returns that negative
 contribution as computed, never clamped; `evaluate_plan_payback()`'s own
 acceptance test already rejects a genuinely negative benefit correctly.
+
+## Why `compute_wipe_duration_seconds()` takes the magnitude
+
+`saferemove_throughput` is signed, and the sign is not part of the rate.
+PVE hands the configured value straight to `cstream -t`, where a
+**positive** number is a session average — cstream accumulates its own
+error and may exceed the rate for a while to make good on earlier
+underutilization — and a **negative** number is an upper limit on each
+individual read/write syscall pair, which is never exceeded. Both name
+the same `|num|` bytes/second, so `-1073741824` means 1 GiB/s. Negative
+values are ordinary in PVE configurations: they are what an operator
+writes when they want a rate the wipe can never burst above.
+
+`compute_wipe_duration_seconds()` is the one implementation of the
+formula (AGENTS.md section 5) — `compute_move_cost()`, `cli.py`'s
+`verify-storages` and `execute.py`'s `min_wipe_seconds` all go through
+it — so `abs()` belongs there and nowhere else. In particular
+`topology.py` deliberately keeps PVE's signed value on `Storage`:
+`verify-storages --json` echoes it back verbatim so an operator can match
+it against their own `storage.cfg`, and normalizing it at parse time
+would quietly change what they are shown.
+
+Dividing by the signed value was a real bug, not a cosmetic one, and the
+shape of it is worth remembering. `duration_wipe` came out negative;
+`duration_d = duration_mirror + duration_wipe` therefore collapsed
+towards zero, and to **exactly** zero on the common configuration where
+`|saferemove_throughput|` equals `migration.bwlimit_bytes_per_sec`. On
+such a cluster section 7.3's `max_single_move_duration` rejection could
+not fire for a disk of any size — a hypothetical 100 TiB move reported a
+total duration of 0 s and sailed past a 6 h limit — and
+`verify-storages`' two warnings (`cooldown_per_storage_too_short`,
+`max_single_move_duration_too_short`) were both permanently false, since
+a negative number never exceeds a positive threshold. It printed
+`implied wipe time for the largest disk (1.00 TiB): -17.1m` and nobody
+downstream noticed. Found by replaying a corpus bundle from a cluster
+whose three LVM storages all carry `saferemove_throughput -1073741824`.
 
 ## `headroom_src`/`headroom_dst`: a plan formula this project cannot fill in
 
