@@ -25,6 +25,8 @@ docs/
 man/
   pve-storage-drs.1.md             source
   pve-storage-drs.1                built with pandoc -s -t man; installed to share/man/man1
+config/
+  drs.example.yaml                 the reference configuration; installed as an example
 ```
 
 Multi-file sources are concatenated in filename order, which is why the files are numbered. Keep
@@ -47,13 +49,70 @@ pandoc man/pve-storage-drs.1.md --standalone --to=man --output=man/pve-storage-d
 
 with the metadata block at the top of `pve-storage-drs.1.md` supplying the title, section, date and footer.
 
+## Self-contained
+
+[`../AGENTS.md`](../AGENTS.md) section 8.0 is the rule: the manual, `docs/internals/`, the manpage,
+`--help` and `config/drs.example.yaml` never send a reader to `IMPLEMENTATION_PLAN.md` for
+something they needed. The plan ships beside them in `/usr/share/doc/pve-storage-drs/`, and that is
+precisely why this is easy to get wrong — the reference *works*, it looks like diligence, and the
+reader still ends up alone in a specification hunting for one number.
+
+The check, applied per sentence while editing: **delete the plan reference and re-read what is
+left.** Still answers the question → it was a footnote, keep it. Now has a hole in it → the hole is
+the sentence you owe the reader.
+
+Before — a deferral wearing a citation:
+
+> Cost and benefit are compared as described in `IMPLEMENTATION_PLAN.md` section 7.2.
+
+After — the same paragraph, self-contained, with the citation demoted to what it actually is:
+
+> A move is rejected unless `benefit > payback_ratio * cost` (default ratio: `10.0`). Both sides are
+> in **load-seconds** — average in-flight I/O requests multiplied by seconds — which is what makes
+> the comparison meaningful. Cost is the extra in-flight I/O the migration itself imposes:
+> `source_load_weight` on the source and `target_load_weight` on the target for the mirror, which
+> takes `disk_bytes / bwlimit_bytes_per_sec` seconds, plus — when `account_saferemove_wipe` is on
+> and the source storage has `saferemove` set — `wipe_load_weight` on the source for as long as the
+> old volume takes to be zeroed. Benefit is the improvement the plan buys in imbalance, in data
+> spread and in VM affinity, each weighted as in the objective, held for `payback_horizon`
+> (default `365d`). (Derived in `IMPLEMENTATION_PLAN.md` section 7.2.)
+
+Longer, and that is the point: the second one can be read at 03:00 by somebody deciding whether to
+raise `payback_ratio`.
+
+Two things this rule does **not** say:
+
+- Cross-references between the shipped artefacts are fine and encouraged — the manual sends a reader
+  to the internals PDF for theory, the manpage sends them to the manual. They ship together, and
+  each is written for a reader who has the others.
+- Saying the same thing as the plan is not the duplication we avoid. That rule is for facts with a
+  single generator — options, defaults, built artefacts — where a second copy goes stale silently.
+  Prose written for the operator and prose written for the implementer are two texts, and they are
+  *supposed* to drift in wording.
+
+## Writing the reference configuration
+
+`config/drs.example.yaml` is documentation that happens to parse. It is installed as an example,
+it is what most operators copy to `/etc/pve/drs.yaml`, and its comments are frequently the only
+thing they read before running the tool.
+
+- Every value shown is the default, or is marked `REQUIRED`. Anything else teaches a wrong default.
+- A comment says the **unit**, what the knob trades against, and what goes wrong at each extreme —
+  the manual entry's five points, compressed to the two or three lines a config file can carry.
+- Self-contained like everything else (section 8.0): no "see the plan for the semantics". If the
+  semantics need a paragraph, write the paragraph here and say the rest is in the manual — that is
+  a shipped artefact and a fair place to send the reader.
+- It validates against the schema (`test_example_config_valid`), and every knob in it appears in
+  the manual and in the schema. Add a knob in all three places in one commit, or in none.
+
 ## Writing the internals documentation
 
 The audience has to change the code and is entitled to understand why it is shaped as it is.
 
 - Start each page with the question it answers, then the answer. No preamble.
-- Name the plan sections it expands (`§7.3`) and the modules it describes (`proxmox_storage_drs/solver/milp.py`).
-  Those two references are what make the page maintainable.
+- Name the modules the page describes (`proxmox_storage_drs/solver/milp.py`) — that is what makes it
+  maintainable — and, if you like, close the page with the plan sections it expands. The plan
+  reference is a footnote, never the explanation: see *Self-contained* below.
 - Explain the **why**. That the scheduler re-reads the VM's node before every move is visible in
   the code; that it does so because the PVE Dynamic Load Balancer may have moved the VM mid-plan
   is not.
@@ -85,7 +144,7 @@ Replanning is skipped until the load vector has moved by this much in L1 relativ
 recorded at the last balance. Lower values react sooner and migrate more; higher values ride out
 daily variation. Below roughly 0.05 the tool will chase noise on a busy cluster.
 
-Interacts with `gates.imbalance_threshold` (§6): drift decides *whether to look*, imbalance decides
+Interacts with `gates.imbalance_threshold` below: drift decides *whether to look*, imbalance decides
 *whether to act*.
 ```
 

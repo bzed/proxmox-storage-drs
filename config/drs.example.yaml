@@ -10,7 +10,7 @@
 #   2. $PVE_STORAGE_DRS_CONFIG          missing or invalid -> hard error, no fallback
 #   3. /etc/pve/drs.yaml        the default
 #
-# Two warnings that follow from the location (plan §11):
+# Two warnings that follow from the location:
 #   - An edit here is live on every node immediately. There is no staging.
 #   - Files under /etc/pve are group-readable by www-data. Check `ls -l` before
 #     putting a password in this file, and prefer an API token plus
@@ -93,10 +93,15 @@ window:
   # The DECISION window: the period whose load we balance. This is NOT the same
   # as the history a forecaster needs -- see the forecast: block below.
   lookback: 24h
-  quantile: 0.95        # point estimate: the actual decision statistic (>= quantile)
-  upper_quantile: 0.99  # bound consumed by the section 7.3 saturation guard only
-                        # (when a storage sets saturation_load) -- not by the
-                        # optimizer; see IMPLEMENTATION_PLAN.md 10.1's "As built" note
+  quantile: 0.95        # point estimate: the statistic every placement decision uses
+  upper_quantile: 0.99  # Upper bound on the same load; must be >= quantile. Consumed
+                        # ONLY by the saturation guard (migration.saturation_ceiling
+                        # below), and only for a storage that sets saturation_load: the
+                        # guard asks whether a move could push a storage past saturation
+                        # at its busiest rather than at its typical. Placement itself is
+                        # decided from the point estimate above, so raising this never
+                        # moves a disk somewhere else -- it only makes the guard more
+                        # cautious about starting a move now.
   min_coverage: 0.80    # reject a disk's data if fewer than this fraction of
                         # expected samples are present
 
@@ -109,9 +114,9 @@ window:
 #              / (w_iotime + w_ops + w_bytes)
 # with T_g the group's total in-flight I/O. So `load` is in average in-flight I/O
 # requests -- the same physical unit as migration.source/target_load_weight, which
-# is what makes the section 7 payback comparison valid. With the defaults below the
-# whole expression collapses to load = rate(rd+wr_total_time_ns)/1e9 exactly.
-# See plan section 4.
+# is what makes the payback comparison under `migration:` below a valid one. With
+# the defaults below the whole expression collapses to
+# load = rate(rd+wr_total_time_ns)/1e9 exactly.
 load_weights:
   iotime: 1.0           # primary: rate(rd+wr_total_time_ns)/1e9, dimensionless
   ops:    0.0
@@ -138,15 +143,18 @@ load_weights:
 #
 # A literal entry always overrides a pattern that also matches its storage,
 # so one exception can still be pinned to different options within a
-# pattern-matched family. See IMPLEMENTATION_PLAN.md section 11.4 for the
-# full semantics (matching, precedence, validation) and
-# `pve-storage-drs verify-storages`, which prints what every pattern
-# actually matched.
+# pattern-matched family. Matching is case-sensitive and is redone against
+# the live inventory on every run. Once the patterns are expanded a storage
+# must belong to at most ONE group -- two groups claiming it would leave a
+# disk's eligible destinations ambiguous -- so validation rejects that, and
+# rejects a pattern that matches no storage at all, or two patterns in one
+# group claiming the same storage. `pve-storage-drs verify-storages` prints
+# what every pattern actually matched; run it after editing this block.
 groups:
-  # NOTE: this group intentionally mirrors the plan's section 14 worked example and
-  # tests/fixtures/fc-tier1.yaml -- same storage names, same capability weights (all
-  # 1.0). Keep them in sync; the differing-weight feature is illustrated on fc-tier2
-  # below so the fixture stays reproducible from this file.
+  # NOTE: this group intentionally mirrors tests/fixtures/fc-tier1.yaml -- same
+  # storage names, same capability weights (all 1.0). Keep them in sync; the
+  # differing-weight feature is illustrated on fc-tier2 below so the fixture stays
+  # reproducible from this file.
   - name: fc-tier1
     storages:
       - id: san-a
@@ -156,10 +164,11 @@ groups:
         reserve_factor: null       # null = inherit global snapshot_reserve.factor
         # Absolute number of concurrent I/O requests this array services before
         # queueing delay dominates -- roughly its effective queue depth, in the same
-        # units as the load metric (plan section 4). Used ONLY by the section 7.3
-        # saturation guard. There is no safe default: leave it null and that advisory
-        # guard is skipped for this storage (the hard bounds -- max_single_move_duration
-        # and the transient reserve invariant -- always apply). Do not guess it from
+        # units as the load metric above. Used ONLY by the saturation guard
+        # (migration.saturation_ceiling). There is no safe default: leave it null and
+        # that advisory guard is skipped for this storage (the hard bounds --
+        # max_single_move_duration and the transient reserve invariant -- always
+        # apply). Do not guess it from
         # observed load; take it from the array's documented queue depth, or measure
         # the load at which latency starts climbing super-linearly.
         saturation_load: null
@@ -198,7 +207,7 @@ gates:
   imbalance_threshold: 0.20      # 20%
   # Minimum relative spread in fill fraction (bytes/capacity) across a group before
   # we act at all, even when I/O is perfectly balanced -- the data-spread counterpart
-  # of imbalance_threshold (plan section 6). null disables the gate entirely.
+  # of imbalance_threshold. null disables the gate entirely.
   capacity_spread_threshold: 0.25  # 25%
   cooldown_per_disk: 24h
   cooldown_per_storage: 1h
@@ -216,11 +225,11 @@ migration:
   # "saferemove" zeroes the old volume at saferemove_throughput -- DEFAULT 10 MiB/s,
   # so a 1.5 TiB disk takes ~44h to clean up against ~2h to mirror. Read per storage
   # from GET /storage/{id}. Only set false if you have verified saferemove is off
-  # everywhere in the group. See plan sections 7.1 and 9.3.
+  # everywhere in the group.
   account_saferemove_wipe: true
   # In-flight I/O charged to the SOURCE for the whole duration of that wipe -- both
-  # in the cost model (plan 7.1) and in the saturation guard (plan 7.3), where a
-  # draining move charges this to its source and nothing to its target. The zeroing
+  # in the migration cost model and in the saturation guard, where a draining move
+  # charges this to its source and nothing to its target. The zeroing
   # pass is one sequential writer, so 1.0 is the natural value; lower it only if you
   # have measured that a throttled wipe does not disturb your array.
   wipe_load_weight: 1.0
@@ -228,11 +237,11 @@ migration:
   # may drive it to. Inactive for any storage whose saturation_load is null.
   saturation_ceiling: 0.85
   assume_thick_provisioning: true      # cost by provisioned size, not allocated
-  # Below this size, a disk carries zero beta/gamma and needs no payback verdict
-  # (plan sections 5.4, 7.1, 7.3) -- comfortably above an EFI var store or TPM
-  # state, far below anything the payback rule was written for. Together with
-  # kappa_vm_affinity below, this is what lets a tiny disk rejoin its VM for
-  # free instead of being priced like a real migration. 0 restores the old
+  # Below this size, a disk carries neither the per-move nor the per-TiB penalty of
+  # the objective below, and needs no payback verdict -- comfortably above an EFI var
+  # store or TPM state, far below anything the payback rule was written for.
+  # Together with kappa_vm_affinity below, this is what lets a tiny disk rejoin its
+  # VM for free instead of being priced like a real migration. 0 restores the old
   # accounting for every disk.
   tiny_disk_bytes: 67108864            # 64 MiB
 
@@ -243,21 +252,23 @@ objective:
   beta_move_count: 0.25        # penalty per migration  -> "minimal number of migrations"
   gamma_move_bytes_per_tib: 0.05  # penalty per TiB migrated
   kappa_vm_affinity: 0.50      # penalty per extra storage a VM's disks are spread over
-  # Weight on data spread (fill-fraction deviation, plan section 5.3 (C7)) -- bounds
-  # the share of a group's data any single storage failure costs. Defaults to half of
-  # alpha_spread so I/O balance stays the first priority; 0 disables the term.
+  # Weight on data spread -- the deviation of each storage's bytes-used/capacity
+  # from the group's mean. Bounds the share of a group's data any single storage
+  # failure costs. Defaults to half of alpha_spread so I/O balance stays the first
+  # priority; 0 disables the term.
   delta_capacity_spread: 0.5
   # Disks that cannot move THIS RUN (snapshot-blocked, config-excluded, or on a
   # locked VM) are excluded from the affinity count by default, so an unreachable
   # disk cannot pin the rest of its VM to one storage. true counts them: better
   # co-location, worse balance. Note efidisk0/tpmstate0 are NOT in this set --
-  # they move online on PVE 9.2. Plan sections 3.6 and 5.3 (C3).
+  # they move online on PVE 9.2.
   affinity_counts_pinned_disks: false
   # Soft slack so an already-violating start stays repairable rather than infeasible.
   # This is a FLOOR, not the value used: with the single-stage big-M formulation the
   # engine computes the provably-dominant P from the group's own load and sizes and
   # uses max(this, computed), warning when it raises it. The default lexicographic
-  # two-stage solve (plan section 5.3) needs no penalty at all and is preferred.
+  # two-stage solve -- repair the reserve first, then balance within whatever room
+  # that leaves -- needs no penalty at all and is preferred.
   reserve_violation_penalty: 1000.0
 
 solver:
@@ -269,13 +280,13 @@ solver:
 # ----------------------------------------------------------------- execution
 execution:
   mode: dry-run          # dry-run | confirm | auto
-  # >1 requires the GENERALIZED transient reserve invariant (plan section 8.1):
+  # >1 requires the GENERALIZED transient reserve invariant:
   # several disks can be landing on one storage at once and no source releases
   # space until it completes. Leave at 1 unless you have verified headroom.
   max_concurrent_migrations: 1
   max_migrations_per_run: 5
   max_concurrent_per_storage: 1   # counts a storage as both source and target
-  max_replans_per_run: 3          # bound on mid-execution re-plans (section 9.2)
+  max_replans_per_run: 3          # bound on mid-execution re-plans
   abort_on_failure: true
   poll_interval_seconds: 10
 
@@ -299,7 +310,7 @@ execution:
   # saferemove the old volume is still fully allocated while it is being zeroed,
   # and the storage lock it holds can block the NEXT move. A move counts as done
   # only when the task succeeded AND the source volume is gone AND the VM is
-  # unlocked. See plan section 9.3.
+  # unlocked.
   source_release:
     wait: true
     timeout: 48h              # >= largest disk / saferemove_throughput
@@ -319,7 +330,7 @@ exclude:
   # carry the snapshots across if it were not. Setting this false does not make such
   # moves work -- it only stops pre-filtering them so they fail at the API instead.
   # Snapshotted disks are pinned (bytes and load still counted) and reported at WARN
-  # every run, naming the VMs whose snapshots must be cleared. Plan section 3.7.
+  # every run, naming the VMs whose snapshots must be cleared.
   skip_vms_with_snapshots: true
   running_only: true              # only consider running VMs
   # unused{N} volumes are real allocated bytes with no I/O. Including them lets the
@@ -336,7 +347,7 @@ report:
 
 state:
   # Local disk, never /etc/pve: this is rewritten on every run, pmxcfs writes
-  # need quorum, and the file is deliberately node-local (plan §11).
+  # need quorum, and the file is deliberately node-local.
   path: /var/lib/pve-storage-drs/state.json
 
 forecast:
@@ -375,8 +386,7 @@ forecast:
 
 support:
   # Diagnostic bundles: `pve-storage-drs collect-testdata` and the global
-  # `--replay` option (plan section 16). Nothing here is read on the normal
-  # plan/apply path.
+  # `--replay` option. Nothing here is read on the normal plan/apply path.
   #
   # 32 random bytes, generated on first use and persisted here. Keyed
   # pseudonyms (node/storage/vmid/...) are stable for the life of this file;
