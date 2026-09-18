@@ -365,7 +365,32 @@ def evaluate_plan_payback(
     bullet) is not re-checked here -- ``schedule.py`` already enforces it
     before a move is ever scheduled, so by the time a ``ScheduledMove``
     reaches this module it has already passed that rule (AGENTS.md
-    section 5: one implementation, not a second one here)."""
+    section 5: one implementation, not a second one here).
+
+    **A plan of nothing but tiny disks passes the aggregate test
+    unconditionally, by design.** Every move below
+    ``migration.tiny_disk_bytes`` has ``cost_load_seconds == 0``
+    (section 7.1), so ``total_cost`` is 0, ``aggregate_ok`` reduces to
+    ``benefit_load_seconds >= 0``, and :attr:`PaybackResult.ratio`
+    reports ``+inf``. Section 7.3's "needs no verdict" is exactly this:
+    a 528 KiB ``efidisk0`` rejoining its VM must not have to out-earn a
+    rule written for multi-terabyte migrations.
+
+    The consequence is worth stating where the line is, because it is not
+    visible from it: for such a plan **nothing downstream of the section
+    5.4 objective asks whether the moves are worth making**, and no term
+    in that objective has a materiality floor, so any ``+epsilon`` is
+    enough. The affinity term's correctness is therefore load-bearing for
+    tiny moves in a way it is not for any other kind. When section 5.3
+    (C3) still excluded pinned disks by default, two 528 KiB moves on a
+    real cluster were emitted on a 3.6e-7 capacity-spread difference with
+    a kappa gain of exactly zero -- see section 7.3, which carries the
+    full account and the narrowest fix (require
+    ``affinity_debt_before > affinity_debt_after`` for a zero-cost plan)
+    should a future bundle show the branch actually biting. Deliberately
+    not implemented now: the observed failure was a defect in the
+    objective, not a missing gate, and any threshold here would be a
+    magic number."""
     move_costs = tuple(move_costs)
     total_cost = sum(mc.cost_load_seconds for mc in move_costs)
     has_reserve_override = any(mc.resolves_reserve_violation for mc in move_costs)

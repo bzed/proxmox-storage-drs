@@ -174,6 +174,38 @@ neither being non-empty.
 
 ## What this pass deliberately does not do
 
+- **Any materiality floor on the benefit.** A plan of nothing but tiny
+  disks has `total_cost_load_seconds == 0`, so `aggregate_ok` reduces to
+  `benefit_load_seconds >= 0` and `PaybackResult.ratio` reports `+inf`:
+  such a plan passes the aggregate test unconditionally. That is section
+  7.3's "needs no verdict" working as specified — the whole point of the
+  section 7.1 exemption is that a 528 KiB `efidisk0` rejoining its VM
+  must not have to out-earn a rule written for multi-terabyte migrations.
+
+  What the code does not show, and what is worth knowing before touching
+  either module, is the consequence: for such a plan **nothing downstream
+  of the section 5.4 objective asks whether the moves are worth making**,
+  and no objective term has a materiality floor either, so any `+ε` is
+  enough. The affinity term's correctness is load-bearing for tiny moves
+  in a way it is not for any other kind of move. That is not theoretical:
+  while section 5.3 (C3) still excluded pinned disks by default, two
+  528 KiB `efidisk0` moves on a real cluster were emitted on a `3.6e-7`
+  capacity-spread difference — a relative improvement of `6e-8`, on which
+  CP-SAT and CBC did not even agree — with a `kappa` gain of exactly
+  zero, each one a live migration holding a VM lock and burning
+  `gates.cooldown_per_storage` on its target. Correcting that default
+  turned the same two moves into genuine reunifications worth a discrete
+  `1.0`, and the backends into agreement.
+
+  No floor is added speculatively: the failure was a defect in the
+  objective, not a missing gate, and any threshold here would be a magic
+  number standing in for a decision the model does not otherwise need to
+  make. If a future bundle shows tiny moves emitted with
+  `affinity_debt_before == affinity_debt_after`, the narrowest fix is to
+  require `affinity_debt_before > affinity_debt_after` for a zero-cost
+  plan — no threshold needed, since the debt moves in discrete steps.
+  `test_payback.py` pins the current behaviour so that change cannot be
+  made silently.
 - **The 3-retry re-solve-with-doubled-`beta`/`gamma` loop** (section 7.3)
   on aggregate payback failure. A real UX refinement — it converges on the
   smaller subset of high-value moves rather than abandoning the run — but

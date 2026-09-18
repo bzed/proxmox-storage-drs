@@ -297,6 +297,48 @@ def test_negative_throughput_cannot_cancel_the_mirror_and_hide_an_overlong_move(
     assert huge.exceeds_max_duration
 
 
+# ------------------------------------------------------- the zero-cost branch
+
+
+def test_an_all_tiny_plan_passes_the_aggregate_test_unconditionally() -> None:
+    """Section 7.3, documented rather than guarded: every move below
+    `migration.tiny_disk_bytes` costs 0, so `total_cost` is 0,
+    `aggregate_ok` reduces to `benefit >= 0` and `ratio` is `+inf`. That is
+    the exemption working as specified -- a 528 KiB efidisk0 rejoining its
+    VM must not have to out-earn a rule written for multi-terabyte moves.
+
+    Pinned here because the consequence is invisible from the code: for
+    such a plan nothing downstream of the section 5.4 objective asks
+    whether the moves are worth making, and no objective term has a
+    materiality floor either. Adding one is a deliberate non-decision (see
+    `payback.py`'s own note and section 7.3); this test exists so it cannot
+    become a silent one.
+    """
+    source = no_saferemove_storage("san-a")
+    migration = MigrationConfig(
+        bwlimit_bytes_per_sec=200 * MIB,
+        payback_ratio=10.0,
+        tiny_disk_bytes=64 * MIB,
+    )
+    tiny = move("101:efidisk0", "san-a", "san-b", 528 / (1 << 30) / 1024)  # 528 KiB
+    cost = compute_move_cost(tiny, source, migration)
+    assert cost.cost_load_seconds == 0.0
+
+    # A benefit far below anything an operator would call material still passes...
+    noise = evaluate_plan_payback([cost], benefit_load_seconds=1e-6, payback_ratio=10.0)
+    assert noise.total_cost_load_seconds == 0.0
+    assert noise.ratio == float("inf")
+    assert noise.aggregate_ok and noise.accepted
+
+    # ... and so does a benefit of exactly zero.
+    nothing = evaluate_plan_payback([cost], benefit_load_seconds=0.0, payback_ratio=10.0)
+    assert nothing.aggregate_ok and nothing.accepted
+
+    # A negative benefit is still refused: the plan made things worse.
+    worse = evaluate_plan_payback([cost], benefit_load_seconds=-1.0, payback_ratio=10.0)
+    assert not worse.aggregate_ok and not worse.accepted
+
+
 # ------------------------------------------------------------------ hard duration rule
 
 

@@ -1787,6 +1787,35 @@ test:
   storage with no `saturation_load` configured;
 - the move violates the transient reserve invariant of section 8 → reject.
 
+**A plan of nothing but tiny disks has no economic gate at all, and that is deliberate — but it
+means the objective is the only thing holding it.** `Σ_d cost_d` is then 0, so `benefit ≥ λ · 0`
+reduces to `benefit ≥ 0` and any non-negative benefit passes; the implementation reports the ratio
+as `+inf`. That is the intended reading of "needs no verdict" above, and it is the whole point of
+§7.1's exemption: a 528 KiB `efidisk0` rejoining its VM must not have to out-earn a rule written
+for multi-terabyte migrations.
+
+State the consequence plainly, because it was not obvious and it cost a real dogfooding cycle to
+find. For such a plan, nothing downstream of the §5.4 objective asks whether the moves are worth
+making. If the objective scores a move at `+ε` for any `ε > 0`, the move happens — and `ε` can be
+arbitrarily small, because no term in the objective has a materiality floor either. So the
+*correctness of the objective's affinity term is load-bearing for tiny moves in a way it is not for
+any other kind of move*, and a defect in it surfaces directly as migrations that buy nothing.
+
+Exactly that happened. With §5.3 (C3)'s affinity term excluding pinned disks — the pre-fix default,
+see §3.6 — two 528 KiB `efidisk0` moves on a real cluster scored a κ gain of precisely zero and
+were emitted anyway on a `3.6 × 10⁻⁷` capacity-spread difference, a relative improvement of about
+`6 × 10⁻⁸`, on which the three solver backends did not even agree (CP-SAT emitted two moves, CBC
+none). Each was a live migration with a VM lock, a PVE task and a `saferemove` wipe, and each burned
+`gates.cooldown_per_storage` on its target. Correcting (C3)'s default turned the same two moves into
+genuine reunifications worth a discrete `1.0` of objective, and the three backends into agreement.
+
+No materiality floor is specified, and none should be added speculatively: any threshold would be a
+magic number standing in for a decision this model does not otherwise need to make, and the observed
+failure was a defect in the objective rather than a missing gate. But the branch is a real one, and
+a future bundle showing tiny moves emitted with `A_before = A_after` is evidence to revisit it — the
+narrowest available fix being to require `A_before > A_after` for a zero-cost plan, which needs no
+threshold because the affinity debt moves in discrete steps.
+
 **Defining "during the mirror".** `u_s` as used everywhere else is a p95 over the lookback window —
 a robust *statistic*, not an instantaneous reading — so adding an instantaneous `ω` to it would mix
 two different kinds of quantity. Define the check explicitly:
