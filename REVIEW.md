@@ -226,6 +226,34 @@ AB-01 through AB-05 and AB-07 are fixed (documentation/comment corrections only,
 change); AB-06 is acknowledged without a change, since the changelog entry it names is already
 tagged and released.
 
+A **twentieth pass** (section 39) reviews commit `9b44ba9` — the plan-only redesign of the
+free-space policy as per-storage requirements (§5.3.1, §5.3 (C5), the §6 override, the §7.3
+repair exemption, §8.1's hard floor, and the §14.8 companion fixture), the first new plan
+material since the nineteenth pass. Thirteen findings (AC-01..AC-13) are identified: five
+blocking — §7.3's per-move "excluded from both sums" exemption contradicts the plan-level
+override the built `payback.py` implements and, as written, changes `fc-tier1`'s recorded
+payback numbers (against the commit message's own "every existing fixture stays valid"); the
+exclusion semantics is undefined against §7.2's plan-level benefit while §14.8 renders the
+override semantics the same commit abandoned; §14.8's unique-optimum claim rests on the (C2)
+format rule both solver backends document as not implemented (the as-built optimum is a
+one-move repair at objective 1.081, positive benefit, payback-passing); §14.8's capacity gate is
+open at 127% against the 25% default, so its "the requirement, and nothing else" isolation
+claim is false; and the `hard: null` reversed-order arithmetic drops the very floor the commit
+introduced and uses a stale `Z_b`. Five spec gaps (the revert test vs the built "source
+presently violating" detection, with its evaluation point unspecified; a migration path for a
+per-storage `min_free_bytes` that never existed, with both-set precedence undefined; `hard:
+null` overloaded between global and per-storage; `100%` accepted by the grammar and rejected by
+`soft_s < C_s`; §8.1's false "relaxation of (C5)" claim, with a dip claim that fails whenever
+`r_s > 0`). Three smaller (§9.5's unrendered repair marker; the unaddressed thrash risk of an
+unsatisfiable requirement; phase 13's row missing the `min_free_bytes` signature-change sweep).
+**Section 40** records the resolution: all thirteen fixed in the plan, and resolving AC-01/AC-02
+surfaced one further defect in the commit's own semantics — a per-move trigger misses
+**redundant repairs** (fc-tier1's own shape: either move alone repairs, so neither is marked),
+which would let payback veto a repairing plan — so the exemption is re-hung on the plan's
+*outcome* (final `Σ r_s` strictly below the current assignment's), with the revert test kept as
+the per-move output marker; `fc-tier1`'s recorded numbers survive under every semantics
+considered, and the plan now says so with the arithmetic.
+
 ---
 
 ## 0. Overall assessment
@@ -5769,6 +5797,97 @@ coverage** (unchanged: no production logic changed beyond one added comment), `g
 --check` and `validate_corpus.py --check` both clean, `docs-check` clean (`IMPLEMENTATION_PLAN.pdf`
 and the manual PDF rebuilt and re-stamped in the same commit as their Markdown, per AGENTS.md
 §7.4).
+
+---
+
+## 39. Twentieth-pass review — the free-space policy redesign (§5.3.1, §7.3, §8.1, §14.8)
+
+Reviewed commit `9b44ba9` ("plan: redesign free-space policy as per-storage requirements (section
+5.3.1)") — the plan-only redesign of the free-space policy: per-storage `free_space.soft`/`hard`
+requirements (bytes, byte-unit strings, percentages; global, per-storage, per-`/regex/`-pattern),
+the (C5) integration `R_s = max(f_s·Z_s, soft_s)`, the §6 gate override, the §7.3 payback
+exemption for repairs, §8.1's transient hard floor, and the §14.8 companion fixture
+(`free-space-repair.yaml`, specified but not yet built — phase 13). The review verified every
+as-built claim against the code (`payback.py`'s `has_reserve_override` plan-level override,
+`schedule.py`'s `_resolves_reserve_violation` "source presently violating" detection,
+`heuristic.py`/`optimize.py`'s documented (C2) format gap, `config.py`'s global-scalar
+`min_free_bytes`, `fc-tier1.expected.json`'s recorded payback numbers) and re-derived §14.8's
+arithmetic independently (the initial table, `b̄ = 0.51`, `F = 1.608 → 1.216`, `E = 0 → 4.10`,
+objective 5.283 vs the 602-variant 5.308, the soft:0 counterfactual 0.804, benefit −1.23×10⁸,
+cost 15 729, ratio −7 827, both `hard`-sweep orders) — all confirmed.
+
+### 39.1 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| AC-01 | High | plan §7.3, `payback.py`, `fc-tier1.expected.json` | §7.3 as written specifies a per-move exemption ("exempt moves are excluded from both sums") that contradicts the built plan-level override (`payback.py:352` `aggregate_ok = has_reserve_override or benefit ≥ λ·cost`, every move in the sums) and, applied to `fc-tier1` — whose `102:scsi0` comes off a reserve-short storage — changes the fixture's recorded `total_cost_load_seconds: 26214.4` and its ratio, against the commit message's "every existing fixture and config stays valid" |
+| AC-02 | High | plan §7.3, §14.8 | "Excluded from both sums" is not well-defined: `benefit` is a plan-level quantity (§7.2's E/F/A before→after), not a sum over moves, and §14.8 renders "REJECT — overridden", the override semantics the same commit abandoned — pick one semantics and state it |
+| AC-03 | High | plan §14.8, `heuristic.py:51`, `optimize.py:72` | §14.8's unique two-move optimum rests on the (C2) format rule that is specified but not implemented (`topology.Storage` exposes no type/format, so every group storage is an eligible target); without it the one-move repair `601:scsi0 packed → swapme` is legal and optimal (objective ≈ 1.081, Σ r_s = 0, positive benefit, payback passes), collapsing the unique-optimum claim, the negative benefit and the whole exemption demonstration; phase 13's row named none of the required work (topology plumbing, both backends, fixture schema, oracle) |
+| AC-04 | Medium | plan §14.8 | The fixture's capacity gate is open: fills 0.75/0.68/0.10 give `(max b − min b)/b̄ = 0.65/0.51 = 127%` against `capacity_spread_threshold`'s 25% default, so "E = 0, both balance gates shut" names two of three gates and "the requirement, and nothing else, is what makes the engine act" is false — the gate's ACT is what lets the engine plan |
+| AC-05 | Medium | plan §14.8 | The `hard: null` reversed-order arithmetic is wrong twice over: it drops the `max(…, hard_b)` floor this same commit introduced (`5.8 + 0.5 + max(2·max(1.0, 0.5), 3.0) = 9.3`, not `6.3 + 2.0 = 8.3`) and reads `Z_b` from before `603` left; "drops roomy to 6.3 used" also conflates the post-603 state (5.8) with the post-601 one (6.3) |
+| AC-06 | Medium | plan §5.3/§7.3, `schedule.py:171` | The revert test is specified without saying how it relates to the built repair detection it replaces (`_resolves_reserve_violation`: "is this disk's current storage presently violating (C5)?"), which by construction cannot see the indirect repair §14.8 needs; the replacement touches `schedule.py`, `ScheduledMove`/`MoveCost` in `payback.py`, and `optimize.py`'s documented asymmetry, and the test's evaluation point (re-score vs re-solve) is unspecified |
+| AC-07 | Medium | plan §5.3.1, `config.py:122` | "A per-storage `min_free_bytes` keeps its storage's `soft_s`" describes a migration path for a key that does not exist: `StorageConfig` carries only `capability_weight`/`reserve_factor`/`saturation_load`, and `min_free_bytes` is one global scalar threaded as a parameter through ~14 call sites; what happens when both `snapshot_reserve.min_free_bytes` and `free_space.soft` are set is undefined |
+| AC-08 | Medium | plan §5.3.1 | `hard: null` is overloaded: the YAML comment says null = soft, the inheritance paragraph says per-storage null means inherit global — global `hard: "10%"` plus per-storage `hard: null` has two answers |
+| AC-09 | Low | plan §5.3.1, §11.1 | The percentage grammar accepts `0 ≤ N ≤ 100` while `soft_s < C_s` rejects 100% — a value the grammar accepts and no storage can ever satisfy; make the grammar `0 ≤ N < 100` |
+| AC-10 | Low | plan §8.1 | "This is a relaxation of (C5)" is wrong: only the floor component relaxes (hard ≤ soft); the snapshot term is *strengthened* (`f_b·max(Z_b, z_d) ≥ f_b·Z_b`) and the source is still charged — as written a reader could conclude §8.1 is implied by (C5); the following dip claim ("solely on a storage the finished plan leaves compliant") is also false whenever `r_s > 0`, which §5.3 explicitly permits |
+| AC-11 | Low | plan §9.5 | The example shows a `repair` marker and a `repair: true` plan-output field that no shipped renderer emits, inside a section whose surrounding prose is annotated "As built" — mark it phase 13 pending the way the other pending items are |
+| AC-12 | Low | plan §5.3.1 | The thrash risk of an unsatisfiable requirement (soft: 30% on an 85%-full cluster) is unaddressed: it bypasses the drift and imbalance gates on every run and is payback-exempt — both anti-thrash mechanisms disabled for exactly the case that recurs forever, leaving only `cooldown_per_disk`; §12's new row covers reporting, not this |
+| AC-13 | Low | plan §12 (phase 13 row) | The row does not name the `min_free_bytes` scalar → per-storage `soft_s`/`hard_s` signature change across `compute_reserve_status`/`run_heuristic`/`transient_invariant_ok`/`order_moves` and their `cli.py` call sites, nor the unit tests asserting the old flag |
+
+### 39.2 What the review verified as correct
+
+All of §14.8's numbers except the AC-05 line: the initial used/`Z_s`/`R_s`/free/`r_s` table,
+`b̄ = 0.51` and `F = 1.608 → 1.216` (ΔF = 0.392), `E = 0 → 4.10`, objective 5.283 (no-move at
+soft: 0.804) at α=1.0/β=0.25/γ=0.05/κ=0.5/δ=0.5, the γ tiebreak against the 602 variant (5.308,
+so the uniqueness claim holds *given the format rule*), benefit −1.2311×10⁸, cost 15 729
+(2 × duration, saferemove off, matching §7.1), ratio −7 827, `10.3 > 10` infeasible and
+`7.3 + 2.0 = 9.3` with the 2.7 TiB dip. The design itself — the `max()` integration, the
+lexicographic stage-1 minimization, the gate override, the soft/hard split with the endpoint
+checked by (C5) and the transient floor by §8.1 — is sound, and the worked example is unusually
+well-checked. What went wrong is scope honesty (AC-01, AC-03), not the model.
+
+---
+
+## 40. Resolution of twentieth-pass findings (AC-01..AC-13)
+
+All thirteen findings are fixed in `IMPLEMENTATION_PLAN.md` (this is a plan-only change; phase 13
+builds it). Resolving AC-01/AC-02 surfaced one further defect in the commit's own semantics,
+fixed with them:
+
+**The redundant-repair hole (found resolving AC-01/AC-02).** The commit's per-move trigger —
+"a plan that contains a repair move is exempt" — misses a plan of **redundant repairs**: two
+moves off a violating storage where *either one alone* repairs it. `fc-tier1` is exactly this
+shape (holding `102:scsi0` back leaves san-a at `3.5 + 4.0 = 7.5 ≤ 8`; holding `101:scsi1` back
+at `3.0 + 4.0 = 7.0 ≤ 8`), so neither move passes the revert test, the plan contains no repair
+move, loses its exemption, and a payback-failing redundant-repair plan would be vetoed —
+leaving the violation standing against the mandate. §7.3 now hangs the exemption on the plan's
+**outcome** — exempt iff the plan's final `Σ r_s` is strictly below the current assignment's —
+and keeps the revert test as the per-move `repair: true`/`false` output marker. The outcome
+trigger is deliberately narrower than the built `has_reserve_override` (a plan that moves a disk
+off a violating storage but ends no less short is exempt today and will not be), and the plan
+says so; §8.2's priority-1 scheduling test keeps its current-state form.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AC-01 | Resolved | §7.3's exemption is plan-level again, matching the built `payback.py`: the aggregate test is skipped for the whole plan, every move stays in the sums. The reviewer's fixture-churn concern is **refuted by the arithmetic**: under the revert test `fc-tier1`'s two-move plan contains no repair moves (either move alone repairs san-a), so the aggregate test runs and accepts at ratio 7 344.4 ≥ 10 — the fixture's recorded numbers (`total_cost_load_seconds: 26214.4`, `benefit_load_seconds: 192529137.63`, `ratio: 7344.4`, `accepted: true`) are unchanged under the old override, the commit's per-move semantics, and the final outcome trigger. §7.3 states this with the worked numbers, and §9.5's example now shows the correct rendering (both moves `repair: false`, exemption note on the plan, not on move 1). |
+| AC-02 | Resolved | The exemption semantics is stated explicitly: option (a) — any repairing plan skips the economic test for the whole plan — chosen because it matches the built code and needs no fixture churn; the revert test is defined as the per-move *marker*, evaluated by re-scoring `Σ r_s` on the final assignment with one `x` held (no re-solve), and §14.8 renders exactly that ("REJECT — overridden: the plan repairs (Σ r_s 0.5 → 0)"). The marker/trigger disagreement cases are spelled out (redundant repairs: plan repairs, no move marked; load-bearing move on a non-repairing plan: marked, plan not exempt). |
+| AC-03 | Resolved | §14.8 gained a "Two prerequisites" paragraph stating the (C2) gap openly: the as-built optimum is the one-move `601:scsi0 packed → swapme` (objective 1.081, positive benefit, payback passes), so the fixture ships **with** phase 13's format work, its expected file recording `requires_format_eligibility: true` so a premature run fails loudly; capacity cannot substitute (§8.1's predicate is monotone in `z_d`) and pinning `603` does not work either (verified: `601 → swapme` stays legal and optimal) — the reviewer's suggested `pinned: true` workaround is refuted. Phase 13's row now scopes in `topology.Storage` type/format fields, both backends' `x_{d,s}=0` fixing, the fixture schema and the oracle. |
+| AC-04 | Resolved | The fixture sets `gates.capacity_spread_threshold: null` and §14.8 says why: the gate's ACT is what lets the engine plan, the requirement is what makes the solver move — the isolation claim is about the solver's objective, not the gate stack. The soft:0 counterfactual is tied to §9.5's ACT-but-no-moves case (with the gate at its default) or the engine declining to act (with it nulled), pinned deliberately. |
+| AC-05 | Resolved | The reversed order is `603 → swapme` first (its own check on `swapme`: `1.0 + 1.0 + max(2·1.0, 3.0) = 6.0 ≤ 10` ✓), which empties `roomy` to 5.8 used; `601` then lands at `5.8 + 0.5 + max(2·max(1.0, 0.5), 3.0) = 9.3 ≤ 10` ✓ — the floor kept, `Z_roomy` re-read at 0.5 after `603` left, and the hard:10% reversed second move (`5.8 + 0.5 + max(1.0, 1.0) = 7.3`) added for symmetry. |
+| AC-06 | Resolved | §7.3 and phase 13's row name the replacement precisely: `ScheduledMove.resolves_reserve_violation` (set by `schedule.py`'s "source presently violating" test) is replaced by the outcome trigger plus per-move revert-test markers, while `order_moves()`'s internal priority-1 test keeps §8.2's current-state form; the evaluation point is fixed (re-score `Σ r_s` on the final assignment with one `x` held, no re-solve), and the unit tests asserting the old flag (`test_schedule.py`'s ordering assertions, `test_cli.py`'s JSON assertions) are swept with it. |
+| AC-07 | Resolved | §5.3.1 now states what the built code actually carries: `min_free_bytes` was never more than a global scalar (`config.py`'s `snapshot_reserve` block, no per-storage form, unlike `reserve_factor`), it is deprecated syntax for the global `free_space.soft`, and when both are set **`free_space.soft` wins** with the warning naming the ignored key — the same fail-safe posture as §11.1's other either/or rules. |
+| AC-08 | Resolved | The two `null`s never collide: global `hard: null` is a *value* ("no dip below soft"), per-storage `hard: null` is an *absence* ("inherit the global") — stated in the YAML comment, the inheritance paragraph and the defaults paragraph, the same inheritance `reserve_factor` already has. |
+| AC-09 | Resolved | The grammar is `0 ≤ N < 100` (grammar bullet and §11.1 row): `100%` is rejected by the grammar itself rather than accepted here and failed by `soft_s < C_s` later. |
+| AC-10 | Resolved | §8.1 now says only the *floor component* relaxes (hard ≤ soft); the snapshot term is **strengthened** (`f_b·max(Z_b, z_d) ≥ f_b·Z_b`) and the source is still charged — the two facts that make §8.1 a separate invariant rather than a corollary of (C5) — and the dip claim carries the `r_s > 0` case (a dip may also sit on a storage whose shortfall the plan already minimizes and reports, which §5.3 permits). |
+| AC-11 | Resolved | §9.5's example is corrected to the final semantics (no `repair` marker on move 1's line; the exemption note names the plan, and both moves are `repair: false` — redundant repairs) and the "As built, phase 13 pending" note now covers the exemption note, the per-move markers and the `--json` field, naming today's `resolves_reserve_violation` field as the built flag §7.3 replaces. |
+| AC-12 | Resolved | §5.3.1 gained a thrash paragraph: an unsatisfiable requirement bypasses the gates every run and a shortfall-reducing plan is payback-exempt — accepted on purpose (the alternative is hysteresis on a safety property, which §6 forbids for the snapshot reserve), with the reporting mitigations named (the §9.5 unfixable-shortfall line, every run) and an explicit warning not to "fix" it with a back-off timer without revisiting §6's no-hysteresis rule first. |
+| AC-13 | Resolved | Phase 13's row now names the full signature change: the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py` and every `cli.py` call site that threads the scalar today — plus the flag-asserting unit-test sweep (AC-06). |
+
+Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
+`docs-check` (the plan PDF rebuilt and re-stamped in the same commit as the Markdown, per
+AGENTS.md §7.4). No production code changed in this pass; every fix is to the plan text, and the
+one behavioural claim that changed (the exemption trigger) is specified against the built code it
+will replace in phase 13.
 
 ---
 
