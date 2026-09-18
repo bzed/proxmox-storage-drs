@@ -58,8 +58,18 @@ String or `null`.
 A PVE user, e.g. `drs@pve`. Required unless `proxmox.auth.token_id` is set.
 Username/password authentication is what the original requirement asked
 for; an API token (below) is preferred for `execution.mode: auto` because it
-needs no interactive ticket refresh and can be scoped to exactly the
-privileges section 3.5 of the plan lists.
+needs no interactive ticket refresh and can be scoped tightly: the tool's
+actual minimum privilege is `Datastore.Audit` **and** `Datastore.Allocate` on
+every storage in the config's `groups`, plus `VM.Config.Disk` and
+`VM.Migrate` (or an equivalent custom role) on the VMs it may move.
+`Datastore.Audit` alone is not enough — PVE's per-volume content listing
+silently returns an *empty* result with no error when only Audit is
+granted, which would make every tracked disk look untracked rather than
+raising anything you'd notice. Grant the role per storage rather than
+relying on propagation from the parent `/storage` path, and remember that
+an API token's effective permission is the **intersection** of the user's
+own grants and the token's own: both need the grant, or neither has it.
+(`IMPLEMENTATION_PLAN.md` section 3.5.)
 
 ### `proxmox.auth.password`
 
@@ -181,9 +191,19 @@ As `metrics.read_bytes`, for writes.
 String, default `blockstat_rd_total_time_ns`.
 
 The Prometheus metric name for cumulative read I/O time in nanoseconds. This
-is the **primary** load signal by default (`load_weights.iotime`) — see
-`IMPLEMENTATION_PLAN.md` section 4 for why I/O time, rather than IOPS or
-bytes, is the right default.
+is the **primary** load signal by default (`load_weights.iotime`): by
+Little's law, `rate(rd_total_time_ns + wr_total_time_ns) / 1e9` is the
+average number of I/O requests in flight on that disk — dimensionless,
+additive across disks on the same storage, and directly comparable between
+storages of different size and speed. It also *self-weights* reads against
+writes automatically: an operation that takes eight times as long to
+service (a large sequential write against a small random read, say) counts
+eight times as much, with no manual read/write tuning needed. Pure IOPS
+treats every operation as equal and so under-counts large sequential load;
+pure throughput does the reverse and under-counts small random load. `ops`
+and `bytes` (see `load_weights` below) remain available as additional
+weighted terms for a policy the array's own timings do not capture.
+(`IMPLEMENTATION_PLAN.md` section 4.)
 
 ### `metrics.write_time_ns`
 
@@ -212,7 +232,7 @@ this is still set to the literal string `instance`.
 String, default `nodename`.
 
 The Prometheus label carrying the PVE node name — what the auto-derived
-filter below is built from (section 3.4): the tool fetches this cluster's
+filter below is built from: the tool fetches this cluster's
 own node list from the PVE API and scopes every query to `<this
 label>=~"<node1>|<node2>|..."`, so a Prometheus shared by more than one
 PVE cluster (or by anything else emitting a same-named metric) cannot
@@ -322,14 +342,17 @@ nor suppresses a migration.
 
 Fraction in (0, 1), default `0.99`.
 
-The quantile the section 7.3 **saturation guard** actually consumes (when a
-storage configures `saturation_load`) — must be `>= window.quantile`. Being
-wrong in the direction of "busier than it looks" costs the guard deferring a
-move that was actually safe; the other direction risks the guard missing a
+The quantile the **saturation guard** actually consumes — must be
+`>= window.quantile`. (The saturation guard is the migration-time safety
+check, `migration.saturation_ceiling` below, that defers a move if it would
+push a storage's forecasted load past a configured ceiling; it runs only for
+a storage that sets `groups[].storages[].saturation_load`.) Being wrong in
+the direction of "busier than it looks" costs the guard deferring a move
+that was actually safe; the other direction risks the guard missing a
 mirror that pushes a storage past saturation. The optimizer itself still
-decides placement from `window.quantile`, the point estimate — see
-`IMPLEMENTATION_PLAN.md` §10.1's "As built" note; wiring the upper bound
-into the optimizer's own input remains future work.
+decides placement from `window.quantile`, the point estimate, not this
+upper bound; wiring the upper bound into the optimizer's own input remains
+future work. (`IMPLEMENTATION_PLAN.md` §10.1's "As built" note.)
 
 ### `window.min_coverage`
 
@@ -343,10 +366,25 @@ storage.
 
 ## `load_weights` — combining read/write and time/ops/bytes
 
-See `IMPLEMENTATION_PLAN.md` section 4 for the full blend-and-rescale
-formula; the summary is that `iotime`/`ops`/`bytes` are blended in
-normalized space and the whole result is rescaled back onto the
-in-flight-I/O scale, so `ℓ_d = raw_t(d)` exactly under the defaults below.
+Each disk's load is a single scalar, in **average in-flight I/O
+requests**, blended from three raw per-disk signals — I/O time,
+operations/second and bytes/second — after applying the read/write
+asymmetry factors below. The three raw signals have wildly different
+magnitudes (in-flight I/O is roughly 0–10, ops/s can run into the tens of
+thousands, bytes/s into the billions), so they cannot be weighted directly:
+each is first normalized against its own group's total (which makes the
+three comparable, but throws away their physical meaning), the normalized
+values are blended using the weights below, and the blend is then rescaled
+back onto the in-flight-I/O scale using the group's total I/O time. Under
+the defaults (`iotime: 1.0`, `ops: 0.0`, `bytes: 0.0`) that rescale is an
+exact identity, so a disk's load is simply its own I/O-time term — the
+normalize/blend/rescale machinery only changes the result once `ops` or
+`bytes` carries a non-zero weight. The absolute scale this produces matters
+beyond the blend itself: `migration.source_load_weight` and its siblings
+below assume that `1.0` in-flight request at a mirror endpoint is directly
+comparable to a disk's own load, which is only true because of this
+rescale. (Derived in full, with the normalization formula, in
+`IMPLEMENTATION_PLAN.md` section 4.)
 
 ### `load_weights.iotime`
 
@@ -438,14 +476,18 @@ Positive number or `null`, default `null`.
 
 The storage's approximate queue depth — the number of concurrent I/O
 requests it services before latency climbs super-linearly — in the same
-units as the load model (average in-flight I/O). Used only by the section
-7.3 saturation guard on a migration's mirror. **Has no safe default**: an
-idle storage's observed load is not its capacity, so leaving this `null`
-(the default) simply disables that one advisory check for the storage; the
-hard bounds (`migration.max_single_move_duration`, the transient reserve
-invariant) always apply regardless. Obtain a real value from the array's
-documented queue depth, or by observing where latency actually starts
-climbing.
+units as the load model (average in-flight I/O). Used only by the
+saturation guard on a migration's mirror (see `window.upper_quantile`
+above). **Has no safe default**: an idle storage's observed load is not its
+capacity, so leaving this `null` (the default) simply disables that one
+advisory check for the storage; the hard bounds always apply regardless —
+`migration.max_single_move_duration`, and the **transient reserve
+invariant**: the `snapshot_reserve` floor (below) checked against the
+storage's actual state *while a migration is in flight*, when a moving
+disk's source and target copies are both briefly fully allocated at once,
+not merely before and after. Obtain a real value for `saturation_load` from
+the array's documented queue depth, or by observing where latency actually
+starts climbing.
 
 ## `snapshot_reserve` — the free-space floor
 
@@ -495,9 +537,11 @@ Fraction, default `0.20`.
 
 The minimum relative spread across a group's storages before a plan is
 actually built. A group under this threshold is left alone even if it has
-drifted. Also, unrelatedly, the section 10.2 backtest error ceiling a
-non-`quantile` `forecast.model` must stay within to drive the section 7.3
-saturation guard — see `forecast.model` above.
+drifted. Also, unrelatedly, this same value doubles as the backtest error
+ceiling a non-`quantile` `forecast.model` (`seasonal_naive`/`holt_winters`)
+must stay within before its forecast is trusted to drive the saturation
+guard for that group's run — see `forecast.model` below for how that
+backtest works.
 
 ### `gates.capacity_spread_threshold`
 
@@ -539,8 +583,10 @@ this and warns when the configured cooldown is too short.
 Size/s, default `209715200` (200 MiB/s).
 
 Passed to `move_disk` as `bwlimit` (converted to KiB/s at the API call site —
-the API's own unit, never bytes/s). Also the divisor in the section 7.1
-mirror-duration estimate used by the payback test.
+the API's own unit, never bytes/s). Also the divisor in the mirror-duration
+estimate the payback test uses: a move's mirror is assumed to take
+`disk_bytes / bwlimit_bytes_per_sec` seconds (see `migration.payback_ratio`
+below for the full cost/benefit comparison).
 
 ### `migration.source_load_weight`
 
@@ -562,8 +608,11 @@ Duration, default `365d`.
 
 The horizon `H` over which a plan's imbalance, data-spread and VM-affinity
 reduction are assumed to persist — `benefit = (alpha_spread * ΔE +
-delta_capacity_spread * ΔF + kappa_vm_affinity * ΔA) * H`. `ΔA` may be
-negative (a balance move that splits a VM pays for that fragmentation out
+delta_capacity_spread * ΔF + kappa_vm_affinity * ΔA) * H`, where each `Δ`
+is the improvement the plan buys in that term (its value before the plan
+minus its value after: `ΔE` for imbalance, `ΔF` for data spread, `ΔA` for
+VM-affinity fragmentation — see `objective` below for what each term
+measures). `ΔA` may be negative (a balance move that splits a VM pays for that fragmentation out
 of its other gains — `IMPLEMENTATION_PLAN.md` section 7.2). Setting this to
 `0` disables the payback test entirely
 (`IMPLEMENTATION_PLAN.md` section 11.1 rejects that at config-load time:
@@ -581,9 +630,22 @@ clusters).
 
 Weight `> 0`, default `10.0`.
 
-`λ`: a plan is only accepted if its total benefit is at least this many
-times its total migration cost. This is the numeric form of "migrating a
-very large disk might generate more traffic than it saves."
+`λ`: a plan is only accepted when `benefit >= payback_ratio * cost`, summed
+over every disk the plan moves. Both sides are in **load-seconds** —
+average in-flight I/O requests (the unit `load_weights` produces, see
+`metrics.read_time_ns` above) multiplied by seconds — which is what makes
+the comparison meaningful. A disk's cost (`cost_d`) is the extra in-flight
+I/O the migration itself imposes: `migration.source_load_weight` on the
+source and `migration.target_load_weight` on the target for the mirror,
+which takes `disk_bytes / migration.bwlimit_bytes_per_sec` seconds, plus —
+when `migration.account_saferemove_wipe` is on and the source storage has
+`saferemove` set — `migration.wipe_load_weight` on the source for as long
+as the old volume takes to be zeroed. Benefit is the improvement the plan
+buys in imbalance, data spread and VM affinity, each weighted exactly as in
+the `objective` section below and held for `migration.payback_horizon`
+(see above for that formula). This is the numeric form of "migrating a very
+large disk might generate more traffic than it saves." (`IMPLEMENTATION_PLAN.md`
+section 7.2.)
 
 ### `migration.max_single_move_duration`
 
@@ -608,8 +670,8 @@ migration cost badly if that assumption is wrong.
 Weight, default `1.0`.
 
 In-flight I/O charged to the source for the whole `saferemove` wipe duration
-— both in the cost model and in the section 7.3 saturation guard, where a
-draining move charges this to its source and nothing to its target. The
+— both in the cost model and in the saturation guard, where a draining move
+charges this to its source and nothing to its target. The
 zeroing pass is one sequential writer, so `1.0` is the natural value.
 
 ### `migration.saturation_ceiling`
@@ -633,15 +695,17 @@ storage, and note that allocation can *grow* during a move even then.
 Size, default `67108864` (64 MiB).
 
 A disk smaller than this carries zero `beta_move_count`/`gamma_move_bytes_per_tib`
-cost in the objective and zero `cost_d` in the payback model (section 5.4's
-`D^big`, sections 7.1/7.3) — it still counts as a scheduled move and every hard
-per-move safety rule (`max_single_move_duration`, the saturation guard, the
-transient reserve invariant) still applies to it exactly like any other move,
-but it needs no payback verdict and cannot make a plan fail the aggregate
-`payback_ratio` test. Together with `objective.kappa_vm_affinity`, this is what
-lets a tiny volume — an `efidisk0` var store or `tpmstate0`, both normally a
-few hundred KiB to a few MiB — rejoin its VM for free instead of being priced
-like a real migration (see section 3.6's `efidisk0`/`tpmstate0` note).
+cost in the objective and zero `cost_d` in the payback model — it still
+counts as a scheduled move and every hard per-move safety rule
+(`max_single_move_duration`, the saturation guard, the transient reserve
+invariant) still applies to it exactly like any other move, but it needs no
+payback verdict and cannot make a plan fail the aggregate `payback_ratio`
+test. Together with `objective.kappa_vm_affinity`, this is what lets a tiny
+volume — an `efidisk0` var store or `tpmstate0`, both normally a few hundred
+KiB to a few MiB — rejoin its VM for free instead of being priced like a
+real migration: both device types move online on PVE 9.2, so there is no
+reason to price their reunion like a real migration once they are cheap
+enough to ignore. (`IMPLEMENTATION_PLAN.md` §§5.4, 7.1, 7.3, 3.6.)
 
 The default sits comfortably above either of those and far below any disk the
 payback rule was written for, so a 528 KiB EFI disk always qualifies and a
@@ -654,9 +718,28 @@ judgement call, not a validated range.
 
 ## `objective` — the solver's trade-off weights
 
-See `IMPLEMENTATION_PLAN.md` section 5.4 for the full objective and section
-14.3 for a worked demonstration of `beta_move_count` and
-`kappa_vm_affinity` choosing between competing plans.
+The solver (and, for the terms it also uses, the heuristic backend)
+minimizes one weighted sum, evaluated per group:
+
+```
+  alpha_spread            * (imbalance: summed deviation of each storage's utilization from the group's target)
++ beta_move_count         * (number of migrations)
++ gamma_move_bytes_per_tib * (TiB actually migrated)
++ kappa_vm_affinity       * (VM disk fragmentation, I/O-weighted — see below)
++ delta_capacity_spread   * (data spread: summed deviation of each storage's fill fraction from the group's mean)
++ reserve_violation_penalty * (reserve violation, heuristic backend only — see below)
+```
+
+The first five terms are calibrated to share one scale, in units of average
+in-flight I/O per storage (see `metrics.read_time_ns` above) — which is
+what makes the weights directly comparable: at the defaults, a migration
+must buy at least a 0.25-request reduction in summed imbalance just to
+cover its own `beta_move_count` cost, before its `gamma_move_bytes_per_tib`
+and `kappa_vm_affinity` costs and the separate payback test
+(`migration.payback_ratio` above) are even considered. Each term is
+explained, with its own default and worked numbers, in its own entry below.
+(`IMPLEMENTATION_PLAN.md` section 5.4 has the full derivation; section 14.3
+works two competing plans through this exact formula.)
 
 ### `objective.spread_metric`
 
@@ -671,9 +754,11 @@ nearly-as-bad storage once the worst one is fixed.
 
 Weight, default `1.0`.
 
-Weight on the imbalance term. This and the other three weights below share
-one scale — see the worked arithmetic in `IMPLEMENTATION_PLAN.md` section
-14.3 for what "a 0.25-request reduction" actually costs against one move.
+Weight on the imbalance term (the sum of each storage's deviation from the
+group's target utilization — see `objective` above for where this sits in
+the full objective, and why `1.0` against the default
+`beta_move_count: 0.25` means a migration must buy at least a 0.25-request
+reduction in that sum to be worth making at all).
 
 ### `objective.beta_move_count`
 
@@ -697,14 +782,20 @@ specifically (as opposed to `beta_move_count`, which only counts moves).
 Weight, default `0.50`.
 
 Penalty per extra storage a VM's disks are spread across, counted only
-**within** a group (a VM split across two groups is structural and cannot be
-repaired by any migration, so it is not counted) and weighted by the VM's
-own I/O share (`w_v = max(1, ℓ_v / ℓ̄)`, `IMPLEMENTATION_PLAN.md` section
-5.4) — a VM doing several times the group's average I/O is worth
-correspondingly more to keep together than this configured weight alone
-suggests; a quiet VM's fragmentation is weighted exactly as configured. A
-soft preference: a
-strong imbalance or a capacity constraint can legitimately override it.
+**within** a group — a VM split across two groups is structural and cannot
+be repaired by any migration, so it is not counted — and weighted by the
+VM's own I/O share of the group: `w_v = max(1, ℓ_v / ℓ̄)`, where `ℓ_v` is
+the VM's total load (the sum, in average in-flight I/O, of every one of its
+disks in the group, including disks pinned this run) and `ℓ̄` is the
+group's mean load per VM (the group's total load divided by every VM that
+owns a disk in the group). The floor of `1` means a below-average VM's
+fragmentation is weighted exactly as configured; a VM running several times
+the group's average I/O is worth correspondingly more to keep together than
+the configured weight alone suggests — a VM doing 2.7x the group's average
+I/O, for example, is effectively weighted as if `kappa_vm_affinity` were
+2.7 times higher for that VM alone. A soft preference: a strong imbalance
+or a capacity constraint can legitimately override it.
+(`IMPLEMENTATION_PLAN.md` section 5.4.)
 
 ### `objective.delta_capacity_spread`
 
@@ -740,17 +831,19 @@ The reserve-violation weight in the **heuristic backend**'s objective
 MILP backend is installed): multiplied straight into
 `reserve_penalty_term = objective.reserve_violation_penalty *
 reserve_shortfall_tib`, one of the six terms `explain`'s `objective:`
-line prints and the section 14 fixture's totals carry. It is used exactly
-as configured — no floor, no automatic raise, no warning.
+line prints. It is used exactly as configured — no floor, no automatic
+raise, no warning.
 
-The MILP backends (`solver.backend: cpsat`/`cbc`, and `auto` when either
-is available) solve the reserve **lexicographically** instead
-(`IMPLEMENTATION_PLAN.md` section 5.3, option 1): it is fixed as a hard
-constraint before the section 5.4 objective is even considered, so no
-weight — this one included — can trade it away. Section 5.3 also
-describes a single-stage big-M alternative (option 2) with a
-`max(configured, computed)` floor for this key; that alternative is not
-implemented, so this key never gets raised automatically for any backend.
+The MILP backends (`solver.backend: cpsat`/`cbc`, and `auto` when either is
+available) solve the reserve **lexicographically** instead: the reserve is
+fixed as a hard constraint and solved for first, before the rest of the
+objective above is even considered, so no weight — this one included — can
+trade it away. A single-stage alternative exists on paper: computing a
+provably-dominant penalty from the group's own load instead of taking this
+key at face value, with a `max(configured, computed)` floor. It is not
+implemented, so this key never gets raised automatically for any backend —
+what you set is exactly what the heuristic backend uses, and the MILP
+backends never consult it at all. (`IMPLEMENTATION_PLAN.md` section 5.3.)
 
 ## `solver` — which backend plans
 
@@ -779,17 +872,23 @@ falls back cleanly instead.
 
 Fraction, default `0.02`.
 
-Acceptable optimality gap for the MILP solve. `IMPLEMENTATION_PLAN.md`
-section 5.5's coefficient-scaling error bound is three orders of magnitude
-below this, so it cannot itself change which plan is selected.
+Acceptable optimality gap for the MILP solve: CP-SAT/CBC may stop once the
+best solution found is within this fraction of a proven lower bound, rather
+than solving to exact optimality. The CP-SAT backend must also convert
+every fractional weight and load value into an integer coefficient before
+solving, which introduces its own rounding error — worked out to roughly
+`5×10⁻⁴` of summed load-deviation units even for a 1,000-disk group, three
+orders of magnitude below this default `0.02` gap, so that rounding error
+cannot itself change which plan is selected or make CP-SAT and CBC
+disagree. (`IMPLEMENTATION_PLAN.md` section 5.5.)
 
 ### `solver.heuristic_iterations`
 
 Integer `> 0`, default `5000`.
 
-Iteration budget for the heuristic's local-search descent phase (section
-5.5). Higher can find a better local optimum on a large group at the cost of
-run time.
+Iteration budget for the heuristic's local-search descent phase. Higher can
+find a better local optimum on a large group at the cost of run time.
+(`IMPLEMENTATION_PLAN.md` section 5.5.)
 
 ## `execution` — how (and whether) moves actually happen
 
@@ -810,11 +909,11 @@ Integer `>= 1`, default `1`.
 
 How many moves may be in flight across the whole run at once, in `--mode
 auto` only (`dry-run`/`confirm` always run strictly sequentially
-regardless of this setting). Above `1` requires the *generalized*
-transient reserve invariant (section 8.1): several disks can land on one
-storage at once, and none of their sources release space until each
-individually completes — `apply` re-checks it live before launching each
-move. Launch order stays strictly FIFO: `apply` never reorders the
+regardless of this setting). Above `1` requires the *generalized* form of the transient reserve
+invariant (see `groups[].storages[].saturation_load` above for the
+single-move definition): several disks can land on one storage at once, and
+none of their sources release space until each individually completes —
+`apply` re-checks it live before launching each move. Launch order stays strictly FIFO: `apply` never reorders the
 scheduler's own queue to keep every slot busy, so a move that cannot
 launch yet is waited for rather than skipped past — see
 `docs/manual/28-apply.md`'s own "Concurrent execution" section.
@@ -845,8 +944,8 @@ throttle.
 Integer `>= 0`, default `3`.
 
 A cap on how many times one run may abandon its current plan and re-plan
-from newly observed state (section 9.2) — a mismatch between the plan and
-reality (a VM live-migrated mid-plan, a lock appeared) is normal, but a
+from newly observed state — a mismatch between the plan and reality (a VM
+live-migrated mid-plan, a lock appeared) is normal, but a
 cluster churning faster than the engine can plan is a condition for a human,
 not for indefinite retrying. `auto` mode only — `confirm`/`dry-run` report a
 mismatch (`replan_needed`) and stop that group's own run for the operator to
@@ -945,9 +1044,8 @@ time of the host running `pve-storage-drs`** — the same convention
 cross midnight (`start: "22:00"`, `end: "06:00"`); `start == end` is
 rejected as ambiguous — it would silently mean either "never" or "always".
 No `time_windows` configured at all means no restriction: `auto` may
-execute at any time (section 2.1's "the engine may plan at any time and
-simply decline to act outside the window" only applies once at least one
-window is configured). Before starting a move, `auto` also refuses it (and
+execute at any time — this is the deliberate default, not merely the
+absence of a rule. Before starting a move, `auto` also refuses it (and
 stops the group's run cleanly, without aborting a move already in
 progress) if its estimated duration would not finish before the window
 closes.
@@ -1047,17 +1145,16 @@ and `holt_winters` need more history than the decision window alone — see
 below — and `pve-storage-drs` refuses to start if `window.lookback` (or your
 Prometheus retention) cannot supply it, rather than silently falling back.
 
-**Backtest-validated before use.** Only when the section 7.3 saturation
-guard is actually active (some `groups[].storages[].saturation_load` is
-set): a `seasonal_naive`/`holt_winters` model is fit on the older half of
-its own recent history and checked against what actually happened in the
-newer half, once per group, before it is trusted for that run. A model
-that misses by more than `gates.imbalance_threshold` — or that does not
-yet have enough history to backtest at all — falls back to `quantile` for
-that group's saturation guard this run, logged at warning
-(`IMPLEMENTATION_PLAN.md` section 10.2). `quantile` itself is never
-backtested; there is nothing to validate and nothing more conservative to
-fall back to.
+**Backtest-validated before use.** Only when the saturation guard is
+actually active (some `groups[].storages[].saturation_load` is set): a
+`seasonal_naive`/`holt_winters` model is fit on the older half of its own
+recent history and checked against what actually happened in the newer
+half, once per group, before it is trusted for that run. A model that
+misses by more than `gates.imbalance_threshold` — or that does not yet
+have enough history to backtest at all — falls back to `quantile` for that
+group's saturation guard this run, logged at warning. `quantile` itself is
+never backtested; there is nothing to validate and nothing more
+conservative to fall back to. (`IMPLEMENTATION_PLAN.md` section 10.2.)
 
 ### `forecast.seasonal_lookback_days`
 
@@ -1110,9 +1207,9 @@ The seasonal component passed to the same fit.
 Weight, default `2.0`.
 
 The upper bound is `point_estimate + residual_z * stdev(residuals)` from the
-in-sample fit — this is what the section 7.3 saturation guard actually
-consumes (see `window.upper_quantile` for the equivalent under the
-`quantile` model; the optimizer itself does not consume this).
+in-sample fit — this is what the saturation guard actually consumes (see
+`window.upper_quantile` above for the equivalent under the `quantile`
+model; the optimizer itself does not consume this).
 
 ## `support` — diagnostic bundles
 
@@ -1153,8 +1250,8 @@ bring the estimate under it.
 
 The literal string `"auto"`, or a duration, default `"auto"`.
 
-`"auto"` captures the union of every forecaster's `required_range()`
-(section 16.2) — currently
+`"auto"` captures the union of every forecaster's `required_range()` —
+currently
 `max(window.lookback, forecast.seasonal_lookback_days, 2 * forecast.holt_winters.seasonal_periods * metrics.step)`
 — so a bundle can reproduce a forecaster the capturing operator never
 configured. An explicit duration (e.g. `14d`) overrides that; `--range` on

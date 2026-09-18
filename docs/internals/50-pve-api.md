@@ -6,16 +6,16 @@ actually call? Describes `proxmox_storage_drs/pve.py`.
 
 ## Why `proxmoxer`
 
-`IMPLEMENTATION_PLAN.md` section 3.5 explains the decision in full; the
-short version is `proxmoxer`'s **backend abstraction**. The same
-`ProxmoxAPI` attribute-chaining interface
-(`api.nodes(node).qemu(vmid).config.get()`) is available over plain HTTPS
-(what `build_client()` uses today) or over SSH, either shelling out to the
-system's own `ssh`+`pvesh` (`openssh`) or with an in-process client
-(`ssh_paramiko`). A deployment that cannot open the API port to the
-management host becomes a different keyword argument in `build_client()`,
-with no change anywhere else — not to `PveClient`'s methods, and not to any
-of their callers.
+`pve.py` is built on `proxmoxer` rather than a hand-rolled ticket/CSRF
+client for its **backend abstraction**. The same `ProxmoxAPI`
+attribute-chaining interface (`api.nodes(node).qemu(vmid).config.get()`) is
+available over plain HTTPS (what `build_client()` uses today) or over SSH,
+either shelling out to the system's own `ssh`+`pvesh` (`openssh`) or with an
+in-process client (`ssh_paramiko`). A deployment that cannot open the API
+port to the management host becomes a different keyword argument in
+`build_client()`, with no change anywhere else — not to `PveClient`'s
+methods, and not to any of their callers. (`IMPLEMENTATION_PLAN.md` section
+3.5 has the full evaluation of alternatives that led here.)
 
 ## `build_client()`: the one place auth is assembled
 

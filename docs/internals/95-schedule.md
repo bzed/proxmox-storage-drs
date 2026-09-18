@@ -74,7 +74,13 @@ actually enforce the invariant against whatever really ends up running
 together.
 
 The actual arithmetic — `used_b + sum(z_m) + f_b * max(Z_b, max(z_m)) <=
-C_b` — lives in `reserve.transient_charge_ok()`, taking a *list* of
+C_b` (storage `b`'s bytes already used, plus every in-flight charge
+landing on it, plus its reserve headroom sized off the larger of what
+already resides there and the largest single charge in flight, must not
+exceed its capacity — `f_b` is the storage's own `reserve_factor`, `z_m`
+each in-flight move's disk size, `Z_b` the largest disk already resident,
+`C_b` the storage's capacity in bytes) — lives in
+`reserve.transient_charge_ok()`, taking a *list* of
 charges rather than one disk, so it degenerates to section 8.1's original
 single-move form when called with `[disk.size_bytes]` (what this module
 does) and generalizes correctly to several moves landing on the same

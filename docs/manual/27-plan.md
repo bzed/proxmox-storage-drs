@@ -12,12 +12,19 @@ For each group, `plan`:
 2. If the gate says `NO ACTION`, stops there for that group — no solver
    runs, nothing more to show.
 3. If it says `ACT`, solves it with whichever backend `solver.backend`
-   selects (`IMPLEMENTATION_PLAN.md` section 5.4/5.5 — see
-   `docs/internals/91-optimize.md` for the CP-SAT/CBC backends and
-   `docs/internals/90-heuristic.md` for the dependency-free one) to
-   compute a target assignment, orders its moves under the section 8
-   transient reserve invariant, and checks the whole plan against
-   section 7's payback rule.
+   selects (see `docs/internals/91-optimize.md` for the CP-SAT/CBC
+   backends and `docs/internals/90-heuristic.md` for the dependency-free
+   one) to compute a target assignment, orders its moves under the
+   **transient reserve invariant** — while a move is in flight, the disk
+   being migrated exists on *both* its source and target storage at once
+   (the mirror is fully allocated on the target before the old copy is
+   removed from the source), so the target's own snapshot reserve must
+   already hold with that disk's bytes counted in, not only once the
+   source frees them afterwards (`IMPLEMENTATION_PLAN.md` section 8.1 has
+   the full formula, including the generalization to several moves
+   landing on the same storage at once under concurrent execution — see
+   `docs/manual/28-apply.md`) — and checks the whole plan against the
+   payback rule below.
 
 This example uses the same section 14 worked example `show-load`'s manual
 page does, at the default weights (the two-move plan) and
@@ -79,8 +86,12 @@ whether the plan as a whole looks profitable.
 `resolves_reserve_violation` (visible in `--json`, and implied by the
 `ACT: reserve violated on ...` header in human output) marks a move
 scheduled first *regardless* of its ratio, because the storage it leaves
-is currently breaching (C4)/(C5) — safety is not subject to hysteresis
-(section 13), so this always wins over a purely balance-driven move.
+is currently breaching its snapshot reserve — the capacity a storage must
+always keep free, sized to the larger of `snapshot_reserve.factor` times
+its largest disk or `snapshot_reserve.min_free_bytes`
+(`IMPLEMENTATION_PLAN.md` section 5.3, constraints (C4)/(C5)) — safety is
+not subject to hysteresis (section 13), so this always wins over a purely
+balance-driven move.
 
 **A `⚠` line means a deadlock, not a hidden failure.** If the target
 assignment includes a move this run cannot find any transient-feasible
@@ -131,8 +142,8 @@ line for both.
 
 **A plan resolving a reserve violation always passes this test**,
 regardless of the ratio shown — the example above happens to pass on
-merit (133 ≥ 10), but a plan whose *only* move fixes a (C4)/(C5) violation
-with zero balance benefit (a real, common case: relocating the sole loaded
+merit (133 ≥ 10), but a plan whose *only* move fixes a snapshot-reserve
+violation with zero balance benefit (a real, common case: relocating the sole loaded
 disk in a two-storage group changes which side carries it without
 reducing spread at all) is accepted too. Section 13's "the reserve is
 never traded against balance" applies here exactly as it does to the

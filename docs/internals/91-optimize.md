@@ -67,7 +67,11 @@ Every coefficient is folded and rounded exactly as section 5.5 specifies:
   rounds the capability weight itself and would make CP-SAT and CBC
   disagree for a non-integer `c_s`).
 - `_WEIGHT_SCALE` (`W = 10⁴`) scales every objective weight
-  (`α`/`β`/`γ`/`κ`). The `γ` term folds `z_d` into its own coefficient
+  (`α`/`β`/`γ`/`κ` — section 5.4's imbalance, move-count, moved-bytes and
+  VM-affinity weights, `objective.alpha_spread`/`beta_move_count`/
+  `gamma_move_bytes_per_tib`/`kappa_vm_affinity` in config, the same four
+  `heuristic.py` computes `ObjectiveBreakdown` from — see
+  `90-heuristic.md`). The `γ` term folds `z_d` into its own coefficient
   (`round(γ·W·K·z_d^TiB)`) rather than factoring out a standalone
   `γ_scaled = round(γ·K/2²⁰)` — the plan's own worked example of *why*
   that shortcut is wrong: at the default `γ = 0.05/TiB`, it rounds to

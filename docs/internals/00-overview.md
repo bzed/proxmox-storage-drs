@@ -32,6 +32,18 @@ and cooldowns, and now **written** by `apply` after any run that actually
 executed a migration — see [`15-state.md`](15-state.md),
 [`80-gates.md`](80-gates.md) and [`92-execute.md`](92-execute.md).
 
+A handful of short symbols recur below and in every other page this one
+links to, so they are worth fixing once, here: `D` is the set of every
+managed disk a group places (pinned or not), `S` its set of storages, and
+`Uˢᵉˣᵗ` the bytes on a storage that belong to no managed disk at all —
+orphans, other groups' foreign volumes (`60-topology.md`). `(C2)` is the
+plan's per-disk eligibility constraint (a pinned disk cannot be
+reassigned); `(C4)`/`(C5)` are the largest-disk and capacity/snapshot-
+reserve constraints `reserve.py` evaluates per storage, both in
+`60-topology.md`. `ℓ_d` is one disk's own blended load; `L_s`/`u_s` a
+storage's summed load and I/O-share utilization; `u*` the group's average
+utilization — all four in [`70-loadmodel.md`](70-loadmodel.md).
+
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
    │  Prometheus          │        │   Proxmox VE API           │

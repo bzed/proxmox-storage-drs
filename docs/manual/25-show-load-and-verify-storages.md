@@ -25,25 +25,58 @@ Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the 
     105:scsi0      512.00 GiB  raw     ℓ 0.20
 ```
 
-`L=`/`u=` on a storage's line are section 4's `L_s` (summed `ℓ` of the
-disks currently on it) and `u_s = L_s / capability_weight`; `ℓ` after a
-disk's size/format is that disk's own share. Both come from
-`IMPLEMENTATION_PLAN.md` section 14's worked example, so the numbers above
-are traceable to that section rather than invented for this page.
+`L=`/`u=` on a storage's line are `L_s` — the sum of `ℓ` over every disk
+currently on that storage — and `u_s = L_s / capability_weight`, the
+*utilization* that actually gets balanced across storages (so a storage
+configured with half the `capability_weight` of another is correctly
+expected to carry half the load, not the same absolute amount). `ℓ` after
+a disk's size/format is that disk's own load, measured in **average
+in-flight I/O requests**: by default it is `rate(rd_total_time_ns +
+wr_total_time_ns) / 1e9` for that disk — how many read/write requests are,
+on average, in progress on the device at once — which self-weights by
+cost: an 8 ms write and a 1 ms read are correctly counted eight-to-one
+rather than as equal operations, the way a plain IOPS count would. (Read
+and write can be weighted asymmetrically via `load_weights.read_factor`/
+`write_factor`, and `ops`/`bytes` terms can be blended in alongside I/O
+time; see `IMPLEMENTATION_PLAN.md` section 4 for the full normalization
+and `docs/internals/70-loadmodel.md` for the code.) The worked numbers
+above are `IMPLEMENTATION_PLAN.md` section 14's own example
+(`config/drs.example.yaml` ships the same group and weights), not invented
+for this page.
 
 ## The `Group <name> → ACT`/`NO ACTION` line
 
-Section 6's three gates, evaluated in order — reserve override, then
-drift, then imbalance — and the first one that decides wins. The header
-line above shows the **reserve override**: san-a's 0.5 TiB shortfall forces
-`ACT` outright, regardless of how balanced or drifted the group is,
-because "safety is not subject to hysteresis" (section 13). The other two
-shapes this line can take, on a group with no reserve violation:
+Four gates, evaluated in this order — **reserve override**, then the
+**capacity gate**, then **drift**, then **imbalance** — and the first one
+that decides wins. The header line above shows the reserve override:
+san-a's 0.5 TiB shortfall forces `ACT` outright, regardless of how
+balanced or drifted the group is, because "safety is not subject to
+hysteresis" (section 13). The other shapes this line can take, on a group
+with no reserve violation:
 
 ```
 Group fc-tier1 → ACT: imbalance 255.4% meets or exceeds gates.imbalance_threshold (20.0%)
 Group fc-tier1 → NO ACTION: imbalance 12.2% is below gates.imbalance_threshold (20.0%)
 ```
+
+The **capacity gate** is the data-spread counterpart of the imbalance
+gate: instead of comparing I/O load across a group's storages, it compares
+how *full* each one is, as a fraction of its own capacity. It fires —
+bypassing drift and imbalance the same way the reserve override does, on
+the reasoning that a quiet workload is not a reason to leave data lopsided
+across storages — when the spread in fill fraction across the group's
+storages is at least `gates.capacity_spread_threshold` (default `0.25`)
+relative to the group's mean fill:
+
+```
+Group fc-tier1 → ACT: capacity spread 32.0% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance
+```
+
+Unlike the other three, this gate can act on a group whose I/O is already
+perfectly balanced — `objective.delta_capacity_spread` is what does the
+actual spreading once the solver runs. Setting
+`gates.capacity_spread_threshold: null` disables it outright, and it never
+fires on a group with no data at all (mean fill `0`).
 
 `show-load` reads `state.path`'s recorded load vector (section 11.2) and
 passes it to the drift gate, so once a group has one on record, this line
@@ -56,8 +89,9 @@ Group fc-tier1 → NO ACTION: drift 3.1% is below gates.drift_threshold (10.0%)
 A group with no `state.json`, or none recorded for it yet, still evaluates
 as if this were the very first run — the drift gate is skipped outright
 (section 6's own degenerate-case rule), not "treated as zero drift" — so
-its verdict falls straight through to a reserve override or an imbalance
-check, exactly as before this was wired up. `docs/internals/80-gates.md`
+its verdict falls straight through to a reserve override, the capacity
+gate (which never depends on `state.json` at all), or an imbalance check,
+exactly as before this was wired up. `docs/internals/80-gates.md`
 and `docs/internals/15-state.md` have the detail; `apply` writes
 `last_balance` once a run actually executes at least one move (`confirm`
 or `auto` mode -- `dry-run` only simulates, so it never triggers this), so
@@ -125,8 +159,9 @@ with `act` (bool), `reason` (string, identical to the human line's text
 after the arrow), `reserve_override` (bool), and `drift_fraction`/
 `imbalance_fraction`/`capacity_fraction` (float or `null` — `null` means
 that gate was never reached, not that it evaluated to zero;
-`capacity_fraction` is section 6's capacity-gate ratio, section 5.3 (C7)'s
-fill fractions, `null` too whenever the group's mean fill is 0).
+`capacity_fraction` is the capacity gate's own ratio described above —
+`null` whenever `gates.capacity_spread_threshold` is unset or the group's
+mean fill is 0, the same two cases in which the gate itself never fires).
 
 **A config with several groups issues Prometheus queries per group.**
 Computing one group's load takes seven queries (six raw metrics plus one
@@ -158,8 +193,8 @@ Group fc-tier1
     saferemove is off or throughput unknown; no wipe-time check
   san-b  saferemove=on
     implied wipe time for the largest disk (1.00 TiB): 1.2d
-    ⚠ gates.cooldown_per_storage (1.0h) is shorter than the implied wipe time -- the next run may plan onto a still-draining storage (section 9.3)
-    ⚠ migration.max_single_move_duration (6.0h) is shorter than the implied wipe time -- a move of the largest disk would be rejected outright (section 7.3)
+    ⚠ gates.cooldown_per_storage (1.0h) is shorter than the implied wipe time -- the next run may plan onto a still-draining storage
+    ⚠ migration.max_single_move_duration (6.0h) is shorter than the implied wipe time -- a move of the largest disk would be rejected outright
   san-c  saferemove=off
     saferemove is off or throughput unknown; no wipe-time check
 ```

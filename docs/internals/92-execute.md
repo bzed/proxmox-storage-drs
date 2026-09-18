@@ -304,8 +304,11 @@ in a `finally` so a mid-run exception never leaves the lock held.
 ## The payback gate: `apply` refuses on its own verdict (REVIEW.md S-02)
 
 Section 7 calls the payback rule "a **hard acceptance test on the
-finished plan**, not merely a soft `γ` penalty" — a verdict `plan` shows
-the operator, not a suggestion. An earlier revision of `_handle_apply()`
+finished plan**, not merely a soft `γ` penalty" — a plan a move's size
+already costs `γ` points against in the solver's own objective
+(`docs/internals/91-optimize.md`) can still be rejected wholesale here,
+after the fact, rather than just scored lower going in: a verdict `plan`
+shows the operator, not a suggestion. An earlier revision of `_handle_apply()`
 computed `payback_result` and then ignored it entirely on the execution
 path: a plan whose aggregate economics failed, or whose one move exceeded
 `migration.max_single_move_duration` (`payback_result.rejected_moves`,

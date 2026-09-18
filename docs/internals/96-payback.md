@@ -11,8 +11,16 @@ verdict — and why does a reserve-fixing plan always pass? Describes
 source `topology.Storage` — no new fetch, no new state. `duration_mirror`
 is `z_d / migration.bwlimit_bytes_per_sec`; `duration_wipe` is `z_d /
 saferemove_throughput` when `migration.account_saferemove_wipe` and the
-source has `saferemove` on, else zero. `cost_load_seconds` is zero below
-`migration.tiny_disk_bytes` (section 5.4/7.1) — `duration_mirror`/
+source has `saferemove` on, else zero. `cost_load_seconds` — in the same
+**load-seconds** unit (average in-flight I/O requests multiplied by
+seconds) `compute_benefit_load_seconds()` produces below, which is what
+makes the two comparable at all — is `duration_mirror *
+(migration.source_load_weight + migration.target_load_weight) +
+duration_wipe * migration.wipe_load_weight`: the extra in-flight I/O the
+migration itself imposes on the source and the target while the mirror
+runs, plus, for as long as the old volume takes to be zeroed, the extra
+load a running `saferemove` wipe imposes on the source alone. It is zero
+below `migration.tiny_disk_bytes` (section 5.4/7.1) — `duration_mirror`/
 `duration_wipe` are still the real numbers, so `exceeds_max_duration`/
 `saturation_deferred` still fire normally for a tiny disk that happens to
 be throttled hard enough; only the economic charge is waived.
@@ -20,8 +28,14 @@ be throttled hard enough; only the economic charge is waived.
 `compute_benefit_load_seconds()` implements section 7.2's `benefit =
 (alpha_spread*(E_before-E_after) + delta_capacity_spread*(F_before-F_after) +
 kappa_vm_affinity*(A_before-A_after)) * H` (sections 12 and, for the third
-term, 5.4/7.2's affinity-payback fix): it takes the pre-plan/post-plan
-pair of `heuristic.raw_spread()` values (E, the *raw*, unweighted
+term, 5.4/7.2's affinity-payback fix). `H` is
+`migration.payback_horizon_seconds` (default `365d`, converted to
+seconds) — the length of time the plan's improvement is assumed to keep
+paying off, which is why both sides of the payback ratio end up in the
+same **load-seconds** unit: benefit is a load-shaped quantity held for
+`H` seconds, and cost (below) is a duration in seconds multiplied by a
+load-shaped weight. `compute_benefit_load_seconds()` itself takes the
+pre-plan/post-plan pair of `heuristic.raw_spread()` values (E, the *raw*, unweighted
 imbalance quantity), `heuristic.raw_capacity_spread()` values (F, the raw
 data-spread quantity, section 5.3 (C7)) and `heuristic.raw_affinity_debt()`
 values (A, the raw — `w_v`-weighted but not `kappa`-scaled — affinity debt,
@@ -68,6 +82,15 @@ underspecified formula, not silently worked around.
 
 ## The reserve-override exemption
 
+`evaluate_plan_payback()`'s aggregate ratio test is `benefit_load_seconds
+>= migration.payback_ratio * total_cost_load_seconds` (default
+`payback_ratio: 10.0` — a plan's benefit must be worth at least ten
+times what executing it costs, both sides in the same load-seconds unit
+`compute_benefit_load_seconds()` produces above). `PaybackResult.ratio`
+is that same `benefit / cost` division exposed for reporting; the test
+itself never divides, to stay well-defined when `total_cost_load_seconds`
+is `0`.
+
 Section 7's payback test weighs a move's cost against the *balance*
 benefit it buys. That framing has an edge it does not name: a move
 resolving an active (C4)/(C5) violation is not optional the way a
@@ -97,16 +120,36 @@ economic one) when a slow `saferemove` wipe pushes it over
 
 ## The section 7.3 saturation guard: `compute_move_cost()`'s optional `target`
 
+The guard defers a move (never rejects it outright) when the load it
+would add to either endpoint, forecast over the mirror, would push that
+storage past an operator-declared ceiling: a move is deferred whenever
+`L_during(s) > saturation_ceiling * N_s` for either endpoint `s`. `N_s`
+is that storage's own `storages[].saturation_load` — an operator-supplied
+number, in the same average-in-flight-I/O-requests unit every other load
+figure in this codebase uses, above which the operator judges the
+storage should not run for a sustained period; it is optional, and a
+storage that never sets it is never checked at all (below).
+`saturation_ceiling` is `migration.saturation_ceiling` (default `0.85`),
+the fraction of `N_s` a move's own forecast load is allowed to reach.
+`L_during(s) = L_hat_s(duration_mirror) + omega_role(s)`: `L_hat_s
+(duration_mirror)` is the forecast upper bound of `s`'s own load over the
+move's mirror duration — `forecast.storage_upper_bound()`, section 10.1,
+summed over the disks *currently* resident on that storage, not the
+moving disk's own hypothetical arrival, since during mirroring it is
+still served from `src` — and `omega_role(s)` is the same per-role load
+charge the cost formula itself uses for a mirroring move,
+`migration.source_load_weight` (`ω_src`) when `s` is the source or
+`migration.target_load_weight` (`ω_dst`) when `s` is the target (never
+both on the same endpoint).
+
 `compute_move_cost()` stays pure (the module docstring's own promise:
 "nothing fetches anything") by taking the guard's inputs already
 computed, rather than fetching a forecast itself: `target`, and
 `l_hat_src`/`l_hat_dst` — the caller's own already-computed
-`L_hat_s(duration_mirror)` for each endpoint
-(`forecast.storage_upper_bound()`, section 10.1, summed over the disks
-*currently* resident on that storage — not the moving disk's own
-hypothetical arrival, since during mirroring it is still served from
-`src`, and its mirror-write traffic to `dst` is exactly what the
-`ω_dst` charge below already accounts for separately). Left at their
+`L_hat_s(duration_mirror)` for each endpoint, per the formula above (its
+`ω_dst` charge below already accounts for the moving disk's own
+mirror-write traffic to `dst` separately, so `l_hat_dst` itself must
+never double-count it). Left at their
 defaults (`target=None`, both `0.0`) the check is simply inactive — every
 call site written before this existed, and `cli.py`'s own `dry-run`/
 `plan` paths that have not been updated to compute a forecast, keep
@@ -122,12 +165,11 @@ call `mirror_duration_seconds()`, use it as the horizon for
 `forecast.storage_upper_bound()` against each endpoint's own resident
 disks, then call `compute_move_cost()` with the results.
 
-`_saturation_deferred()` charges `migration.source_load_weight`/
-`target_load_weight` (`ω_src`/`ω_dst`) on top of each endpoint's own
-`l_hat`, matching section 7.3's `ω_role` table for the mirroring state —
-the same two config values `compute_move_cost()`'s own cost formula
-already uses (AGENTS.md section 5: no second pair of weights invented
-for this). `MoveCost.saturation_deferred`/`PaybackResult.deferred_moves`
+`_saturation_deferred()` is where `L_during(s) > saturation_ceiling * N_s`
+above is actually evaluated per endpoint — the same two `ω_src`/`ω_dst`
+config values `compute_move_cost()`'s own cost formula already uses, not
+a second pair invented for this check (AGENTS.md section 5).
+`MoveCost.saturation_deferred`/`PaybackResult.deferred_moves`
 mirror `exceeds_max_duration`/`rejected_moves`'s existing shape exactly,
 but are kept as distinct fields — section 7.3 itself draws the same
 distinction ("reject the move" vs. "defer the move to a later run"), and
@@ -156,8 +198,10 @@ neither being non-empty.
   saturation_ceiling * N_s` for each endpoint (see the section above),
   but only at the mirroring-phase horizon the section's own
   header names ("push either endpoint above ... during *the mirror*") —
-  not a second, separate check for the *draining* phase (`ω_wipe` over
-  `duration_wipe_seconds`), which the full generalized in-flight-set
+  not a second, separate check for the *draining* phase (`ω_wipe` —
+  `migration.wipe_load_weight`, the same weight the cost formula above
+  charges for a running wipe — over `duration_wipe_seconds`), which the
+  full generalized in-flight-set
   model implies but which needs `schedule.py` to reason about overlapping
   moves, something it does not do (`95-schedule.md`). `N_s` unset on a
   storage still skips the check for that endpoint entirely, exactly as

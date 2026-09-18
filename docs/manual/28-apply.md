@@ -85,11 +85,15 @@ Configuring `execution.max_concurrent_migrations`/`max_concurrent_per_storage`
 above their default of `1` runs several moves at once in `auto` mode
 (`dry-run`/`confirm` always run strictly sequentially, regardless of these
 settings — concurrency only makes sense for unattended operation).
-Section 8.1's transient reserve invariant generalizes to a whole in-flight
-set of moves landing on the same storage at once, checked live before
-every launch exactly like the sequential executor's own pre-flight
-re-check; `max_concurrent_per_storage` counts a storage as occupied
-whether a move touches it as source *or* target.
+The **transient reserve invariant** — the rule (`docs/manual/27-plan.md`)
+that a storage's snapshot reserve must hold even while a disk migrating
+onto it exists on both source and target at once, not only once the move
+finishes — generalizes to a whole in-flight set of moves landing on the
+same storage at the same time (`IMPLEMENTATION_PLAN.md` section 8.1's own
+formula for it), checked live before every launch exactly like the
+sequential executor's own pre-flight re-check; `max_concurrent_per_storage`
+counts a storage as occupied whether a move touches it as source *or*
+target.
 
 **Launch order stays strictly FIFO.** The scheduler's own queue (the same
 one a sequential run would follow, one move at a time) is never

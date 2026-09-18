@@ -10,17 +10,28 @@ actually get decided? Describes `proxmox_storage_drs/topology.py` and
 
 This is stated at the top of `topology.py`'s own docstring because it is
 the single easiest thing to get backwards: `D` (section 5.1) is *every*
-disk this module puts into a group's `Group.disks`, whether or not (C2)
-pins its placement. A disk this module never sees at all — a stopped VM
-excluded by `exclude.running_only`, or a disk whose current storage is not
-in any configured group — is what "foreign" (`Uˢᵉˣᵗ`, section 5.1.1) means.
+disk this module puts into a group's `Group.disks`, whether or not **(C2)**
+pins its placement. (C2) is the plan's per-disk eligibility constraint: a
+pinned disk is still a full member of `D` — its bytes and its I/O still
+count — it is simply excluded from ever being *reassigned*; the "Pin
+priority" section below enumerates every condition that triggers it. A disk
+this module never sees at all — a stopped VM excluded by
+`exclude.running_only`, or a disk whose current storage is not in any
+configured group — is what "foreign" (`Uˢᵉˣᵗ`, section 5.1.1) means.
 Config-excluded disks (`exclude.vmids`/`exclude.disks`/tags) are *not*
-foreign: (C2) pins them into `D` specifically so their bytes still count in
-(C4)/(C5) and their fragmentation toward `κ` (section 3.6, "Pinned disks are
-modelled, not ignored"). An earlier draft of section 5.1.1 listed config-excluded
-disks as foreign, which directly contradicted (C2) — that self-contradiction
-was found and fixed in the same commit that first implemented this join;
-see that section's note if you need the history.
+foreign: (C2) pins them into `D` specifically so their bytes still count
+toward a storage's reserve check — **(C4)/(C5)**: `Z_s`, the largest disk
+resident on a storage, sets a reserve floor `R_s = max(reserve_factor_s ·
+Z_s, min_free_bytes)` that must stay free on top of every disk's actual
+usage there (the exact shortfall arithmetic is in "`reserve.py`: one
+(C4)/(C5) evaluator, shared" below) — and toward **`κ`**, the objective's
+per-VM fragmentation penalty, which charges a VM for every extra storage
+its disks are spread across (section 5.4; see `90-heuristic.md`) (section
+3.6, "Pinned disks are modelled, not ignored"). An earlier draft of section
+5.1.1 listed config-excluded disks as foreign, which directly contradicted
+(C2) — that self-contradiction was found and fixed in the same commit that
+first implemented this join; see that section's note if you need the
+history.
 
 ## One pass, in the order section 3.5 lists
 
@@ -276,11 +287,17 @@ of it, needs to know a pattern was ever involved.
 
 ## `reserve.py`: one (C4)/(C5) evaluator, shared
 
-`compute_reserve_status()` is deliberately its own module, not a method on
-`Storage`: `heuristic.py` needs to evaluate the identical formula against a
-*candidate* assignment, not only the current one (`storage_of=` overrides
-which storage each disk is treated as sitting on), and `pve-storage-drs
-show-load`'s reporting needs it against the current assignment today. Both
+`compute_reserve_status()` computes, for one storage: `used = Σ_{d∈D on s} z_d
++ Uˢᵉˣᵗ_s` (every managed disk's bytes plus the foreign/unreferenced bytes
+from "`Uˢᵉˣᵗ`: everything not referenced" above), `shortfall = max(0, used +
+R_s − capacity_s)`, and `ReserveStatus.violated` is exactly `shortfall > 0`
+— the boolean `gates.py`'s reserve-override gate reads directly
+(`docs/internals/80-gates.md`). It is deliberately its own module, not a
+method on `Storage`: `heuristic.py` needs to evaluate the identical formula
+against a *candidate* assignment, not only the current one (`storage_of=`
+overrides which storage each disk is treated as sitting on), and
+`pve-storage-drs show-load`'s reporting needs it against the current
+assignment today. Both
 call the same function (AGENTS.md section 5) — `show-load`'s use of it is
 already exercised end-to-end (see `cli.py`'s
 `_render_show_load_human`/`_json`). `optimize.py`'s MILP path needs the
