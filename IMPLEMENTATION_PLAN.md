@@ -879,12 +879,38 @@ This is deliberately *not* the same as excluding them: their bytes must still co
 Treating them as foreign volumes instead would work for capacity but would lose the fact that they
 belong to a VM whose other disks we are placing.
 
-**Pinned disks are excluded from the affinity term by default.** `κ` (§5.4) counts a VM's spread over
-storages. If an immovable disk counted, a VM with one snapshot-blocked volume would be permanently
-"fragmented" the moment any other disk moved, and `κ` would veto good placements to chase a
-co-location that cannot be achieved this run. So the `y_{v,s}` linking of (C3) ranges over **movable**
-disks only unless `objective.affinity_counts_pinned_disks` is set. Both behaviours are defensible;
-the default is the one that does not let an unreachable disk dictate placement of the rest.
+**Pinned disks count toward the affinity term by default.** `κ` (§5.4) counts a VM's spread over
+storages, and a disk that cannot move this run still *occupies* a storage — the VM is genuinely
+spread whether or not that particular volume is reachable. So the `y_{v,s}` linking of (C3) ranges
+over all of `D`; set `objective.affinity_counts_pinned_disks: false` to range over `D^mov` instead.
+
+An earlier revision defaulted the other way, reasoning that an immovable disk would otherwise leave
+a VM permanently "fragmented" and let `κ` "veto good placements to chase a co-location that cannot
+be achieved this run". Dogfooding overturned that (found by replaying a real bundle, not by review),
+and it is worth being precise about why, because the reasoning is seductive and wrong in two
+separate places.
+
+*The co-location usually can be achieved.* A pinned disk's storage is a **constant**, so `κ`'s only
+marginal effect is a preference for putting the VM's movable disks where it already has one. That is
+reachable this run — by moving the movable disk, which is the very thing the solver is choosing.
+Excluding pinned disks does not make an unreachable goal reachable; it hides a reachable one. On the
+bundle that found this, VM 717219 had two pinned disks together on one storage and a single movable
+`efidisk0` on another; the plan sent the `efidisk0` to a *third* storage, because with the pinned
+pair excluded the VM's counted footprint was one disk and every target scored identically.
+
+*Worse, the exclusion inverts the sign.* Take a VM with a pinned disk on `a` and one movable disk on
+`b`. Under `D^mov` its debt is 0 (one counted disk, one storage) and moving the movable disk to `a`
+— reuniting the VM — raises the debt to 0 as well, but *any* move it makes is equally weightless, so
+repair is unrewarded; and for a VM with two movable disks on `b`, moving one to `a` to rejoin the
+pinned disk raises the counted debt from 0 to 1. The tool charges `κ` for reassembling a VM. Under
+all of `D` the same repair correctly reduces the debt from 1 to 0.
+
+The original worry does have a real residue: `κ` now charges a VM for a split it cannot fully undo,
+so a VM with pinned disks on two different storages carries a permanent debt floor. That floor is a
+*constant* — it shifts the objective's absolute value but not its argmin, and it cancels in §7.2's
+`A_before − A_after` — so it changes no decision. And where `κ` does pull a movable disk toward a
+bad target, it remains what §5.4 calls it: a soft preference that (C5)'s free space or a strong
+imbalance can legitimately override.
 
 **Unused disks move only to repair the reserve, and that is correct.** They carry `ℓ_d = 0` — no
 series exists for a volume QEMU has not opened — so relocating one yields zero imbalance benefit
@@ -1223,10 +1249,12 @@ x_{d,s}  ≤  y_{v(d),s}                                 ∀ d ∈ D^mov, s ∈ 
 y_{v,s}  ≤  Σ_{d ∈ D^mov : v(d)=v} x_{d,s}             ∀ v ∈ V, s ∈ S
 ```
 
-Ranging over `D^mov` rather than `D` keeps a disk that cannot move this run — snapshot-blocked,
-config-excluded or locked — from dictating where a VM's movable disks may go (§3.6). Set
-`objective.affinity_counts_pinned_disks: true` to range over all of `D` instead, which is the right
-choice only if you would rather chase an unreachable co-location than balance well.
+`D^mov` is the range only when `objective.affinity_counts_pinned_disks: false` is set explicitly.
+**By default the linking ranges over all of `D`** (`D^mov` replaced by `D` in both constraints
+above), so that a disk which cannot move this run — snapshot-blocked, config-excluded or locked —
+still anchors its VM: `y_{v,σ₀(p)} = 1` is fixed for every pinned `p`, and `κ` then rewards bringing
+the VM's movable disks to that storage instead of being blind to where they go. §3.6 carries the
+full argument, including why the opposite default silently penalized affinity repair.
 
 **(C4) Largest-disk linearization.** `Z_s = max{ z_d : x_{d,s}=1 }` is not linear, but because the
 reserve constraint pushes `Z_s` *down* while this pushes it *up*, a one-sided bound is exact at the
@@ -2957,7 +2985,7 @@ bug waiting to happen; this table is the audit.
 | `execution.source_release.*` | §9.3 completion criterion; §8.2 `draining` state |
 | `exclude.include_unused_disks` | §3.6 membership of `D` |
 | `exclude.skip_vms_with_snapshots` | §3.7, §5.3 (C2) pinning |
-| `objective.affinity_counts_pinned_disks` | §5.3 (C3) range of `D^mov` |
+| `objective.affinity_counts_pinned_disks` | §5.3 (C3) range: all of `D` (default) or `D^mov` |
 | `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
 | `migration.saturation_ceiling` | §7.3 `L_during(s) ≤ saturation_ceiling · N_s` |
 | `groups[].storages[].saturation_load` | §7.3 `N_s`; guard skipped when unset |

@@ -194,7 +194,10 @@ class ObjectiveConfig:
     gamma_move_bytes_per_tib: float = 0.05
     kappa_vm_affinity: float = 0.50
     delta_capacity_spread: float = 0.5
-    affinity_counts_pinned_disks: bool = False
+    # Section 5.3 (C3): default True -- a pinned disk is a fixed anchor its
+    # VM's movable disks can be drawn back to, not a veto. See the plan's
+    # own note on why the opposite default was wrong.
+    affinity_counts_pinned_disks: bool = True
     reserve_violation_penalty: float = 1000.0
 
 
@@ -576,7 +579,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         gamma_move_bytes_per_tib=obj_raw.get("gamma_move_bytes_per_tib", 0.05),
         kappa_vm_affinity=obj_raw.get("kappa_vm_affinity", 0.50),
         delta_capacity_spread=obj_raw.get("delta_capacity_spread", 0.5),
-        affinity_counts_pinned_disks=obj_raw.get("affinity_counts_pinned_disks", False),
+        affinity_counts_pinned_disks=obj_raw.get("affinity_counts_pinned_disks", True),
         reserve_violation_penalty=obj_raw.get("reserve_violation_penalty", 1000.0),
     )
 

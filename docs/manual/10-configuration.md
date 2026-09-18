@@ -725,13 +725,25 @@ evenness in every plan comparison.
 
 ### `objective.affinity_counts_pinned_disks`
 
-Boolean, default `false`.
+Boolean, default `true`.
 
-Whether a disk that cannot move this run (snapshot-blocked, excluded, or
-on a locked VM) still counts toward `kappa_vm_affinity`. Default `false` so
-one unreachable disk cannot veto good placement of the rest of its VM's
-disks; note `efidisk0`/`tpmstate0` are *not* in this pinned set on PVE 9.2 —
-they move online.
+Whether a disk that cannot move this run (snapshot-blocked, excluded, or on
+a locked VM) still counts toward `kappa_vm_affinity`. Default `true`: such a
+disk still *occupies* a storage, so the VM really is spread, and its fixed
+location is an anchor the VM's movable disks can be drawn back to. Note
+`efidisk0`/`tpmstate0` are *not* in this pinned set on PVE 9.2 — they move
+online.
+
+Set it to `false` to count movable disks only. Be aware of what that costs:
+with a VM's pinned disks excluded, moving its one movable disk *to* them —
+reassembling the VM, which is perfectly achievable — either scores the same
+as sending it anywhere else, or is charged `kappa` outright as if the VM
+had just been split. `IMPLEMENTATION_PLAN.md` section 3.6 works the
+arithmetic through.
+
+**This default changed after 0.1.6** (it was `false`). If you have not set
+it and your cluster has pinned disks, expect plans to prefer targets where
+the VM already has a disk. To keep the old behaviour, set it explicitly.
 
 ### `objective.reserve_violation_penalty`
 

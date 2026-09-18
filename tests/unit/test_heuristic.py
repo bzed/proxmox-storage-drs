@@ -513,10 +513,11 @@ def test_pinned_disk_never_moves_even_when_it_would_improve_the_objective() -> N
     assert result.repair_moves == 0
 
 
-def test_pinned_disks_are_excluded_from_fragmentation_by_default() -> None:
-    """(C3): affinity_counts_pinned_disks=False (default) ranges over
-    D^mov, so a VM whose only "spread" comes from a pinned disk is not
-    counted as fragmented."""
+def test_pinned_disks_count_toward_fragmentation_by_default() -> None:
+    """(C3): affinity_counts_pinned_disks=True (default) ranges over all of
+    `D`, so a VM really split across two storages is counted as fragmented
+    even when the disk holding it there cannot move. Setting it False
+    ranges over `D^mov` and makes that spread invisible."""
     disks = (
         make_disk("101:scsi0", 1.0, 1.0, "san-a", pinned="locked: backup"),
         make_disk("101:scsi1", 1.0, 1.0, "san-b"),
@@ -524,17 +525,45 @@ def test_pinned_disks_are_excluded_from_fragmentation_by_default() -> None:
     storages = (make_storage("san-a"), make_storage("san-b"))
     group = Group(name="g", storages=storages, disks=disks)
     assignment = seed_assignment(group)
+    loads = {"101:scsi0": 1.0, "101:scsi1": 1.0}
 
-    default = evaluate_assignment(
-        group, assignment, {"101:scsi0": 1.0, "101:scsi1": 1.0}, DEFAULT_OBJECTIVE, 0, 1.0, 0.0
-    )
-    assert default.fragmentation_term == 0.0  # 101:scsi1 alone in D^mov -> 1 storage, no spread
+    default = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 0, 1.0, 0.0)
+    assert default.fragmentation_term == pytest.approx(0.50)  # both disks count -> 2 storages
 
-    counting_pinned = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=True)
-    counted = evaluate_assignment(
-        group, assignment, {"101:scsi0": 1.0, "101:scsi1": 1.0}, counting_pinned, 0, 1.0, 0.0
+    movable_only = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=False)
+    excluded = evaluate_assignment(group, assignment, loads, movable_only, 0, 1.0, 0.0)
+    assert excluded.fragmentation_term == 0.0  # 101:scsi1 alone in D^mov -> 1 storage
+
+
+def test_a_pinned_disk_anchors_its_movable_sibling_under_the_default() -> None:
+    """The reason (C3)'s default is True. A VM whose pinned disk sits on
+    san-a and whose movable disk sits on san-b can be reunited -- by moving
+    the movable one to san-a, which is entirely reachable this run. Under
+    `affinity_counts_pinned_disks=False` that repair is not merely
+    unrewarded, it is *penalized*: the debt is 0 while the movable disk is
+    alone in `D^mov` and becomes 1 the moment it joins the pinned one.
+    Found replaying a real bundle (VM 717219, whose two pinned disks shared
+    a storage its movable efidisk0 was then sent away from)."""
+    disks = (
+        make_disk("101:scsi0", 1.0, 0.0, "san-a", pinned="snapshots present (2)"),
+        make_disk("101:scsi1", 1.0, 0.0, "san-b"),
     )
-    assert counted.fragmentation_term == pytest.approx(0.50)  # now both disks count -> 2 storages
+    group = Group(name="g", storages=(make_storage("san-a"), make_storage("san-b")), disks=disks)
+    loads = {"101:scsi0": 0.0, "101:scsi1": 0.0}
+    split = seed_assignment(group)
+    reunited = dict(split) | {"101:scsi1": "san-a"}
+
+    def debt(objective: ObjectiveConfig, assignment: dict[str, str]) -> float:
+        return evaluate_assignment(group, assignment, loads, objective, 0, 0.0, 0.0).affinity_debt
+
+    # Default: reuniting the VM is an improvement, as it should be.
+    assert debt(DEFAULT_OBJECTIVE, split) == pytest.approx(1.0)
+    assert debt(DEFAULT_OBJECTIVE, reunited) == pytest.approx(0.0)
+
+    # Opted out: the same repair looks like a regression.
+    movable_only = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=False)
+    assert debt(movable_only, split) == pytest.approx(0.0)
+    assert debt(movable_only, reunited) == pytest.approx(0.0)
 
 
 # -------------------------------------------------------------------------- swaps
