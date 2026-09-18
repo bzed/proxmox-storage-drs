@@ -301,6 +301,32 @@ deprecated value from the `soft_s < C_s` startup error (warn and report as the u
 it always was), AE-07 by stating the strict-subset property in place of the "same condition"
 claim.
 
+A **twenty-third pass** (section 45) verifies the AE-01..AE-07 fixes in commit `2622e6b`. All
+seven are resolved: the per-storage fold matches what the built key means (`reserve.py:143`,
+`schedule.py:147`), both greps were re-run and their recorded file lists are exact, the trigger
+is pinned to the scheduled assignment, and AE-07's strict-subset property holds as a proof.
+`make check` is green and the PDF stamp matches. Six new findings (AF-01..AF-06): three Medium —
+`config_schema.json` is missing from phase 13's row, and the schema is deliberately closed
+(`additionalProperties: false` throughout), so the whole `free_space` config surface is
+unreachable until it changes; the grep-defined sweep was applied to the flag and to one function
+signature but *not* to the phase's largest change, the `min_free_bytes` scalar → `soft_s`/`hard_s`
+pair and the deprecation of a documented config key (`git grep -l min_free_bytes` returns 30
+files, including the manual's own reference section for the key and `.agents/domain-invariants.md`,
+which states the invariant in terms of it); and the fold's place in the validate-then-resolve
+pipeline is unspecified, leaving `soft_s < C_s` reading as an error on exactly the case the new
+resolution list says must warn, and letting a `hard > soft` typo hide behind the deprecated key
+until the operator deletes it as instructed — two Low (an absolute "cannot be lowered at all"
+claim its own paragraph contradicts for `hard`; the example config's `free_space.hard` needing
+to ship as `null`) and one Info (the commit message claims an example-config change the commit
+does not contain). **Section 46** records the resolution: five fixed in the plan — AF-01 by
+listing `config_schema.json` first in phase 13's row with the shape the closed schema needs,
+AF-02 by defining the scalar sweep as a third grep (`git grep -l min_free_bytes`, 30 files
+today) and naming `execute.py` and `collect.py` in the module list, AF-03 by pinning the
+"validate as written, then fold" order in §5.3.1 and qualifying both §11.1 rows, AF-04 by
+scoping the claim to the plan endpoint, AF-05 by fixing the example config's values at
+`soft: 0` / `hard: null` — and AF-06 recorded rather than rewritten, because it is a defect in
+a commit message already in history.
+
 ---
 
 ## 0. Overall assessment
@@ -6121,6 +6147,109 @@ note names.
 Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
 `docs-check` (the plan PDF rebuilt and re-stamped in the same commit as the Markdown, per
 AGENTS.md §7.4). No production code changed; every fix is to the plan text and to this file.
+
+---
+
+## 45. Twenty-third-pass review — verification of the AE-01..AE-07 fixes
+
+Reviewed commit `2622e6b` ("plan: fix twenty-second-pass review findings (AE-01..AE-07)") — 83
+lines of `IMPLEMENTATION_PLAN.md` and 130 of this file, the PDF rebuilt and re-stamped in the
+same commit (`dcd84304…` verified matching the Markdown on both sides). No production code
+touched. `make check` runs clean (941 passed, 96.38% coverage, fixtures and corpus `--check`
+OK), so §44's verification line holds.
+
+### 45.1 Verification of the AE-fixes
+
+All seven are resolved, and the code claims the fixes rest on were checked against the tree:
+
+- **AE-01 ✓.** The fold is per storage, after percent conversion, and both of its stated reasons
+  are true of the built code: `reserve.py:143` applies `min_free_bytes` as a floor on every
+  storage (`required = max(round(reserve_factor * largest), min_free_bytes)`), and
+  `schedule.py:147` folds the same floor into the transient check (`docs/internals/95-schedule.md:95`
+  documents it). One benefit the paragraph does not claim: because the deprecated key is now a
+  *bound* rather than a resolved number, the warning no longer needs storage capacities and can
+  be emitted at config-load time, where the rest of the deprecation lives.
+- **AE-02 ✓.** The row is out of the hard-error table and into a "Resolution rules (warn and
+  continue)" list that opens by saying everything above it is a hard error. See AF-03 for the
+  two hard-error statements that were not adjusted to match it.
+- **AE-03/AE-04 ✓.** Both greps were re-run here and the recorded lists are exact:
+  `git grep -l resolves_reserve_violation` returns the thirteen files the row names, and
+  `git grep -l evaluate_plan_payback` adds exactly `test_affinity_repair_fixture.py` and
+  `docs/internals/00-overview.md`. The manual's prose is correctly described as a *split*
+  rather than a rename.
+- **AE-05 ✓.** §7.3 and §5.3 point 3 both pin the trigger to `schedule_result.final_assignment`,
+  and the phase-13 row names `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses` as
+  the source — which is right: both breakdowns are in hand at `cli.py:2415`, and `cli.py:2374`
+  already evaluates `final_breakdown` against the scheduled assignment for R-02's reason.
+- **AE-06 ✓** in §5.3.1 and in the new resolution list — but not in the two places an
+  implementer reads the validation rules from; see AF-03.
+- **AE-07 ✓.** The strict-subset argument is sound as stated: `Σ r_s` is a sum of non-negative
+  terms, so it can only fall if some `r_s` falls; `r_s` can only fall if `used_s` or `Z_s` falls,
+  which requires a disk to leave `s`; and `r_s > 0` before means `s` was in violation in the
+  current assignment, which is exactly what `schedule.py:171`'s test asks. Every outcome-exempt
+  plan is therefore `has_reserve_override`-exempt today.
+
+The findings below are in this commit's new material and in what its two structural fixes did
+*not* reach. None of them reopens a resolved decision.
+
+### 45.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| AF-01 | Medium | plan §12 (phase 13 row), `src/proxmox_storage_drs/config_schema.json` | Phase 13's row never mentions `config_schema.json`, and the schema is **deliberately closed**: its own `$comment` says "`additionalProperties: false` throughout is deliberate: a typo'd key is a knob with no formula … this is where it is caught". So until the schema gains a top-level `free_space` object *and* a `free_space` property on `groups[].storages[]`, every config using the block §5.3.1 specifies is rejected by structural validation before a line of the new `config.py` code can run — §11.1's own pipeline is "validate with `jsonschema` for structure, **then** apply these semantic rules". The row enumerates seven source modules and the schema is not one of them. It also needs §5.3.1's grammar, which is wider than the existing `min_free_bytes` entry's: `{"type": ["string", "number", "null"]}` for `soft` and `hard` in both locations (integer bytes, byte-unit string, `"N%"`, and `null` with two distinct meanings by level) |
+| AF-02 | Medium | plan §12 (phase 13 row), `docs/manual/10-configuration.md`, `docs/internals/{60,91,95}-*.md`, `.agents/domain-invariants.md` | The grep-defined sweep was applied to the flag and to `evaluate_plan_payback()` — but not to phase 13's *larger* change, the `min_free_bytes` scalar → `soft_s`/`hard_s` pair and the deprecation of a **documented config key**. That half is still an enumeration of source modules with no artefact list at all. `git grep -l min_free_bytes` returns 30 files; beyond the seven modules the row names and the files the other two greps cover, it adds `docs/manual/10-configuration.md:504` (a dedicated `### snapshot_reserve.min_free_bytes` reference section — the page where a deprecation has to be announced and the `free_space` block documented; the row says only "the manual documents the block"), `docs/manual/00-installation.md:42`, `docs/manual/30-safety-and-status.md:12`, `docs/internals/60-topology.md:25`, `docs/internals/91-optimize.md:81`, `docs/internals/95-schedule.md:95`, `.agents/domain-invariants.md:16` — which states invariant 2 as `used + max(f·Z_s, min_free_bytes) ≤ C_s`, the contract file agents read before touching this code — `.agents/testing.md:25`, `config_schema.json` (AF-01), and both `tests/corpus/*/config.yaml` inputs. §44 cites `95-schedule.md` as evidence for AE-01's fix, so that file was read during this commit and still did not enter the sweep. The remedy is the one the row already applies twice: define it as `git grep -l min_free_bytes` and record today's list |
+| AF-03 | Medium | plan §11.1, §5.3.1, §12 (phase 13 row) | The fold's position in the validate-then-resolve pipeline is unspecified, and two hard-error statements read as though it has already happened. (a) The table row `free_space.soft < C_s` **for every storage, after resolution** now covers the folded value, which is exactly the case the resolution list below it says must warn and continue — the row was not qualified when AE-06's exception was written, and phase 13's row repeats it unqualified ("validates `hard ≤ soft` and `soft < C_s`"). (b) Unaddressed anywhere: the fold can only *raise* `soft_s`, so a config whose written `hard` exceeds its written `soft` passes `hard ≤ soft` while a large `min_free_bytes` is present and becomes a **hard error the moment the operator deletes the deprecated key** — the deprecation warning's own advice turns a running config into a startup failure. One sentence fixes both: validate the `free_space` values as written, *then* fold the deprecated floor in, and say that order — with the `< C_s` row qualified as "the `free_space` value's own, before the fold (see the resolution rules)" |
+| AF-04 | Low | plan §5.3.1 | "Folded per storage, the deprecated floor cannot be lowered by the new knob **at all** — not by a smaller global `soft`, not by a per-storage override, not by a percentage landing on a small LUN" is contradicted three sentences later by the same paragraph: "an operator who then sets `hard` below it is using the new knob for the dip it exists to allow". The concession is the right call — `hard` exists to allow a transient dip — but "at all" is an absolute claim about a knob that demonstrably can lower the floor on the transient side. Say "cannot be lowered as a plan-endpoint floor", and let the `hard` sentence stand as the one deliberate exception |
+| AF-05 | Low | plan §12 (phase 13 row), `config/drs.example.yaml` | The row now requires the example config to gain the `free_space` block but not what it must contain, and one value is load-bearing: it must ship `hard: null`. With `soft: 0` the per-storage fold protects the deprecated floor at the plan endpoint (`max(0, min_free_bytes)`), but an example that spelled out any `hard` below that floor would weaken §8.1's transient charge for precisely the operators the fold exists to protect — the built check charges `min_free_bytes` on every in-flight state (`schedule.py:147`), and `hard_s` replaces it. `hard: null` (= `soft`) is the only value that leaves an upgrading deprecated-key config exactly as strong as it is today. One clause in the row, or a sentence in §5.3.1's example block |
+| AF-06 | Info | commit message | The message says the grep sweep pulls in "`docs/internals/00-overview.md`, and `config/drs.example.yaml`, **which gains the `free_space` block in the same commit**". It does not: this commit changes four files and the example config is not among them (it still has no `free_space` block). The plan's own wording is correct — in §12's row, "the same commit" means phase 13's implementation commit — but the sentence reads in `git log` as a claim about this commit, and the git record is the one artefact no later fix can amend |
+
+### 45.3 Assessment
+
+Both structural fixes in this commit are the right shape. Replacing an enumerated sweep with
+`git grep -l` is the correct generalisation of AE-03/AE-04, and the per-storage fold (AE-01) is
+strictly better than the global one: it matches what the built key means, it makes the
+percentage case well defined, and it turns the deprecation warning into something emittable at
+config-load time. AE-07's subset property is now a proof rather than a comparison, and it holds.
+
+**AF-01 and AF-02 are the two that should not ship as written**, and they are the same defect
+seen from two sides. The row generalised the sweep for the flag and for one function signature —
+the two things the previous pass happened to name — and left the phase's largest change, the one
+that deprecates a **documented config key**, on the enumeration that has now come up short three
+passes running. `config_schema.json` is the sharp end of it: a closed schema means the feature's
+entire config surface is unreachable until that file changes, and it is the one file in the
+phase whose omission cannot be discovered by reading the code the row does name. A third grep —
+`git grep -l min_free_bytes`, 30 files today — closes both, and would have closed AF-01 without
+anyone thinking about schemas at all.
+
+AF-03 is next, because it is the only finding here that can still turn a running configuration
+into a refusal to start, and (b) does it at the exact moment the operator follows the
+deprecation warning's instructions. AF-04 through AF-06 are one clause each.
+
+---
+
+## 46. Resolution of twenty-third-pass findings (AF-01..AF-06)
+
+Five of the six are fixed in `IMPLEMENTATION_PLAN.md` (plan-only, as with the three commits the
+findings are about; phase 13 builds all of it). AF-06 is a defect in a commit message that is
+already in history and is recorded rather than rewritten — history is not rewritten in this
+repository — with the plan wording that invited it disambiguated so it cannot recur.
+
+**These fixes were written by the reviewer who raised the findings**, unlike §§40/42/44, where
+the finder and the fixer were different. This section is therefore a record, not an independent
+verification: a later pass should re-check it the way §45 re-checked §44.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AF-01 | Resolved | §12's phase-13 row now lists `config_schema.json` **first**, with the reason (the schema is closed — `additionalProperties: false` throughout, deliberately — so a `free_space:` key is rejected structurally before `config.py` sees it) and the shape (a top-level `free_space` object and a `free_space` property on `groups[].storages[]`, each with `soft`/`hard` typed `["string", "number", "null"]` for §5.3.1's grammar). §5.3.1's closing sentence carries the same point, so the constraint is stated where the block is specified as well as where it is built. |
+| AF-02 | Resolved | The row defines the scalar → `soft_s`/`hard_s` sweep by `git grep -l min_free_bytes` — the third grep, alongside the two AE-03/AE-04 added — and records today's list of 30 files, calling out what the enumeration had missed: `docs/manual/10-configuration.md`'s `### snapshot_reserve.min_free_bytes` reference section (which becomes the deprecation notice and the `free_space` documentation), the other three manual pages, `docs/internals/{60-topology,91-optimize,95-schedule}.md`, `.agents/domain-invariants.md` (whose invariant 2 reads `used + max(f·Z_s, min_free_bytes) ≤ C_s` and becomes `soft_s`), `.agents/testing.md`, both `tests/corpus/*/config.yaml` replay inputs, and the seven test modules. Two source files the module list had also missed are now named in it: `execute.py`'s live execution-time re-check and `collect.py`'s bundle manifest, which serialises the scalar so a replayed bundle must carry the pair. |
+| AF-03 | Resolved | §5.3.1 gains a **"Validate as written, then fold"** paragraph pinning the pipeline — inheritance, percent-to-bytes conversion, §11.1's two `free_space` checks against the written values, *then* the fold — with both failure modes spelled out: `hard ≤ soft` checked after the fold lets a written `hard > soft` hide behind a large `min_free_bytes` and surface as a startup failure the moment the operator deletes the deprecated key (the very thing the warning asks for), and `soft_s < C_s` checked after the fold errors on the oversized deprecated floor that AE-06 deliberately does not promote. §11.1's two table rows carry the same qualification — `hard ≤ soft` "**before** the deprecated `min_free_bytes` fold", and `soft_s < C_s` "the `free_space` value's own, **not** the folded `min_free_bytes`" — and phase 13's row now says "on the written values, before that fold". |
+| AF-04 | Resolved | §5.3.1's absolute claim is scoped: the deprecated floor cannot be lowered **as a plan-endpoint requirement**, and the sentence now says outright that the transient floor is the one place the new knob may move it, pointing at the `hard` sentence that makes that deliberate. |
+| AF-05 | Resolved | Phase 13's row states the example config's values, not just that it gains the block: `soft: 0` / `hard: null`, with `hard: null` marked load-bearing — any spelled-out `hard` below the folded floor would weaken §8.1's transient charge for exactly the operators the fold protects, since the built check charges `min_free_bytes` on every in-flight state and `hard_s` replaces it, while `hard: null` (= `soft`) leaves an upgrading deprecated-key config exactly as strong as it is today. |
+| AF-06 | Recorded, not fixable | The message of `2622e6b` says `config/drs.example.yaml` "gains the `free_space` block in the same commit"; it does not — that commit changes four files and the example config is not among them. The commit is in history and history is not rewritten here (AGENTS.md §4), so the correction lives in this section: **the example config gains the block in phase 13's implementation commit, not in `2622e6b`.** The plan sentence that invited the misreading now says "in **phase 13's own commit**" instead of "in the same commit". |
+
+Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
+`docs-check` (the plan PDF rebuilt and re-stamped alongside the Markdown, per AGENTS.md §7.4).
+No production code changed; every fix is to the plan text and to this file.
 
 ---
 
