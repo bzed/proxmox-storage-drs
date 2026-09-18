@@ -1338,11 +1338,17 @@ global value*, the same inheritance `reserve_factor` already has.
 `snapshot_reserve.min_free_bytes` is **deprecated syntax for `free_space.soft`** — and it was
 never more than a global scalar: the built `config.py` carries it as one number on the
 `snapshot_reserve` block, with no per-storage form (unlike `reserve_factor`). `config.py` accepts
-it, warns, and uses it as the global `free_space.soft`. When both are set, **`free_space.soft`
-wins** and the warning names the ignored key — a config that sets both is telling the tool two
-different requirements, and refusing to guess which one is meant is the same fail-safe posture as
-§11.1's other either/or rules. No `schema_version` bump: the old key keeps working, and the new
-block is additive.
+it, warns, and folds it into the **global** `free_space.soft`; from there the ordinary
+most-specific-wins inheritance of the table above applies. When both keys are set, **both are
+honoured**: the global soft floor is `max(min_free_bytes, free_space.soft)`, and the warning
+names both keys and the resolved floor so the deprecated one can be deleted. Two keys carrying
+different values are two requirements, and the union is the only resolution that cannot reduce
+safety — `max()` can only raise a floor, while any "winner" rule is a guess that can silently
+lower one. That is not hypothetical: an operator who adopts the new example config (which spells
+out `free_space: soft: 0`) while keeping an old `min_free_bytes: 1 TiB` hits the both-set case
+**on upgrade**, and a "soft wins" rule would drop a configured 1 TiB floor to zero behind a
+warning that reads like a deprecation notice. No `schema_version` bump: the old key keeps
+working, and the new block is additive.
 
 **Soft is the plan endpoint; hard is the floor at every instant.** `soft_s` is the requirement the
 finished plan must satisfy — (C5) enforces it, the lexicographic stage repairs it, and §6's override
@@ -1881,17 +1887,30 @@ redundant-repair plan above repairs with no marked move, and the converse exists
 be load-bearing on a plan that does not repair — holding it back raises the plan's *final* `Σ r_s`
 above zero while the current assignment was already at zero, e.g. one half of a swap whose other
 half lands a new largest disk and needs the room this move frees. Such a move is marked
-`repair: true` and scheduled first by §8.2's exception 2 (it frees space a later move needs), but
+`repair: true` — and, once §8.2's exception 2 is implemented (it is spec-only today, as §14.8
+records), scheduled first, because it frees space a later move needs — but
 its plan is *not* exempt — the plan leaves the group no better than it found it, and a plan that
 does not repair has nothing the mandate protects.)
 This is deliberately narrower in its trigger than the built `payback.py` already
 implements (`has_reserve_override` fires when *any* move's source was violating at scheduling
 time — a plan that moves a disk off a violating storage but ends no less short is exempt today
 and will not be under the outcome trigger), and the free-space work replaces that detection
-with the outcome test plus the revert-test markers. The three hard rules above still apply to
-every move in an exempt plan in full — a repair that cannot finish inside
-`max_single_move_duration`, or that breaches the transient invariant, is rejected like any other
-move and the shortfall reported as unfixable.
+with the outcome test plus the revert-test markers. The breadth cuts both ways, and the wide
+side is a deliberate cost too: the trigger is one byte of shortfall reduction, so a plan that
+repairs by a byte while carrying expensive balance moves is exempt **in full** — the economic
+test is skipped for the whole plan, not prorated, and on a permanently-short cluster (§5.3.1's
+thrash paragraph) every shortfall-reducing plan is fully payback-exempt for as long as the
+shortfall stands. That is accepted for the same reason the narrower side is: the mandate does
+not grade repairs by size — a partial repair is still the operator's configured requirement
+being met — and there is no principled way to price only part of a repairing plan, because the
+benefit is plan-level (§7.2's before→after on the whole assignment), so "price the balance
+moves but not the repair" would mean inventing a per-move benefit that does not exist. What
+bounds it: the three hard rules above still apply to every move in an exempt plan, the plan
+output carries every move's cost and its `repair` marker so the operator sees exactly what the
+exemption bought, and on a healthy cluster the trigger is rare — it requires an actual
+shortfall reduction, the same condition §6's override already singles out. A repair that
+cannot finish inside `max_single_move_duration`, or that breaches the transient invariant, is
+rejected like any other move and the shortfall reported as unfixable.
 
 **The shipped `fc-tier1` fixture survives this unchanged, and its plan is exactly the
 redundant-repair case.** san-a starts `r = 0.5` (4.5 used + 4.0 snapshot reserve > 8.0 TiB); the
@@ -2585,6 +2604,7 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | Within a group, no storage is matched by two pattern entries | Which entry's options apply would be arbitrary; a literal entry overriding a pattern is allowed and is not this error (§11.4) |
 | `capability_weight > 0` | Appears in a denominator |
 | `reserve_factor ≥ 0`, `min_free_bytes ≥ 0` | Negative reserve is meaningless; `min_free_bytes` is accepted as deprecated `free_space.soft` syntax (§5.3.1) |
+| `snapshot_reserve.min_free_bytes` and `free_space.soft` both set → global soft floor is `max(min_free_bytes, free_space.soft)`, with a warning naming both keys and the resolved floor | §5.3.1. Both keys express the same quantity — a minimum-free floor — so the union is the only resolution that cannot silently lower a configured floor on upgrade; a "winner" rule is a guess |
 | `free_space.soft/hard`: absolute values `≥ 0` and parseable (bytes or byte-unit string); percentages `"N%"` with `0 ≤ N < 100`; `hard ≤ soft` **after** per-storage resolution and percent-to-bytes conversion | §5.3.1. A `hard` above `soft` makes every plan for a compliant storage infeasible; a percentage of 100 or more is a typo, not a policy |
 | `free_space.soft < C_s` for every storage, after resolution | A requirement no disk could leave room for is a typo; caught only once the inventory is loaded, like the pattern rules of §11.4 |
 | `0 ≤ drift_threshold ≤ 1`, `0 ≤ imbalance_threshold ≤ 1` | They are ratios |
@@ -2770,7 +2790,7 @@ Each phase is independently testable and useful on its own.
 | 10 | `anonymize.py`, `collect.py`, `replay.py`, `tests/corpus/` (§16) | A bundle collected from a live cluster replays to the same plan the live run produced; the scrub audit and the determinism test pass on it |
 | 11 | Logging policy (§2.3) | **Done.** A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
 | 12 | Capacity-spread objective and gate, one-year payback horizon (§5.3 (C7), §5.4 `δ`, §6, §7.2) | **Done.** Fixtures regenerated with the `delta_values` sweep and the 365d horizon; a replayed bundle shows the capacity gate deciding; `explain` reports the fill deviation; the manual documents `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` and the new `payback_horizon` default (the manpage documents no individual knob, by §11's own established convention) |
-| 13 | Free-space requirements (§5.3.1, §5.3 (C5), §6 override, §7.3 repair exemption, §8.1 hard floor) **and the (C2) format-compatibility eligibility it needs** | `config.py` resolves `free_space.soft/hard` per storage (bytes, byte-unit strings, percentages; global, per-storage, per-pattern; the global `snapshot_reserve.min_free_bytes` scalar deprecated, `free_space.soft` winning when both are set), validates `hard ≤ soft` and `soft < C_s`; the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py` and every `cli.py` call site that threads the scalar today; `topology.Storage` gains the type/format fields (C2) needs and both solver backends fix `x_{d,s}=0` for format-incompatible targets; `payback.py`'s repair detection (`ScheduledMove.resolves_reserve_violation`, set by `schedule.py`'s "source presently violating" test) is replaced by §7.3's outcome trigger (exempt iff the plan's final `Σ r_s` is strictly below the current assignment's) plus a per-move `repair` marker computed by the revert test — re-scoring `Σ r_s` on the final assignment with one `x` held — while `order_moves()`'s internal priority-1 test keeps §8.2's "source currently violating" form (a current-state rule, not a plan-outcome one); the unit tests asserting the old flag (`test_schedule.py`'s ordering assertions, `test_cli.py`'s `resolves_reserve_violation` JSON assertions) are swept with it; the §14.8 fixture (which requires the format rule, and records `requires_format_eligibility: true` so it fails loudly before that lands) proves the mandate, the exemption and both `hard`-sweep orders; the manual documents the block |
+| 13 | Free-space requirements (§5.3.1, §5.3 (C5), §6 override, §7.3 repair exemption, §8.1 hard floor) **and the (C2) format-compatibility eligibility it needs** | `config.py` resolves `free_space.soft/hard` per storage (bytes, byte-unit strings, percentages; global, per-storage, per-pattern; the global `snapshot_reserve.min_free_bytes` scalar deprecated, folded into the global `free_space.soft` as `max(min_free_bytes, free_space.soft)` when both are set), validates `hard ≤ soft` and `soft < C_s`; the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py` and every `cli.py` call site that threads the scalar today; `topology.Storage` gains the type/format fields (C2) needs and both solver backends fix `x_{d,s}=0` for format-incompatible targets; `payback.py`'s repair detection (`ScheduledMove.resolves_reserve_violation`, set by `schedule.py`'s "source presently violating" test) is replaced by §7.3's outcome trigger (exempt iff the plan's final `Σ r_s` is strictly below the current assignment's) plus a per-move `repair` marker computed by the revert test — re-scoring `Σ r_s` on the final assignment with one `x` held — while `order_moves()`'s internal priority-1 test keeps §8.2's "source currently violating" form (a current-state rule, not a plan-outcome one); the outcome trigger is a **signature and data-flow change**, not a flag swap: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s`, so the current and final slack are threaded in from its sole production caller (`cli.py`'s plan builder, `evaluate_plan_payback()`'s only call site outside tests); the unit tests asserting the old flag (`test_schedule.py`'s ordering assertions, `test_cli.py`'s `resolves_reserve_violation` JSON assertions, `test_payback.py`'s two override tests and `test_execute.py`'s `ScheduledMove` constructions) are swept with it; the §14.8 fixture (which requires the format rule, and records `requires_format_eligibility: true` so it fails loudly before that lands) proves the mandate, the exemption and both `hard`-sweep orders; the manual documents the block |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
@@ -3204,9 +3224,11 @@ and the predicate demands `7.3 + max(2·1.0, hard) ≤ 10`:
 
 - `hard: null` (= `soft` = 3.0): `7.3 + 3.0 = 10.3 > 10` — **infeasible**. The scheduler reverses
   the order: `603 → swapme` first (its own check on `swapme` is `1.0 + 1.0 + max(2·1.0, 3.0) =
-  6.0 ≤ 10` ✓), which empties `roomy` to 5.8 used, and then `601` lands at
-  `5.8 + 0.5 + max(2·max(1.0, 0.5), 3.0) = 5.8 + 0.5 + 3.0 = 9.3 ≤ 10` ✓ — note `Z_roomy` has
-  dropped to 0.5 with `603` gone, but the `hard` floor of 3.0 still dominates the snapshot term.
+  5.0 ≤ 10` ✓), which empties `roomy` to 5.8 used, and then `601` lands at
+  `5.8 + 0.5 + max(2·max(0, 0.5), 3.0) = 5.8 + 0.5 + 3.0 = 9.3 ≤ 10` ✓ — note `Z_roomy` has
+  dropped to 0 with `603` gone (the 5.8 TiB left on it is foreign, and `601` has not arrived
+  yet), so the inner term is `max(0, 0.5) = 0.5` and the `hard` floor of 3.0 dominates the
+  snapshot term either way.
   The plan still executes — the requirement is met either way, at the cost of the less preferred
   order.
 - `hard: "10%"` (= 1.0 TiB): `7.3 + 2.0 = 9.3 ≤ 10` — feasible as preferred. `roomy` dips to
