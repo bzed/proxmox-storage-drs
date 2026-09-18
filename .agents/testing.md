@@ -22,8 +22,8 @@ plan:
 
 | Module | Plan section | Must be tested to the edges |
 |---|---|---|
-| reserve / capacity constraint | §5.3 (C4), (C5) | `min_free_bytes` floor vs `f·Z`; already-violating start; `r_s > 0` reporting |
-| transient invariant | §8.1 | single move; concurrent set `M`; incoming disk becomes the new largest |
+| reserve / capacity constraint | §5.3 (C4), (C5), §5.3.1 | `soft_s` floor vs `f·Z` — the `max()`, both ways round; already-violating start; `r_s > 0` reporting; per-storage resolution (absolute, byte-unit string, `"N%"` against *that* storage's capacity); the deprecated `min_free_bytes` folded in per storage **after** percent conversion and **after** the written values are validated |
+| transient invariant | §8.1 | single move; concurrent set `M`; incoming disk becomes the new largest; the floor component is `hard_b`, not `soft_b` — including the default `hard: null` (= `soft`, no dip) and a `hard` strictly below `soft` (a bounded dip on a storage the finished plan leaves compliant) |
 | scheduling / ordering | §8.2, §8.3 | priority exceptions; deadlock; staging; `draining` accounting |
 | payback | §7 | accept, reject, the saferemove wipe term, `max_single_move_duration` |
 | locks and drain | §9.3 | lock present → wait; timeout → skip; task OK but volume still present |

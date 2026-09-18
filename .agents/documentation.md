@@ -129,8 +129,10 @@ The audience has a cluster to run and no interest in the solver's variables.
 - Second person, imperative, present tense. "Set `window` to the period you want balanced."
 - Every section starts from something the operator wants to achieve, not from a feature.
 - Show the command and its real output. Invented output is worse than none.
-- Say what is safe. Dry-run is the default, the reserve is never traded for balance, nothing is
-  ever deleted automatically — an operator who does not know that will not run the tool at all.
+- Say what is safe. Dry-run is the default, the reserve is never traded for balance, the free
+  space the operator configured is held to the same standard (and `free_space.hard` is never
+  crossed, not even mid-move), nothing is ever deleted automatically — an operator who does not
+  know that will not run the tool at all.
 - Cross-reference the internals PDF for theory rather than half-explaining it.
 
 Every configuration option gets an entry of this shape:

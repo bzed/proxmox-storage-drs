@@ -13,18 +13,68 @@ unparseable mode means dry-run, never automatic.
 
 ## 2. The snapshot reserve is never traded against balance (§5.3, §13)
 
-`used + max(f·Z_s, min_free_bytes) ≤ C_s`. The `r_s` slack exists only so an already-violating
-storage does not make the model infeasible. The **lexicographic two-stage solve is the default**:
+`used + max(f·Z_s, soft_s) ≤ C_s`. The `r_s` slack exists only so an already-violating storage
+does not make the model infeasible. The **lexicographic two-stage solve is the default**:
 minimise `Σ r_s`, fix it, then optimise balance. The single-stage big-M form is a fallback and
 its `P` is **computed at model-build time** from the group's absolute load — the config value is
 a floor, not the value used. A hard-coded `P` is a bug.
 
+One slack per storage, not one per reason: `Σ r_s` covers the snapshot term and the configured
+free-space requirement together, so a byte of configured free space is exactly as non-negotiable
+as a byte of snapshot reserve.
+
+**As built:** `soft_s` is still the global scalar `snapshot_reserve.min_free_bytes`
+(`reserve.py:143`, `required = max(round(f·largest), min_free_bytes)`). Phase 13 replaces that
+scalar with the per-storage `soft_s`/`hard_s` pair everywhere it is threaded; until it lands,
+read `soft_s` here as that one number applied to every storage.
+
+## 2a. The three floors, and which one wins (§5.3 (C5), §5.3.1, §8.1)
+
+Three quantities want space free on a storage, and they compose in **one fixed order**. Get this
+wrong and you either fill a LUN or refuse every plan:
+
+1. **`f_s · Z_s`, the snapshot reserve, wins outright.** It enters as the first argument of a
+   `max()`, never as an addend and never as something a free-space knob can reduce. Whenever the
+   snapshot term is the larger of the two, it *is* the requirement and the configured free space
+   is irrelevant. "If the snapshot reserve is bigger than the configured free space, the snapshot
+   reserve wins" — §5.3 (C5). There is no config key that lowers it.
+2. **`hard_s` is the floor at every instant, and it is what binds during a move.** §8.1's
+   transient predicate is `used_b + z_d + max(f_b·max(Z_b, z_d), hard_b) ≤ C_b` — the snapshot
+   term still first, but the floor component is `hard_s`, not `soft_s`. A storage may sit below
+   its soft requirement while moves are in flight; it may **never** cross `hard_s`. So where the
+   two disagree during execution, `hard_s` is the one the scheduler enforces.
+3. **`soft_s` is the plan endpoint only.** (C5) enforces it on the finished assignment, the
+   lexicographic stage repairs it, §6's override bypasses the gates for it and §7.3 exempts a
+   repairing plan from payback. It says nothing about intermediate states.
+
+`hard_s ≤ soft_s` is a hard validation error if violated (§11.1), so the transient floor is
+always a relaxation of the endpoint one — never the other way round. The default `hard: null`
+means `hard_s = soft_s`: no dip at all, and §8.1 exactly as strong as before free-space
+requirements existed. An operator who sets `hard` strictly below `soft` is deliberately buying
+the scheduler room for a bounded, planned dip on a storage the finished plan leaves compliant.
+
+Two `null`s, and they do not mean the same thing: **global** `hard: null` is a *value* ("no dip",
+`hard_s = soft_s`); **per-storage** `hard: null` is an *absence* ("inherit the global"). Same
+inheritance `reserve_factor` already has.
+
+The deprecated `snapshot_reserve.min_free_bytes` folds in **per storage, after percent-to-bytes
+conversion, as the last step**: `soft_s = max(soft_s_resolved, min_free_bytes)`. Validate the
+written values *first* (`hard ≤ soft`, `soft < C_s`), then fold — checking after the fold would
+let a written `hard > soft` hide behind the deprecated key and blow up the moment the operator
+deletes it, which is exactly what the deprecation warning asks them to do.
+
 ## 3. The invariant holds *during* moves (§8.1)
 
 While a move is in flight the volume occupies **both** storages. The target must satisfy
-`used_b + z_d + f_b·max(Z_b, z_d) ≤ C_b`, generalised to the whole in-flight set when
-concurrency > 1. There is exactly one implementation of this predicate, called with `M = {m}`
-for the sequential case.
+`used_b + z_d + max(f_b·max(Z_b, z_d), hard_b) ≤ C_b`, generalised to the whole in-flight set
+when concurrency > 1 (the sum over in-flight arrivals, the inner `max` over the same set).
+There is exactly one implementation of this predicate, called with `M = {m}` for the sequential
+case.
+
+Two halves, and only one of them is a relaxation of (C5): the **floor** component drops from
+`soft_b` to `hard_b`, but the **snapshot** component grows to `f_b·max(Z_b, z_d)` the moment the
+incoming disk is the new largest, and the source is still charged in full. Never read §8.1 as
+implied by (C5) — on the snapshot side it is strictly stronger.
 
 ## 4. A finished task is not a finished move (§8.2, §9.3)
 
