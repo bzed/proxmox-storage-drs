@@ -1,0 +1,698 @@
+{
+  "query": "rd_bytes",
+  "result": [
+    {
+      "metric": {
+        "instance": "efidisk0",
+        "nodename": "node-722c4e62",
+        "vmid": "644488"
+      },
+      "value": [
+        947334005.3870001,
+        "0"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "efidisk0",
+        "nodename": "node-d8d4d911",
+        "vmid": "163216"
+      },
+      "value": [
+        947334005.3870001,
+        "0"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "efidisk0",
+        "nodename": "node-d8d4d911",
+        "vmid": "443669"
+      },
+      "value": [
+        947334005.3870001,
+        "0"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "efidisk0",
+        "vmid": "240169"
+      },
+      "value": [
+        947334005.3870001,
+        "0"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "efidisk0",
+        "vmid": "457823"
+      },
+      "value": [
+        947334005.3870001,
+        "0"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "efidisk0",
+        "vmid": "494807"
+      },
+      "value": [
+        947334005.3870001,
+        "0"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide0",
+        "vmid": "457823"
+      },
+      "value": [
+        947334005.3870001,
+        "0"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-345988ce",
+        "vmid": "457823"
+      },
+      "value": [
+        947334005.3870001,
+        "46"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-345988ce",
+        "vmid": "725058"
+      },
+      "value": [
+        947334005.3870001,
+        "46"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "62"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "240169"
+      },
+      "value": [
+        947334005.3870001,
+        "92"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "317511"
+      },
+      "value": [
+        947334005.3870001,
+        "92"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "365149"
+      },
+      "value": [
+        947334005.3870001,
+        "124"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "366117"
+      },
+      "value": [
+        947334005.3870001,
+        "46"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "534304"
+      },
+      "value": [
+        947334005.3870001,
+        "124"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "644488"
+      },
+      "value": [
+        947334005.3870001,
+        "514"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "747564"
+      },
+      "value": [
+        947334005.3870001,
+        "138"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "75052"
+      },
+      "value": [
+        947334005.3870001,
+        "92"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "752636"
+      },
+      "value": [
+        947334005.3870001,
+        "92"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-d8d4d911",
+        "vmid": "163216"
+      },
+      "value": [
+        947334005.3870001,
+        "46"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "nodename": "node-d8d4d911",
+        "vmid": "443669"
+      },
+      "value": [
+        947334005.3870001,
+        "46"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "vmid": "163216"
+      },
+      "value": [
+        947334005.3870001,
+        "46"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "vmid": "240169"
+      },
+      "value": [
+        947334005.3870001,
+        "0"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "ide2",
+        "vmid": "494807"
+      },
+      "value": [
+        947334005.3870001,
+        "46"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "sata0",
+        "nodename": "node-722c4e62",
+        "vmid": "494807"
+      },
+      "value": [
+        947334005.3870001,
+        "916"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-345988ce",
+        "vmid": "457823"
+      },
+      "value": [
+        947334005.3870001,
+        "29840516096"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-345988ce",
+        "vmid": "725058"
+      },
+      "value": [
+        947334005.3870001,
+        "134657049088"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "17716581376"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "240169"
+      },
+      "value": [
+        947334005.3870001,
+        "156734465024"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "317511"
+      },
+      "value": [
+        947334005.3870001,
+        "4986430464"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "365149"
+      },
+      "value": [
+        947334005.3870001,
+        "36495470592"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "366117"
+      },
+      "value": [
+        947334005.3870001,
+        "14284769792"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "494807"
+      },
+      "value": [
+        947334005.3870001,
+        "261870001152"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "534304"
+      },
+      "value": [
+        947334005.3870001,
+        "52983858176"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "644488"
+      },
+      "value": [
+        947334005.3870001,
+        "44379571712"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "747564"
+      },
+      "value": [
+        947334005.3870001,
+        "23978532352"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "75052"
+      },
+      "value": [
+        947334005.3870001,
+        "42702320640"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-722c4e62",
+        "vmid": "752636"
+      },
+      "value": [
+        947334005.3870001,
+        "811718155264"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-d8d4d911",
+        "vmid": "163216"
+      },
+      "value": [
+        947334005.3870001,
+        "96760161280"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "nodename": "node-d8d4d911",
+        "vmid": "443669"
+      },
+      "value": [
+        947334005.3870001,
+        "17214185472"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "vmid": "163216"
+      },
+      "value": [
+        947334005.3870001,
+        "3158886912"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "vmid": "240169"
+      },
+      "value": [
+        947334005.3870001,
+        "1628344832"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "vmid": "457823"
+      },
+      "value": [
+        947334005.3870001,
+        "427897823744"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi0",
+        "vmid": "494807"
+      },
+      "value": [
+        947334005.3870001,
+        "3497791488"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi1",
+        "nodename": "node-345988ce",
+        "vmid": "725058"
+      },
+      "value": [
+        947334005.3870001,
+        "45143756800"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi1",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "3623034880"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi1",
+        "nodename": "node-722c4e62",
+        "vmid": "365149"
+      },
+      "value": [
+        947334005.3870001,
+        "12272347136"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi1",
+        "nodename": "node-722c4e62",
+        "vmid": "534304"
+      },
+      "value": [
+        947334005.3870001,
+        "47262776320"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi1",
+        "nodename": "node-722c4e62",
+        "vmid": "747564"
+      },
+      "value": [
+        947334005.3870001,
+        "3646159872"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi1",
+        "nodename": "node-722c4e62",
+        "vmid": "75052"
+      },
+      "value": [
+        947334005.3870001,
+        "25545926656"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi1",
+        "nodename": "node-722c4e62",
+        "vmid": "752636"
+      },
+      "value": [
+        947334005.3870001,
+        "3090764722176"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi1",
+        "nodename": "node-d8d4d911",
+        "vmid": "443669"
+      },
+      "value": [
+        947334005.3870001,
+        "10967355392"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi2",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "2420720640"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi2",
+        "nodename": "node-722c4e62",
+        "vmid": "75052"
+      },
+      "value": [
+        947334005.3870001,
+        "81361309696"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi2",
+        "nodename": "node-722c4e62",
+        "vmid": "752636"
+      },
+      "value": [
+        947334005.3870001,
+        "2699542626304"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi2",
+        "nodename": "node-d8d4d911",
+        "vmid": "443669"
+      },
+      "value": [
+        947334005.3870001,
+        "21171679232"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi3",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "57408963584"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi3",
+        "nodename": "node-d8d4d911",
+        "vmid": "443669"
+      },
+      "value": [
+        947334005.3870001,
+        "11721031680"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi4",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "2938054656"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi5",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "3311633408"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi6",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "137543680"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi7",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "2230519808"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi8",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "1116594176"
+      ]
+    },
+    {
+      "metric": {
+        "instance": "scsi9",
+        "nodename": "node-345988ce",
+        "vmid": "843425"
+      },
+      "value": [
+        947334005.3870001,
+        "1106379776"
+      ]
+    }
+  ]
+}
