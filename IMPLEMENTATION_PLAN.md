@@ -2330,7 +2330,13 @@ Before **every** move, re-read the live state rather than trusting the plan:
    figure can differ from the other (a volume resized outside PVE, a storage that rounds sizes), so the
    pre-flight's parsed `size=` is kept alongside the listed size and a volume of either size matches. If
    PVE ever allocates a target at some third size, nothing matches, the target stays counted as well as
-   charged, and the check is merely stricter than it needs to be. Nothing else is ever excluded — a foreign volume that appeared since, or a
+   charged, and the check is merely stricter than it needs to be.
+   The same two sizes decide what the move itself is charged as `z_m`: the disk's listed size, except when
+   the move changes the kind of volume made — between different storage types (`storage.type` differs), or
+   a qcow2 disk landing on a target that cannot hold qcow2 so PVE writes it raw — where the target is
+   allocated at the config's `size=` and the larger of the two is charged. A same-kind move keeps the
+   listed size. (The tool never passes `format=` and (C2) keeps a qcow2 disk off a storage that cannot hold
+   it, so the conversion branch is a guard; the plan's own §8.1 check keeps `z_d`, the listed size.) Nothing else is ever excluded — a foreign volume that appeared since, or a
    leftover of the same VM that was already there, still counts — and where nothing matches (the window
    between `move_disk` returning and the allocation) the move is charged by its `z_m` alone. Wrongly
    keeping a volume only makes the check stricter; wrongly dropping one would weaken it, so the match is

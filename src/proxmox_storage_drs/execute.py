@@ -82,6 +82,7 @@ from proxmox_storage_drs.topology import (
     parse_disk_spec,
     parse_pve_config_size_bytes,
     pending_disk_reasons,
+    storage_accepts_format,
 )
 from proxmox_storage_drs.units import format_bytes
 
@@ -446,18 +447,45 @@ def _provisioned_used_bytes(
     return total, None
 
 
+def _move_charge_bytes(
+    disk: Disk, config_size_bytes: int | None, source: Storage, target: Storage
+) -> int:
+    """``z_m`` for section 8.1's transient invariant: the bytes this move
+    puts on ``target``. That is the disk's listed size (``Disk.size_bytes``,
+    the source image's own) unless the move changes what kind of volume is
+    made -- between different storage types, or a qcow2 disk landing on a
+    target that cannot hold qcow2, so PVE writes it raw -- where the target
+    is allocated at the disk line's ``size=`` in the VM config and the larger
+    of the two is charged (``config_size_bytes`` is ``None`` when the line
+    carries no parseable ``size=``, which leaves the listed size).
+
+    This is what the operator describes PVE doing (not read from PVE's
+    source). A same-kind move keeps the listed size on purpose: there the
+    target is a copy of the source image, and charging more would refuse
+    moves for a discrepancy that does not apply. This tool never passes
+    ``format=`` to ``move_disk`` and (C2) keeps a qcow2 disk off storage that
+    cannot hold it, so the conversion case is a guard rather than something
+    a plan produces today."""
+    changes_kind = source.storage_type != target.storage_type
+    converts_to_raw = disk.format == "qcow2" and not storage_accepts_format(target, "qcow2")
+    if (changes_kind or converts_to_raw) and config_size_bytes is not None:
+        return max(disk.size_bytes, config_size_bytes)
+    return disk.size_bytes
+
+
 def _live_transient_check(
     client: PveClient,
     node: str,
     target: Storage,
-    disk: Disk,
+    charge_bytes: int,
     existing_largest_bytes: int,
     inflight_here: Sequence[_InflightMove] = (),
 ) -> _LiveCheck:
     """Section 9.2 step 2 -- section 8.1's transient invariant re-derived
     from *live* figures, via the shared :func:`reserve.transient_charge_ok`
-    (one arithmetic core, AGENTS.md section 5), for a move of ``disk`` onto
-    ``target`` that has not been issued yet.
+    (one arithmetic core, AGENTS.md section 5), for a move that puts
+    ``charge_bytes`` (:func:`_move_charge_bytes`) onto ``target`` and has
+    not been issued yet.
 
     **Provisioned, never allocated** (section 5.1, domain rule 8): the
     ``used`` this feeds the rule is the sum of ``size`` over the target's
@@ -506,7 +534,10 @@ def _live_transient_check(
             listed,
         )
     live_total = int(status["total"])
-    charges = [im.disk.size_bytes for im in inflight_here] + [disk.size_bytes]
+    charges = [
+        _move_charge_bytes(im.disk, im.config_size_bytes, im.source, im.target)
+        for im in inflight_here
+    ] + [charge_bytes]
     if transient_charge_ok(
         target.reserve_factor,
         live_total,
@@ -838,7 +869,13 @@ def _execute_one_move(
 
     target = storages_by_id[move.to_storage]
     live = _live_transient_check(
-        client, preflight.node, target, disk, largest_by_storage[move.to_storage]
+        client,
+        preflight.node,
+        target,
+        _move_charge_bytes(
+            disk, preflight.config_size_bytes, storages_by_id[move.from_storage], target
+        ),
+        largest_by_storage[move.to_storage],
     )
     if live.refusal is not None:
         return outcome("replan_needed", live.refusal)
@@ -1599,7 +1636,9 @@ def _launch_decision(
         client,
         preflight.node,
         target,
-        disk,
+        _move_charge_bytes(
+            disk, preflight.config_size_bytes, storages_by_id[candidate.from_storage], target
+        ),
         largest_by_storage[target.id],
         _inflight_onto(inflight, target.id),
     )

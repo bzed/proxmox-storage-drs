@@ -33,6 +33,7 @@ from proxmox_storage_drs.execute import (
     _detect_orphan_volumes,
     _is_task_lock_timeout,
     _live_transient_check,
+    _move_charge_bytes,
     _preflight,
     _vm_resource,
     _wait_for_unlocked,
@@ -88,6 +89,8 @@ def make_storage(
     saferemove_throughput: float | None = None,
     free_space_soft_bytes: int = 0,
     free_space_hard_bytes: int | None = None,
+    storage_type: str = "dir",
+    allowed_formats: frozenset[str] = frozenset({"raw", "qcow2"}),
 ) -> Storage:
     return Storage(
         id=id_,
@@ -103,8 +106,8 @@ def make_storage(
         free_space_hard_bytes=(
             free_space_hard_bytes if free_space_hard_bytes is not None else free_space_soft_bytes
         ),
-        storage_type="dir",
-        allowed_formats=frozenset({"raw", "qcow2"}),
+        storage_type=storage_type,
+        allowed_formats=allowed_formats,
     )
 
 
@@ -740,11 +743,89 @@ def test_live_transient_check_never_reads_the_pools_used_figure() -> None:
     assert run(client2, default_group(), (make_move(),)).outcomes[0].status == "moved"
 
 
+def _group_with_types(source_type: str, target_type: str) -> Group:
+    return Group(
+        name="fc-tier1",
+        storages=(
+            make_storage("san-a", storage_type=source_type),
+            make_storage("san-b", storage_type=target_type),
+        ),
+        disks=(make_disk("101:scsi0", 1.0, "san-a"),),
+    )
+
+
+def test_live_transient_check_charges_the_larger_config_size_between_storage_types() -> None:
+    """Between different storage types the target is allocated at the disk
+    line's `size=` (2 TiB here) rather than the source image's listed size
+    (1 TiB), so the check charges 2 TiB: 4.5 used + 2 + 2*2 reserve = 10.5 >
+    8 TiB is refused, where the listed 1 TiB alone (4.5 + 1 + 2 = 7.5) would
+    have passed."""
+    responses: dict[str, object] = {
+        "nodes/pve01/qemu/101/config": {"scsi0": "san-a:vm-101-disk-0,size=2048G"},
+        "nodes/pve01/storage/san-b/content": [_vol("san-b:vm-900-disk-0", 900, 4.5)],
+    }
+    client, api = client_with(responses)
+    result = run(client, _group_with_types("dir", "rbd"), (make_move(),))
+    assert result.outcomes[0].status == "replan_needed"
+    assert not any(c[1].endswith("/move_disk") for c in api.calls)
+
+
+def test_live_transient_check_keeps_the_listed_size_within_one_storage_type() -> None:
+    """The same 2 TiB config `size=` and the same 4.5 TiB already on the
+    target, but source and target are the same kind: the target is a copy of
+    the source image, so only the listed 1 TiB is charged and the move goes."""
+    responses: dict[str, object] = {
+        "nodes/pve01/qemu/101/config": {"scsi0": "san-a:vm-101-disk-0,size=2048G"},
+        "nodes/pve01/storage/san-b/content": [_vol("san-b:vm-900-disk-0", 900, 4.5)],
+    }
+    client, _api = client_with(responses)
+    result = run(client, _group_with_types("rbd", "rbd"), (make_move(),))
+    assert result.outcomes[0].status == "moved"
+
+
+@pytest.mark.parametrize(
+    ("source_type", "target_type", "disk_format", "target_formats", "config_gib", "expected_gib"),
+    [
+        ("rbd", "rbd", "raw", {"raw"}, 2048, 1024),  # same kind: listed size
+        ("dir", "rbd", "raw", {"raw"}, 2048, 2048),  # different types: the larger
+        ("dir", "rbd", "raw", {"raw"}, 512, 1024),  # ... and it is a max, not the config
+        ("rbd", "rbd", "qcow2", {"raw"}, 2048, 2048),  # qcow2 landing raw: the larger
+        ("dir", "dir", "qcow2", {"raw", "qcow2"}, 2048, 1024),  # qcow2 kept as qcow2: listed
+        ("dir", "rbd", "raw", {"raw"}, None, 1024),  # no parseable size=: listed
+    ],
+)
+def test_move_charge_bytes_rule(
+    source_type: str,
+    target_type: str,
+    disk_format: str,
+    target_formats: set[str],
+    config_gib: int | None,
+    expected_gib: int,
+) -> None:
+    disk = Disk(
+        key="101:scsi0",
+        vmid=101,
+        device="scsi0",
+        vm_name="vm101",
+        node="pve01",
+        size_bytes=1024 * (1 << 30),
+        current_storage="san-a",
+        format=disk_format,
+        pinned_reason=None,
+    )
+    source = make_storage("san-a", storage_type=source_type)
+    target = make_storage(
+        "san-b", storage_type=target_type, allowed_formats=frozenset(target_formats)
+    )
+    config_bytes = None if config_gib is None else config_gib * (1 << 30)
+    assert _move_charge_bytes(disk, config_bytes, source, target) == expected_gib * (1 << 30)
+
+
 def test_live_transient_check_helper_directly() -> None:
     client, _api = client_with({"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 0}})
     target = make_storage("san-b", capacity_tib=8.0)
     disk = default_group().disks[0]
-    assert _live_transient_check(client, "pve01", target, disk, 0).refusal is None
+    assert _live_transient_check(client, "pve01", target, disk.size_bytes, 0).refusal is None
 
 
 def test_live_transient_check_applies_the_target_storages_hard_free_space_floor() -> None:
@@ -762,12 +843,12 @@ def test_live_transient_check_applies_the_target_storages_hard_free_space_floor(
     )
     disk = default_group().disks[0]  # 1 TiB
     # used(0) + z(1) + max(f*max(Z,z), hard(7.5)) = 0+1+7.5 = 8.5 > 8.0 capacity.
-    assert _live_transient_check(client, "pve01", target, disk, 0).refusal is not None
+    assert _live_transient_check(client, "pve01", target, disk.size_bytes, 0).refusal is not None
 
     client2, _api2 = client_with(
         {"nodes/pve01/storage/san-b/content": [_vol("san-b:vm-900-disk-0", 900, 7.9)]}
     )
-    assert _live_transient_check(client2, "pve01", target, disk, 0).refusal is not None
+    assert _live_transient_check(client2, "pve01", target, disk.size_bytes, 0).refusal is not None
 
 
 def test_live_transient_check_counts_approximate_size_when_size_is_missing() -> None:

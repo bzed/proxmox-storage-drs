@@ -109,9 +109,20 @@ line's `size=` in the VM config. The pre-flight already parses that line, so
 two can differ when a volume was resized outside PVE or its storage rounds
 sizes. If PVE allocates some third size, nothing matches, the target is
 counted as well as charged, and the check is merely stricter than necessary.
-One consequence left as it was: the moving disk's own charge `z_m` is the
-listed size, so a cross-type target allocated at a larger config `size=` is
-charged slightly under what it will occupy. The matching is deliberately narrow for the same reason: a
+The same two sizes decide what a move is *charged*: `_move_charge_bytes()`
+returns the listed size, except when the move changes the kind of volume
+made — `Storage.storage_type` differs between source and target, or a qcow2
+disk lands on a target that cannot hold qcow2 and PVE writes it raw — where
+the target is allocated at the config's `size=` and the larger of the two is
+charged. A same-kind move keeps the listed size, since there the target is a
+copy of the source image and charging more would refuse moves for a
+discrepancy that does not apply. `_live_transient_check()` takes the
+candidate's charge as a number and computes each in-flight move's own the
+same way from its stored `source`/`target`/`config_size_bytes`. The tool
+never passes `format=` to `move_disk` and (C2) keeps a qcow2 disk off a
+storage that cannot hold it, so the conversion branch is a guard rather than
+something a plan produces today; the plan-time check in `schedule.py` keeps
+using the listed size. The matching is deliberately narrow for the same reason: a
 foreign volume that appeared since the launch, or a leftover of the same VM
 that was already there (it is in the baseline), is never excluded — wrongly
 keeping a volume only tightens the check, wrongly dropping one would weaken

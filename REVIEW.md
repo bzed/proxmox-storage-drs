@@ -7278,10 +7278,13 @@ rewritten to say so. Decisions, since the design question §52.1 left open has m
   line's `size=` in the VM config. Both sizes are accepted (the pre-flight already parses the config
   one). A first version matched the listed size only and would have missed every cross-type move; if
   PVE ever picks a third size, nothing matches and the consequence is over-conservatism, never a weaker
-  check. **Not changed, worth a decision:** the moving disk's own charge `z_m` stays the listed size,
-  so a cross-type target allocated at a larger config `size=` is charged a little under what it will
-  occupy; charging `max(listed, config)` in the live check would close that but makes it slightly
-  stricter than the plan's own.
+  check. **Charge:** the moving disk's own `z_m` is the listed size, except between different storage types or
+  when a qcow2 disk would land raw, where the live check charges `max(listed, config size=)`
+  (`_move_charge_bytes()`, at the operator's direction) so a cross-type target allocated at a larger
+  config size is not charged under what it will occupy. A same-kind move keeps the listed size. The
+  plan-time check (`schedule.transient_invariant_ok()`) still uses the listed size, so on a cross-type
+  move whose config `size=` exceeds the listed one the live check can be slightly stricter than the plan.
+  The conversion branch is a guard: no `format=` is ever passed and (C2) keeps qcow2 off raw-only storage.
 - **A listed volume with neither `size` nor `approximate-size` refuses the move**, naming the volume.
   Planning skips such a *foreign* volume with a warning (an undercount); a check deciding whether to
   touch the storage right now must not. Cost: a storage that persistently lists an unsized volume
