@@ -7255,6 +7255,53 @@ thin pool a `free_space.soft` can show a shortfall the pool's own numbers do not
 double-counting the in-flight mirror's own target volume, which RBD lists at full size on creation —
 so it is left as a separate task rather than guessed at in the execution path.
 
+### 52.2 The deviation §52.1 recorded, now fixed
+
+`execute.py`'s live re-check no longer reads PVE's `used`; plan §5.1's rule (provisioned, never
+allocated) now holds at execution time too, and §9.2 step 2 and the "as built" exception in §5.1 are
+rewritten to say so. Decisions, since the design question §52.1 left open has more than one answer:
+
+- **Live provisioned `used_b` = `Σ size` over `GET .../storage/{s}/content`**, the quantity
+  `schedule.transient_invariant_ok()` sums from the model (`Σ z_d + Uˢᵉˣᵗ`), read fresh. `total`
+  still comes from `/status`. The shared `reserve.transient_charge_ok()` core is unchanged (AGENTS §5).
+  `storage_content` needs `Datastore.Allocate`, which the tool's credential already requires.
+- **No `max(provisioned, used)`.** Taking PVE's `used` as a further floor would make the allocated
+  figure a model input again, and on ZFS (snapshots) or any pool with metadata overhead `used` can
+  exceed the provisioned sum, so the executor would refuse moves the plan accepted and `replan_needed`
+  would loop. The live check has to be the same quantity as the plan's, only fresher.
+- **In-flight mirror targets are excluded from the listing sum, not the charges.** `move_disk` picks
+  the target volume's name, so it is identified rather than known: at most one volume per in-flight
+  move that was not in the target's listing when the move launched (recorded on `_InflightMove`),
+  belongs to the same VM, and has the size `move_disk` allocates the target at. Deliberately narrow —
+  see the plan. Per the operator (not read from PVE's source): thin to thin of the same kind, the
+  target is the source image's size; between different storage types or thin to thick, it is the disk
+  line's `size=` in the VM config. Both sizes are accepted (the pre-flight already parses the config
+  one). A first version matched the listed size only and would have missed every cross-type move; if
+  PVE ever picks a third size, nothing matches and the consequence is over-conservatism, never a weaker
+  check. **Charge:** the moving disk's own `z_m` is the listed size, except between different storage types or
+  when a qcow2 disk would land raw, where the live check charges `max(listed, config size=)`
+  (`_move_charge_bytes()`, at the operator's direction) so a cross-type target allocated at a larger
+  config size is not charged under what it will occupy. A same-kind move keeps the listed size. The
+  plan-time check (`schedule.transient_invariant_ok()`) still uses the listed size, so on a cross-type
+  move whose config `size=` exceeds the listed one the live check can be slightly stricter than the plan.
+  The conversion branch is a guard: no `format=` is ever passed and (C2) keeps qcow2 off raw-only storage.
+- **A listed volume with neither `size` nor `approximate-size` refuses the move**, naming the volume.
+  Planning skips such a *foreign* volume with a warning (an undercount); a check deciding whether to
+  touch the storage right now must not. Cost: a storage that persistently lists an unsized volume
+  blocks every move onto it until that is dealt with. Loosening it to skip-and-warn like planning
+  would be a one-line change, but it reopens a hole the task asked to close, so it is left strict.
+- **An API error reading either endpoint is `replan_needed`**, where it used to propagate and abort
+  the run.
+- `show-load`/`explain` print `provisioned X/C` (with `(pool reports Y allocated)` when they differ)
+  instead of the pool's `used` beside a shortfall computed from the provisioned sum; `--json` gains
+  `provisioned_used_bytes` next to `used_bytes`.
+
+Covered by `tests/unit/test_execute.py` (thin pool with small `used` and large provisioned content is
+refused; the pool's `used` is never read; unsized and errored reads fail safe; an in-flight mirror
+target is not counted twice, at either the listed or the config size; a foreign, pre-existing same-VM or
+other-sized volume still is) and
+`tests/unit/test_cli.py`.
+
 ---
 
 ## Appendix A — Independent verification of the §14 worked example

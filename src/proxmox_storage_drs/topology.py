@@ -34,7 +34,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from proxmox_storage_drs.config import (
     Config,
@@ -111,7 +111,7 @@ _ALLOWED_FORMATS_BY_STORAGE_TYPE: dict[str, frozenset[str]] = {
 }
 
 
-def _parse_pve_config_size_bytes(value: str) -> int | None:
+def parse_pve_config_size_bytes(value: str) -> int | None:
     """Parse a `size=` value from a VM config line, e.g. ``"512G"``.
 
     Returns ``None`` if it does not match -- callers fall back further, or
@@ -760,6 +760,27 @@ def _pin_reason(
     return None
 
 
+def content_item_size(item: Mapping[str, Any]) -> tuple[int, bool] | None:
+    """One content-listing entry's size in bytes and whether it is exact, or
+    ``None`` when the entry carries neither field -- the one place the
+    ``size`` -> ``approximate-size`` fallback order lives, shared by the
+    planning-time join here and by ``execute.py``'s live provisioned-use
+    read (AGENTS.md section 5).
+
+    ``size`` is PVE's exact figure. ``approximate-size`` is the storage
+    plugin's own estimate where an exact one is expensive to determine (see
+    :func:`_resolve_disk_size_and_format`), so the returned flag is ``False``
+    for it and each caller decides how loudly to say so. What ``None``
+    means is the caller's call too: a disk here falls back to the VM
+    config's ``size=``, a foreign volume is skipped with a warning, and
+    the live re-check refuses to start the move."""
+    if "size" in item:
+        return int(item["size"]), True
+    if "approximate-size" in item:
+        return int(item["approximate-size"]), False
+    return None
+
+
 def _resolve_disk_size_and_format(
     key: str,
     volid: str,
@@ -799,17 +820,18 @@ def _resolve_disk_size_and_format(
     disk_format = (content_item.get("format") if content_item else None) or _default_format(
         storage_type
     )
-    if content_item is not None:
-        if "size" in content_item:
-            return int(content_item["size"]), disk_format, None
-        if "approximate-size" in content_item:
-            warning = (
-                f"{key}: {volid!r} has no exact size= in {storage_id!r}'s content listing; "
-                "using its approximate-size instead"
-            )
-            return int(content_item["approximate-size"]), disk_format, warning
+    sized = content_item_size(content_item) if content_item is not None else None
+    if sized is not None:
+        listed_bytes, exact = sized
+        if exact:
+            return listed_bytes, disk_format, None
+        warning = (
+            f"{key}: {volid!r} has no exact size= in {storage_id!r}'s content listing; "
+            "using its approximate-size instead"
+        )
+        return listed_bytes, disk_format, warning
     gap = "not found in" if content_item is None else "has no size= or approximate-size in"
-    size_bytes = _parse_pve_config_size_bytes(params.get("size", "")) or 0
+    size_bytes = parse_pve_config_size_bytes(params.get("size", "")) or 0
     warning = (
         f"{key}: {volid!r} {gap} {storage_id!r}'s content listing; "
         "using the VM config's own size= instead, which can be stale if the volume was "
@@ -995,13 +1017,13 @@ def _build_storages(
             for item in data.content_by_id[sid]:
                 if item.get("volid") in referenced_volids[sid]:
                     continue
-                if "size" in item:
-                    foreign_bytes += int(item["size"])
-                elif "approximate-size" in item:
-                    # Same fallback tier _resolve_disk_size_and_format uses:
-                    # PVE's own estimate, preferred over dropping the
-                    # volume entirely.
-                    foreign_bytes += int(item["approximate-size"])
+                sized = content_item_size(item)
+                if sized is not None:
+                    # `approximate-size` is the same fallback tier
+                    # _resolve_disk_size_and_format uses: PVE's own
+                    # estimate, preferred over dropping the volume
+                    # entirely.
+                    foreign_bytes += sized[0]
                 else:
                     # Same content-listing gap _resolve_disk_size_and_format
                     # guards against, but a foreign volume has no VM config

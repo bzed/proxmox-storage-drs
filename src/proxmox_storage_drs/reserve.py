@@ -86,9 +86,10 @@ def transient_charge_ok(
     moves land on the same storage at once. This is the one arithmetic
     core both `schedule.py`'s planning-time check (model-derived
     ``used_bytes``/``existing_largest_bytes``, always a single charge) and
-    `execute.py`'s live, execution-time check (``storage_status()``-derived
-    ``used_bytes``, one or more charges once concurrent execution launches
-    more than one move onto the same target) call — AGENTS.md section 5:
+    `execute.py`'s live, execution-time check (``used_bytes`` summed from the
+    target's live content listing at provisioned sizes, never PVE's own
+    allocated ``used`` — section 5.1; one or more charges once concurrent
+    execution launches more than one move onto the same target) call — AGENTS.md section 5:
     the *rule* is one implementation, and only the *source* of
     ``used_bytes``/``existing_largest_bytes``/``capacity_bytes`` legitimately
     differs between a model-based caller and a live one (a live re-check
@@ -99,11 +100,11 @@ def transient_charge_ok(
 
     Deliberately conservative for the concurrent case: this function does
     not assume ``used_bytes`` already reflects any of ``charge_sizes_bytes``
-    (whether a live ``storage_status()`` read already counts another
-    in-flight move's target allocation at the instant it is queried is not
-    something this codebase asserts either way — the arithmetic is only
-    ever *too* conservative if it does, never unsafe, and unsafe is the one
-    direction this tool never accepts, see `.agents/domain-invariants.md`).
+    — the arithmetic is only ever *too* conservative if it does, never
+    unsafe, and unsafe is the one direction this tool never accepts, see
+    `.agents/domain-invariants.md`. A caller that can tell which listed
+    volumes are its own in-flight mirror targets (`execute.py` does) leaves
+    those out of ``used_bytes`` so each is counted once, not twice.
 
     ``existing_largest_bytes`` is ``Z_b`` *before* any of
     ``charge_sizes_bytes`` land — the largest disk already resident on the

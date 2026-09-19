@@ -26,14 +26,25 @@ from proxmox_storage_drs.topology import (
     Topology,
     _allowed_formats,
     _default_format,
-    _parse_pve_config_size_bytes,
     _pin_reason,
     _split_tags,
     build_topology,
+    content_item_size,
     parse_disk_spec,
+    parse_pve_config_size_bytes,
     pending_disk_reasons,
 )
 from tests.unit.fakes import fake_api
+
+
+def test_content_item_size_prefers_the_exact_size_over_the_estimate() -> None:
+    """The one fallback order every consumer of a content entry shares
+    (planning's disk and foreign-volume sums, `execute.py`'s live check):
+    exact `size`, then `approximate-size` flagged as inexact, else nothing."""
+    assert content_item_size({"volid": "s:v", "size": 10, "approximate-size": 99}) == (10, True)
+    assert content_item_size({"volid": "s:v", "approximate-size": 99}) == (99, False)
+    assert content_item_size({"volid": "s:v"}) is None
+
 
 # --------------------------------------------------------------------- config
 
@@ -944,12 +955,12 @@ def test_parse_disk_spec_no_params() -> None:
     ],
 )
 def test_parse_pve_config_size_bytes(value: str, expected: int) -> None:
-    assert _parse_pve_config_size_bytes(value) == expected
+    assert parse_pve_config_size_bytes(value) == expected
 
 
 def test_parse_pve_config_size_bytes_invalid() -> None:
-    assert _parse_pve_config_size_bytes("not-a-size") is None
-    assert _parse_pve_config_size_bytes("") is None
+    assert parse_pve_config_size_bytes("not-a-size") is None
+    assert parse_pve_config_size_bytes("") is None
 
 
 @pytest.mark.parametrize(

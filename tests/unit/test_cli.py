@@ -444,6 +444,13 @@ def test_show_load_human_output(
     assert "reserve short by" in out or "reserve OK" in out
     assert "ungrouped" in out
     assert "L=3.00 u=3.00" in out  # san-a's StorageLoad
+    # Section 5.1: the reserve shortfall is computed from the provisioned
+    # sum (3 + 2 TiB of disks), so that is the headline figure; the pool's
+    # own, lower `used` (3 TiB, as a thin pool would report) is shown
+    # beside it instead of in its place.
+    assert "san-a  provisioned 5.00 TiB/8.00 TiB (pool reports 3.00 TiB allocated)" in out
+    # san-b: nothing provisioned, nothing allocated -- they agree, no note.
+    assert "san-b  provisioned 0 B/8.00 TiB  " in out
     assert "ℓ 3.00" in out  # 101:scsi0's DiskLoad
     assert "102:scsi0: sample coverage 40%" in out  # the flagged disk
     # san-a's reserve is violated in this fixture (see the json test's own
@@ -479,6 +486,8 @@ def test_show_load_json_output(
     san_a = next(s for s in group_payload["storages"] if s["id"] == "san-a")
     # managed_used 3+2=5 TiB, largest=3 TiB, reserve=2.0*3=6 TiB, 5+6=11 > capacity 8 TiB.
     assert san_a["reserve_violated"] is True
+    assert san_a["used_bytes"] == 3 * (1 << 40)  # the pool's own, allocated figure
+    assert san_a["provisioned_used_bytes"] == 5 * (1 << 40)  # what the shortfall is computed from
     assert san_a["load"] == 3.0
     assert san_a["utilization"] == 3.0
 
