@@ -644,10 +644,10 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
     """Section 16.6, check 2 -- the safety properties a real bundle can
     check without knowing the optimum, reconstructed from what
     ``plan --json``'s own group report already records per variant (X-07:
-    this used to check only the first of these). Three checks, none
+    this used to check only the first of these). Four checks, none
     requiring the emitted order or the objective breakdown that only
-    ``explain --json`` carries -- Sigma r_s = 0, section 8.1's per-step
-    transient predicate and the objective-recompute equality stay a named,
+    ``explain --json`` carries -- section 8.1's per-step transient
+    predicate and the objective-recompute equality stay a named,
     deliberate gap (see section 16.6's own note) rather than a claim this
     function does not back:
 
@@ -662,6 +662,13 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
        the two lists (``payback.rejected_moves``/``deferred_moves`` and
        ``moves``) are supposed to partition the candidate set, never
        overlap.
+    4. **The plan never worsens the reserve shortfall.** The payback
+       block's ``reserve_shortfall_bytes_after`` (the final ``Sigma r_s``,
+       section 9.5) must not exceed ``..._before``: the lexicographic
+       stage minimises ``Sigma r_s`` first (section 5.4), so a plan that
+       leaves it higher than it found it is a defect. Deliberately *not*
+       ``after == 0`` -- an oversized ``min_free_bytes`` or a group with no
+       feasible repair legitimately ends above zero.
     """
     import yaml
 
@@ -699,6 +706,14 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
                     f"{bundle.name} [{result.variant}]: group {group_report['name']!r} "
                     f"accepted move(s) {sorted(overlap)} also appear in payback's own "
                     "rejected/deferred list"
+                )
+            before = payback.get("reserve_shortfall_bytes_before")
+            after = payback.get("reserve_shortfall_bytes_after")
+            if before is not None and after is not None and after > before:
+                violations.append(
+                    f"{bundle.name} [{result.variant}]: group {group_report['name']!r} "
+                    f"plan raises the reserve shortfall from {before} to {after} bytes "
+                    "-- the lexicographic stage minimises it first (section 5.4)"
                 )
     return violations
 

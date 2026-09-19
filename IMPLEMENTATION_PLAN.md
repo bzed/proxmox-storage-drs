@@ -2484,7 +2484,7 @@ a bare `accepted: true` erases. Phase 13 therefore emits `repair_exempt` (the tr
 verdict) alongside the pair it is computed from, `reserve_shortfall_bytes_before`/`_after` —
 the two `Σ r_s` sums the trigger already has in hand at the call site. That pair is also the
 first instalment on §16.6's X-07/Y-04 gap: with it, check 4's "payback arithmetic" per variant
-records a verdict a regression diff can read, and check 2's `Σ r_s = 0` invariant becomes
+records a verdict a regression diff can read, and check 2's `Σ r_s` invariant (final ≤ current) becomes
 checkable from `plan --json` without the emitted order.
 
 The pinned block is not optional decoration — it is the "complain" half of the skip-and-complain
@@ -3868,9 +3868,11 @@ Four kinds of assertion that do hold:
    structurally). These are checkable without knowing the optimum, and they are what
    `check_invariants()` actually asserts. Three properties this bullet used to claim as checked and
    is not: §8.1's per-step transient predicate needs the emitted *order*, which no `plan --json`
-   field carries (the `Σ r_s = 0` half of this gap is closed as of phase 13 — the payback block's
-   `reserve_shortfall_bytes_after` is the final `Σ r_s`, so the invariant is readable from the
-   plan itself; wiring it into `check_invariants()` is still open); "the objective the scheduler was handed
+   field carries (the `Σ r_s` half of this gap is closed as of phase 13 — the payback block's
+   `reserve_shortfall_bytes_before`/`_after` are the current and final `Σ r_s`, and
+   `check_invariants()` asserts the part of it that is an invariant: the plan never *raises* the
+   shortfall. Not `= 0`: an oversized deprecated `min_free_bytes`, or a group with no feasible
+   repair, legitimately ends above zero); "the objective the scheduler was handed
    equals the objective recomputed from the final assignment" needs the six-term breakdown, which
    today only `explain --json` emits. A real and deliberate gap, named here rather than discovered
    later (the same shape as this section's own pattern-expansion gap above) — either sweep

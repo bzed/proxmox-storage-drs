@@ -372,3 +372,49 @@ def test_scrub_manifest_group_names_passes_the_pseudonymized_view(tmp_path: Path
     config_path = tmp_path / "config.yaml"
     config_path.write_text("groups:\n- name: group-448ef164\n", encoding="utf-8")
     assert vc._scrub_manifest_group_names(manifest_path, config_path) == []
+
+
+def _invariant_inputs(  # type: ignore[no-untyped-def]
+    tmp_path: Path, shortfall_before: int, shortfall_after: int
+):
+    """A one-group, one-move plan whose payback block carries the given
+    ``Sigma r_s`` pair -- everything else about it is legal."""
+    (tmp_path / "config.yaml").write_text(
+        "groups:\n- name: g1\n  storages:\n  - id: stor-a\n  - id: stor-b\n", encoding="utf-8"
+    )
+    bundle = vc.Bundle(
+        name="b", directory=tmp_path, submission=tmp_path / "s", expected=tmp_path / "e"
+    )
+    report = {
+        "groups": [
+            {
+                "name": "g1",
+                "moves": [{"disk_key": "1:scsi0", "to_storage": "stor-b"}],
+                "payback": {
+                    "rejected_moves": [],
+                    "deferred_moves": [],
+                    "reserve_shortfall_bytes_before": shortfall_before,
+                    "reserve_shortfall_bytes_after": shortfall_after,
+                },
+            }
+        ]
+    }
+    return bundle, [vc.VariantResult(variant={"solver_backend": "heuristic"}, report=report)]
+
+
+@needs_full_checkout
+def test_check_invariants_flags_a_plan_that_raises_the_reserve_shortfall(tmp_path: Path) -> None:
+    bundle, results = _invariant_inputs(tmp_path, shortfall_before=100, shortfall_after=101)
+    violations = vc.check_invariants(bundle, results)
+    assert len(violations) == 1
+    assert "raises the reserve shortfall from 100 to 101" in violations[0]
+
+
+@needs_full_checkout
+@pytest.mark.parametrize("before, after", [(100, 0), (100, 100), (0, 0), (5, 3)])
+def test_check_invariants_accepts_a_plan_that_never_worsens_the_shortfall(
+    tmp_path: Path, before: int, after: int
+) -> None:
+    """Including ``after > 0``: an unfixable shortfall is not a violation."""
+    bundle, results = _invariant_inputs(tmp_path, before, after)
+    assert vc.check_invariants(bundle, results) == []

@@ -7014,8 +7014,11 @@ exactly as strong". The reviewer is also right that nothing caught it: the only 
 - **The provenance strings are free text.** They are display-only by construction (nothing reads
   them), which is why they are plain `str` rather than an enum; if a machine consumer of
   `verify-storages --json` ever appears, that should become a structured field first.
-- **`validate_corpus.py`'s `check_invariants()` still does not assert `Σ r_s = 0` from the
-  payback block.** §16.6 now says so; the data is there and the assertion is a small addition.
+- **`validate_corpus.py`'s `check_invariants()` now asserts the `Σ r_s` invariant** — but as
+  `after ≤ before`, not the `= 0` this section first proposed and §16.6 first named: an oversized
+  deprecated `min_free_bytes`, or a group with no feasible repair, legitimately ends above zero, so
+  `= 0` would false-positive on exactly the configs AH-01 concerns. The lexicographic stage
+  minimises `Σ r_s` first, so "never raised" is what actually holds.
 
 ---
 
