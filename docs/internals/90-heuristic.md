@@ -208,8 +208,8 @@ be counted — see `96-payback.md`). `compute_vm_weights()` computes
 is the group's total load and `|V|` is the count of **every** distinct
 vmid with a disk in the group, not only the (possibly narrower) set of
 vmids the `kappa` sum itself ranges over once
-`objective.affinity_counts_pinned_disks` has excluded a pinned-only VM
-from it — section 14.7's own worked number (`l_bar = 6.0/3`, not `6.0/2`,
+`objective.affinity_counts_pinned_disks: false` has excluded a pinned-only
+VM from it — section 14.7's own worked number (`l_bar = 6.0/3`, not `6.0/2`,
 with VM 309 pinned out of the sum but still counted here) is what caught
 this the first implementation got wrong. `evaluate_assignment()` folds
 `w_v` into `fragmentation_term` in place of the old flat per-VM count; both

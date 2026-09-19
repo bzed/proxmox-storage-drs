@@ -131,8 +131,10 @@ class Fixture:
     def vm_weights(self) -> Dict[int, float]:
         """Section 5.4's `w_v = max(1, l_v / l_bar)`. `V` (the vmids this
         returns weights for) is derived from movable disks only
-        (`objective.affinity_counts_pinned_disks` defaults to false, and no
-        fixture here sets it true); `l_v` sums a VM's *entire* load across
+        (`objective.affinity_counts_pinned_disks=False`, which every fixture
+        here sets explicitly -- the engine's own default is True, and these
+        fixtures carry section 14's worked arithmetic, so they state their
+        semantics rather than tracking a default); `l_v` sums a VM's *entire* load across
         `all_keys`, pinned included. `l_bar`'s own denominator is wider
         still -- every distinct vmid with a disk in the group at all, not
         just `V` -- section 14.7's own worked number is explicit about this
@@ -301,8 +303,9 @@ def repair_markers(f: Fixture, assign: Assignment) -> Dict[str, bool]:
 
 def fragmentation(f: Fixture, assign: Assignment) -> float:
     """Section 5.4 kappa term, `A = Sum_v w_v * (extra storages)` -- V from
-    movable disks only (objective.affinity_counts_pinned_disks defaults to
-    false; no fixture here overrides it), each vmid's own extra-storage
+    movable disks only (objective.affinity_counts_pinned_disks=False, set
+    explicitly by every fixture here; the engine's default is True), each
+    vmid's own extra-storage
     count weighted by `f.vm_weights` (section 5.4's `w_v`, which sums a
     VM's *entire* load, pinned included -- see that property's docstring).
     """

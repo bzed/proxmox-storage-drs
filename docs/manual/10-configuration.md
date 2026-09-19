@@ -641,7 +641,9 @@ Duration, default `1h`.
 
 A storage involved in a migration within this long accepts no new incoming
 moves. **Must exceed the implied wipe time of that storage's largest disk**
-(`largest_disk / saferemove_throughput`) or the next run will plan onto a
+(`largest_disk / |saferemove_throughput|` — the magnitude, see
+[`verify-storages`](25-show-load-and-verify-storages.md) on why that value is
+often negative) or the next run will plan onto a
 storage that is still draining and stall — `pve-storage-drs verify-storages` computes
 this and warns when the configured cooldown is too short.
 
@@ -903,13 +905,36 @@ evenness in every plan comparison.
 
 ### `objective.affinity_counts_pinned_disks`
 
-Boolean, default `false`.
+Boolean, default `true`.
 
-Whether a disk that cannot move this run (snapshot-blocked, excluded, or
-on a locked VM) still counts toward `kappa_vm_affinity`. Default `false` so
-one unreachable disk cannot veto good placement of the rest of its VM's
-disks; note `efidisk0`/`tpmstate0` are *not* in this pinned set on PVE 9.2 —
-they move online.
+Whether a disk that cannot move this run (snapshot-blocked, excluded, or on
+a locked VM) still counts toward `kappa_vm_affinity`. Default `true`: such a
+disk still *occupies* a storage, so the VM really is spread, and its fixed
+location is an anchor the VM's movable disks can be drawn back to. Note
+`efidisk0`/`tpmstate0` are *not* in this pinned set on PVE 9.2 — they move
+online.
+
+Set it to `false` to count movable disks only. Be aware of what that costs.
+Take a VM with a snapshot-blocked disk on `san-a`:
+
+- **One movable disk, on `san-b`.** With `false` the VM's counted footprint
+  is that one disk, so it is never "spread", and moving it to `san-a`
+  (reuniting the VM) scores exactly the same as leaving it or sending it to
+  a third storage — the reunion is invisible, and the solver may pick any
+  of them. With `true` the VM counts as spread over two storages until the
+  disk joins `san-a`, and `kappa_vm_affinity` pulls it there.
+- **Two movable disks, both on `san-b`.** With `false` the counted
+  footprint is `san-b` alone; moving one of them to `san-a` to rejoin the
+  pinned disk makes it `{san-a, san-b}` and is charged `kappa_vm_affinity`
+  as if the VM had just been split. With `true` that same move is neutral,
+  and moving both is a gain.
+
+The pinned disk's storage is fixed, so counting it never asks for anything
+unreachable: it only prefers targets where the VM already has a disk.
+
+**This default changed after 0.1.6** (it was `false`). If you have not set
+it and your cluster has pinned disks, expect plans to prefer targets where
+the VM already has a disk. To keep the old behaviour, set it explicitly.
 
 ### `objective.reserve_violation_penalty`
 
@@ -1112,7 +1137,7 @@ storages verified not to wipe.
 Duration, default `48h`.
 
 Bound on the wait above, sized for a multi-TiB disk wiping at the default 10
-MiB/s. Must be at least `largest_disk / saferemove_throughput` for every
+MiB/s. Must be at least `largest_disk / |saferemove_throughput|` for every
 storage where `saferemove` is on — `verify-storages` checks this.
 
 ### `execution.time_windows[].days`

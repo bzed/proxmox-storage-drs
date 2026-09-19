@@ -774,7 +774,8 @@ silently.
 relying on any plan. For every storage in every group it reports `type`, `shared`, `content`,
 `saferemove`, `saferemove_throughput`, total/used, the largest disk currently on it, and the
 **resolved** free-space requirement `soft_s`/`hard_s` with the level each came from (§5.3.1);
-then it derives the implied wipe time `z_max / saferemove_throughput` and warns when that exceeds
+then it derives the implied wipe time `z_max / |saferemove_throughput|` (§7.1 on that sign) and warns
+when that exceeds
 `migration.max_single_move_duration` or `gates.cooldown_per_storage` (§9.3). It also prints the
 expansion of every `/…/` storage pattern (§11.4) — the entry and the storages it matched — and
 lists cluster storages matched by no group, so an over-broad or dead pattern is visible before any
@@ -890,12 +891,41 @@ This is deliberately *not* the same as excluding them: their bytes must still co
 Treating them as foreign volumes instead would work for capacity but would lose the fact that they
 belong to a VM whose other disks we are placing.
 
-**Pinned disks are excluded from the affinity term by default.** `κ` (§5.4) counts a VM's spread over
-storages. If an immovable disk counted, a VM with one snapshot-blocked volume would be permanently
-"fragmented" the moment any other disk moved, and `κ` would veto good placements to chase a
-co-location that cannot be achieved this run. So the `y_{v,s}` linking of (C3) ranges over **movable**
-disks only unless `objective.affinity_counts_pinned_disks` is set. Both behaviours are defensible;
-the default is the one that does not let an unreachable disk dictate placement of the rest.
+**Pinned disks count toward the affinity term by default.** `κ` (§5.4) counts a VM's spread over
+storages, and a disk that cannot move this run still *occupies* a storage — the VM is genuinely
+spread whether or not that particular volume is reachable. So the `y_{v,s}` linking of (C3) ranges
+over all of `D`; set `objective.affinity_counts_pinned_disks: false` to range over `D^mov` instead.
+
+An earlier revision defaulted the other way, reasoning that an immovable disk would otherwise leave
+a VM permanently "fragmented" and let `κ` "veto good placements to chase a co-location that cannot
+be achieved this run". Dogfooding overturned that (found by replaying a real bundle, not by review),
+and it is worth being precise about why, because the reasoning is seductive and wrong in two
+separate places.
+
+*The co-location usually can be achieved.* A pinned disk's storage is a **constant**, so `κ`'s only
+marginal effect is a preference for putting the VM's movable disks where it already has one. That is
+reachable this run — by moving the movable disk, which is the very thing the solver is choosing.
+Excluding pinned disks does not make an unreachable goal reachable; it hides a reachable one. On the
+bundle that found this, VM 717219 had two pinned disks together on one storage and a single movable
+`efidisk0` on another; the plan sent the `efidisk0` to a *third* storage, because with the pinned
+pair excluded the VM's counted footprint was one disk and every target scored identically.
+
+*Worse, the exclusion can invert the sign.* Take a VM with a pinned disk on `a`.
+
+- **One movable disk, on `b`.** Under `D^mov` the debt is 0 wherever that disk goes — one counted
+  disk, one storage — so moving it to `a` to reunite the VM scores exactly the same as leaving it or
+  sending it to a third storage: repair is *unrewarded*. Under all of `D` the debt is 1 until it
+  joins `a`, then 0.
+- **Two movable disks, both on `b`.** Under `D^mov` the debt is 0; moving one of them to `a` to rejoin
+  the pinned disk raises it to 1. The tool *charges* `κ` for taking a step towards reassembling the
+  VM. Under all of `D` that step is neutral (1 → 1), and moving both is a gain (1 → 0).
+
+The original worry does have a real residue: `κ` now charges a VM for a split it cannot fully undo,
+so a VM with pinned disks on two different storages carries a permanent debt floor. That floor is a
+*constant* — it shifts the objective's absolute value but not its argmin, and it cancels in §7.2's
+`A_before − A_after` — so it changes no decision. And where `κ` does pull a movable disk toward a
+bad target, it remains what §5.4 calls it: a soft preference that (C5)'s free space or a strong
+imbalance can legitimately override.
 
 **Unused disks move only to repair the reserve, and that is correct.** They carry `ℓ_d = 0` — no
 series exists for a volume QEMU has not opened — so relocating one yields zero imbalance benefit
@@ -1247,10 +1277,12 @@ x_{d,s}  ≤  y_{v(d),s}                                 ∀ d ∈ D^mov, s ∈ 
 y_{v,s}  ≤  Σ_{d ∈ D^mov : v(d)=v} x_{d,s}             ∀ v ∈ V, s ∈ S
 ```
 
-Ranging over `D^mov` rather than `D` keeps a disk that cannot move this run — snapshot-blocked,
-config-excluded or locked — from dictating where a VM's movable disks may go (§3.6). Set
-`objective.affinity_counts_pinned_disks: true` to range over all of `D` instead, which is the right
-choice only if you would rather chase an unreachable co-location than balance well.
+`D^mov` is the range only when `objective.affinity_counts_pinned_disks: false` is set explicitly.
+**By default the linking ranges over all of `D`** (`D^mov` replaced by `D` in both constraints
+above), so that a disk which cannot move this run — snapshot-blocked, config-excluded or locked —
+still anchors its VM: `y_{v,σ₀(p)} = 1` is fixed for every pinned `p`, and `κ` then rewards bringing
+the VM's movable disks to that storage instead of being blind to where they go. §3.6 carries the
+full argument, including why the opposite default silently penalized affinity repair.
 
 **(C4) Largest-disk linearization.** `Z_s = max{ z_d : x_{d,s}=1 }` is not linear, but because the
 reserve constraint pushes `Z_s` *down* while this pushes it *up*, a one-sided bound is exact at the
@@ -1815,7 +1847,7 @@ pass**, throttled and often far slower than the mirror it follows:
 ```
 duration_mirror_d = z_d / min(bwlimit, headroom_src, headroom_dst)
 
-duration_wipe_d   = z_d / saferemove_throughput(σ₀(d))     if saferemove is enabled there
+duration_wipe_d   = z_d / |saferemove_throughput(σ₀(d))|   if saferemove is enabled there
                   = 0                                       otherwise
 
 duration_d        = duration_mirror_d + duration_wipe_d
@@ -1846,8 +1878,33 @@ about **44 hours** to wipe, against roughly 2.2 hours to mirror it at 200 MiB/s 
 twenty times the move. A cost model that stops at the mirror understates such a migration by that
 factor and will happily schedule a plan that occupies the source array for two days.
 
+**`saferemove_throughput` is signed, and the sign is not part of the rate.** PVE passes the
+configured value straight through to `cstream -t`, where the sign selects *how* the limit is
+enforced and the magnitude is the rate in bytes/second (`cstream(1)`, confirmed by the operator
+against a production cluster):
+
+- **positive** — a session average. cstream accumulates its own error and may exceed the rate for
+  a while to make good on earlier underutilization, so the whole session converges on it.
+- **negative** — an upper limit on each individual read/write syscall pair, never exceeded.
+
+So `-1073741824` means 1 GiB/s, not minus anything, and negative values are ordinary in PVE
+configurations — they are what an operator writes when they want a rate the wipe can never burst
+above. Hence the `| … |` in the formula. `z_d / |throughput|` is the right estimate under either
+sign; under the negative one it is additionally a hard floor, since the wipe cannot finish ahead of
+a rate that is never exceeded.
+
+Dividing by the signed value is not a cosmetic error. `duration_wipe_d` would come out **negative**,
+`duration_d = duration_mirror_d + duration_wipe_d` would collapse towards zero — to *exactly* zero
+on the common configuration where the operator sets `|saferemove_throughput|` equal to
+`migration.bwlimit_bytes_per_sec` — and §7.3's `max_single_move_duration` rejection, along with
+`verify-storages`' cooldown-versus-wipe warning, would then be unable to fire for a disk of any
+size. This is not hypothetical: it was found by replaying a real bundle from a cluster whose three
+LVM storages all carry `saferemove_throughput -1073741824` against a `bwlimit_bytes_per_sec` of
+`1073741824`, where a hypothetical 100 TiB move reported a total duration of 0 s and passed a 6 h
+limit.
+
 Read `saferemove` and `saferemove_throughput` from `GET /storage` (§3.5 — the list form, not
-`GET /storage/{id}`) per storage; never assume.
+`GET /storage/{id}`) per storage; never assume, and never assume a sign either.
 `migration.account_saferemove_wipe: false` disables the term for an operator who has verified their
 storages do not wipe, but the default is to account for it. Note the knock-on effects, all covered in
 §9.3: the wipe also determines when the source's space is actually released, and it holds a
@@ -2020,6 +2077,35 @@ new surface — per-move `disk_key`, the plan's `aggregate_ok`, the `reserve_sho
 cleared the aggregate test regardless) and `repair_markers` (both `false`, the redundant-repair
 case) — with every recorded payback *number* unchanged; the corpus expected files record the same
 fields.
+
+**A plan of nothing but tiny disks has no economic gate at all, and that is deliberate — but it
+means the objective is the only thing holding it.** `Σ_d cost_d` is then 0, so — outside the repair
+exemption above, which skips the test anyway — `benefit ≥ λ · 0` reduces to `benefit ≥ 0` and any non-negative benefit passes; the implementation reports the ratio
+as `+inf`. That is the intended reading of "needs no verdict" above, and it is the whole point of
+§7.1's exemption: a 528 KiB `efidisk0` rejoining its VM must not have to out-earn a rule written
+for multi-terabyte migrations.
+
+State the consequence plainly, because it was not obvious and it cost a real dogfooding cycle to
+find. For such a plan, nothing downstream of the §5.4 objective asks whether the moves are worth
+making. If the objective scores a move at `+ε` for any `ε > 0`, the move happens — and `ε` can be
+arbitrarily small, because no term in the objective has a materiality floor either. So the
+*correctness of the objective's affinity term is load-bearing for tiny moves in a way it is not for
+any other kind of move*, and a defect in it surfaces directly as migrations that buy nothing.
+
+Exactly that happened. With §5.3 (C3)'s affinity term excluding pinned disks — the pre-fix default,
+see §3.6 — two 528 KiB `efidisk0` moves on a real cluster scored a κ gain of precisely zero and
+were emitted anyway on a `3.6 × 10⁻⁷` capacity-spread difference, a relative improvement of about
+`6 × 10⁻⁸`, on which the three solver backends did not even agree (CP-SAT emitted two moves, CBC
+none). Each was a live migration with a VM lock, a PVE task and a `saferemove` wipe, and each burned
+`gates.cooldown_per_storage` on its target. Correcting (C3)'s default turned the same two moves into
+genuine reunifications worth a discrete `1.0` of objective, and the three backends into agreement.
+
+No materiality floor is specified, and none should be added speculatively: any threshold would be a
+magic number standing in for a decision this model does not otherwise need to make, and the observed
+failure was a defect in the objective rather than a missing gate. But the branch is a real one, and
+a future bundle showing tiny moves emitted with `A_before = A_after` is evidence to revisit it — the
+narrowest available fix being to require `A_before > A_after` for a zero-cost plan, which needs no
+threshold because the affinity debt moves in discrete steps.
 
 **Defining "during the mirror".** `u_s` as used everywhere else is a p95 over the lookback window —
 a robust *statistic*, not an instantaneous reading — so adding an instantaneous `ω` to it would mix
@@ -2421,8 +2507,9 @@ move m from a to b is DONE  ⟺  task(upid) exitstatus == OK
                             ∧  elapsed(drain) ≥ min_wipe_seconds(m)
 ```
 
-`min_wipe_seconds(m)` is `size_bytes(m) / storage.saferemove_throughput` — PVE's own configured
-wipe rate, already read live off the storage definition (§3.5) — or, when that throughput is not
+`min_wipe_seconds(m)` is `size_bytes(m) / |storage.saferemove_throughput|` — PVE's own configured
+wipe rate, already read live off the storage definition (§3.5), magnitude taken because the sign
+selects `cstream`'s throttling mode rather than the rate (§7.1) — or, when that throughput is not
 configured (the storage type has no such concept, e.g. Ceph RBD or ZFS, or `saferemove` is off
 there), simply absent from the criterion (the first three conditions alone still govern, exactly as
 before this term existed). **Found dogfooding against a real cluster: the first three conditions
@@ -3471,7 +3558,7 @@ bug waiting to happen; this table is the audit.
 | `execution.source_release.*` | §9.3 completion criterion; §8.2 `draining` state |
 | `exclude.include_unused_disks` | §3.6 membership of `D` |
 | `exclude.skip_vms_with_snapshots` | §3.7, §5.3 (C2) pinning |
-| `objective.affinity_counts_pinned_disks` | §5.3 (C3) range of `D^mov` |
+| `objective.affinity_counts_pinned_disks` | §5.3 (C3) range: all of `D` (default) or `D^mov` |
 | `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
 | `migration.saturation_ceiling` | §7.3 `L_during(s) ≤ saturation_ceiling · N_s` |
 | `groups[].storages[].saturation_load` | §7.3 `N_s`; guard skipped when unset |

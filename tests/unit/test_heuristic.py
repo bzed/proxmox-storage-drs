@@ -13,6 +13,7 @@ agree with the plan's own arithmetic, not merely with each other.
 from __future__ import annotations
 
 import dataclasses
+from typing import Callable
 
 import pytest
 
@@ -524,10 +525,11 @@ def test_pinned_disk_never_moves_even_when_it_would_improve_the_objective() -> N
     assert result.repair_moves == 0
 
 
-def test_pinned_disks_are_excluded_from_fragmentation_by_default() -> None:
-    """(C3): affinity_counts_pinned_disks=False (default) ranges over
-    D^mov, so a VM whose only "spread" comes from a pinned disk is not
-    counted as fragmented."""
+def test_pinned_disks_count_toward_fragmentation_by_default() -> None:
+    """(C3): affinity_counts_pinned_disks=True (default) ranges over all of
+    `D`, so a VM really split across two storages is counted as fragmented
+    even when the disk holding it there cannot move. Setting it False
+    ranges over `D^mov` and makes that spread invisible."""
     disks = (
         make_disk("101:scsi0", 1.0, 1.0, "san-a", pinned="locked: backup"),
         make_disk("101:scsi1", 1.0, 1.0, "san-b"),
@@ -535,17 +537,78 @@ def test_pinned_disks_are_excluded_from_fragmentation_by_default() -> None:
     storages = (make_storage("san-a"), make_storage("san-b"))
     group = Group(name="g", storages=storages, disks=disks)
     assignment = seed_assignment(group)
+    loads = {"101:scsi0": 1.0, "101:scsi1": 1.0}
 
-    default = evaluate_assignment(
-        group, assignment, {"101:scsi0": 1.0, "101:scsi1": 1.0}, DEFAULT_OBJECTIVE, 1.0, 0
-    )
-    assert default.fragmentation_term == 0.0  # 101:scsi1 alone in D^mov -> 1 storage, no spread
+    default = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 1.0, 0.0)
+    assert default.fragmentation_term == pytest.approx(0.50)  # both disks count -> 2 storages
 
-    counting_pinned = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=True)
-    counted = evaluate_assignment(
-        group, assignment, {"101:scsi0": 1.0, "101:scsi1": 1.0}, counting_pinned, 1.0, 0
+    movable_only = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=False)
+    excluded = evaluate_assignment(group, assignment, loads, movable_only, 1.0, 0.0)
+    assert excluded.fragmentation_term == 0.0  # 101:scsi1 alone in D^mov -> 1 storage
+
+
+def test_a_pinned_disk_anchors_its_movable_sibling_under_the_default() -> None:
+    """The reason (C3)'s default is True, in the two shapes the plan's
+    section 3.6 works through. A VM with a pinned disk on san-a:
+
+    - one movable disk on san-b: under `affinity_counts_pinned_disks=False`
+      the debt is 0 wherever that disk goes, so reuniting the VM is
+      *unrewarded*; under the default it is 1 -> 0.
+    - two movable disks on san-b: under False, moving one to san-a to
+      rejoin the pinned disk raises the debt 0 -> 1 -- the tool *charges*
+      kappa for a step towards reassembling the VM; under the default that
+      step is neutral and moving both is a gain.
+
+    Found replaying a real bundle (VM 717219, whose two pinned disks shared
+    a storage its movable efidisk0 was then sent away from)."""
+    storages = (make_storage("san-a"), make_storage("san-b"))
+    movable_only = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=False)
+
+    def debt_of(group: Group) -> Callable[[ObjectiveConfig, dict[str, str]], float]:
+        loads = {d.key: 0.0 for d in group.disks}
+
+        def debt(objective: ObjectiveConfig, assignment: dict[str, str]) -> float:
+            breakdown = evaluate_assignment(group, assignment, loads, objective, 0.0, 0.0)
+            return breakdown.affinity_debt
+
+        return debt
+
+    # One movable disk.
+    one = Group(
+        name="g",
+        storages=storages,
+        disks=(
+            make_disk("101:scsi0", 1.0, 0.0, "san-a", pinned="snapshots present (2)"),
+            make_disk("101:scsi1", 1.0, 0.0, "san-b"),
+        ),
     )
-    assert counted.fragmentation_term == pytest.approx(0.50)  # now both disks count -> 2 storages
+    debt = debt_of(one)
+    split = seed_assignment(one)
+    reunited = dict(split) | {"101:scsi1": "san-a"}
+    assert debt(DEFAULT_OBJECTIVE, split) == pytest.approx(1.0)
+    assert debt(DEFAULT_OBJECTIVE, reunited) == pytest.approx(0.0)
+    assert debt(movable_only, split) == pytest.approx(0.0)  # unrewarded ...
+    assert debt(movable_only, reunited) == pytest.approx(0.0)  # ... either way
+
+    # Two movable disks.
+    two = Group(
+        name="g",
+        storages=storages,
+        disks=(
+            make_disk("101:scsi0", 1.0, 0.0, "san-a", pinned="snapshots present (2)"),
+            make_disk("101:scsi1", 1.0, 0.0, "san-b"),
+            make_disk("101:scsi2", 1.0, 0.0, "san-b"),
+        ),
+    )
+    debt = debt_of(two)
+    start = seed_assignment(two)
+    half = dict(start) | {"101:scsi1": "san-a"}
+    whole = dict(half) | {"101:scsi2": "san-a"}
+    assert debt(movable_only, start) == pytest.approx(0.0)
+    assert debt(movable_only, half) == pytest.approx(1.0)  # charged for rejoining
+    assert debt(DEFAULT_OBJECTIVE, start) == pytest.approx(1.0)
+    assert debt(DEFAULT_OBJECTIVE, half) == pytest.approx(1.0)  # neutral
+    assert debt(DEFAULT_OBJECTIVE, whole) == pytest.approx(0.0)  # gain
 
 
 # -------------------------------------------------------------------------- swaps

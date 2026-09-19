@@ -174,7 +174,9 @@ those API-visible signals had already cleared). `_poll_move_once()`
 computes it as `payback.compute_wipe_duration_seconds(size_bytes,
 source.saferemove_throughput_bytes_per_sec)` — the identical formula
 `payback.compute_move_cost()` already uses for the planning-time cost
-estimate (AGENTS.md section 5: one implementation, two callers) — and
+estimate (AGENTS.md section 5: one implementation, two callers, and the
+one place `saferemove_throughput`'s sign is resolved to a rate; see
+`96-payback.md`) — and
 folds it into the same `drain_start` clock the volume/lock poll already
 tracks, so it costs no extra API call. It is `None`, and so has no effect
 at all, whenever the storage has no configured `saferemove_throughput` —

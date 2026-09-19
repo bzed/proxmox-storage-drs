@@ -480,24 +480,26 @@ def test_pinned_disk_never_moves_even_when_it_would_improve_the_objective(backen
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_pinned_disks_are_excluded_from_fragmentation_by_default(backend: str) -> None:
-    """(C3): `affinity_counts_pinned_disks=False` (default) ranges the y
-    -linking constraints over `D^mov` only, so a VM whose only "spread"
-    comes from a pinned disk is not counted as fragmented -- mirrors
-    `test_heuristic.py`'s identical-in-spirit test, proving the MILP's own
-    y-variable modeling agrees with `evaluate_assignment()`'s independent
-    computation, not just with itself."""
+def test_pinned_disks_count_toward_fragmentation_by_default(backend: str) -> None:
+    """(C3): `affinity_counts_pinned_disks=True` (default) ranges the y
+    -linking constraints over all of `D`, so a VM really split across two
+    storages is counted as fragmented even when the disk holding it there
+    cannot move; False ranges over `D^mov` and makes that spread invisible.
+    Mirrors `test_heuristic.py`'s identical-in-spirit test, proving the
+    MILP's own y-variable modeling agrees with `evaluate_assignment()`'s
+    independent computation, not just with itself."""
     disks = (
         make_disk("101:scsi0", 1.0, 1.0, "san-a", pinned="locked: backup"),
         make_disk("101:scsi1", 1.0, 1.0, "san-b"),
     )
     group = Group(name="g", storages=(make_storage("san-a"), make_storage("san-b")), disks=disks)
-    result = _solve(group, {"101:scsi0": 1.0, "101:scsi1": 1.0}, DEFAULT_OBJECTIVE, backend)
-    assert result.breakdown.fragmentation_term == 0.0
+    loads = {"101:scsi0": 1.0, "101:scsi1": 1.0}
+    result = _solve(group, loads, DEFAULT_OBJECTIVE, backend)
+    assert result.breakdown.fragmentation_term == pytest.approx(0.50)
 
-    counting_pinned = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=True)
-    counted = _solve(group, {"101:scsi0": 1.0, "101:scsi1": 1.0}, counting_pinned, backend)
-    assert counted.breakdown.fragmentation_term == pytest.approx(0.50)
+    movable_only = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=False)
+    excluded = _solve(group, loads, movable_only, backend)
+    assert excluded.breakdown.fragmentation_term == 0.0
 
 
 # ------------------------------------------------------------------------ swaps
@@ -559,16 +561,16 @@ def test_pinned_by_storage_groups_only_pinned_disks() -> None:
     assert result["san-b"] == ()
 
 
-def test_relevant_vmids_defaults_to_movable_disks_only() -> None:
+def test_relevant_vmids_defaults_to_every_vm_with_a_disk_in_the_group() -> None:
     disks = (
         make_disk("101:scsi0", 1.0, 1.0, "san-a", pinned="locked: backup"),
         make_disk("102:scsi0", 1.0, 1.0, "san-a"),
     )
     group = Group(name="g", storages=(make_storage("san-a"),), disks=disks)
     movable = tuple(d for d in disks if d.pinned_reason is None)
-    assert _relevant_vmids(group, movable, DEFAULT_OBJECTIVE) == [102]
-    counting_pinned = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=True)
-    assert _relevant_vmids(group, movable, counting_pinned) == [101, 102]
+    assert _relevant_vmids(group, movable, DEFAULT_OBJECTIVE) == [101, 102]
+    movable_only = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=False)
+    assert _relevant_vmids(group, movable, movable_only) == [102]
 
 
 # --------------------------------------------------------------------- no-op

@@ -833,6 +833,40 @@ def test_verify_storages_json_output(
     assert san_b["implied_wipe_seconds"] is None
 
 
+def test_verify_storages_reports_a_negative_saferemove_throughput_as_a_positive_wipe(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Section 7.1's signed `saferemove_throughput`, end to end: the
+    configured value is echoed back verbatim (so it can be matched against
+    storage.cfg) while the duration derived from it is positive, and the
+    two warnings that compare against it can fire again -- with the signed
+    division they never could, since every wipe time came out negative."""
+    topology = _sample_topology()
+    san_a = topology.groups[0].storages[0]
+    patched = Group(
+        name=topology.groups[0].name,
+        storages=(
+            dataclasses.replace(san_a, saferemove_throughput_bytes_per_sec=-10.0 * (1 << 20)),
+            topology.groups[0].storages[1],
+        ),
+        disks=topology.groups[0].disks,
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        _fake_build_topology(Topology(groups=(patched,), warnings=())),
+    )
+    path = write_config(tmp_path, gates={"cooldown_per_storage": "1s"})
+    assert cli.main(["-c", str(path), "--json", "verify-storages"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    out = next(s for s in payload["groups"][0]["storages"] if s["id"] == "san-a")
+    assert out["saferemove_throughput_bytes_per_sec"] == -10.0 * (1 << 20)
+    assert out["implied_wipe_seconds"] == pytest.approx(3 * (1 << 40) / (10 * (1 << 20)))
+    assert out["cooldown_per_storage_too_short"] is True
+    assert out["max_single_move_duration_too_short"] is True
+
+
 def test_verify_storages_shows_where_each_free_space_half_came_from(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

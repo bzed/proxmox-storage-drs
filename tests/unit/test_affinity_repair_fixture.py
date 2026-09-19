@@ -57,6 +57,13 @@ OBJECTIVE = ObjectiveConfig(
     gamma_move_bytes_per_tib=0.05,
     kappa_vm_affinity=0.5,
     delta_capacity_spread=0.5,
+    # Pinned explicitly, not inherited: section 14.7's worked numbers are
+    # computed with `V` ranging over movable disks only, and
+    # `tests/fixtures/generate_expected.py`'s independent oracle computes
+    # `fragmentation()` the same way. The engine's own default is True
+    # (section 5.3 (C3)); a fixture that carries the plan's arithmetic must
+    # state which semantics that arithmetic is in, not track a default.
+    affinity_counts_pinned_disks=False,
 )
 
 MIGRATION = MigrationConfig(

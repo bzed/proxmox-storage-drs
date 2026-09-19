@@ -10,7 +10,7 @@ verdict — and why does a reserve-fixing plan always pass? Describes
 `compute_move_cost()` needs only a `schedule.ScheduledMove` and its
 source `topology.Storage` — no new fetch, no new state. `duration_mirror`
 is `z_d / migration.bwlimit_bytes_per_sec`; `duration_wipe` is `z_d /
-saferemove_throughput` when `migration.account_saferemove_wipe` and the
+|saferemove_throughput|` when `migration.account_saferemove_wipe` and the
 source has `saferemove` on, else zero. `cost_load_seconds` — in the same
 **load-seconds** unit (average in-flight I/O requests multiplied by
 seconds) `compute_benefit_load_seconds()` produces below, which is what
@@ -66,6 +66,43 @@ a balance move that *splits* a VM must pay for the fragmentation out of its
 `alpha` gain — and `compute_benefit_load_seconds()` returns that negative
 contribution as computed, never clamped; `evaluate_plan_payback()`'s own
 acceptance test already rejects a genuinely negative benefit correctly.
+
+## Why `compute_wipe_duration_seconds()` takes the magnitude
+
+`saferemove_throughput` is signed, and the sign is not part of the rate.
+PVE hands the configured value straight to `cstream -t`, where a
+**positive** number is a session average — cstream accumulates its own
+error and may exceed the rate for a while to make good on earlier
+underutilization — and a **negative** number is an upper limit on each
+individual read/write syscall pair, which is never exceeded. Both name
+the same `|num|` bytes/second, so `-1073741824` means 1 GiB/s. Negative
+values are ordinary in PVE configurations: they are what an operator
+writes when they want a rate the wipe can never burst above.
+
+`compute_wipe_duration_seconds()` is the one implementation of the
+formula (AGENTS.md section 5) — `compute_move_cost()`, `cli.py`'s
+`verify-storages` and `execute.py`'s `min_wipe_seconds` all go through
+it — so `abs()` belongs there and nowhere else. In particular
+`topology.py` deliberately keeps PVE's signed value on `Storage`:
+`verify-storages --json` echoes it back verbatim so an operator can match
+it against their own `storage.cfg`, and normalizing it at parse time
+would quietly change what they are shown.
+
+Dividing by the signed value was a real bug, not a cosmetic one, and the
+shape of it is worth remembering. `duration_wipe` came out negative;
+`duration_d = duration_mirror + duration_wipe` therefore collapsed
+towards zero, and to **exactly** zero on the common configuration where
+`|saferemove_throughput|` equals `migration.bwlimit_bytes_per_sec`. On
+such a cluster the `max_single_move_duration` rejection (a move whose
+mirror plus wipe would run longer than that is refused outright) could
+not fire for a disk of any size — a hypothetical 100 TiB move reported a
+total duration of 0 s and sailed past a 6 h limit — and
+`verify-storages`' two warnings (`cooldown_per_storage_too_short`,
+`max_single_move_duration_too_short`) were both permanently false, since
+a negative number never exceeds a positive threshold. It printed
+`implied wipe time for the largest disk (1.00 TiB): -17.1m` and nobody
+downstream noticed. Found by replaying a corpus bundle from a cluster
+whose three LVM storages all carry `saferemove_throughput -1073741824`.
 
 ## `headroom_src`/`headroom_dst`: a plan formula this project cannot fill in
 
@@ -229,6 +266,41 @@ neither being non-empty.
 
 ## What this pass deliberately does not do
 
+- **Any materiality floor on the benefit.** A plan of nothing but tiny
+  disks has `total_cost_load_seconds == 0`, so `aggregate_ok` reduces to
+  `benefit_load_seconds >= 0` and `PaybackResult.ratio` reports `+inf`:
+  such a plan passes the aggregate test unconditionally (a repairing plan
+  skips the test anyway, so this matters for the non-repairing case). That
+  is intended: a disk below `tiny_disk_bytes` is exempt from the payback
+  arithmetic precisely so that a 528 KiB `efidisk0` rejoining its VM does
+  not have to out-earn a rule written for multi-terabyte migrations.
+
+  What the code does not show, and what is worth knowing before touching
+  either module, is the consequence: for such a plan **nothing downstream
+  of the solver's objective asks whether the moves are worth making**,
+  and no objective term has a materiality floor either, so any `+ε` is
+  enough. The affinity term's correctness is load-bearing for tiny moves
+  in a way it is not for any other kind of move. That is not theoretical:
+  while `objective.affinity_counts_pinned_disks` still defaulted to
+  `false` — so a disk that could not move was left out of the affinity
+  count, and a VM's pinned disks exerted no pull on its movable ones — two
+  528 KiB `efidisk0` moves on a real cluster were emitted on a `3.6e-7`
+  capacity-spread difference — a relative improvement of `6e-8`, on which
+  CP-SAT and CBC did not even agree — with a `kappa` gain of exactly
+  zero, each one a live migration holding a VM lock and burning
+  `gates.cooldown_per_storage` on its target. Correcting that default
+  turned the same two moves into genuine reunifications worth a discrete
+  `1.0`, and the backends into agreement.
+
+  No floor is added speculatively: the failure was a defect in the
+  objective, not a missing gate, and any threshold here would be a magic
+  number standing in for a decision the model does not otherwise need to
+  make. If a future bundle shows tiny moves emitted with
+  `affinity_debt_before == affinity_debt_after`, the narrowest fix is to
+  require `affinity_debt_before > affinity_debt_after` for a zero-cost
+  plan — no threshold needed, since the debt moves in discrete steps.
+  `test_payback.py` pins the current behaviour so that change cannot be
+  made silently.
 - **The 3-retry re-solve-with-doubled-`beta`/`gamma` loop** (section 7.3)
   on aggregate payback failure. A real UX refinement — it converges on the
   smaller subset of high-value moves rather than abandoning the run — but

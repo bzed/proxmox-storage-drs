@@ -65,6 +65,11 @@ OBJECTIVE = ObjectiveConfig(
     gamma_move_bytes_per_tib=0.05,
     kappa_vm_affinity=0.5,
     delta_capacity_spread=0.5,
+    # Pinned explicitly, not inherited -- the same reason as
+    # test_affinity_repair_fixture.py: `generate_expected.py`'s oracle
+    # computes fragmentation() with `V` over movable disks only, and the
+    # engine's own default is True (section 5.3 (C3)).
+    affinity_counts_pinned_disks=False,
 )
 
 # saferemove off everywhere in the fixture -- see free-space-repair.yaml's

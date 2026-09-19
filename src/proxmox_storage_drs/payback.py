@@ -161,10 +161,29 @@ def compute_wipe_duration_seconds(
     ``compute_move_cost()`` below and ``cli.py``'s ``verify-storages``,
     which needs the identical number for its own, unrelated warning about
     cooldowns and move-duration limits being shorter than the implied
-    wipe -- one implementation of the formula (AGENTS.md section 5)."""
+    wipe -- one implementation of the formula (AGENTS.md section 5).
+
+    **A negative ``saferemove_throughput`` is normal, and its magnitude
+    is the rate.** PVE passes the configured value straight through to
+    ``cstream -t`` (section 7.1), whose sign selects *how* the limit is
+    enforced, never how fast: a positive number is an average the whole
+    session converges on, so a run may exceed the rate for a while to
+    make good on earlier underutilization; a negative number is a hard
+    ceiling on each individual read/write syscall pair, which is never
+    exceeded. Both describe the same |num| bytes/second, so the duration
+    is ``disk_bytes / abs(throughput)`` in both cases -- and if anything
+    the negative form is the more dependable estimate of the two, since
+    the wipe can never finish ahead of it. Dividing by the signed value
+    instead yields a *negative duration*, which is not merely a cosmetic
+    wrong number: it cancels ``duration_mirror_seconds`` in
+    ``compute_move_cost()`` and silently disables section 7.3's
+    ``max_single_move_duration`` rejection and ``verify-storages``'
+    cooldown warning. Found by replaying a real bundle whose three LVM
+    storages all carry ``saferemove_throughput -1073741824``.
+    """
     if not throughput_bytes_per_sec:
         return None
-    return disk_bytes / throughput_bytes_per_sec
+    return disk_bytes / abs(throughput_bytes_per_sec)
 
 
 def mirror_duration_seconds(move: ScheduledMove, migration: MigrationConfig) -> float:
@@ -444,7 +463,32 @@ def evaluate_plan_payback(
     bullet) is not re-checked here -- ``schedule.py`` already enforces it
     before a move is ever scheduled, so by the time a ``ScheduledMove``
     reaches this module it has already passed that rule (AGENTS.md
-    section 5: one implementation, not a second one here)."""
+    section 5: one implementation, not a second one here).
+
+    **A plan of nothing but tiny disks passes the aggregate test
+    unconditionally, by design.** Every move below
+    ``migration.tiny_disk_bytes`` has ``cost_load_seconds == 0``
+    (section 7.1), so ``total_cost`` is 0, ``aggregate_ok`` reduces to
+    ``benefit_load_seconds >= 0``, and :attr:`PaybackResult.ratio`
+    reports ``+inf``. Section 7.3's "needs no verdict" is exactly this:
+    a 528 KiB ``efidisk0`` rejoining its VM must not have to out-earn a
+    rule written for multi-terabyte migrations.
+
+    The consequence is worth stating where the line is, because it is not
+    visible from it: for such a plan **nothing downstream of the section
+    5.4 objective asks whether the moves are worth making**, and no term
+    in that objective has a materiality floor, so any ``+epsilon`` is
+    enough. The affinity term's correctness is therefore load-bearing for
+    tiny moves in a way it is not for any other kind. When section 5.3
+    (C3) still excluded pinned disks by default, two 528 KiB moves on a
+    real cluster were emitted on a 3.6e-7 capacity-spread difference with
+    a kappa gain of exactly zero -- see section 7.3, which carries the
+    full account and the narrowest fix (require
+    ``affinity_debt_before > affinity_debt_after`` for a zero-cost plan)
+    should a future bundle show the branch actually biting. Deliberately
+    not implemented now: the observed failure was a defect in the
+    objective, not a missing gate, and any threshold here would be a
+    magic number."""
     move_costs = tuple(move_costs)
     total_cost = sum(mc.cost_load_seconds for mc in move_costs)
     repair_exempt = final_shortfall_bytes < current_shortfall_bytes

@@ -193,9 +193,9 @@ reason about than partial reuse, at the cost of building the constraint
 set twice per solve (irrelevant next to a MILP solve's own running time).
 
 (C3)'s `y_{v,s}` linking honors `objective.affinity_counts_pinned_disks`
-exactly as the plan's own text describes it: **false** (default) links
+exactly as the plan's own text describes it: **false** links
 `y` to `x` over `D^mov` only, so a pinned disk never forces `y_{v,s}=1`
-for its storage; **true** ranges the constraint over all of `D`, which
+for its storage; **true** (the default) ranges the constraint over all of `D`, which
 this module implements as forcing `y_{v,s}=1` outright wherever a pinned
 disk of `v` already sits (the natural reading of "`x_{d,s} ≤ y_{v,s}`
 for `d ∈ D`" when `x_{d,σ₀(d)}` is a constant `1`, not a variable, for a

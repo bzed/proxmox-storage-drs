@@ -108,6 +108,10 @@ objective:
                               # -only harness at all
   gamma_move_bytes_per_tib: 0.05
   kappa_vm_affinity: 0.5
+  # Stated, not inherited: these fixtures carry section 14's worked
+  # arithmetic, computed with V over movable disks only. The engine's
+  # own default is true (section 5.3 (C3)).
+  affinity_counts_pinned_disks: false
   reserve_violation_penalty: 1000.0
 # Section 5.3.1's transient floor, swept: null means hard_b = soft_b (no
 # dip at all, the conservative default); 1.0 is "10%" of 10 TiB. Recorded

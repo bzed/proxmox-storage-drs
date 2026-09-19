@@ -294,11 +294,13 @@ objective:
   # priority; 0 disables the term.
   delta_capacity_spread: 0.5
   # Disks that cannot move THIS RUN (snapshot-blocked, config-excluded, or on a
-  # locked VM) are excluded from the affinity count by default, so an unreachable
-  # disk cannot pin the rest of its VM to one storage. true counts them: better
-  # co-location, worse balance. Note efidisk0/tpmstate0 are NOT in this set --
-  # they move online on PVE 9.2.
-  affinity_counts_pinned_disks: false
+  # locked VM) still count toward the affinity term by default: such a disk still
+  # occupies a storage, so the VM really is spread, and its fixed location anchors
+  # the VM's movable disks. false counts movable disks only, which makes reuniting
+  # a VM with its pinned disks either unrewarded or outright penalized. Note
+  # efidisk0/tpmstate0 are NOT in this set -- they move online on PVE 9.2.
+  # Default changed from false after 0.1.6.
+  affinity_counts_pinned_disks: true
   # Soft slack so an already-violating start stays repairable rather than infeasible.
   # This is a FLOOR, not the value used: with the single-stage big-M formulation the
   # engine computes the provably-dominant P from the group's own load and sizes and
