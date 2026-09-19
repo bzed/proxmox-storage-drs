@@ -10,17 +10,30 @@ actually get decided? Describes `proxmox_storage_drs/topology.py` and
 
 This is stated at the top of `topology.py`'s own docstring because it is
 the single easiest thing to get backwards: `D` (section 5.1) is *every*
-disk this module puts into a group's `Group.disks`, whether or not (C2)
-pins its placement. A disk this module never sees at all — a stopped VM
-excluded by `exclude.running_only`, or a disk whose current storage is not
-in any configured group — is what "foreign" (`Uˢᵉˣᵗ`, section 5.1.1) means.
+disk this module puts into a group's `Group.disks`, whether or not **(C2)**
+pins its placement. (C2) is the plan's per-disk eligibility constraint: a
+pinned disk is still a full member of `D` — its bytes and its I/O still
+count — it is simply excluded from ever being *reassigned*; the "Pin
+priority" section below enumerates every condition that triggers it. A disk
+this module never sees at all — a stopped VM excluded by
+`exclude.running_only`, or a disk whose current storage is not in any
+configured group — is what "foreign" (`Uˢᵉˣᵗ`, section 5.1.1) means.
 Config-excluded disks (`exclude.vmids`/`exclude.disks`/tags) are *not*
-foreign: (C2) pins them into `D` specifically so their bytes still count in
-(C4)/(C5) and their fragmentation toward `κ` (section 3.6, "Pinned disks are
-modelled, not ignored"). An earlier draft of section 5.1.1 listed config-excluded
-disks as foreign, which directly contradicted (C2) — that self-contradiction
-was found and fixed in the same commit that first implemented this join;
-see that section's note if you need the history.
+foreign: (C2) pins them into `D` specifically so their bytes still count
+toward a storage's reserve check — **(C4)/(C5)**: `Z_s`, the largest disk
+resident on a storage, sets a reserve floor `R_s = max(reserve_factor_s ·
+Z_s, soft_s)` that must stay free on top of every disk's actual usage
+there (`soft_s` is section 5.3.1's configured free-space requirement,
+resolved per storage onto `Storage.free_space_soft_bytes` below — the
+exact shortfall arithmetic is in "`reserve.py`: one (C4)/(C5) evaluator,
+shared" below) — and toward **`κ`**, the objective's
+per-VM fragmentation penalty, which charges a VM for every extra storage
+its disks are spread across (section 5.4; see `90-heuristic.md`) (section
+3.6, "Pinned disks are modelled, not ignored"). An earlier draft of section
+5.1.1 listed config-excluded disks as foreign, which directly contradicted
+(C2) — that self-contradiction was found and fixed in the same commit that
+first implemented this join; see that section's note if you need the
+history.
 
 ## One pass, in the order section 3.5 lists
 
@@ -276,11 +289,17 @@ of it, needs to know a pattern was ever involved.
 
 ## `reserve.py`: one (C4)/(C5) evaluator, shared
 
-`compute_reserve_status()` is deliberately its own module, not a method on
-`Storage`: `heuristic.py` needs to evaluate the identical formula against a
-*candidate* assignment, not only the current one (`storage_of=` overrides
-which storage each disk is treated as sitting on), and `pve-storage-drs
-show-load`'s reporting needs it against the current assignment today. Both
+`compute_reserve_status()` computes, for one storage: `used = Σ_{d∈D on s} z_d
++ Uˢᵉˣᵗ_s` (every managed disk's bytes plus the foreign/unreferenced bytes
+from "`Uˢᵉˣᵗ`: everything not referenced" above), `shortfall = max(0, used +
+R_s − capacity_s)`, and `ReserveStatus.violated` is exactly `shortfall > 0`
+— the boolean `gates.py`'s reserve-override gate reads directly
+(`docs/internals/80-gates.md`). It is deliberately its own module, not a
+method on `Storage`: `heuristic.py` needs to evaluate the identical formula
+against a *candidate* assignment, not only the current one (`storage_of=`
+overrides which storage each disk is treated as sitting on), and
+`pve-storage-drs show-load`'s reporting needs it against the current
+assignment today. Both
 call the same function (AGENTS.md section 5) — `show-load`'s use of it is
 already exercised end-to-end (see `cli.py`'s
 `_render_show_load_human`/`_json`). `optimize.py`'s MILP path needs the
@@ -290,3 +309,64 @@ equivalent bound directly as a scaled linear constraint instead. The
 section 14 worked example's initial state (`tests/unit/test_reserve.py`)
 is the proof this reproduces the plan's own arithmetic exactly, not merely
 a self-consistent unit test.
+
+## `free_space` resolution: `soft_s`/`hard_s`, resolved once, here
+
+Section 5.3.1's `soft_s`/`hard_s` pair is resolved onto
+`Storage.free_space_soft_bytes`/`.free_space_hard_bytes` in
+`_build_storages()`, by `_resolve_free_space()` -- the same place and the
+same per-storage pattern `_resolve_reserve_factor()` already uses for
+`reserve_factor`, and for the same reason: a `/…/` pattern's `free_space`
+entry applies to every storage it matches, a literal entry overrides it,
+and only a real storage's `capacity_bytes` (known here, not in `config.py`)
+can resolve a percentage. The mandated order is inheritance, then
+percent-to-bytes conversion, then the two section 11.1 hard rules against
+the *written* values (`hard_s <= soft_s`, `soft_s < C_s` -- both raise
+`TopologyError`, exactly like the pattern-expansion rules above, since both
+need the cluster inventory config.py never has), and only then the
+deprecated `snapshot_reserve.min_free_bytes` fold (`soft_s = max(soft_s,
+min_free_bytes)`) -- "validate as written, then fold": folding first would
+let a written `hard > soft` hide behind a large `min_free_bytes` and
+surface as a startup failure only once the operator deletes the deprecated
+key, exactly the upgrade path the fold exists to keep safe. A *null* `hard` is
+not a written value, so it is the one thing that is **not** settled before
+the fold: it means `hard_s = soft_s`, and that is the *folded* `soft_s`. Read
+before the fold it would leave `hard_s = 0` for a config carrying only
+`min_free_bytes` and drop the deprecated floor from section 8.1's transient
+charge without a word (a `min_free_bytes`-only config gets no deprecation
+warning); a *written* `hard` stays as written. `_resolve_free_space()` returns
+a `ResolvedFreeSpace`: the pair plus two display-only strings naming the level
+each half came from (global, storage entry, `pattern /re/`, percent-converted,
+folded), carried on `Storage.free_space_soft_source`/`_hard_source` for
+`verify-storages` and read by nothing else. By the time
+`compute_reserve_status()` reads `storage.free_space_soft_bytes`, or
+`schedule.transient_invariant_ok()` reads `.free_space_hard_bytes`, both
+are plain, already-resolved byte constants -- section 5.3.1's own grammar
+(percentages, patterns, the deprecated key) is never seen again past this
+module.
+
+## (C2) format eligibility: `storage_type`/`allowed_formats`
+
+`Storage` also carries `storage_type` (from `GET /storage`'s own `type`
+field, never guessed) and `allowed_formats` -- the disk formats that type
+can actually hold, from a fixed table keyed by the same storage-type
+partition `_default_format()` already draws for the fallback format of a
+content listing with no `format` field of its own: a block-backed type
+(`lvmthin`, `zfspool`, `rbd`, `iscsi`, `iscsidirect`) holds `raw` only --
+there is no image container on the array, a volume *is* the raw block
+device -- and a file-backed type (`dir`, `nfs`, `cifs`, `cephfs`) holds
+whatever `qemu-img` formats PVE offers a regular file for. Ordinary
+(non-thin) `lvm` is the one block-backed exception: current PVE versions
+also accept `qcow2` there, since PVE 9.2 added snapshot support on plain
+LVM by formatting the LV itself as a qcow2 image rather than using it raw
+(the same mechanism `_resolve_disk_size_and_format()`'s `approximate-size`
+note above describes) -- `lvmthin` needs no such carve-out, since its
+snapshots are native LVM-thin COW, never qcow2-on-the-LV. Section 5.3
+(C2)'s "`s` cannot hold the disk's format" is `topology.
+storage_accepts_format(storage, disk.format)` -- one function, called by
+both MILP backends (`91-optimize.md`) and by `heuristic.py`'s own
+candidate-generating helpers to fix `x_{d,s}=0` (or exclude the pair from
+the neighbourhood the heuristic searches) for every ineligible target.
+Unlike the free-space floor, format eligibility needs no per-run
+resolution step of its own -- it is a pure function of `storage_type`,
+computed once when `Storage` is built and read directly thereafter.

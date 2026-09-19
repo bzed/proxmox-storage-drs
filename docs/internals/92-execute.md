@@ -29,8 +29,8 @@ vmid/tag predicate rather than an import of it — that name is private to
 that module, matching this codebase's usual choice for a one-line filter
 (AGENTS.md section 5; `optimize.py`'s `_movable_disks()` is the same
 precedent). And `_live_transient_check()` re-derives the section 8.1
-reserve formula
-against the target's live `storage_status()`, not the in-memory model.
+transient invariant against the target's *live* content listing and
+capacity, not the in-memory model.
 Either kind of mismatch stops the group's run with `"replan_needed"`
 rather than trying to patch the plan around it — `IMPLEMENTATION_PLAN.md`
 section 9.2 is explicit: "abandon the remaining moves... do not attempt to
@@ -44,17 +44,98 @@ from the exclusion re-check's deliberate duplication above: it calls
 specifically so this is the only place it lives (`60-topology.md`'s "The
 pending-change pin").
 
+### The live transient check: provisioned, never allocated
+
 `_live_transient_check()`'s arithmetic is the identical section 8.1
 formula `schedule.transient_invariant_ok()` checks against the in-memory
-model, both now calling the same `reserve.transient_charge_ok()` (see
-`95-schedule.md`) — this one re-typed against `PveClient.storage_status()`'s
-live `used`/`total` instead of a summed disk list. The same *rule*, a
-different *data source*, not a second implementation of it (AGENTS.md
-section 5). `transient_charge_ok()` already takes a *list* of charges, not
-one disk, so it is ready for a future concurrent executor to call with
-every move currently in flight against the same target — this module does
-not do that yet (see "What `execute_plan()` deliberately does not do"
-below).
+model — the target must still hold `used_b + Σ z_m + max(f_b·max(Z_b, max
+z_m), hard_b) ≤ C_b` while the move is in flight, `z_m` each move's disk
+size, `f_b` the storage's snapshot-reserve factor, `Z_b` the largest disk
+already resident and `hard_b` the transient free-space floor. Both call the
+same `reserve.transient_charge_ok()` (see `95-schedule.md`); the live
+check differs only in where `used_b` and `C_b` come from. The same *rule*,
+a different *data source*, not a second implementation of it (AGENTS.md
+section 5).
+
+**`used_b` is the sum of `size` over the target's live content listing —
+never `storage_status()`'s own `used`.** The tool counts every disk at its
+*provisioned* size, on thin-provisioned storage (Ceph RBD, LVM-thin, ZFS)
+exactly as on thick, because a plan that fits only while the disks stay
+thin is one a growing guest can turn into a full pool, and nothing here can
+bound that growth (`.agents/domain-invariants.md` rule 2b; over-provisioning
+is never considered). The planner's `used_b` is `Σ z_d + Uˢᵉˣᵗ` — the
+provisioned sizes of the managed disks plus the foreign volumes on the
+storage — which is the listing's total. PVE's `used` is the *allocated*
+figure: equal on a thick pool, far lower on a thin one (a pool with 3.36 TiB
+provisioned and 1.45 TiB allocated was seen on the dev cluster). A live
+check built on it could only ever confirm the plan; it could never notice
+that other provisioning had filled the pool, in provisioned terms, since
+planning — the one thing a live re-check exists to catch. `C_b` still comes from `storage_status()`'s `total`, since a LUN can
+be resized after the run started.
+
+Two properties keep the listing figure safe to trust:
+
+- **It fails safe.** A PVE API error reading either endpoint, or a listed
+  volume with neither `size` nor `approximate-size` (its size then cannot be
+  established, and planning's habit of skipping such a foreign volume with a
+  warning is not available to a check that decides whether to touch the
+  storage *now*), refuses the move as `"replan_needed"` with the reason in
+  the outcome's detail — never a pass on a partial figure, never an
+  exception that crashes the run. `approximate-size` counts at its value,
+  the same fallback tier planning uses (`topology.content_item_size()`).
+- **One rule for the sizes.** `topology.content_item_size()` is the single
+  place the `size` → `approximate-size` order lives, shared by the planner's
+  disk and foreign-volume sums and this check.
+
+**No double counting under concurrency.** With
+`execution.max_concurrent_migrations` above `1` the invariant carries one
+charge `z_m` per move of this run already in flight onto the same target,
+so those moves' own mirror targets must not also be summed from the
+listing: on RBD (and other block storage) the new volume is listed at its
+full provisioned size the moment `move_disk` allocates it, and would be
+charged twice. `_LiveCheck.listed_volids` — every volid the target's
+listing held at the moment a move launched — is stored on the launched
+move as `_InflightMove.target_baseline_volids`. `_inflight_target_volids()`
+then leaves out of the sum **at most one volume per in-flight move**: one
+not in that baseline, of the *same VM*, whose size is one of the two sizes
+`move_disk` allocates a mirror target at (`_is_mirror_target()`). As the
+operator describes PVE's behaviour (it has not been read from PVE's
+source): between storages of the same thin kind the target is the same size
+as the source image, i.e. `Disk.size_bytes` from its content listing;
+between different storage types, or from thin to thick, it is the disk
+line's `size=` in the VM config. The pre-flight already parses that line, so
+`_PreflightResult.config_size_bytes` is carried onto
+`_InflightMove.config_size_bytes` and a volume of either size matches — the
+two can differ when a volume was resized outside PVE or its storage rounds
+sizes. If PVE allocates some third size, nothing matches, the target is
+counted as well as charged, and the check is merely stricter than necessary.
+The same two sizes decide what a move is *charged*: `_move_charge_bytes()`
+returns the listed size, except when the move changes the kind of volume
+made — `Storage.storage_type` differs between source and target, or a qcow2
+disk lands on a target that cannot hold qcow2 and PVE writes it raw — where
+the target is allocated at the config's `size=` and the larger of the two is
+charged. A same-kind move keeps the listed size, since there the target is a
+copy of the source image and charging more would refuse moves for a
+discrepancy that does not apply. `_live_transient_check()` takes the
+candidate's charge as a number and computes each in-flight move's own the
+same way from its stored `source`/`target`/`config_size_bytes`. The tool
+never passes `format=` to `move_disk` and (C2) keeps a qcow2 disk off a
+storage that cannot hold it, so the conversion branch is a guard rather than
+something a plan produces today; the plan-time check in `schedule.py` keeps
+using the listed size. The matching is deliberately narrow for the same reason: a
+foreign volume that appeared since the launch, or a leftover of the same VM
+that was already there (it is in the baseline), is never excluded — wrongly
+keeping a volume only tightens the check, wrongly dropping one would weaken
+it. Where nothing matches yet (the short window between `move_disk`
+returning its UPID and the allocation), the move is charged by its `z_m`
+alone, which is exactly right. The sequential executor has no in-flight set
+and excludes nothing. Because the whole in-flight period, mirroring and
+draining, keeps a move in the set, its target volume is excluded and its
+`z_m` charged for as long as it is — counted once either way.
+
+`transient_charge_ok()` takes a *list* of charges, not one disk, so the
+concurrent executor calls it with every move currently in flight against
+the same target (see "Concurrent execution" below).
 
 ## Why "done" needs four conditions, not one
 
@@ -306,8 +387,11 @@ in a `finally` so a mid-run exception never leaves the lock held.
 ## The payback gate: `apply` refuses on its own verdict (REVIEW.md S-02)
 
 Section 7 calls the payback rule "a **hard acceptance test on the
-finished plan**, not merely a soft `γ` penalty" — a verdict `plan` shows
-the operator, not a suggestion. An earlier revision of `_handle_apply()`
+finished plan**, not merely a soft `γ` penalty" — a plan a move's size
+already costs `γ` points against in the solver's own objective
+(`docs/internals/91-optimize.md`) can still be rejected wholesale here,
+after the fact, rather than just scored lower going in: a verdict `plan`
+shows the operator, not a suggestion. An earlier revision of `_handle_apply()`
 computed `payback_result` and then ignored it entirely on the execution
 path: a plan whose aggregate economics failed, or whose one move exceeded
 `migration.max_single_move_duration` (`payback_result.rejected_moves`,
@@ -463,11 +547,16 @@ executor logs the "VM is locked" warning once, not once per poll, and
 knows when `execution.locks.wait_timeout_seconds` has actually elapsed.
 The generalized invariant itself lives in `reserve.transient_charge_ok()`
 (`docs/internals/95-schedule.md`) — `_launch_decision()`'s only job is to
-assemble its inputs: a live `storage_status()` read for `used`/`total`,
-this run's own (C4) `largest_by_storage` tracking for `Z_b`, and
-`_target_charges()` (every other in-flight move's own disk size, for
-moves already landing on the same target) alongside the candidate's own
-size.
+assemble its inputs, and it does so by calling the same
+`_live_transient_check()` the sequential executor uses, passing the
+in-flight moves whose target is the candidate's (`_inflight_onto()`):
+the check reads the live provisioned `used_b` and capacity, takes `Z_b`
+from this run's own (C4) `largest_by_storage` tracking, and charges every
+other in-flight move's disk size alongside the candidate's own — see "The
+live transient check" above for why the in-flight targets are left out of
+the listing sum. On a `"launch"` verdict the target's listing at that
+instant travels back on `_LaunchDecision.target_baseline_volids` and is
+stored on the new `_InflightMove`.
 
 **Strict FIFO, deliberately.** `_advance_pending()` only ever considers
 `pending[0]` — the same move a sequential run would try next. If it

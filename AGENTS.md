@@ -11,7 +11,8 @@ and the short version.
 
 - **Project:** a Storage DRS replacement for Proxmox VE 9.2 — see
   [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md), which is the specification and the
-  source of truth for behaviour.
+  source of truth for behaviour. It is addressed to whoever builds the tool, not to whoever runs
+  it: everything we ship as documentation has to stand on its own without it (section 8.0).
 - **Names, and they are not interchangeable:** the distribution is `proxmox-storage-drs`, the
   import package is `proxmox_storage_drs`, and the **installed executable is `pve-storage-drs`** —
   one `[project.scripts]` entry point onto `cli.py`. Every command in the documentation, in
@@ -180,12 +181,26 @@ These come out of the plan and out of the fact that this tool moves live product
    execution mode is a defect, no matter how convenient.
 2. **The snapshot reserve is never traded for balance.** Lexicographic solve is the default;
    the big-M penalty is the fallback and its `P` is *computed*, never taken from config as-is.
-3. **The transient invariant holds during moves, not just before and after.**
-4. **A finished task is not a finished move** — the source volume must be observed gone and
+   The configured free-space requirement (`free_space.soft`, plan §5.3.1) enters the *same*
+   slack and the same lexicographic stage, so it is exactly as non-negotiable.
+3. **Three floors, one fixed precedence: `f_s·Z_s` → `hard_s` → `soft_s`.** The snapshot term
+   `f_s·Z_s` wins outright — it is the first argument of a `max()` and no config key can lower
+   it. `hard_s` is the floor every *instant* must clear, and it is what binds during a move
+   (§8.1). `soft_s` is the plan *endpoint* requirement only (C5), and may be dipped below in
+   flight. `hard_s ≤ soft_s` is a validation error if violated, and the default `hard: null`
+   means `hard_s = soft_s` — no dip at all. Never write a check that compares against `soft_s`
+   during execution or against `hard_s` at the endpoint.
+4. **The transient invariant holds during moves, not just before and after.**
+5. **A finished task is not a finished move** — the source volume must be observed gone and
    the VM config unlocked. See plan §9.3.
-5. **Never auto-delete a volume.** Orphans are reported, never cleaned up automatically.
-6. When the plan and the code disagree, **the plan is right and the code is a bug** — unless
+6. **Never auto-delete a volume.** Orphans are reported, never cleaned up automatically.
+7. When the plan and the code disagree, **the plan is right and the code is a bug** — unless
    the plan is wrong, in which case fix the plan *in the same commit*.
+8. **Never consider over-provisioning.** Every disk counts at its *provisioned* size, on
+   thin-provisioned storage (Ceph RBD, LVM-thin, ZFS) exactly as on thick — never at its allocated
+   size, and never "it will probably stay thin". A pool's own `used` figure is a display value, not
+   a model input. Do not add an allocated-size mode or a knob for one; `migration.
+   assume_thick_provisioning: false` is refused on purpose. (Plan §5.1.)
 
 Details: [`.agents/domain-invariants.md`](.agents/domain-invariants.md).
 
@@ -238,6 +253,44 @@ page and manual section that describe it, in the same commit — they do not nee
 whole plan on day one, only what is actually built, and must say so honestly where it is not
 (see `docs/manual/30-safety-and-status.md`'s per-command status table for the pattern).
 
+**The reference configuration is documentation too.** `config/drs.example.yaml` installs to
+`/usr/share/doc/pve-storage-drs/examples/` and is, in practice, the first thing most operators read.
+It is the one shipped artefact not generated from Markdown, which makes it the easiest to let rot:
+hold its comments to the standard the manual is held to, section 8.0 included, and move it in the
+same commit as the schema it mirrors.
+
+### 8.0 Self-contained, always: the plan is not a prerequisite
+
+**Every shipped artefact stands on its own.** The manual, the internals document, the manpage,
+`--help` and [`config/drs.example.yaml`](config/drs.example.yaml) must answer the reader's question
+from what is in front of them. `IMPLEMENTATION_PLAN.md` ships in the package too, but it is a
+*specification written for whoever builds this tool* — an operator must never be required to open
+it to understand a knob, a command or a safety property, and a reader of `docs/internals/` must not
+have to reconstruct the machine from two documents at once.
+
+- **Never defer.** "See `IMPLEMENTATION_PLAN.md` section 7.2 for the payback rule" is a defect: it
+  occupies the place of the sentence that should have *explained* the payback rule. Write the
+  explanation, the formula, the units and the worked number in place.
+- **Footnote-style references only.** A plan reference may appear as a trailing, parenthetical
+  pointer for a reader who wants the full derivation — never as the carrier of the fact. The test
+  is mechanical: **delete the reference. If the sentence still answers the question, it was a
+  footnote. If the sentence now has a hole in it, it was a dependency, and that is the bug.**
+- **Define your own terms.** In-flight I/O, the transient invariant, the snapshot reserve, payback,
+  the decision window: every term an artefact uses is defined where that artefact first uses it.
+  A symbol (`lambda`, `H`, `w_v`, `P`) that appears in a document without being introduced there is
+  the same defect wearing different clothes.
+- **A good explanation in the plan is a gap in the documentation, not a link.** Copy the substance
+  across in the voice of the artefact that needs it and let the two texts diverge in wording. This
+  is *not* the duplication section 8.6 forbids: that rule is about facts with one generator
+  (options, defaults, artefacts). Two audiences are not two copies.
+- Cross-references *between* the shipped artefacts stay as they are — the manual may send a reader
+  to the internals PDF for theory, and the manpage sends them to the manual. They ship together and
+  are written for readers who already have them.
+- This governs what we ship. Docstrings and comments keep their `See IMPLEMENTATION_PLAN.md
+  section 8.1.` provenance line (sections 5 and 8.1): their reader has the checkout, and that line
+  is already exactly the footnote style described here. `README.md`'s pointer to the plan,
+  `.agents/` and `REVIEW.md` are likewise addressed to contributors and unaffected.
+
 ### 8.1 Documentation inside the code
 
 - Every module opens with a docstring saying what it does and **which plan section it implements**.
@@ -276,7 +329,8 @@ Written for an operator with a cluster to run and no interest in the solver's va
 cover installation and requirements, mapping the metric names to their own Prometheus, the
 verification commands, a first dry run and how to read the plan it prints, the three execution
 modes, exit codes, troubleshooting, and the safety properties they are entitled to rely on
-(dry-run default, the reserve is never traded, nothing is ever auto-deleted).
+(dry-run default, the reserve is never traded — nor is the free space they configured — nothing
+is ever auto-deleted).
 
 **Every configuration option is documented in full**: type, unit, default, what it interacts with,
 what happens if it is set too high and too low. A knob that exists in the schema or in

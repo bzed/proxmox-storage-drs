@@ -58,6 +58,7 @@
       ],
       "expected_order": [
         {
+          "disk_key": "102:scsi0",
           "move": "102:scsi0:san-a->san-c",
           "transient_target_used_tib": 2.0,
           "transient_reserve_basis_tib": 1.5,
@@ -66,6 +67,7 @@
           "ok": true
         },
         {
+          "disk_key": "105:scsi0",
           "move": "105:scsi0:san-c->san-b",
           "transient_target_used_tib": 2.0,
           "transient_reserve_basis_tib": 1.0,
@@ -74,6 +76,7 @@
           "ok": true
         },
         {
+          "disk_key": "101:scsi1",
           "move": "101:scsi1:san-a->san-b",
           "transient_target_used_tib": 3.0,
           "transient_reserve_basis_tib": 1.0,
@@ -141,6 +144,7 @@
       ],
       "expected_order": [
         {
+          "disk_key": "102:scsi0",
           "move": "102:scsi0:san-a->san-c",
           "transient_target_used_tib": 2.0,
           "transient_reserve_basis_tib": 1.5,
@@ -149,6 +153,7 @@
           "ok": true
         },
         {
+          "disk_key": "101:scsi1",
           "move": "101:scsi1:san-a->san-b",
           "transient_target_used_tib": 2.5,
           "transient_reserve_basis_tib": 1.0,
@@ -215,6 +220,7 @@
       ],
       "expected_order": [
         {
+          "disk_key": "102:scsi0",
           "move": "102:scsi0:san-a->san-c",
           "transient_target_used_tib": 2.0,
           "transient_reserve_basis_tib": 1.5,
@@ -223,6 +229,7 @@
           "ok": true
         },
         {
+          "disk_key": "101:scsi1",
           "move": "101:scsi1:san-a->san-b",
           "transient_target_used_tib": 2.5,
           "transient_reserve_basis_tib": 1.0,
@@ -289,6 +296,7 @@
       ],
       "expected_order": [
         {
+          "disk_key": "102:scsi0",
           "move": "102:scsi0:san-a->san-c",
           "transient_target_used_tib": 2.0,
           "transient_reserve_basis_tib": 1.5,
@@ -297,6 +305,7 @@
           "ok": true
         },
         {
+          "disk_key": "101:scsi1",
           "move": "101:scsi1:san-a->san-b",
           "transient_target_used_tib": 2.5,
           "transient_reserve_basis_tib": 1.0,
@@ -374,7 +383,15 @@
     "total_cost_load_seconds": 26214.4,
     "benefit_load_seconds": 192529137.63,
     "ratio": 7344.4,
-    "accepted": true
+    "aggregate_ok": true,
+    "reserve_shortfall_tib_before": 0.5,
+    "reserve_shortfall_tib_after": 0.0,
+    "repair_exempt": true,
+    "accepted": true,
+    "repair_markers": {
+      "101:scsi1": false,
+      "102:scsi0": false
+    }
   },
   "payback_rejected_archive_disk": {
     "size_tib": 4.0,

@@ -48,16 +48,19 @@ are both reachable by repair+descend alone (verified in
 already makes descend prefer co-location whenever it does not cost more
 than it is worth, which covers everything the fixture exercises. A real
 gap, not forgotten, just not yet needed to pass the one fixture that
-exists to prove this module correct. **Also not implemented:** (C2)'s *format-compatibility*
-eligibility rule -- a different target-exclusion rule from the storage
-cooldown above, not yet subsumed by it -- (a storage that cannot hold a
-disk's format is fixed `x_{d,s}=0`) — ``topology.Storage`` does not yet
-carry the type/format
-information that rule needs (see ``topology.py``'s ``_default_format``,
-which resolves it internally but does not expose it on `Storage`), so
-every group storage is treated as an eligible target for every movable
-disk today. The section 14 fixture is homogeneous (all three storages
-accept the same format) and does not exercise this gap.
+exists to prove this module correct.
+
+**(C2)'s format-compatibility eligibility rule** (a storage that cannot
+hold a disk's format is fixed `x_{d,s}=0`) is implemented here the same
+way both MILP backends implement it (section 12's phase 13): every
+candidate-generating function below (`_single_move_trials`,
+`_swap_trials`, `_vm_relocation_trials`, `_best_repair_candidate`'s target
+loop, `best_single_disk_alternative`) excludes a target storage whose
+`allowed_formats` does not contain the disk's `format`
+(`topology.storage_accepts_format`) -- a swap excludes the pair unless
+*both* legs are eligible. The section 14 fixture is homogeneous (all three
+storages accept the same format) and does not exercise this; section
+14.8's ``free-space-repair.yaml`` does.
 """
 
 from __future__ import annotations
@@ -67,7 +70,7 @@ from typing import Iterable, Mapping
 
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status
-from proxmox_storage_drs.topology import Disk, Group, Storage
+from proxmox_storage_drs.topology import Disk, Group, Storage, storage_accepts_format
 
 # Every byte-valued objective term (`gamma`, and `r_s` for reporting) is
 # expressed in TiB here, matching `objective.gamma_move_bytes_per_tib` and
@@ -271,7 +274,6 @@ def evaluate_assignment(
     assignment: Assignment,
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     average_utilization: float,
     average_fill: float,
     tiny_disk_bytes: int = 0,
@@ -306,7 +308,7 @@ def evaluate_assignment(
     fill_fraction: dict[str, float] = {}
     fill_deviation: dict[str, float] = {}
     for storage in group.storages:
-        status = compute_reserve_status(storage, group.disks, min_free_bytes, storage_of=storage_of)
+        status = compute_reserve_status(storage, group.disks, storage_of=storage_of)
         reserve_statuses[storage.id] = status
         load = sum(load_by_key.get(d.key, 0.0) for d in group.disks if storage_of(d) == storage.id)
         u_s = load / storage.capability_weight if storage.capability_weight else 0.0
@@ -400,7 +402,6 @@ def best_single_disk_alternative(
     group: Group,
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     average_utilization: float,
     average_fill: float,
     baseline: ObjectiveBreakdown,
@@ -420,6 +421,8 @@ def best_single_disk_alternative(
         for storage in group.storages:
             if storage.id == disk.current_storage:
                 continue
+            if not storage_accepts_format(storage, disk.format):
+                continue  # (C2): fixed x_{d,s}=0, not a real alternative
             assignment = seed_assignment(group)
             assignment[disk.key] = storage.id
             breakdown = evaluate_assignment(
@@ -427,7 +430,6 @@ def best_single_disk_alternative(
                 assignment,
                 load_by_key,
                 objective,
-                min_free_bytes,
                 average_utilization,
                 average_fill,
                 tiny_disk_bytes,
@@ -454,7 +456,6 @@ def _best_repair_candidate(
     movable: tuple[Disk, ...],
     worst_id: str,
     current_total_shortfall: int,
-    min_free_bytes: int,
 ) -> _RepairCandidate | None:
     """The inner search of one `_repair` iteration, factored out only to
     keep that function's own branching within the project's complexity
@@ -471,6 +472,8 @@ def _best_repair_candidate(
         for target in group.storages:
             if target.id == worst_id:
                 continue
+            if not storage_accepts_format(target, disk.format):
+                continue  # (C2): fixed x_{d,s}=0, not a real repair target
             trial = dict(assignment)
             trial[disk.key] = target.id
 
@@ -478,9 +481,7 @@ def _best_repair_candidate(
                 return _trial.get(d.key, d.current_storage)
 
             trial_total = sum(
-                compute_reserve_status(
-                    s, group.disks, min_free_bytes, storage_of=trial_storage_of
-                ).shortfall_bytes
+                compute_reserve_status(s, group.disks, storage_of=trial_storage_of).shortfall_bytes
                 for s in group.storages
             )
             reduction = current_total_shortfall - trial_total
@@ -488,9 +489,7 @@ def _best_repair_candidate(
                 continue
             ratio = reduction / disk.size_bytes
 
-            target_status = compute_reserve_status(
-                target, group.disks, min_free_bytes, storage_of=trial_storage_of
-            )
+            target_status = compute_reserve_status(target, group.disks, storage_of=trial_storage_of)
             candidate: _RepairCandidate = (
                 ratio,
                 disk,
@@ -510,7 +509,6 @@ def _best_repair_candidate(
 def _repair(
     group: Group,
     assignment: Assignment,
-    min_free_bytes: int,
 ) -> tuple[Assignment, int]:
     """Section 5.5 step 2: "while any `s` violates (C5), move the disk from
     `s` that most reduces the violation per byte moved, to the feasible
@@ -556,7 +554,7 @@ def _repair(
 
     for _ in range(max_iterations):
         statuses = {
-            s.id: compute_reserve_status(s, group.disks, min_free_bytes, storage_of=storage_of)
+            s.id: compute_reserve_status(s, group.disks, storage_of=storage_of)
             for s in group.storages
         }
         violating = [sid for sid, status in statuses.items() if status.violated]
@@ -565,9 +563,7 @@ def _repair(
         worst_id = max(violating, key=lambda sid: statuses[sid].shortfall_bytes)
         current_total = sum(status.shortfall_bytes for status in statuses.values())
 
-        best = _best_repair_candidate(
-            group, assignment, movable, worst_id, current_total, min_free_bytes
-        )
+        best = _best_repair_candidate(group, assignment, movable, worst_id, current_total)
         if best is None:
             break  # no repair move helps: report the residual as unfixable (caller's job)
         _ratio, disk, target_id, _worsens, _used = best
@@ -595,7 +591,6 @@ def _best_of(
     group: Group,
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     average_utilization: float,
     average_fill: float,
     best_value: float,
@@ -614,7 +609,6 @@ def _best_of(
             trial,
             load_by_key,
             objective,
-            min_free_bytes,
             average_utilization,
             average_fill,
             tiny_disk_bytes,
@@ -636,13 +630,18 @@ def _single_move_trials(
         for target in storages:
             if target.id == here or target.id in cooldown_storages:
                 continue
+            if not storage_accepts_format(target, disk.format):
+                continue  # (C2): fixed x_{d,s}=0
             trial = dict(assignment)
             trial[disk.key] = target.id
             yield trial
 
 
 def _swap_trials(
-    assignment: Assignment, movable: tuple[Disk, ...], cooldown_storages: frozenset[str]
+    assignment: Assignment,
+    movable: tuple[Disk, ...],
+    storages_by_id: dict[str, Storage],
+    cooldown_storages: frozenset[str],
 ) -> Iterable[Assignment]:
     for i, disk_a in enumerate(movable):
         for disk_b in movable[i + 1 :]:
@@ -652,6 +651,12 @@ def _swap_trials(
                 continue  # no-op swap
             if here_a in cooldown_storages or here_b in cooldown_storages:
                 continue  # the swap would send a disk to each of these
+            # (C2): a swap sends disk_a to here_b and disk_b to here_a -- both legs
+            # must be format-eligible, or this pair fixes x_{d,s}=0 for it.
+            if not storage_accepts_format(storages_by_id[here_b], disk_a.format):
+                continue
+            if not storage_accepts_format(storages_by_id[here_a], disk_b.format):
+                continue
             trial = dict(assignment)
             trial[disk_a.key], trial[disk_b.key] = here_b, here_a
             yield trial
@@ -668,6 +673,9 @@ def _vm_relocation_trials(
         for target in storages:
             if here == {target.id} or target.id in cooldown_storages:
                 continue
+            # (C2): every disk in the VM must be format-eligible for the shared target.
+            if any(not storage_accepts_format(target, disk.format) for disk in disks):
+                continue
             trial = dict(assignment)
             for disk in disks:
                 trial[disk.key] = target.id
@@ -679,7 +687,6 @@ def _descend(
     assignment: Assignment,
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     average_utilization: float,
     average_fill: float,
     max_iterations: int,
@@ -728,12 +735,12 @@ def _descend(
     assignment = dict(assignment)
     movable = _movable_disks(group)
     vm_relocation_candidates = _vm_relocation_candidates(movable)
+    storages_by_id = {s.id: s for s in group.storages}
     current = evaluate_assignment(
         group,
         assignment,
         load_by_key,
         objective,
-        min_free_bytes,
         average_utilization,
         average_fill,
         tiny_disk_bytes,
@@ -745,7 +752,7 @@ def _descend(
 
         for trials in (
             _single_move_trials(assignment, movable, group.storages, cooldown_storages),
-            _swap_trials(assignment, movable, cooldown_storages),
+            _swap_trials(assignment, movable, storages_by_id, cooldown_storages),
             _vm_relocation_trials(
                 assignment, vm_relocation_candidates, group.storages, cooldown_storages
             ),
@@ -755,7 +762,6 @@ def _descend(
                 group,
                 load_by_key,
                 objective,
-                min_free_bytes,
                 average_utilization,
                 average_fill,
                 best_value,
@@ -775,7 +781,6 @@ def run_heuristic(
     group: Group,
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     heuristic_iterations: int = 5000,
     cooldown_storages: frozenset[str] = frozenset(),
     tiny_disk_bytes: int = 0,
@@ -783,8 +788,11 @@ def run_heuristic(
     """Section 5.5's four-step heuristic (minus "polish"; see the module
     docstring), producing a :class:`HeuristicResult` for one group.
 
-    ``load_by_key`` is ``loadmodel.GroupLoad.load_by_disk_key()``;
-    ``min_free_bytes`` is ``config.snapshot_reserve.min_free_bytes``.
+    ``load_by_key`` is ``loadmodel.GroupLoad.load_by_disk_key()``. The
+    section 5.3.1 free-space requirement needs no parameter here: it is
+    already resolved onto ``storage.free_space_soft_bytes`` per storage
+    (``topology.py``), read directly by ``reserve.compute_reserve_status()``,
+    the same way ``storage.reserve_factor`` already is.
     ``cooldown_storages`` -- storage ids currently within
     ``gates.cooldown_per_storage`` (``state.active_storage_cooldowns()``,
     bare ids for this group) -- is passed to ``_descend()`` only, never to
@@ -800,19 +808,17 @@ def run_heuristic(
         initial,
         load_by_key,
         objective,
-        min_free_bytes,
         average_utilization,
         average_fill,
         tiny_disk_bytes,
     )
 
-    repaired, repair_moves = _repair(group, initial, min_free_bytes)
+    repaired, repair_moves = _repair(group, initial)
     final = _descend(
         group,
         repaired,
         load_by_key,
         objective,
-        min_free_bytes,
         average_utilization,
         average_fill,
         heuristic_iterations,
@@ -824,7 +830,6 @@ def run_heuristic(
         final,
         load_by_key,
         objective,
-        min_free_bytes,
         average_utilization,
         average_fill,
         tiny_disk_bytes,

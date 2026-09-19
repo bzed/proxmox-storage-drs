@@ -14,36 +14,87 @@ section rather than invented for this page:
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml show-load
 Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the normal drift/imbalance thresholds -- a capacity shortfall is never delayed by them
-  san-a  used 4.50 TiB/8.00 TiB  L=6.50 u=6.50  ⚠ reserve short by 512.00 GiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
+  san-a  provisioned 4.50 TiB/8.00 TiB  L=6.50 u=6.50  ⚠ reserve short by 512.00 GiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
     101:scsi0        2.00 TiB  raw     ℓ 3.00
     101:scsi1        1.00 TiB  raw     ℓ 1.00
     102:scsi0        1.50 TiB  raw     ℓ 2.50
-  san-b  used 1.50 TiB/8.00 TiB  L=0.70 u=0.70  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
+  san-b  provisioned 1.50 TiB/8.00 TiB  L=0.70 u=0.70  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
     103:scsi0      512.00 GiB  raw     ℓ 0.40
     104:scsi0        1.00 TiB  raw     ℓ 0.30
-  san-c  used 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
+  san-c  provisioned 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
     105:scsi0      512.00 GiB  raw     ℓ 0.20
 ```
 
-`L=`/`u=` on a storage's line are section 4's `L_s` (summed `ℓ` of the
-disks currently on it) and `u_s = L_s / capability_weight`; `ℓ` after a
-disk's size/format is that disk's own share. Both come from
-`IMPLEMENTATION_PLAN.md` section 14's worked example, so the numbers above
-are traceable to that section rather than invented for this page.
+`provisioned` on a storage's line is the sum of every disk's *provisioned*
+size on it (the managed disks, plus any foreign volumes — templates, ISOs,
+backups, other groups' disks) against the storage's capacity — the figure
+the reserve shortfall beside it is computed from. The tool never counts on
+over-provisioning: a thin-provisioned pool (Ceph RBD, LVM-thin, ZFS) is
+counted at what its disks were provisioned at, not at what happens to be
+allocated. On a thick pool the two are the same number. On a thin one the
+pool's own, lower figure is printed next to it so the shortfall does not
+look like a mistake:
+
+```
+  ceph-a  provisioned 3.36 TiB/9.48 TiB (pool reports 1.45 TiB allocated)  L=2.10 u=2.10  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
+```
+
+Only the provisioned figure ever enters a decision; the allocated one is
+shown for information. (`--json` carries both: `provisioned_used_bytes` and
+`used_bytes`.)
+
+`L=`/`u=` on a storage's line are `L_s` — the sum of `ℓ` over every disk
+currently on that storage — and `u_s = L_s / capability_weight`, the
+*utilization* that actually gets balanced across storages (so a storage
+configured with half the `capability_weight` of another is correctly
+expected to carry half the load, not the same absolute amount). `ℓ` after
+a disk's size/format is that disk's own load, measured in **average
+in-flight I/O requests**: by default it is `rate(rd_total_time_ns +
+wr_total_time_ns) / 1e9` for that disk — how many read/write requests are,
+on average, in progress on the device at once — which self-weights by
+cost: an 8 ms write and a 1 ms read are correctly counted eight-to-one
+rather than as equal operations, the way a plain IOPS count would. (Read
+and write can be weighted asymmetrically via `load_weights.read_factor`/
+`write_factor`, and `ops`/`bytes` terms can be blended in alongside I/O
+time; see `IMPLEMENTATION_PLAN.md` section 4 for the full normalization
+and `docs/internals/70-loadmodel.md` for the code.) The worked numbers
+above are `IMPLEMENTATION_PLAN.md` section 14's own example
+(`config/drs.example.yaml` ships the same group and weights), not invented
+for this page.
 
 ## The `Group <name> → ACT`/`NO ACTION` line
 
-Section 6's three gates, evaluated in order — reserve override, then
-drift, then imbalance — and the first one that decides wins. The header
-line above shows the **reserve override**: san-a's 0.5 TiB shortfall forces
-`ACT` outright, regardless of how balanced or drifted the group is,
-because "safety is not subject to hysteresis" (section 13). The other two
-shapes this line can take, on a group with no reserve violation:
+Four gates, evaluated in this order — **reserve override**, then the
+**capacity gate**, then **drift**, then **imbalance** — and the first one
+that decides wins. The header line above shows the reserve override:
+san-a's 0.5 TiB shortfall forces `ACT` outright, regardless of how
+balanced or drifted the group is, because "safety is not subject to
+hysteresis" (section 13). The other shapes this line can take, on a group
+with no reserve violation:
 
 ```
 Group fc-tier1 → ACT: imbalance 255.4% meets or exceeds gates.imbalance_threshold (20.0%)
 Group fc-tier1 → NO ACTION: imbalance 12.2% is below gates.imbalance_threshold (20.0%)
 ```
+
+The **capacity gate** is the data-spread counterpart of the imbalance
+gate: instead of comparing I/O load across a group's storages, it compares
+how *full* each one is, as a fraction of its own capacity. It fires —
+bypassing drift and imbalance the same way the reserve override does, on
+the reasoning that a quiet workload is not a reason to leave data lopsided
+across storages — when the spread in fill fraction across the group's
+storages is at least `gates.capacity_spread_threshold` (default `0.25`)
+relative to the group's mean fill:
+
+```
+Group fc-tier1 → ACT: capacity spread 32.0% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance
+```
+
+Unlike the other three, this gate can act on a group whose I/O is already
+perfectly balanced — `objective.delta_capacity_spread` is what does the
+actual spreading once the solver runs. Setting
+`gates.capacity_spread_threshold: null` disables it outright, and it never
+fires on a group with no data at all (mean fill `0`).
 
 `show-load` reads `state.path`'s recorded load vector (section 11.2) and
 passes it to the drift gate, so once a group has one on record, this line
@@ -56,8 +107,9 @@ Group fc-tier1 → NO ACTION: drift 3.1% is below gates.drift_threshold (10.0%)
 A group with no `state.json`, or none recorded for it yet, still evaluates
 as if this were the very first run — the drift gate is skipped outright
 (section 6's own degenerate-case rule), not "treated as zero drift" — so
-its verdict falls straight through to a reserve override or an imbalance
-check, exactly as before this was wired up. `docs/internals/80-gates.md`
+its verdict falls straight through to a reserve override, the capacity
+gate (which never depends on `state.json` at all), or an imbalance check,
+exactly as before this was wired up. `docs/internals/80-gates.md`
 and `docs/internals/15-state.md` have the detail; `apply` writes
 `last_balance` once a run actually executes at least one move (`confirm`
 or `auto` mode -- `dry-run` only simulates, so it never triggers this), so
@@ -125,8 +177,9 @@ with `act` (bool), `reason` (string, identical to the human line's text
 after the arrow), `reserve_override` (bool), and `drift_fraction`/
 `imbalance_fraction`/`capacity_fraction` (float or `null` — `null` means
 that gate was never reached, not that it evaluated to zero;
-`capacity_fraction` is section 6's capacity-gate ratio, section 5.3 (C7)'s
-fill fractions, `null` too whenever the group's mean fill is 0).
+`capacity_fraction` is the capacity gate's own ratio described above —
+`null` whenever `gates.capacity_spread_threshold` is unset or the group's
+mean fill is 0, the same two cases in which the gate itself never fires).
 
 **A config with several groups issues Prometheus queries per group.**
 Computing one group's load takes seven queries (six raw metrics plus one
@@ -141,9 +194,13 @@ multiplier.
 
 ## `verify-storages`
 
-Reports `saferemove` and the wipe time it implies for the largest disk on
-each storage, and warns when your configured cooldown or move-duration
-limits are shorter than that implied wipe — the condition
+Reports the resolved `free_space.soft`/`.hard` bytes for each storage,
+each with the level it came from (`IMPLEMENTATION_PLAN.md` section 5.3.1) —
+the derivation an operator cannot otherwise predict, once inheritance,
+`/…/` patterns, percentages and the deprecated
+`snapshot_reserve.min_free_bytes` fold are all in play — plus `saferemove`
+and the wipe time it implies for the largest disk on each storage, warning
+when your configured cooldown or move-duration limits are shorter than that implied wipe — the condition
 `IMPLEMENTATION_PLAN.md` section 9.3 describes as "the next run plans onto a
 storage that is still draining". Section 14's fixture has `saferemove` off
 everywhere (stated explicitly there, so its payback arithmetic is
@@ -155,14 +212,39 @@ warning looks like:
 $ pve-storage-drs -c /etc/pve/drs.yaml verify-storages
 Group fc-tier1
   san-a  saferemove=off
+    free_space: soft=0 B (global)  hard=0 B (= soft (no dip))
     saferemove is off or throughput unknown; no wipe-time check
   san-b  saferemove=on
+    free_space: soft=0 B (global)  hard=0 B (= soft (no dip))
     implied wipe time for the largest disk (1.00 TiB): 1.2d
-    ⚠ gates.cooldown_per_storage (1.0h) is shorter than the implied wipe time -- the next run may plan onto a still-draining storage (section 9.3)
-    ⚠ migration.max_single_move_duration (6.0h) is shorter than the implied wipe time -- a move of the largest disk would be rejected outright (section 7.3)
+    ⚠ gates.cooldown_per_storage (1.0h) is shorter than the implied wipe time -- the next run may plan onto a still-draining storage
+    ⚠ migration.max_single_move_duration (6.0h) is shorter than the implied wipe time -- a move of the largest disk would be rejected outright
   san-c  saferemove=off
+    free_space: soft=0 B (global)  hard=0 B (= soft (no dip))
     saferemove is off or throughput unknown; no wipe-time check
 ```
+
+`free_space.soft`/`.hard` read `0 B` here because the fixture sets no
+`free_space` knob at all — the pre-section-5.3.1 default, unchanged. A
+config with a non-zero `free_space.soft` (or the deprecated
+`snapshot_reserve.min_free_bytes`, folded in) shows the resolved byte
+count here, the same value `plan`/`explain`/`show-load` all enforce.
+
+The parenthesis after each value says where it came from, which is the part
+you cannot read off the config file when one line can mean a different number
+per LUN:
+
+| Shown | Meaning |
+|---|---|
+| `global` | inherited from the top-level `free_space` block |
+| `storage entry` | written on this storage's own `groups[].storages[]` entry |
+| `pattern /re/` | supplied by the `/…/` pattern entry that matched this storage |
+| `…, 10% of 30.00 TiB` | appended when the value was a percentage: the capacity it was converted against |
+| `folded from snapshot_reserve.min_free_bytes` | (soft only) the deprecated key was larger than the value written, so it raised the floor |
+| `= soft (no dip)` | (hard only) `hard` is null, so it equals the resolved soft — including a folded one |
+
+`--json` carries the same strings as `free_space_soft_source` and
+`free_space_hard_source` beside the two byte counts.
 
 Storage types without `saferemove` at all (Ceph RBD, ZFS) always report
 `saferemove=off` and skip the check — there is nothing to wipe.
@@ -190,8 +272,9 @@ enforced and the magnitude is the rate:
 output's `saferemove_throughput_bytes_per_sec` still echoes the value
 exactly as PVE has it, sign included, so you can compare it against
 `storage.cfg` without arithmetic. Everything that consumes the number —
-section 7.1's move cost, section 7.3's `max_single_move_duration` check,
-`apply`'s source-release wait — reads it the same way.
+the migration cost the payback test charges, the
+`migration.max_single_move_duration` check, `apply`'s source-release
+wait — reads it the same way.
 
 Versions up to 0.1.6 divided by the signed value instead, which produced
 a *negative* wipe time (`implied wipe time for the largest disk (1.00

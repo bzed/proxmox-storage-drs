@@ -63,8 +63,10 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from proxmox_storage_drs.config import MigrationConfig
+from proxmox_storage_drs.heuristic import Assignment
+from proxmox_storage_drs.reserve import total_shortfall_bytes
 from proxmox_storage_drs.schedule import ScheduledMove
-from proxmox_storage_drs.topology import Storage
+from proxmox_storage_drs.topology import Disk, Group, Storage
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,12 +78,15 @@ class MoveCost:
     duration_wipe_seconds: float
     cost_load_seconds: float  # duration_mirror*(w_src+w_dst) + duration_wipe*w_wipe
     exceeds_max_duration: bool  # hard rule: duration_d > migration.max_single_move_duration
-    # Copied from `ScheduledMove.resolves_reserve_violation` -- carried here
-    # rather than re-derived, so `evaluate_plan_payback()` can implement
-    # section 13's "reserve is never traded against balance" for the
-    # aggregate test too (see that function's docstring) without needing
-    # the `ScheduledMove`s themselves.
-    resolves_reserve_violation: bool
+    # Section 7.3's revert test: would holding this disk back on its
+    # current storage strictly raise the plan's final Sum r_s? Computed by
+    # `repair_markers()` below, over the *executed* final assignment (this
+    # move's source/target still held if it was itself excluded by
+    # `exceeds_max_duration`/`saturation_deferred`) -- not set by
+    # `compute_move_cost()` itself, which runs before that assignment is
+    # known; defaults False until the caller (cli.py's plan builder) fills
+    # it in via `dataclasses.replace()`.
+    repair: bool = False
     # Section 7.3's best-effort defer check: `L_during(s) > saturation_ceiling
     # * N_s` for either endpoint, at the mirroring-phase horizon (see the
     # module docstring's note on why only that phase is checked). Defaults
@@ -100,10 +105,10 @@ class PaybackResult:
     """One plan's section 7.3 acceptance verdict.
 
     ``aggregate_ok`` (``benefit >= payback_ratio * Sum cost_d``, or
-    unconditionally ``True`` when any move resolves a reserve violation --
-    see ``evaluate_plan_payback()``) and ``accepted`` (``aggregate_ok``
-    **and** no individually-rejected or -deferred move) are kept separate
-    so a caller can report *why* an otherwise-profitable plan was still
+    unconditionally ``True`` when ``repair_exempt`` -- see
+    ``evaluate_plan_payback()``) and ``accepted`` (``aggregate_ok`` **and**
+    no individually-rejected or -deferred move) are kept separate so a
+    caller can report *why* an otherwise-profitable plan was still
     rejected, rather than only a single bit.
 
     ``rejected_moves`` (the hard per-move duration rule) and
@@ -114,7 +119,12 @@ class PaybackResult:
     run"), and a caller reporting *why* a move did not run should be able
     to say which of the two happened, one hard and always active, the
     other best-effort and skipped entirely when a storage has no
-    ``saturation_load`` configured."""
+    ``saturation_load`` configured.
+
+    ``repair_exempt``/``reserve_shortfall_bytes_before``/``_after`` are
+    section 7.3's outcome trigger, carried on the result so `cli.py` can
+    surface them in ``--json`` (section 9.5) -- without them an exempt
+    plan and one accepted on merit are the same object to a consumer."""
 
     move_costs: tuple[MoveCost, ...]
     # (alpha*(E_before-E_after) + delta*(F_before-F_after) + kappa*(A_before-A_after))
@@ -123,6 +133,9 @@ class PaybackResult:
     rejected_moves: tuple[str, ...]  # disk keys failing the hard per-move duration rule
     aggregate_ok: bool
     deferred_moves: tuple[str, ...] = ()  # disk keys failing the section 7.3 saturation guard
+    repair_exempt: bool = False
+    reserve_shortfall_bytes_before: int = 0
+    reserve_shortfall_bytes_after: int = 0
 
     @property
     def total_cost_load_seconds(self) -> float:
@@ -275,7 +288,6 @@ def compute_move_cost(
         duration_wipe_seconds=duration_wipe,
         cost_load_seconds=cost,
         exceeds_max_duration=exceeds,
-        resolves_reserve_violation=move.resolves_reserve_violation,
         saturation_deferred=deferred,
     )
 
@@ -335,31 +347,117 @@ def compute_benefit_load_seconds(
     ) * payback_horizon_seconds
 
 
+def executed_assignment(
+    group: Group, final_assignment: Assignment, excluded_disk_keys: frozenset[str]
+) -> Assignment:
+    """Section 7.3: "what it will really run" -- ``final_assignment``
+    (``schedule_result.final_assignment``, the R-02 scheduled endpoint)
+    with every disk in ``excluded_disk_keys`` held back at its *current*
+    storage, as if its move had never been scheduled. ``excluded_disk_keys``
+    is every disk key a hard per-move rule has taken out --
+    ``MoveCost.exceeds_max_duration`` or ``.saturation_deferred`` -- computed
+    by the caller before this is called (both are per-move verdicts on
+    ``cost_d``/``duration_d`` alone, independent of the exemption).
+
+    This is the one assignment both section 7.3's outcome trigger and its
+    revert test (:func:`repair_markers`) score, so a repair move that is
+    itself excluded can never buy the plan-level exemption -- see the
+    module-level ``evaluate_plan_payback()`` docstring."""
+    return {
+        d.key: (
+            d.current_storage
+            if d.key in excluded_disk_keys
+            else final_assignment.get(d.key, d.current_storage)
+        )
+        for d in group.disks
+    }
+
+
+def repair_markers(
+    group: Group, order: Iterable[ScheduledMove], executed_final_assignment: Assignment
+) -> dict[str, bool]:
+    """Section 7.3's revert test, one verdict per scheduled move in
+    ``order``: would holding that one disk back on its *current* storage
+    strictly raise the plan's final ``Sum r_s``, evaluated on
+    ``executed_final_assignment`` (the same assignment the outcome trigger
+    scores, via :func:`executed_assignment`) with that one ``x`` held? No
+    re-solve -- the plan is fixed, this asks only what its own slack would
+    be without one move.
+
+    A move excluded from ``executed_final_assignment`` (its disk already
+    sits at its current storage there) trivially scores ``False``: holding
+    it back changes nothing, since it was never really applied. This
+    covers the *indirect* repair (section 14.8): a move that empties the
+    destination another repair needs is marked even though its own source
+    was never in violation, because reverting it is what raises the
+    group's final shortfall -- not because its own source was short."""
+    disks_by_key = {d.key: d for d in group.disks}
+
+    def storage_of(d: Disk) -> str:
+        return executed_final_assignment.get(d.key, d.current_storage)
+
+    base = total_shortfall_bytes(group.storages, group.disks, storage_of=storage_of)
+
+    markers: dict[str, bool] = {}
+    for move in order:
+        disk = disks_by_key[move.disk_key]
+
+        def reverted_storage_of(d: Disk, _disk: Disk = disk) -> str:
+            if d.key == _disk.key:
+                return _disk.current_storage
+            return executed_final_assignment.get(d.key, d.current_storage)
+
+        reverted = total_shortfall_bytes(
+            group.storages, group.disks, storage_of=reverted_storage_of
+        )
+        markers[move.disk_key] = reverted > base
+    return markers
+
+
 def evaluate_plan_payback(
     move_costs: Iterable[MoveCost],
     benefit_load_seconds: float,
     payback_ratio: float,
+    current_shortfall_bytes: int,
+    final_shortfall_bytes: int,
 ) -> PaybackResult:
     """Section 7.3: the aggregate acceptance test over a whole plan, plus
     the hard per-move ``max_single_move_duration`` rule.
 
-    **A plan containing any reserve-violation-resolving move always
-    passes the aggregate test.** Section 7's whole premise is weighing a
-    move's cost against the *balance* benefit it buys -- but a move that
-    resolves an active (C4)/(C5) violation is not optional in the way a
-    balance-driven move is; it exists for safety, not for the imbalance
-    reduction the benefit formula happens to compute for it (which can
-    easily be zero or even net-zero on its own, e.g. a two-storage group
-    where the only loaded disk simply changes which side it's on). Section
-    13's "the reserve is never traded against balance" applies here just
-    as much as it does to the drift/imbalance gates (`gates.py`) -- an
-    operator does not get to decline a capacity emergency fix because it
-    scores poorly against `migration.payback_ratio`. The hard per-move
-    duration rule still applies regardless (it is an operational limit,
-    not an economic one, and section 7.3 lists it as one of the rules
-    applied "regardless of the aggregate test"), so a reserve-resolving
-    move that would take days to wipe is still correctly flagged and
-    still blocks `accepted`.
+    **A plan that repairs is exempt from the aggregate test.** The
+    trigger is the plan's *outcome*, not any one move's own flag:
+    ``final_shortfall_bytes`` (``Sum r_s`` of the plan's executed
+    endpoint -- :func:`executed_assignment`, after the hard per-move
+    rules have taken their moves out) strictly below
+    ``current_shortfall_bytes`` (``Sum r_s`` today). Section 7's whole
+    premise is weighing a move's cost against the *balance* benefit it
+    buys -- but a plan that leaves the group with less reserve/free-space
+    shortfall than it found is not optional in the way a balance-driven
+    plan is; it exists for safety, not for the imbalance reduction the
+    benefit formula happens to compute for it (which can easily be zero or
+    even net-negative on its own, section 14.8's own worked example).
+    Section 13's "the reserve is never traded against balance" applies
+    here just as much as it does to the drift/imbalance gates (`gates.py`)
+    -- an operator does not get to decline a capacity emergency fix
+    because it scores poorly against `migration.payback_ratio`. This is
+    deliberately narrower than the built flag it replaced
+    (``ScheduledMove.resolves_reserve_violation``, "some move's source was
+    violating at scheduling time"): the outcome trigger is a *strict
+    subset* of that condition (section 7.3's own proof), never a
+    superset, so this change can only remove exemptions, never invent
+    one. Both shortfall sums are the *caller's* responsibility --
+    ``current_shortfall_bytes``/``final_shortfall_bytes`` are two sums
+    over already-computed :class:`~proxmox_storage_drs.heuristic.ObjectiveBreakdown`
+    objects (``reserve.total_shortfall_bytes()`` over
+    ``solve_outcome.initial_breakdown``'s assignment and the *executed*
+    final one respectively) -- this function has no access to a `Group`
+    and does not need one.
+
+    The hard per-move duration rule still applies regardless of the
+    exemption (it is an operational limit, not an economic one, and
+    section 7.3 lists it as one of the rules applied "regardless of the
+    aggregate test"), so a repair move that would take days to wipe is
+    still correctly flagged and still blocks `accepted`.
 
     The transient reserve invariant's own hard rule (section 7.3's third
     bullet) is not re-checked here -- ``schedule.py`` already enforces it
@@ -393,8 +491,8 @@ def evaluate_plan_payback(
     magic number."""
     move_costs = tuple(move_costs)
     total_cost = sum(mc.cost_load_seconds for mc in move_costs)
-    has_reserve_override = any(mc.resolves_reserve_violation for mc in move_costs)
-    aggregate_ok = has_reserve_override or benefit_load_seconds >= payback_ratio * total_cost
+    repair_exempt = final_shortfall_bytes < current_shortfall_bytes
+    aggregate_ok = repair_exempt or benefit_load_seconds >= payback_ratio * total_cost
     rejected = tuple(mc.disk_key for mc in move_costs if mc.exceeds_max_duration)
     deferred = tuple(mc.disk_key for mc in move_costs if mc.saturation_deferred)
     return PaybackResult(
@@ -403,4 +501,7 @@ def evaluate_plan_payback(
         rejected_moves=rejected,
         aggregate_ok=aggregate_ok,
         deferred_moves=deferred,
+        repair_exempt=repair_exempt,
+        reserve_shortfall_bytes_before=current_shortfall_bytes,
+        reserve_shortfall_bytes_after=final_shortfall_bytes,
     )

@@ -34,7 +34,13 @@ makes this literal rather than merely well-weighted: `_repair()` runs
 *before* `_descend()` and fixes any (C5) violation by moving disks off the
 worst-violating storage, one iteration at a time, regardless of what the
 objective weights say — there is no `beta`/`gamma` value large enough to
-switch this off. `objective.reserve_violation_penalty` still appears in
+switch this off (`beta`/`gamma`, the objective's per-move weights —
+`objective.beta_move_count` on how many disks moved and
+`objective.gamma_move_bytes_per_tib` on how many bytes moved — are the
+two terms a migration itself costs; see `objective.spread_metric` below
+for `alpha`, the imbalance weight, and "`w_v`: `kappa` weighted..."
+further down for `kappa`, the VM-affinity weight).
+`objective.reserve_violation_penalty` still appears in
 `ObjectiveBreakdown.reserve_penalty_term`, but only for *reporting* a
 residual that repair could not fix (physically impossible, not merely
 unattractive) — by the time `_descend()` runs, every reserve violation

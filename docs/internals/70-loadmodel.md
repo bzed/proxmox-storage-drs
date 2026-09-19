@@ -13,8 +13,10 @@ a `GroupLoad`: one `DiskLoad` per disk (`ℓ_d`) and one `StorageLoad` per
 storage (`L_s`, `u_s`), plus the group's `u*` and whether the whole group
 is idle. It never touches the PVE API and never builds topology itself —
 matching `reserve.py`'s identical "given the join, evaluate one formula"
-framing, not a coincidence: both are meant to be called again, unchanged,
-by the solver once it exists.
+framing, not a coincidence: `cli.py` calls it exactly once per group, and
+the solver (`heuristic.py`'s `run_heuristic()`, via `GroupLoad.load_by_disk_key()`)
+consumes that same set of per-disk `ℓ_d` values against every *candidate*
+assignment it considers, rather than recomputing load per candidate.
 
 ## Six queries, not six-times-groups queries
 
@@ -92,11 +94,23 @@ disk's `flagged_reason` is still there to check.
 
 `StorageLoad` sums `ℓ_d` over disks whose `Disk.current_storage` already
 points at that storage — today's state, exactly like `reserve.py`'s
-`compute_reserve_status()`. The solver (`optimize.py`/`heuristic.py`, not
-yet written) will evaluate the identical per-disk `ℓ_d` values against a
-*candidate* assignment instead; nothing in `loadmodel.py` needs to change
-for that, since `ℓ_d` itself does not depend on which storage a disk is
-currently on.
+`compute_reserve_status()`. `u_s = L_s / c_s`, where `c_s` is
+`storage.capability_weight` — a per-storage config knob (default `1.0`,
+see `config/drs.example.yaml`) an operator lowers to say "this storage
+should carry a smaller *share* of the group's load than an equal-weighted
+one would," e.g. `0.5` for a storage with half the spindles of its peers.
+`u_s` is therefore load-per-unit-of-declared-capability, not a byte-fill
+percentage — the gate/objective's notion of "imbalanced" is about I/O
+share, not free space (that is (C4)/(C5)'s job, `docs/internals/60-topology.md`).
+`GroupLoad.average_utilization` (`u*`) is the group-wide counterpart,
+`(Σ_d ℓ_d) / (Σ_s c_s)` — total load over total declared capability across
+every storage in the group, section 5.3 (C6). The solver
+(`heuristic.py`'s `evaluate_assignment()`, `optimize.py`'s MILP encoding —
+see `90-heuristic.md`/`91-optimize.md`) re-sums the identical per-disk
+`ℓ_d` values against each *candidate* assignment it considers, using its
+own `storage_of()` lookup in place of `Disk.current_storage`; `loadmodel.py`
+itself needed no change for that, since `ℓ_d` does not depend on which
+storage a disk is currently on.
 
 ## `compute_disk_load_series()`: the same blend, as a time series
 
@@ -123,17 +137,22 @@ Every disk in the group gets an entry, even an empty one — unlike
 at all: a forecaster's own `required_range()` is a much longer, coarser
 signal than that rule was built to validate, and a sparse history is
 exactly what the forecaster itself needs to see to distrust its own fit.
-Not called from anywhere yet — this is section 10's raw material for the
-section 7.3 saturation guard `payback.py` does not implement yet either
-(see that page's own note on the gap); this function exists so that work
-has its data source in place first.
+This is section 10's raw material for the section 7.3 saturation guard:
+`cli.py`'s `_saturation_forecast_inputs()` calls it once per group, then
+feeds the result through `forecast.storage_upper_bound()` to get each
+move's `l_hat_src`/`l_hat_dst` — see
+[`96-payback.md`](96-payback.md) for how `payback.py` uses those two
+figures to reject a move that would push a target storage's own forecast
+load past that storage's configured `saturation_load`.
 
-## What is still missing from phase 3
+## What `loadmodel.py` is, and is not, responsible for
 
-`IMPLEMENTATION_PLAN.md` section 12 phase 3's own "done when" is "correct
-act/no-act decision per group, with the reasoning shown" — that is the
-section 6 drift/imbalance gates, cooldowns, and the reserve override, none
-of which exist yet. `loadmodel.py` is the load computation those gates
-consume, not the gates themselves; `pve-storage-drs show-load` reports
-`ℓ_d`/`L_s`/`u_s` today, but no command yet decides whether a group should
-be re-balanced.
+`loadmodel.py` is the load computation the rest of the engine consumes —
+`compute_group_load()`'s `ℓ_d`/`L_s`/`u_s` feed `gates.py`'s drift/imbalance
+gates ([`80-gates.md`](80-gates.md); `reserve.py`'s reserve override is
+computed separately, straight from the group's disks/storages, not through
+this module), and `compute_disk_load_series()` feeds the section 7.3
+saturation guard above — but this module decides none of those verdicts
+itself. `pve-storage-drs show-load` reports `ℓ_d`/`L_s`/`u_s` directly;
+deciding whether a group should be re-balanced at all is `gates.py`'s job,
+not this one's.

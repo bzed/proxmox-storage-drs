@@ -132,11 +132,10 @@ def transient_invariant_ok(
     state: Assignment,
     disk: Disk,
     target_storage: Storage,
-    min_free_bytes: int,
 ) -> bool:
     """Section 8.1's transient invariant, called with the single-move set
-    ``{disk}`` -- ``used_b + z_d + f_b * max(Z_b, z_d) <= C_b``, via
-    :func:`reserve.transient_charge_ok`, the one arithmetic core section
+    ``{disk}`` -- ``used_b + z_d + max(f_b * max(Z_b, z_d), hard_b) <= C_b``,
+    via :func:`reserve.transient_charge_ok`, the one arithmetic core section
     8.1's own generalized (concurrent) form and this single-move form both
     reduce to (AGENTS.md section 5; see that function's docstring).
 
@@ -144,10 +143,10 @@ def transient_invariant_ok(
     every previously-scheduled move already fully applied (this module's
     sequential-only simplification; see the module docstring), so
     ``target_storage``'s ``used``/``Z_b`` here do not yet include the
-    disk this call is checking. The ``min_free_bytes`` floor is folded in
-    the same way (C5) folds it into the steady-state reserve, for the same
-    reason: a small-disk storage's absolute floor should not evaporate
-    just because a migration is in flight.
+    disk this call is checking. The floor is ``target_storage.
+    free_space_hard_bytes`` (section 5.3.1's ``hard_b``) -- the *transient*
+    floor, not the endpoint ``soft_b`` (C5) checks -- resolved once at run
+    start, so nothing here re-derives it.
     """
 
     def storage_of(d: Disk) -> str:
@@ -164,13 +163,11 @@ def transient_invariant_ok(
         used_b,
         existing_largest,
         [disk.size_bytes],
-        min_free_bytes,
+        target_storage.free_space_hard_bytes,
     )
 
 
-def _resolves_reserve_violation(
-    group: Group, state: Assignment, disk: Disk, min_free_bytes: int
-) -> bool:
+def _resolves_reserve_violation(group: Group, state: Assignment, disk: Disk) -> bool:
     """Section 8.2 priority 1: is ``disk``'s *current* (in ``state``)
     storage presently violating (C5)? Moving any disk off a violating
     storage always helps or leaves it unchanged (removing bytes cannot
@@ -184,9 +181,7 @@ def _resolves_reserve_violation(
 
     source_id = state.get(disk.key, disk.current_storage)
     source = next(s for s in group.storages if s.id == source_id)
-    return compute_reserve_status(
-        source, group.disks, min_free_bytes, storage_of=storage_of
-    ).violated
+    return compute_reserve_status(source, group.disks, storage_of=storage_of).violated
 
 
 def order_moves(
@@ -194,16 +189,17 @@ def order_moves(
     target_assignment: Assignment,
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     tiny_disk_bytes: int = 0,
 ) -> ScheduleResult:
     """Section 8.2's scheduling loop for one group.
 
     ``target_assignment`` is normally a :class:`heuristic.HeuristicResult`'s
-    ``.assignment``; ``load_by_key``/``objective``/``min_free_bytes`` are
-    the same inputs :func:`heuristic.evaluate_assignment` takes, reused
-    here (not re-derived) to score each candidate move's imbalance
-    reduction with whichever ``objective.spread_metric`` is configured.
+    ``.assignment``; ``load_by_key``/``objective`` are the same inputs
+    :func:`heuristic.evaluate_assignment` takes, reused here (not
+    re-derived) to score each candidate move's imbalance reduction with
+    whichever ``objective.spread_metric`` is configured. The section 5.3.1
+    free-space requirement needs no parameter here either, for the same
+    reason: it is resolved onto each ``group.storages[]`` entry already.
     ``tiny_disk_bytes`` is ``config.migration.tiny_disk_bytes`` (section
     5.4's ``D^big``) -- used below to rank a tiny disk's move first,
     regardless of its own reduction, since it costs nothing to schedule.
@@ -217,7 +213,7 @@ def order_moves(
     order: list[ScheduledMove] = []
     while pending:
         current_breakdown = evaluate_assignment(
-            group, state, load_by_key, objective, min_free_bytes, u_star, b_bar, tiny_disk_bytes
+            group, state, load_by_key, objective, u_star, b_bar, tiny_disk_bytes
         )
         current_imbalance = current_breakdown.imbalance_term
         # Section 8.2's revised ranking: "the alpha, delta and kappa*w
@@ -239,16 +235,14 @@ def order_moves(
         for key, disk in pending.items():
             target_id = target_assignment[key]
             target = storages_by_id[target_id]
-            if transient_invariant_ok(group, state, disk, target, min_free_bytes):
+            if transient_invariant_ok(group, state, disk, target):
                 feasible.append(key)
 
         if not feasible:
             break
 
         priority = [
-            key
-            for key in feasible
-            if _resolves_reserve_violation(group, state, pending[key], min_free_bytes)
+            key for key in feasible if _resolves_reserve_violation(group, state, pending[key])
         ]
         candidates = priority or feasible
 
@@ -264,7 +258,6 @@ def order_moves(
                 trial,
                 load_by_key,
                 objective,
-                min_free_bytes,
                 u_star,
                 b_bar,
                 tiny_disk_bytes,

@@ -75,6 +75,10 @@ def make_storage(id_: str, *, capability_weight: float = 1.0) -> Storage:
         foreign_used_bytes=0,
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
 
 

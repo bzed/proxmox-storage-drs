@@ -1,0 +1,124 @@
+# Section 14.8: a group whose I/O is PERFECTLY BALANCED (loads
+# 2.05/2.05/2.05) and whose snapshot reserve is satisfied everywhere --
+# only the configured free_space.soft is violated, on `packed` alone, by
+# admin-placed foreign volumes DRS does not manage. Isolates section
+# 5.3.1's free-space mandate and section 7.3's repair exemption from every
+# other reason this engine ever moves a disk: nothing here is unbalanced,
+# nothing here breaches the snapshot rule, and the repair the engine must
+# still make actively WORSENS the I/O balance (E: 0 -> 4.1) and would be
+# rejected by the payback rule on its own economics alone.
+#
+# `swapme` accepts only `raw` volumes (section 5.3 (C2)) -- what makes the
+# repair a TWO-move plan (601 cannot land there, so 603 must move first to
+# make room on `roomy`) rather than a one-move one, and what makes the
+# second move an INDIRECT repair: `roomy` never violates anything itself,
+# it is emptied only because the direct repair (601) needs the room.
+#
+# free_space.hard is swept (see `hard_sweep_tib` below, section 5.3.1): the
+# scheduler's chosen order actually REVERSES between the two values, which
+# is the fixture's proof that a transient dip below `soft` is a real,
+# schedulable state and not a contradiction of (C5).
+#
+# Regenerate expectations with `python3 generate_expected.py`; do not
+# hand-edit free-space-repair.expected.json. `generate_expected.py --check`
+# asserts it is current and runs in CI. Sizes and capacities are TiB; loads
+# are in average-in-flight-I/O units (plan section 4).
+schema_version: 1
+description: A perfectly I/O-balanced, snapshot-reserve-compliant group
+  whose configured free_space.soft is violated on one storage by foreign
+  volumes -- proves section 5.3.1's repair mandate, section 7.3's outcome
+  -trigger exemption and revert-test markers, section 5.3 (C2)'s format
+  eligibility (what makes the repair two moves, one indirect), and section
+  8.1's hard-sweep order reversal, together. Verified by exhaustive
+  enumeration of every format-eligible assignment of the 4 movable disks.
+group:
+  name: free-space-repair
+  reserve_factor: 2.0
+  storages:
+  - id: packed
+    capability_weight: 1.0
+    capacity_tib: 10.0
+    foreign_used_tib: 6.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+    free_space_soft_tib: 3.0   # 30% of 10 TiB
+    allowed_formats: [raw, qcow2]
+  - id: roomy
+    capability_weight: 1.0
+    capacity_tib: 10.0
+    foreign_used_tib: 5.8
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+    free_space_soft_tib: 3.0
+    allowed_formats: [raw, qcow2]
+  - id: swapme
+    capability_weight: 1.0
+    capacity_tib: 10.0
+    foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+    free_space_soft_tib: 3.0
+    allowed_formats: [raw]      # (C2): block storage, raw only
+disks:
+- key: 601:scsi0
+  vmid: 601
+  device: scsi0
+  size_tib: 0.5
+  load: 0.05
+  format: qcow2
+  current_storage: packed
+- key: 602:scsi0
+  vmid: 602
+  device: scsi0
+  size_tib: 1.0
+  load: 2.00
+  format: qcow2
+  current_storage: packed
+- key: 603:scsi0
+  vmid: 603
+  device: scsi0
+  size_tib: 1.0
+  load: 2.05
+  format: raw
+  current_storage: roomy
+- key: 604:scsi0
+  vmid: 604
+  device: scsi0
+  size_tib: 1.0
+  load: 2.05
+  format: raw
+  current_storage: swapme
+migration:
+  bwlimit_bytes_per_sec: 209715200
+  source_load_weight: 1.0
+  target_load_weight: 1.0
+  wipe_load_weight: 1.0
+  # saferemove is off on every storage above (see the group block), so this
+  # only documents the assumption the section 14.8 wipe-free arithmetic
+  # relies on, the same way fc-tier1.yaml does.
+  account_saferemove_wipe: false
+  payback_horizon_seconds: 31536000  # 365d, section 12 default
+  payback_ratio: 10.0
+objective:
+  alpha_spread: 1.0
+  beta_values: [0.25]
+  delta_values: [0.5]        # section 12 default -- the gate itself is
+                              # nulled in the real config (see the plan
+                              # prose above), not modelled by this solver
+                              # -only harness at all
+  gamma_move_bytes_per_tib: 0.05
+  kappa_vm_affinity: 0.5
+  # Stated, not inherited: these fixtures carry section 14's worked
+  # arithmetic, computed with V over movable disks only. The engine's
+  # own default is true (section 5.3 (C3)).
+  affinity_counts_pinned_disks: false
+  reserve_violation_penalty: 1000.0
+# Section 5.3.1's transient floor, swept: null means hard_b = soft_b (no
+# dip at all, the conservative default); 1.0 is "10%" of 10 TiB. Recorded
+# against the SAME optimal target assignment the beta/delta sweep above
+# already proves optimal -- hard never changes the target, only the order.
+hard_sweep_tib: [null, 1.0]
+# Section 5.3.1's own proof that the requirement, and nothing else, is
+# what makes the solver move: the identical cluster with free_space.soft: 0
+# everywhere has "do nothing" as its optimum instead.
+counterfactual_soft_zero: true

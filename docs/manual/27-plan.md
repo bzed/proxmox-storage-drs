@@ -12,12 +12,19 @@ For each group, `plan`:
 2. If the gate says `NO ACTION`, stops there for that group — no solver
    runs, nothing more to show.
 3. If it says `ACT`, solves it with whichever backend `solver.backend`
-   selects (`IMPLEMENTATION_PLAN.md` section 5.4/5.5 — see
-   `docs/internals/91-optimize.md` for the CP-SAT/CBC backends and
-   `docs/internals/90-heuristic.md` for the dependency-free one) to
-   compute a target assignment, orders its moves under the section 8
-   transient reserve invariant, and checks the whole plan against
-   section 7's payback rule.
+   selects (see `docs/internals/91-optimize.md` for the CP-SAT/CBC
+   backends and `docs/internals/90-heuristic.md` for the dependency-free
+   one) to compute a target assignment, orders its moves under the
+   **transient reserve invariant** — while a move is in flight, the disk
+   being migrated exists on *both* its source and target storage at once
+   (the mirror is fully allocated on the target before the old copy is
+   removed from the source), so the target's own snapshot reserve must
+   already hold with that disk's bytes counted in, not only once the
+   source frees them afterwards (`IMPLEMENTATION_PLAN.md` section 8.1 has
+   the full formula, including the generalization to several moves
+   landing on the same storage at once under concurrent execution — see
+   `docs/manual/28-apply.md`) — and checks the whole plan against the
+   payback rule below.
 
 This example uses the same section 14 worked example `show-load`'s manual
 page does, at the default weights (the two-move plan) and
@@ -76,11 +83,26 @@ carries a `⚠ exceeds migration.max_single_move_duration` suffix and always
 fails the plan (see below) — this is a hard, per-move rule, independent of
 whether the plan as a whole looks profitable.
 
-`resolves_reserve_violation` (visible in `--json`, and implied by the
-`ACT: reserve violated on ...` header in human output) marks a move
-scheduled first *regardless* of its ratio, because the storage it leaves
-is currently breaching (C4)/(C5) — safety is not subject to hysteresis
+A move scheduled first *regardless* of its ratio — because the storage it
+leaves is currently breaching its snapshot reserve or its configured
+`free_space.soft` requirement, the capacity a storage must always keep
+free, sized to the larger of `snapshot_reserve.factor` times its largest
+disk or `free_space.soft` (`IMPLEMENTATION_PLAN.md` section 5.3,
+constraints (C4)/(C5)/5.3.1) — is implied by the `ACT: reserve violated
+on ...` header in human output. Safety is not subject to hysteresis
 (section 13), so this always wins over a purely balance-driven move.
+
+`repair` (visible in `--json`, `[repair]` in human output) marks a move
+the plan's own shortfall *depends on*: holding that one disk back on its
+current storage, in the plan actually executed, would leave the group
+short by more than it is. This is not the same question as "did this
+move's own source violate something" — an *indirect* repair (a move that
+empties the destination another repair needs) is marked too, even though
+its own source was clean, and a *redundant* repair (either of two moves
+alone would fix the violation) is marked on neither, since holding back
+just one still leaves the other to finish the job. See the `payback:`
+line below for what the plan as a whole being exempt actually depends on
+— a per-move `repair: true` marker is a report, not itself the trigger.
 
 **A `⚠` line means a deadlock, not a hidden failure.** If the target
 assignment includes a move this run cannot find any transient-feasible
@@ -129,17 +151,25 @@ Either, both, or neither can apply to the same plan; `plan` names exactly
 which happened rather than one generic "does not pass the payback test"
 line for both.
 
-**A plan resolving a reserve violation always passes this test**,
-regardless of the ratio shown — the example above happens to pass on
-merit (133 ≥ 10), but a plan whose *only* move fixes a (C4)/(C5) violation
-with zero balance benefit (a real, common case: relocating the sole loaded
+**A plan that leaves the group with less reserve/free-space shortfall
+than it found always passes this test**, regardless of the ratio shown —
+the example above happens to pass on merit (133 ≥ 10), but a plan whose
+*only* move fixes a snapshot-reserve or `free_space.soft` violation with
+zero balance benefit (a real, common case: relocating the sole loaded
 disk in a two-storage group changes which side carries it without
-reducing spread at all) is accepted too. Section 13's "the reserve is
-never traded against balance" applies here exactly as it does to the
-gates: an operator does not get to decline a capacity emergency fix
-because it scores poorly against `migration.payback_ratio`. The hard
-per-move duration rule is not exempted this way — it is an operational
-limit, not an economic one, and still blocks the plan.
+reducing spread at all) is accepted too. This is `--json`'s
+`payback.repair_exempt`, decided on the plan's *outcome* — its executed
+endpoint's `Σ r_s` strictly below the current assignment's
+(`payback.reserve_shortfall_bytes_before`/`_after`) — not on any one
+move's own flag, so a plan that moves a disk off a violating storage but
+leaves the group no less short in total is **not** exempt. Section 13's
+"the reserve is never traded against balance" applies here exactly as it
+does to the gates: an operator does not get to decline a capacity
+emergency fix because it scores poorly against `migration.payback_ratio`.
+The hard per-move duration rule is not exempted this way — it is an
+operational limit, not an economic one, and still blocks the plan, and a
+move it excludes is also excluded from what `repair_exempt` scores: a
+repair a hard rule then blocks is correctly not exempt either.
 
 **What a ✗ (or a rejected move) does *not* do today: automatically make
 the plan smaller and retry.** Section 7.3 describes re-solving with `beta`
@@ -194,7 +224,8 @@ gate said `NO ACTION`; otherwise `"heuristic"`/`null`, or `"cpsat"`/
 `"cbc"` with `"optimal"`/`"feasible"` -- the same information the human
 output's `solver:` line names), `moves[]` (`disk_key`, `vmid`, `device`, `from_storage`,
 `to_storage`, `size_bytes`, `imbalance_reduction`,
-`resolves_reserve_violation`, `load_per_tib`, `duration_mirror_seconds`,
+`repair` (the section 7.3 revert-test marker — see "The `payback:` line"
+above), `load_per_tib`, `duration_mirror_seconds`,
 `duration_wipe_seconds`, `cost_load_seconds`, `exceeds_max_duration`),
 `deadlocked` (a list of disk keys) and `deadlock_message` (`null` if none),
 `before_spread`/`after_spread` (the section 6 spread fraction, before the
@@ -207,7 +238,10 @@ full `.total`, `evaluate_assignment()` re-scored at the same true weights
 (`null` unless Prometheus failed for this group), and `payback` — `null` when there is no
 `GroupLoad` or the gate said `NO ACTION`, otherwise an object with
 `benefit_load_seconds`, `total_cost_load_seconds`, `ratio`, `aggregate_ok`
-(the economic test alone, or `true` if exempted), `rejected_moves` (disk
+(the economic test alone, or `true` if exempted), `repair_exempt` (the
+outcome trigger itself — see above), `reserve_shortfall_bytes_before`/
+`_after` (`Σ r_s` on the current assignment and on the plan's executed
+endpoint, what `repair_exempt` is decided from), `rejected_moves` (disk
 keys failing the hard duration rule), `deferred_moves` (disk keys deferred
 by the section 7.3 saturation guard — empty unless a storage in the group
 configures `saturation_load`) and `accepted` (`aggregate_ok` and neither

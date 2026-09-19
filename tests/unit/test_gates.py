@@ -365,6 +365,10 @@ def make_storage(id_: str, capacity_tib: float = 8.0) -> Storage:
         foreign_used_bytes=0,
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
 
 
@@ -401,7 +405,7 @@ def section_14_2_fill_group() -> Group:
 
 
 def fill_reserve_statuses(group: Group) -> dict[str, ReserveStatus]:
-    return {s.id: compute_reserve_status(s, group.disks, min_free_bytes=0) for s in group.storages}
+    return {s.id: compute_reserve_status(s, group.disks) for s in group.storages}
 
 
 def balanced_load(group: Group) -> GroupLoad:

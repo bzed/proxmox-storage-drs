@@ -34,11 +34,18 @@ mode uniformly.
 
 ## PromQL construction
 
-`build_rate_promql()` and `build_quantile_over_time_promql()` are pure
-string-building functions, deliberately factored out of any query-issuing
-code so they are unit-testable without a fake session at all — see
-`IMPLEMENTATION_PLAN.md` section 3.4 for the exact expressions they
-implement. `raw_metric_name()` is the one place that maps a
+`build_rate_promql()` builds `sum by (vmid, device) (rate(<metric>{<selector>}[<rate_window>]))`
+— the `sum by` deliberately collapses the node/host labels, so a VM that
+live-migrated between nodes mid-window still reads as one series, and
+`selector` (see "Node-scoping" below) sits *inside* `rate()`'s own vector
+selector, before those labels are collapsed. `build_quantile_over_time_promql()`
+wraps a rate expression in `quantile_over_time(q, (<rate_expr>)[<lookback>:<step>])`
+— `metrics.py`'s own six-raw-quantity fetch calls the first to build each
+`rate_expr`, then the second around it, once per configured quantile.
+Both are pure string-building functions, deliberately factored out of any
+query-issuing code so they are unit-testable without a fake session at
+all (`IMPLEMENTATION_PLAN.md` section 3.4 has the full per-metric
+derivation). `raw_metric_name()` is the one place that maps a
 `RAW_METRIC_FIELDS` entry (`"read_ops"`, ...) to the configured metric name
 on a `MetricsConfig`, via `getattr` — this is what lets `verify_metrics()`
 iterate "every configured raw metric" without hand-listing the six field
@@ -162,17 +169,16 @@ branch.
 
 ## `verify_metrics()`: six checks, six functions
 
-Each `_check_*` function implements exactly one `IMPLEMENTATION_PLAN.md`
-section 3.3 numbered check and returns `Finding`s (plus, where relevant, the
-data the report carries forward):
+Each `_check_*` function is a single, focused verification and returns
+`Finding`s (plus, where relevant, the data the report carries forward):
 
-| Function | Section 3.3 step | Returns |
+| Function | What it checks | Returns |
 |---|---|---|
-| `_check_metric_names_exist` | 1 | findings only |
-| `_check_sample_series` | 2 + 3 (labels present) + cross-metric disk consistency | findings, `{metric_name: sample_labels}` |
-| `_check_device_label_collision` | 4 | one `Finding` or `None` (pure, no I/O) |
-| `_check_coverage` | 5 | findings, `{DiskKey: coverage_fraction}` |
-| `_check_observed_spacing` | 6 | findings, `observed_spacing_seconds` |
+| `_check_metric_names_exist` | every one of the six configured `metrics.*` names (`read_ops`, ...) actually exists as a Prometheus series name (`label_values("__name__")`) — an error per name that does not, naming the likely cause (never configured/emitted, or dropped — see below) | findings only |
+| `_check_sample_series` | one instant query per metric returns at least one sample, that the expected `vmid`/`device` labels are present on it, and (via its private `_check_cross_metric_disk_consistency()`) that all six metrics report the identical set of `(vmid, device)` disks — a metric whose disk set is a strict subset of the others' is flagged | findings, `{metric_name: sample_labels}` |
+| `_check_device_label_collision` | warns if `metrics.labels.device` is literally `"instance"`, which collides with Prometheus's own scrape-target `instance` label — a common Telegraf misconfiguration | one `Finding` or `None` (pure, no I/O) |
+| `_check_coverage` | runs `compute_disk_coverage()` and flags every disk whose sample coverage over the window falls below `window.min_coverage` | findings, `{DiskKey: coverage_fraction}` |
+| `_check_observed_spacing` | measures the modal delta between consecutive timestamps of one live series over a short recent range, and compares it against what `metrics.rate_window >= 4x` (section 11.1) assumes the real scrape interval to be | findings, `observed_spacing_seconds` |
 
 `_check_coverage` and `_check_observed_spacing` both use `metrics.read_ops`
 as the one representative metric rather than probing all six: a coverage or

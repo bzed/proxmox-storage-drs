@@ -37,8 +37,14 @@ storages in your `groups`, not backup targets):
   exception, verified against a live PVE 9.2.11 cluster (see
   `IMPLEMENTATION_PLAN.md` section 3.5's note). Getting this wrong does not
   make the tool fail loudly — it makes it under-count what already occupies
-  each storage, which quietly erodes the section 5.3 snapshot reserve it
-  exists to protect.
+  each storage, which quietly erodes the **snapshot reserve**: the free
+  capacity `pve-storage-drs` always keeps clear on every managed storage
+  (sized from `snapshot_reserve.factor`/`free_space.soft` — see
+  [`10-configuration.md`](10-configuration.md)) so that a snapshot, or a
+  disk mid-migration existing on two storages at once, never runs a LUN
+  out of space. An under-counted storage looks to have more headroom than
+  it really does, so the tool plans and executes migrations that erode a
+  safety margin it believes it is still protecting.
 - Grant it **at each storage's own path** (`/storage/<id>`), not only at the
   parent `/storage` — that is the grant confirmed to work.
 - Also add `VM.Audit` cluster-wide (`/`) for VM inventory and config, which

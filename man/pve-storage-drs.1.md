@@ -61,8 +61,8 @@ the same file on every node.
 : Run the identical gate/solve/schedule/payback pipeline **plan** does, and narrate what its output
   does not print: the measured load every number derives from (**show-load**'s own per-storage/
   per-disk picture), every disk pinned this run with its exact reason, any VM a pin leaves with disks
-  spread across more than one storage ("cannot fully consolidate"), the section 5.4 objective's five
-  terms individually, and pinned load as a fraction of the group's total against
+  spread across more than one storage ("cannot fully consolidate"), the solver's objective broken
+  down into its five weighted terms individually, and pinned load as a fraction of the group's total against
   *report.warn_pinned_load_fraction* -- flagging a residual imbalance likely too structural (too
   much load pinned) for another run of **plan** to fix by itself. **-v** additionally names the
   exact Prometheus query (node-scoping filter, window and rate settings) the whole run was
@@ -199,14 +199,15 @@ default path. It is validated in full at startup; every violation is a fatal err
 naming the setting, because a misconfigured balancer that moves production disks is worse than one
 that refuses to start.
 
-Top-level keys: **proxmox** (API connection and credentials), **prometheus** (URL and auth),
-**metrics** (metric and label name mapping), **window** (how much history to consider),
+Top-level keys: **schema_version**, **proxmox** (API connection and credentials), **prometheus**
+(URL and auth), **free_space** (the free space every storage must keep, absolute or as a
+percentage of its own capacity), **metrics** (metric and label name mapping), **window** (how much
+history to consider), **load_weights** (the weighting of I/O time, operations and bytes),
 **groups** (the storage groups, which are what a disk may not leave), **snapshot_reserve**,
-**load** (the weighting of I/O time, operations and bytes), **objective** (the solver's trade-off
-weights), **gates** (drift and imbalance thresholds, cooldowns), **migration** (bandwidth, cost and
-payback), **execution** (mode, concurrency, time windows, locking), **exclude**, **report**,
-**state**, **forecast** and **support** (the anonymization salt and defaults for
-**collect-testdata**).
+**gates** (drift and imbalance thresholds, cooldowns), **migration** (bandwidth, cost and payback),
+**objective** (the solver's trade-off weights), **solver** (backend and iteration budget),
+**execution** (mode, concurrency, time windows, locking), **exclude**, **report**, **state**,
+**forecast** and **support** (the anonymization salt and defaults for **collect-testdata**).
 
 Every option is documented individually, with its unit, its default and what happens at either
 extreme, in the manual listed under **SEE ALSO**. That document, not this page, is authoritative

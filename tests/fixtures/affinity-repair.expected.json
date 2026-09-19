@@ -57,6 +57,7 @@
       ],
       "expected_order": [
         {
+          "disk_key": "301:efidisk0",
           "move": "301:efidisk0:stor-c->stor-a",
           "transient_target_used_tib": 1.0,
           "transient_reserve_basis_tib": 1.0,
@@ -65,6 +66,7 @@
           "ok": true
         },
         {
+          "disk_key": "301:tpmstate0",
           "move": "301:tpmstate0:stor-b->stor-a",
           "transient_target_used_tib": 1.000001,
           "transient_reserve_basis_tib": 1.0,
@@ -142,7 +144,15 @@
     "total_cost_load_seconds": 0.0,
     "benefit_load_seconds": 31536006.65,
     "ratio": null,
-    "accepted": true
+    "aggregate_ok": true,
+    "reserve_shortfall_tib_before": 0.0,
+    "reserve_shortfall_tib_after": 0.0,
+    "repair_exempt": false,
+    "accepted": true,
+    "repair_markers": {
+      "301:efidisk0": false,
+      "301:tpmstate0": false
+    }
   },
   "payback_rejected_archive_disk": {
     "size_tib": 4.0,

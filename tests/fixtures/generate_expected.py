@@ -41,7 +41,7 @@ Assignment = Dict[str, str]
 StorageState = Dict[str, Any]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FIXTURES = ("fc-tier1", "reserve-tradeoff", "affinity-repair")
+FIXTURES = ("fc-tier1", "reserve-tradeoff", "affinity-repair", "free-space-repair")
 R = 6  # rounding for recorded values
 TIB = 1 << 40
 
@@ -77,6 +77,23 @@ class Fixture:
     current: Assignment
     objective: Dict[str, Any]
     migration: Dict[str, Any]
+    # Section 5.3.1: free_space.soft per storage, TiB -- 0.0 (the default)
+    # for every fixture that does not set it, which makes reserve_term()
+    # below reduce exactly to `reserve_factor * largest` and leaves the
+    # first three fixtures' numbers untouched.
+    soft: Dict[str, float]
+    # Section 5.3 (C2): the disk formats each storage accepts, and each
+    # disk's own format -- ["raw", "qcow2"] / "raw" for every fixture that
+    # does not set them, which admits every storage as an eligible target
+    # for every disk, exactly as before this field existed.
+    allowed_formats: Dict[str, List[str]]
+    format: Dict[str, str]
+    # Section 14.8 only: the free_space.hard values to sweep (None = "same
+    # as soft"), and whether to record the free_space.soft: 0 counterfactual.
+    # Empty/False for every other fixture -- both sections are then omitted
+    # from the built output entirely.
+    hard_sweep_tib: List[Optional[float]]
+    counterfactual_soft_zero: bool
 
     @property
     def all_keys(self) -> List[str]:
@@ -171,6 +188,13 @@ def load_fixture(stem: str) -> Fixture:
         current={d["key"]: d["current_storage"] for d in disks},
         objective=fx["objective"],
         migration=fx["migration"],
+        soft={s["id"]: float(s.get("free_space_soft_tib", 0.0)) for s in g["storages"]},
+        allowed_formats={
+            s["id"]: list(s.get("allowed_formats", ["raw", "qcow2"])) for s in g["storages"]
+        },
+        format={d["key"]: d.get("format", "raw") for d in disks},
+        hard_sweep_tib=list(fx.get("hard_sweep_tib", [])),
+        counterfactual_soft_zero=bool(fx.get("counterfactual_soft_zero", False)),
     )
 
 
@@ -179,10 +203,29 @@ def load_fixture(stem: str) -> Fixture:
 # --------------------------------------------------------------------------- #
 
 
+def eligible_storages(f: Fixture, key: str) -> List[str]:
+    """Section 5.3 (C2): every storage whose `allowed_formats` holds this
+    disk's own `format` -- the domain `all_assignments()` takes its product
+    over, per disk rather than the flat `f.storages` every fixture without
+    a format restriction still gets (every storage accepts "raw" by
+    default, so this is a no-op there)."""
+    return [s for s in f.storages if f.format[key] in f.allowed_formats[s]]
+
+
 def all_assignments(f: Fixture) -> Iterator[Assignment]:
-    """Every |S|^|D| placement of the movable disks."""
-    for combo in itertools.product(f.storages, repeat=len(f.keys)):
+    """Every eligible placement of the movable disks -- (C2)'s per-disk
+    domain restriction folded directly into the product, so an
+    ineligible (disk, storage) pair is never even enumerated, matching
+    both MILP backends fixing `x_{d,s}=0` for it rather than scoring it
+    and losing."""
+    domains = [eligible_storages(f, k) for k in f.keys]
+    for combo in itertools.product(*domains):
         yield dict(zip(f.keys, combo))
+
+
+def reserve_term(f: Fixture, s: str, largest: float) -> float:
+    """Section 5.3 (C5)/5.3.1: `R_s = max(f_s * Z_s, soft_s)`."""
+    return max(f.reserve_factor * largest, f.soft[s])
 
 
 def largest_on(f: Fixture, assign: Assignment, s: str) -> float:
@@ -199,12 +242,13 @@ def per_storage(f: Fixture, assign: Assignment) -> Dict[str, StorageState]:
     for s in f.storages:
         used = used_on(f, assign, s)
         largest = largest_on(f, assign, s)
+        term = reserve_term(f, s, largest)
         out[s] = {
             "load": round(sum(f.load[k] for k in f.all_keys if storage_of(f, assign, k) == s), R),
             "used_tib": round(used, R),
             "largest_tib": round(largest, R),
-            "required_tib": round(used + f.reserve_factor * largest, R),
-            "violates_reserve": used + f.reserve_factor * largest > f.capacity[s] + 1e-9,
+            "required_tib": round(used + term, R),
+            "violates_reserve": used + term > f.capacity[s] + 1e-9,
         }
     return out
 
@@ -234,10 +278,27 @@ def slack_of(f: Fixture, assign: Assignment) -> float:
     return sum(
         max(
             0.0,
-            used_on(f, assign, s) + f.reserve_factor * largest_on(f, assign, s) - f.capacity[s],
+            used_on(f, assign, s) + reserve_term(f, s, largest_on(f, assign, s)) - f.capacity[s],
         )
         for s in f.storages
     )
+
+
+def repair_markers(f: Fixture, assign: Assignment) -> Dict[str, bool]:
+    """Section 7.3's revert test: for each disk `assign` actually moves,
+    would holding it back on its current storage strictly raise the plan's
+    total Sum r_s, evaluated on `assign` itself with that one disk held?
+    A disk `assign` does not move is not scored -- there is nothing to
+    revert."""
+    base = slack_of(f, assign)
+    markers: Dict[str, bool] = {}
+    for k in f.keys:
+        if assign[k] == f.current[k]:
+            continue
+        trial = dict(assign)
+        trial[k] = f.current[k]
+        markers[k] = slack_of(f, trial) > base + 1e-9
+    return markers
 
 
 def fragmentation(f: Fixture, assign: Assignment) -> float:
@@ -385,7 +446,9 @@ def cost(f: Fixture, key: str) -> float:
     return duration_mirror(f, key) * omega_mirror + duration_wipe(f, key) * omega_wipe
 
 
-def order_moves(f: Fixture, target: Assignment, delta: float) -> List[Dict[str, Any]]:
+def order_moves(
+    f: Fixture, target: Assignment, delta: float, hard: Optional[Dict[str, float]] = None
+) -> List[Dict[str, Any]]:
     """Section 8.2 greedy, with the two priority exceptions.
 
     Raises Deadlock if no pending move satisfies the section 8.1 transient
@@ -393,22 +456,40 @@ def order_moves(f: Fixture, target: Assignment, delta: float) -> List[Dict[str, 
     schedule time. ``delta`` is the case's own swept
     ``delta_capacity_spread`` -- not read from ``f.objective``, which never
     carries a static value for it (only the ``delta_values`` sweep list).
+
+    ``hard`` is section 5.3.1's per-storage transient floor -- defaults to
+    ``f.soft`` (every fixture but free-space-repair never sets ``hard``
+    differently from ``soft``, so this is a no-op there): the endpoint
+    check inside ``per_storage()`` above always uses ``f.soft`` via
+    ``reserve_term()``, but the *transient* feasibility check below uses
+    this floor instead, per section 8.1's own distinction.
     """
+    hard_map = hard if hard is not None else f.soft
     state = dict(f.current)
     pending = [k for k in f.keys if target[k] != f.current[k]]
     out: List[Dict[str, Any]] = []
     while pending:
         st = per_storage(f, state)
-        violating = {s for s, v in st.items() if v["violates_reserve"]}
-        prio = [k for k in pending if state[k] in violating] or pending
+        # Section 8.2: feasibility is checked over EVERY pending move
+        # first; priority-1 (source currently violating) then narrows
+        # *which feasible move* is picked, exactly like the real
+        # schedule.order_moves() -- restricting feasibility itself to the
+        # violating-source subset (an earlier version of this function
+        # did) can deadlock a plan the real scheduler orders just fine by
+        # picking a different, still-feasible move first (section 14.8's
+        # own free-space-repair fixture is what proves the two
+        # implementations must agree here).
         feasible = []
-        for k in prio:
+        for k in pending:
             b = target[k]
             basis = max(st[b]["largest_tib"], f.size[k])
-            if st[b]["used_tib"] + f.size[k] + f.reserve_factor * basis <= f.capacity[b] + 1e-9:
+            floor = max(f.reserve_factor * basis, hard_map[b])
+            if st[b]["used_tib"] + f.size[k] + floor <= f.capacity[b] + 1e-9:
                 feasible.append(k)
         if not feasible:
             raise Deadlock(f"no feasible move among {sorted(pending)}")
+        violating = {s for s, v in st.items() if v["violates_reserve"]}
+        prio = [k for k in feasible if state[k] in violating] or feasible
 
         def ratio(k: str, _state: Assignment = state) -> float:
             # Section 8.2's revised ranking: "the alpha, delta and kappa*w
@@ -430,18 +511,18 @@ def order_moves(f: Fixture, target: Assignment, delta: float) -> List[Dict[str, 
             c = cost(f, k)
             return float("inf") if c == 0.0 else persistent_reduction / c
 
-        pick = max(feasible, key=ratio)
+        pick = max(prio, key=ratio)
         b = target[pick]
         used_b = st[b]["used_tib"]
         basis = max(st[b]["largest_tib"], f.size[pick])
+        floor = max(f.reserve_factor * basis, hard_map[b])
         out.append(
             {
+                "disk_key": pick,
                 "move": f"{pick}:{state[pick]}->{b}",
                 "transient_target_used_tib": round(used_b + f.size[pick], R),
                 "transient_reserve_basis_tib": round(basis, R),
-                "transient_required_tib": round(
-                    used_b + f.size[pick] + f.reserve_factor * basis, R
-                ),
+                "transient_required_tib": round(used_b + f.size[pick] + floor, R),
                 "capacity_tib": f.capacity[b],
                 "ok": True,
             }
@@ -451,10 +532,12 @@ def order_moves(f: Fixture, target: Assignment, delta: float) -> List[Dict[str, 
     return out
 
 
-def try_order(f: Fixture, target: Assignment, delta: float) -> Dict[str, Any]:
+def try_order(
+    f: Fixture, target: Assignment, delta: float, hard: Optional[Dict[str, float]] = None
+) -> Dict[str, Any]:
     """order_moves, but record a deadlock instead of raising."""
     try:
-        return {"orderable": True, "order": order_moves(f, target, delta)}
+        return {"orderable": True, "order": order_moves(f, target, delta, hard)}
     except Deadlock as exc:
         return {"orderable": False, "blocked_reason": str(exc)}
 
@@ -498,6 +581,7 @@ def case_for(f: Fixture, beta: float, delta: float) -> Dict[str, Any]:
         "_exact_E_after": E_of(f, a),
         "_exact_F_after": F_of(f, a),
         "_exact_A_after": fragmentation(f, a),
+        "_assignment": a,
         "expected_objective": round(val, R),
         "expected_move_count": len(moves_of(f, a)),
         "expected_E_after": round(E_of(f, a), R),
@@ -546,7 +630,12 @@ def case_for(f: Fixture, beta: float, delta: float) -> Dict[str, Any]:
 
 
 def payback(
-    f: Fixture, case: Dict[str, Any], e_after: float, f_after: float, a_after: float
+    f: Fixture,
+    case: Dict[str, Any],
+    e_after: float,
+    f_after: float,
+    a_after: float,
+    assignment: Optional[Assignment] = None,
 ) -> Dict[str, Any]:
     """Section 7.2 payback arithmetic for one case:
     ``benefit = (alpha*(E_before-E_after) + delta*(F_before-F_after) +
@@ -585,7 +674,8 @@ def payback(
     benefit = (alpha * delta_e + delta_weight * delta_f + kappa * delta_a) * float(
         f.migration["payback_horizon_seconds"]
     )
-    return {
+    aggregate_ok = benefit >= float(f.migration["payback_ratio"]) * total_cost
+    out = {
         "beta_move_count": case["beta_move_count"],
         "delta_capacity_spread": case["delta_capacity_spread"],
         "per_move": per_move,
@@ -596,8 +686,23 @@ def payback(
         # float("inf") for the identical case (see "big_m_agreement_
         # threshold_p" above for the same None-for-unbounded convention).
         "ratio": round(benefit / total_cost, 2) if total_cost else None,
-        "accepted": benefit >= float(f.migration["payback_ratio"]) * total_cost,
+        "aggregate_ok": aggregate_ok,
     }
+    if assignment is not None:
+        # Section 7.3's outcome trigger: repair_exempt iff this plan's own
+        # final Sum r_s is strictly below the current assignment's --
+        # independent of aggregate_ok, and overriding it when True.
+        current_slack = slack_of(f, f.current)
+        final_slack = slack_of(f, assignment)
+        repair_exempt = final_slack < current_slack - 1e-9
+        out["reserve_shortfall_tib_before"] = round(current_slack, R)
+        out["reserve_shortfall_tib_after"] = round(final_slack, R)
+        out["repair_exempt"] = repair_exempt
+        out["accepted"] = aggregate_ok or repair_exempt
+        out["repair_markers"] = repair_markers(f, assignment)
+    else:
+        out["accepted"] = aggregate_ok
+    return out
 
 
 def build(f: Fixture) -> Dict[str, Any]:
@@ -650,6 +755,7 @@ def build(f: Fixture) -> Dict[str, Any]:
             chosen["_exact_E_after"],
             chosen["_exact_F_after"],
             chosen["_exact_A_after"],
+            chosen["_assignment"],
         )
         # Section 14.5's counter-example: a 4 TiB archive disk whose
         # relocation improves E by only 0.01 and leaves the data spread
@@ -672,6 +778,36 @@ def build(f: Fixture) -> Dict[str, Any]:
             "benefit_load_seconds": round(arch_benefit, 2),
             "ratio": round(arch_benefit / arch_cost, 3),
             "accepted": arch_benefit / arch_cost >= float(f.migration["payback_ratio"]),
+        }
+
+    # Section 14.8's own two additions, both keyed off the SAME optimal
+    # target assignment `two_move` already chose above -- the hard sweep
+    # only ever changes *ordering* (section 8.1's transient floor), never
+    # the target itself, and the counterfactual is a wholly separate solve
+    # against a modified `f.soft`, not a different case of this one.
+    if two_move and f.hard_sweep_tib:
+        chosen = two_move[0]
+        assignment = chosen["_assignment"]
+        delta = float(chosen["delta_capacity_spread"])
+        sweep = []
+        for hard_tib in f.hard_sweep_tib:
+            hard_map = {s: (f.soft[s] if hard_tib is None else float(hard_tib)) for s in f.storages}
+            entry: Dict[str, Any] = {"hard_tib": hard_tib}
+            entry.update(try_order(f, assignment, delta, hard_map))
+            sweep.append(entry)
+        out["hard_sweep"] = sweep
+
+    if f.counterfactual_soft_zero:
+        zero_soft = Fixture(**{**f.__dict__, "soft": {s: 0.0 for s in f.storages}})
+        beta0 = float(f.objective["beta_values"][0])
+        delta0 = float(f.objective.get("delta_values", [0.0])[0])
+        zero_a, zero_val = best_big_m(zero_soft, beta0, delta0, zero_soft.big_m_p)
+        out["counterfactual_free_space_soft_zero"] = {
+            "beta_move_count": beta0,
+            "delta_capacity_spread": delta0,
+            "expected_objective": round(zero_val, R),
+            "expected_moves": moves_of(zero_soft, zero_a),
+            "expected_move_count": len(moves_of(zero_soft, zero_a)),
         }
     return out
 

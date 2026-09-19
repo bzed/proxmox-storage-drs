@@ -85,11 +85,15 @@ Configuring `execution.max_concurrent_migrations`/`max_concurrent_per_storage`
 above their default of `1` runs several moves at once in `auto` mode
 (`dry-run`/`confirm` always run strictly sequentially, regardless of these
 settings — concurrency only makes sense for unattended operation).
-Section 8.1's transient reserve invariant generalizes to a whole in-flight
-set of moves landing on the same storage at once, checked live before
-every launch exactly like the sequential executor's own pre-flight
-re-check; `max_concurrent_per_storage` counts a storage as occupied
-whether a move touches it as source *or* target.
+The **transient reserve invariant** — the rule (`docs/manual/27-plan.md`)
+that a storage's snapshot reserve must hold even while a disk migrating
+onto it exists on both source and target at once, not only once the move
+finishes — generalizes to a whole in-flight set of moves landing on the
+same storage at the same time (`IMPLEMENTATION_PLAN.md` section 8.1's own
+formula for it), checked live before every launch exactly like the
+sequential executor's own pre-flight re-check; `max_concurrent_per_storage`
+counts a storage as occupied whether a move touches it as source *or*
+target.
 
 **Launch order stays strictly FIFO.** The scheduler's own queue (the same
 one a sequential run would follow, one move at a time) is never
@@ -141,7 +145,15 @@ Before *every* move, `apply` re-checks the live cluster rather than
 trusting the plan: the VM may have moved node, the disk may no longer be
 on the expected source, a snapshot may have appeared, it may have been
 tagged for exclusion, or the target storage's free space may no longer
-satisfy the section 8.1 transient invariant. Any of these stops the
+satisfy the transient invariant (the target must still hold every disk on
+it, plus the disk being moved, plus the snapshot reserve, while both copies
+of the moving disk exist). That last re-check reads the target's volume
+listing afresh and counts every volume at its *provisioned* size, exactly
+as planning did — not the pool's own allocated figure, which on a
+thin-provisioned pool is much lower and would let a move through onto a
+pool that other provisioning has since filled. If the target cannot be read
+at that moment, or lists a volume with no size at all, the move is refused
+too rather than checked against a partial figure. Any of these stops the
 group's run with `replan_needed`. In `dry-run`/`confirm`, that is the end
 of it — the operator re-runs `apply` by hand once ready; see "Reading
 `auto` mode" below for what `auto` itself does about it automatically.

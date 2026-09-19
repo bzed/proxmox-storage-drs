@@ -34,7 +34,13 @@ TIB = 1 << 40
 
 
 def make_disk(
-    key: str, size_tib: float, load: float, storage: str, pinned: str | None = None
+    key: str,
+    size_tib: float,
+    load: float,
+    storage: str,
+    pinned: str | None = None,
+    *,
+    format: str = "raw",
 ) -> Disk:
     vmid, device = key.split(":")
     return Disk(
@@ -45,12 +51,18 @@ def make_disk(
         node="pve01",
         size_bytes=round(size_tib * TIB),
         current_storage=storage,
-        format="raw",
+        format=format,
         pinned_reason=pinned,
     )
 
 
-def make_storage(id_: str, capacity_tib: float = 8.0, capability_weight: float = 1.0) -> Storage:
+def make_storage(
+    id_: str,
+    capacity_tib: float = 8.0,
+    capability_weight: float = 1.0,
+    *,
+    allowed_formats: frozenset[str] = frozenset({"raw", "qcow2"}),
+) -> Storage:
     return Storage(
         id=id_,
         capability_weight=capability_weight,
@@ -61,6 +73,10 @@ def make_storage(id_: str, capacity_tib: float = 8.0, capability_weight: float =
         foreign_used_bytes=0,
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=allowed_formats,
     )
 
 
@@ -91,8 +107,8 @@ def section_14_loads() -> dict[str, float]:
 # delta_capacity_spread=0.0: this file's fixtures and assertions predate
 # section 12's capacity-spread term and are cross-checked against
 # IMPLEMENTATION_PLAN.md numbers computed without it (REVIEW.md Appendix
-# A) -- see test_capacity_spread_term_matches_section_14_2_f_before below
-# for the dedicated (C7) coverage, which uses its own non-zero delta.
+# A) -- see test_optimize.py's own dedicated (C7) coverage, which uses a
+# non-zero delta.
 DEFAULT_OBJECTIVE = ObjectiveConfig(
     alpha_spread=1.0,
     beta_move_count=0.25,
@@ -174,7 +190,7 @@ def test_raw_affinity_debt_matches_breakdowns_own_field() -> None:
     group = section_14_group()
     loads = section_14_loads()
     breakdown = evaluate_assignment(
-        group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0, 7.4 / 3, 0.0
+        group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 7.4 / 3, 0
     )
     assert raw_affinity_debt(breakdown) == breakdown.affinity_debt
 
@@ -192,7 +208,7 @@ def test_initial_imbalance_term_matches_section_14_2_e_before() -> None:
     group = section_14_group()
     loads = section_14_loads()
     assignment = seed_assignment(group)
-    breakdown = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 0, 7.4 / 3, 0.0)
+    breakdown = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 7.4 / 3, 0, 0)
     assert breakdown.imbalance_term == pytest.approx(8.0667, abs=1e-4)
     assert breakdown.reserve_statuses["san-a"].violated
     assert breakdown.reserve_statuses["san-a"].shortfall_bytes == round(0.5 * TIB)
@@ -207,7 +223,7 @@ def test_spread_metric_l1_is_the_default_and_sums_every_deviation() -> None:
     loads = section_14_loads()
     assignment = seed_assignment(group)
     assert DEFAULT_OBJECTIVE.spread_metric == "l1"
-    breakdown = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 0, 7.4 / 3, 0.0)
+    breakdown = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 7.4 / 3, 0, 0)
     assert breakdown.imbalance_term == pytest.approx(sum(breakdown.spread_e.values()))
 
 
@@ -222,7 +238,7 @@ def test_spread_metric_minmax_uses_only_the_hottest_storages_raw_utilization() -
     assignment = seed_assignment(group)
     objective = dataclasses.replace(DEFAULT_OBJECTIVE, spread_metric="minmax")
 
-    breakdown = evaluate_assignment(group, assignment, loads, objective, 0, 7.4 / 3, 0.0)
+    breakdown = evaluate_assignment(group, assignment, loads, objective, 7.4 / 3, 0, 0)
 
     assert breakdown.imbalance_term == pytest.approx(6.5)  # san-a's raw u_s, the hottest
     assert breakdown.imbalance_term != pytest.approx(max(breakdown.spread_e.values()))
@@ -252,10 +268,10 @@ def test_spread_metric_minmax_is_indifferent_to_a_second_nearly_as_bad_storage()
     # san-a is equally hot, but san-b/san-c are now nearly as bad too.
     two_problem_loads = {"101:scsi0": 5.0, "102:scsi0": 2.9, "103:scsi0": 2.9}
 
-    one_minmax = evaluate_assignment(group, assignment, one_problem_loads, minmax, 0, 3.0, 0.0)
-    two_minmax = evaluate_assignment(group, assignment, two_problem_loads, minmax, 0, 3.0, 0.0)
-    one_l1 = evaluate_assignment(group, assignment, one_problem_loads, l1, 0, 3.0, 0.0)
-    two_l1 = evaluate_assignment(group, assignment, two_problem_loads, l1, 0, 3.0, 0.0)
+    one_minmax = evaluate_assignment(group, assignment, one_problem_loads, minmax, 3.0, 0, 0)
+    two_minmax = evaluate_assignment(group, assignment, two_problem_loads, minmax, 3.0, 0, 0)
+    one_l1 = evaluate_assignment(group, assignment, one_problem_loads, l1, 3.0, 0, 0)
+    two_l1 = evaluate_assignment(group, assignment, two_problem_loads, l1, 3.0, 0, 0)
 
     assert one_minmax.imbalance_term == pytest.approx(two_minmax.imbalance_term) == 5.0
     assert one_l1.imbalance_term != pytest.approx(two_l1.imbalance_term)
@@ -268,7 +284,7 @@ def test_spread_metric_minmax_is_indifferent_to_a_second_nearly_as_bad_storage()
 def test_beta_025_reproduces_the_three_move_solution() -> None:
     group = section_14_group()
     loads = section_14_loads()
-    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE, min_free_bytes=0)
+    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE)
 
     assert result.assignment == {
         "101:scsi0": "san-a",
@@ -293,7 +309,7 @@ def test_beta_050_reproduces_the_two_move_solution() -> None:
     group = section_14_group()
     loads = section_14_loads()
     objective = dataclasses.replace(DEFAULT_OBJECTIVE, beta_move_count=0.50)
-    result = run_heuristic(group, loads, objective, min_free_bytes=0)
+    result = run_heuristic(group, loads, objective)
 
     assert result.assignment == {
         "101:scsi0": "san-a",
@@ -333,8 +349,8 @@ def test_beta_knob_crossover_matches_section_14_3_exactly() -> None:
 
     for beta, three_move_wins in ((0.25, True), (0.50, False)):
         objective = dataclasses.replace(DEFAULT_OBJECTIVE, beta_move_count=beta)
-        two = evaluate_assignment(group, two_move, loads, objective, 0, u_star, 0.0)
-        three = evaluate_assignment(group, three_move, loads, objective, 0, u_star, 0.0)
+        two = evaluate_assignment(group, two_move, loads, objective, u_star, 0, 0)
+        three = evaluate_assignment(group, three_move, loads, objective, u_star, 0, 0)
         assert (three.total < two.total) is three_move_wins
 
 
@@ -353,9 +369,7 @@ def test_heuristic_iterations_bounds_the_descend_search() -> None:
     only), not two, since it also undoes repair's own move."""
     group = section_14_group()
     loads = section_14_loads()
-    result = run_heuristic(
-        group, loads, DEFAULT_OBJECTIVE, min_free_bytes=0, heuristic_iterations=1
-    )
+    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE, heuristic_iterations=1)
     assert result.repair_moves == 1
     assert result.breakdown.moves == 1  # the swap above nets to one move from the original
 
@@ -366,7 +380,7 @@ def test_reserve_violation_is_repaired_even_with_beta_high_enough_to_forbid_bala
     group = section_14_group()
     loads = section_14_loads()
     objective = dataclasses.replace(DEFAULT_OBJECTIVE, beta_move_count=100.0)
-    result = run_heuristic(group, loads, objective, min_free_bytes=0)
+    result = run_heuristic(group, loads, objective)
     assert not result.breakdown.reserve_statuses["san-a"].violated
     assert result.repair_moves >= 1
 
@@ -390,7 +404,7 @@ def test_repair_does_not_oscillate_when_no_target_can_fully_absorb_the_violation
     storages = (make_storage("san-a"), make_storage("san-b"))
     group = Group(name="g", storages=storages, disks=disks)
 
-    assignment, repairs = _repair(group, seed_assignment(group), min_free_bytes=0)
+    assignment, repairs = _repair(group, seed_assignment(group))
 
     assert repairs == 1  # not 2 -- no back-and-forth
     assert assignment == {"101:scsi0": "san-b", "102:scsi0": "san-a"}
@@ -401,7 +415,7 @@ def test_repair_does_not_oscillate_when_no_target_can_fully_absorb_the_violation
         return assignment[d.key]
 
     san_b = next(s for s in storages if s.id == "san-b")
-    status = compute_reserve_status(san_b, disks, 0, storage_of=storage_of)
+    status = compute_reserve_status(san_b, disks, storage_of=storage_of)
     assert status.shortfall_bytes == round(1.0 * TIB)
 
 
@@ -421,7 +435,6 @@ def test_descend_blocks_new_arrivals_onto_a_cooldown_storage() -> None:
         group,
         loads,
         DEFAULT_OBJECTIVE,
-        min_free_bytes=0,
         cooldown_storages=frozenset({"san-b"}),
     )
 
@@ -453,7 +466,6 @@ def test_descend_still_allows_a_disk_to_move_away_from_a_cooldown_storage() -> N
         group,
         loads,
         DEFAULT_OBJECTIVE,
-        min_free_bytes=0,
         cooldown_storages=frozenset({"san-a"}),
     )
 
@@ -487,7 +499,6 @@ def test_run_heuristic_repair_ignores_storage_cooldown() -> None:
         group,
         loads,
         DEFAULT_OBJECTIVE,
-        min_free_bytes=0,
         cooldown_storages=frozenset({"san-b"}),
     )
 
@@ -507,7 +518,7 @@ def test_pinned_disk_never_moves_even_when_it_would_improve_the_objective() -> N
     group = Group(name="g", storages=storages, disks=disks)
     loads = {"101:scsi0": 3.0, "102:scsi0": 0.1}
 
-    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE, min_free_bytes=0)
+    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE)
 
     assert result.assignment["101:scsi0"] == "san-a"  # never touched despite being all the load
     assert result.repair_moves == 0
@@ -527,11 +538,11 @@ def test_pinned_disks_count_toward_fragmentation_by_default() -> None:
     assignment = seed_assignment(group)
     loads = {"101:scsi0": 1.0, "101:scsi1": 1.0}
 
-    default = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 0, 1.0, 0.0)
+    default = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 1.0, 0.0)
     assert default.fragmentation_term == pytest.approx(0.50)  # both disks count -> 2 storages
 
     movable_only = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=False)
-    excluded = evaluate_assignment(group, assignment, loads, movable_only, 0, 1.0, 0.0)
+    excluded = evaluate_assignment(group, assignment, loads, movable_only, 1.0, 0.0)
     assert excluded.fragmentation_term == 0.0  # 101:scsi1 alone in D^mov -> 1 storage
 
 
@@ -554,7 +565,7 @@ def test_a_pinned_disk_anchors_its_movable_sibling_under_the_default() -> None:
     reunited = dict(split) | {"101:scsi1": "san-a"}
 
     def debt(objective: ObjectiveConfig, assignment: dict[str, str]) -> float:
-        return evaluate_assignment(group, assignment, loads, objective, 0, 0.0, 0.0).affinity_debt
+        return evaluate_assignment(group, assignment, loads, objective, 0.0, 0.0).affinity_debt
 
     # Default: reuniting the VM is an improvement, as it should be.
     assert debt(DEFAULT_OBJECTIVE, split) == pytest.approx(1.0)
@@ -589,10 +600,10 @@ def test_descend_uses_a_swap_when_no_single_move_is_feasible() -> None:
     loads = {"201:scsi0": 1.0, "202:scsi0": 1.0, "203:scsi0": 3.0, "204:scsi0": 3.0}
 
     initial = seed_assignment(group)
-    before = evaluate_assignment(group, initial, loads, DEFAULT_OBJECTIVE, 0, 4.0, 0.0)
+    before = evaluate_assignment(group, initial, loads, DEFAULT_OBJECTIVE, 4.0, 0, 0)
     assert before.imbalance_term == pytest.approx(4.0)  # |2.0-4.0| + |6.0-4.0|
 
-    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE, min_free_bytes=0)
+    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE)
 
     assert result.breakdown.imbalance_term == pytest.approx(0.0, abs=1e-9)  # perfectly balanced
     assert result.breakdown.moves == 2  # exactly one disk from each side, swapped
@@ -622,20 +633,18 @@ def test_descend_relocates_a_whole_multi_disk_vm_neither_single_moves_nor_swaps_
     loads = {"300:scsi0": 0.89, "200:scsi0": 0.185, "200:scsi1": 0.185, "400:scsi0": 0.0}
 
     initial = seed_assignment(group)
-    before = evaluate_assignment(group, initial, loads, DEFAULT_OBJECTIVE, 0, 0.63, 0.0)
+    before = evaluate_assignment(group, initial, loads, DEFAULT_OBJECTIVE, 0.63, 0, 0)
     assert before.imbalance_term == pytest.approx(1.26, abs=1e-6)
 
     # A single one of 200's disks moved alone: fragmentation makes it a
     # net loss, exactly as it was on the real cluster before this fix.
     one_moved = dict(initial)
     one_moved["200:scsi0"] = "san-b"
-    one_moved_total = evaluate_assignment(
-        group, one_moved, loads, DEFAULT_OBJECTIVE, 0, 0.63, 0.0
-    ).total
+    one_moved_total = evaluate_assignment(group, one_moved, loads, DEFAULT_OBJECTIVE, 0.63, 0).total
     before_total = before.total
     assert one_moved_total > before_total  # worse, not better
 
-    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE, min_free_bytes=0)
+    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE)
 
     assert result.assignment["200:scsi0"] == "san-b"
     assert result.assignment["200:scsi1"] == "san-b"
@@ -670,13 +679,11 @@ def test_best_single_disk_alternative_picks_the_lowest_total_candidate() -> None
     loads = {"1:scsi0": 0.5, "2:scsi0": 0.9, "2:scsi1": 0.1}
     u_star = group_average_utilization(group, loads)
     baseline = evaluate_assignment(
-        group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0, u_star, 0.0
+        group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, u_star, 0
     )
     assert baseline.total == pytest.approx(0.5)
 
-    candidate = best_single_disk_alternative(
-        group, loads, DEFAULT_OBJECTIVE, 0, u_star, 0.0, baseline
-    )
+    candidate = best_single_disk_alternative(group, loads, DEFAULT_OBJECTIVE, u_star, 0, baseline)
 
     assert candidate is not None
     assert candidate.disk_key == "2:scsi1"
@@ -694,13 +701,9 @@ def test_best_single_disk_alternative_returns_none_with_only_one_storage() -> No
     disk = make_disk("1:scsi0", 1.0, 0.5, "s1")
     group = Group(name="g", storages=(make_storage("s1"),), disks=(disk,))
     loads = {"1:scsi0": 0.5}
-    baseline = evaluate_assignment(
-        group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0, 0.5, 0.0
-    )
+    baseline = evaluate_assignment(group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0.5, 0)
 
-    assert (
-        best_single_disk_alternative(group, loads, DEFAULT_OBJECTIVE, 0, 0.5, 0.0, baseline) is None
-    )
+    assert best_single_disk_alternative(group, loads, DEFAULT_OBJECTIVE, 0.5, 0, baseline) is None
 
 
 def test_best_single_disk_alternative_returns_none_when_every_disk_is_pinned() -> None:
@@ -708,11 +711,6 @@ def test_best_single_disk_alternative_returns_none_when_every_disk_is_pinned() -
     storages = (make_storage("s1"), make_storage("s2"))
     group = Group(name="g", storages=storages, disks=(disk,))
     loads = {"1:scsi0": 0.5}
-    baseline = evaluate_assignment(
-        group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0, 0.25, 0.0
-    )
+    baseline = evaluate_assignment(group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0.25, 0)
 
-    assert (
-        best_single_disk_alternative(group, loads, DEFAULT_OBJECTIVE, 0, 0.25, 0.0, baseline)
-        is None
-    )
+    assert best_single_disk_alternative(group, loads, DEFAULT_OBJECTIVE, 0, 0.25, baseline) is None

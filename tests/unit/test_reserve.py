@@ -40,7 +40,16 @@ def make_disk(key: str, size_tib: float, storage: str) -> Disk:
     )
 
 
-def make_storage(id_: str, capacity_tib: float, reserve_factor: float = 2.0) -> Storage:
+def make_storage(
+    id_: str,
+    capacity_tib: float,
+    reserve_factor: float = 2.0,
+    *,
+    free_space_soft_bytes: int = 0,
+    free_space_hard_bytes: int = 0,
+    storage_type: str = "dir",
+    allowed_formats: frozenset[str] = frozenset({"raw", "qcow2"}),
+) -> Storage:
     return Storage(
         id=id_,
         capability_weight=1.0,
@@ -51,6 +60,10 @@ def make_storage(id_: str, capacity_tib: float, reserve_factor: float = 2.0) -> 
         foreign_used_bytes=0,
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=free_space_soft_bytes,
+        free_space_hard_bytes=free_space_hard_bytes,
+        storage_type=storage_type,
+        allowed_formats=allowed_formats,
     )
 
 
@@ -65,7 +78,7 @@ def test_section_14_2_san_a_violates_by_half_a_tib() -> None:
         make_disk("102:scsi0", 1.5, "san-a"),
     ]
     storage = make_storage("san-a", capacity_tib=8.0)
-    status = compute_reserve_status(storage, disks, min_free_bytes=0)
+    status = compute_reserve_status(storage, disks)
     assert status.largest_disk_bytes == round(2.0 * TIB)
     assert status.required_reserve_bytes == round(4.0 * TIB)
     assert status.managed_used_bytes == round(4.5 * TIB)
@@ -76,14 +89,14 @@ def test_section_14_2_san_a_violates_by_half_a_tib() -> None:
 def test_section_14_2_san_b_and_san_c_do_not_violate() -> None:
     san_b_disks = [make_disk("103:scsi0", 0.5, "san-b"), make_disk("104:scsi0", 1.0, "san-b")]
     san_b = make_storage("san-b", capacity_tib=8.0)
-    status_b = compute_reserve_status(san_b, san_b_disks, min_free_bytes=0)
+    status_b = compute_reserve_status(san_b, san_b_disks)
     assert status_b.managed_used_bytes == round(1.5 * TIB)
     assert status_b.required_reserve_bytes == round(2.0 * TIB)  # f=2.0 * Z=1.0
     assert not status_b.violated
 
     san_c_disks = [make_disk("105:scsi0", 0.5, "san-c")]
     san_c = make_storage("san-c", capacity_tib=8.0)
-    status_c = compute_reserve_status(san_c, san_c_disks, min_free_bytes=0)
+    status_c = compute_reserve_status(san_c, san_c_disks)
     assert not status_c.violated
 
 
@@ -101,7 +114,7 @@ def test_section_14_3_post_plan_reserve_is_clean_everywhere() -> None:
     ]
     for storage_id, expected_used_tib in (("san-a", 2.0), ("san-b", 3.0), ("san-c", 1.5)):
         storage = make_storage(storage_id, capacity_tib=8.0)
-        status = compute_reserve_status(storage, disks, min_free_bytes=0)
+        status = compute_reserve_status(storage, disks)
         assert status.managed_used_bytes == round(expected_used_tib * TIB)
         assert not status.violated, f"{storage_id}: unexpected shortfall {status.shortfall_bytes}"
 
@@ -109,18 +122,18 @@ def test_section_14_3_post_plan_reserve_is_clean_everywhere() -> None:
 # --------------------------------------------------------------------- edges
 
 
-def test_min_free_bytes_floor_dominates_a_small_largest_disk() -> None:
+def test_free_space_soft_bytes_floor_dominates_a_small_largest_disk() -> None:
     """A 10 GiB largest disk on a 20 TiB LUN: the snapshot term alone (f=2.0)
-    would reserve only 20 GiB; min_free_bytes is the floor that matters."""
+    would reserve only 20 GiB; free_space_soft_bytes is the floor that matters."""
     disks = [make_disk("1:scsi0", 10 / 1024, "big")]  # 10 GiB in TiB units
-    storage = make_storage("big", capacity_tib=20.0)
-    status = compute_reserve_status(storage, disks, min_free_bytes=100 * (1 << 30))
+    storage = make_storage("big", capacity_tib=20.0, free_space_soft_bytes=100 * (1 << 30))
+    status = compute_reserve_status(storage, disks)
     assert status.required_reserve_bytes == 100 * (1 << 30)
 
 
 def test_empty_storage_has_zero_largest_disk_and_reserve() -> None:
     storage = make_storage("empty", capacity_tib=1.0)
-    status = compute_reserve_status(storage, [], min_free_bytes=0)
+    status = compute_reserve_status(storage, [])
     assert status.largest_disk_bytes == 0
     assert status.required_reserve_bytes == 0
     assert status.managed_used_bytes == 0
@@ -138,9 +151,13 @@ def test_foreign_used_bytes_counts_toward_the_reserve_check() -> None:
         foreign_used_bytes=8 * (1 << 30),
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
     disk = make_disk("1:scsi0", 1 / 1024, "s")  # negligible size, negligible reserve
-    status = compute_reserve_status(storage, [disk], min_free_bytes=0)
+    status = compute_reserve_status(storage, [disk])
     # 8 GiB foreign + ~1 GiB managed + a tiny reserve comfortably exceeds 10 GiB.
     assert status.violated
 
@@ -153,7 +170,7 @@ def test_largest_disk_and_managed_used_ignore_other_storages() -> None:
 
 def test_reserve_status_is_frozen() -> None:
     storage = make_storage("s", capacity_tib=1.0)
-    status = compute_reserve_status(storage, [], min_free_bytes=0)
+    status = compute_reserve_status(storage, [])
     with pytest.raises(dataclasses.FrozenInstanceError):
         status.shortfall_bytes = 1  # type: ignore[misc]
 
@@ -172,7 +189,7 @@ def test_transient_charge_ok_single_move_matches_section_8_1() -> None:
         used_bytes=2 * TIB,
         existing_largest_bytes=1 * TIB,
         charge_sizes_bytes=[1 * TIB],
-        min_free_bytes=0,
+        hard_free_bytes=0,
     )
 
 
@@ -185,7 +202,7 @@ def test_transient_charge_ok_single_move_over_capacity_rejects() -> None:
         used_bytes=2 * TIB,
         existing_largest_bytes=1 * TIB,
         charge_sizes_bytes=[3 * TIB],
-        min_free_bytes=0,
+        hard_free_bytes=0,
     )
 
 
@@ -200,7 +217,7 @@ def test_transient_charge_ok_sums_every_concurrent_charge() -> None:
         used_bytes=2 * TIB,
         existing_largest_bytes=0,
         charge_sizes_bytes=[1 * TIB, 1 * TIB],
-        min_free_bytes=0,
+        hard_free_bytes=0,
     )
     assert transient_charge_ok(
         reserve_factor=2.0,
@@ -208,7 +225,7 @@ def test_transient_charge_ok_sums_every_concurrent_charge() -> None:
         used_bytes=2 * TIB,
         existing_largest_bytes=0,
         charge_sizes_bytes=[1 * TIB] * 4,
-        min_free_bytes=0,
+        hard_free_bytes=0,
     )
     assert not transient_charge_ok(
         reserve_factor=2.0,
@@ -216,7 +233,7 @@ def test_transient_charge_ok_sums_every_concurrent_charge() -> None:
         used_bytes=2 * TIB,
         existing_largest_bytes=0,
         charge_sizes_bytes=[1 * TIB] * 5,
-        min_free_bytes=0,
+        hard_free_bytes=0,
     )
 
 
@@ -235,7 +252,7 @@ def test_transient_charge_ok_reserve_term_uses_the_largest_single_charge_not_the
         used_bytes=0,
         existing_largest_bytes=0,
         charge_sizes_bytes=[1 * TIB, 1 * TIB, 3 * TIB],
-        min_free_bytes=0,
+        hard_free_bytes=0,
     )
 
 
@@ -248,18 +265,18 @@ def test_transient_charge_ok_existing_largest_still_dominates_when_bigger() -> N
         used_bytes=0,
         existing_largest_bytes=5 * TIB,
         charge_sizes_bytes=[1 * TIB, 1 * TIB],
-        min_free_bytes=0,
+        hard_free_bytes=0,
     )  # 0 + 2 + 2*5 = 12 > 8
 
 
-def test_transient_charge_ok_min_free_bytes_floor_still_applies() -> None:
+def test_transient_charge_ok_hard_free_bytes_floor_still_applies() -> None:
     assert not transient_charge_ok(
         reserve_factor=0.01,
         capacity_bytes=1 * TIB,
         used_bytes=round(0.9 * TIB),
         existing_largest_bytes=0,
         charge_sizes_bytes=[round(0.05 * TIB)],
-        min_free_bytes=round(0.2 * TIB),
+        hard_free_bytes=round(0.2 * TIB),
     )
 
 
@@ -271,5 +288,5 @@ def test_transient_charge_ok_with_no_charges_is_vacuously_true() -> None:
         used_bytes=10**9,
         existing_largest_bytes=10**9,
         charge_sizes_bytes=[],
-        min_free_bytes=0,
+        hard_free_bytes=0,
     )

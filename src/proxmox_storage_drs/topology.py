@@ -34,10 +34,11 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from proxmox_storage_drs.config import (
     Config,
+    FreeSpaceValue,
     GroupConfig,
     StorageConfig,
     is_storage_pattern,
@@ -46,7 +47,7 @@ from proxmox_storage_drs.config import (
 from proxmox_storage_drs.exceptions import TopologyError
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.state import State, active_disk_cooldowns, empty_state
-from proxmox_storage_drs.units import format_duration_seconds
+from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +82,36 @@ _DEFAULT_FORMAT_BY_STORAGE_TYPE = {
     "pbs": "raw",  # never holds `images`; content-listed only for completeness
 }
 
+# Section 5.3 (C2): "s cannot hold the disk's format." Block/LUN-backed
+# storage types have no image container of their own -- a volume *is* a raw
+# block device on the array -- so they can only ever hold `raw`. File-backed
+# storage types hold a disk as a regular file and support the qemu-img
+# formats PVE offers for them. This is the same type partition
+# `_DEFAULT_FORMAT_BY_STORAGE_TYPE` already draws (its "raw" entries here are
+# raw-only; its "qcow2" entries gain qcow2/vmdk alongside raw) -- one
+# classification of "is this storage type block- or file-backed", not two --
+# with one exception: ordinary (non-thin) `lvm`. PVE 9.2 added snapshot
+# support there by formatting the LV itself as a qcow2 image instead of using
+# it raw (section 3.5's `approximate-size` note has the full mechanism), so a
+# qcow2 volume is a real, live state on that storage type and (C2) must treat
+# it as eligible, not just raw. `lvmthin` needs no such carve-out -- its
+# snapshots are native LVM-thin COW, never qcow2-on-the-LV.
+_ALLOWED_FORMATS_BY_STORAGE_TYPE: dict[str, frozenset[str]] = {
+    "lvm": frozenset({"raw", "qcow2"}),
+    "lvmthin": frozenset({"raw"}),
+    "zfspool": frozenset({"raw"}),
+    "rbd": frozenset({"raw"}),
+    "iscsi": frozenset({"raw"}),
+    "iscsidirect": frozenset({"raw"}),
+    "dir": frozenset({"raw", "qcow2", "vmdk"}),
+    "nfs": frozenset({"raw", "qcow2", "vmdk"}),
+    "cifs": frozenset({"raw", "qcow2", "vmdk"}),
+    "cephfs": frozenset({"raw", "qcow2"}),
+    "pbs": frozenset(),  # never holds `images` -- (C2)'s content-list rule already excludes it
+}
 
-def _parse_pve_config_size_bytes(value: str) -> int | None:
+
+def parse_pve_config_size_bytes(value: str) -> int | None:
     """Parse a `size=` value from a VM config line, e.g. ``"512G"``.
 
     Returns ``None`` if it does not match -- callers fall back further, or
@@ -153,6 +182,23 @@ class Storage:
     foreign_used_bytes: int  # U^ext, section 5.1.1
     saferemove: bool
     saferemove_throughput_bytes_per_sec: float | None
+    # soft_s / hard_s (section 5.3.1), resolved per storage at run start:
+    # plain byte constants, already through pattern-inheritance, percent
+    # conversion and the deprecated min_free_bytes fold -- nothing
+    # downstream (reserve.py, the solver, the scheduler, execute.py's live
+    # re-check) ever looks at free_space config again.
+    free_space_soft_bytes: int
+    free_space_hard_bytes: int
+    # Section 5.3 (C2): storage type from `GET /storage` (never guessed),
+    # and the disk formats it can hold, both needed to fix x_{d,s}=0 for an
+    # ineligible pair.
+    storage_type: str
+    allowed_formats: frozenset[str]
+    # Where each half of the pair came from, spelled for ``verify-storages``
+    # (section 3.5) and nothing else -- display-only, never consulted by the
+    # solver, the scheduler or execute.py. Empty for a hand-built Storage.
+    free_space_soft_source: str = ""
+    free_space_hard_source: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +244,146 @@ def _resolve_reserve_factor(storage_cfg: StorageConfig, config: Config) -> float
     if storage_cfg.reserve_factor is not None:
         return storage_cfg.reserve_factor
     return config.snapshot_reserve.factor
+
+
+def _resolve_free_space_value(value: FreeSpaceValue, capacity_bytes: int) -> int:
+    """Section 5.3.1: an absolute value is used as written; a percentage is
+    ``round(C_s * N / 100)`` against *this storage's own* capacity -- "a
+    tenth of the LUN free" is one policy applied per storage, not one
+    number shared by a whole group."""
+    if value.absolute_bytes is not None:
+        return value.absolute_bytes
+    assert value.percent is not None
+    return round(capacity_bytes * value.percent / 100.0)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedFreeSpace:
+    """One storage's resolved ``soft_s``/``hard_s`` and where each came from
+    (section 5.3.1, section 3.5's ``verify-storages``). The two ``*_source``
+    strings are display-only."""
+
+    soft_bytes: int
+    hard_bytes: int
+    soft_source: str
+    hard_source: str
+
+
+def _free_space_source(value: FreeSpaceValue, level: str, capacity_bytes: int) -> str:
+    """``level`` (global / storage entry / pattern ``/re/``), plus the
+    percent-to-bytes conversion when the value was written as a percentage."""
+    if value.percent is None:
+        return level
+    return f"{level}, {value.percent:g}% of {format_bytes(capacity_bytes)}"
+
+
+def _free_space_level(storage_value: FreeSpaceValue | None, entry_level: str) -> str:
+    return "global" if storage_value is None else entry_level
+
+
+def _resolve_free_space(
+    storage_cfg: StorageConfig,
+    entry_level: str,
+    config: Config,
+    capacity_bytes: int,
+    warnings: list[str],
+) -> ResolvedFreeSpace:
+    """Section 5.3.1: resolve ``soft_s``/``hard_s`` for one storage.
+
+    The mandated order -- inheritance, then percent-to-bytes conversion,
+    then section 11.1's two hard rules against the *written* values, and
+    only then the deprecated ``min_free_bytes`` fold ("validate as written,
+    then fold"): checking ``hard <= soft`` after the fold would let a
+    written ``hard > soft`` hide behind a large ``min_free_bytes`` and
+    surface as a startup failure only once the operator deletes the
+    deprecated key; checking ``soft < C_s`` after the fold would turn an
+    oversized *deprecated* floor -- never a startup failure, section 9.5's
+    permanent shortfall today -- into a new one.
+
+    Raises :class:`TopologyError` for either hard rule; both need ``C_s``,
+    so -- like section 11.4's pattern rules -- they live here, once the
+    cluster inventory is loaded, not in ``config.py``. The oversized-
+    deprecated-floor case is a warning, appended to ``warnings`` in place,
+    never an error (section 11.1's resolution rules). A null ``hard`` (the
+    global default) resolves to the *folded* ``soft_s``, so the deprecated
+    floor stays charged on every in-flight state (section 8.1).
+
+    ``entry_level`` names the config entry that supplied a per-storage
+    value -- ``"storage entry"`` or ``"pattern /re/"`` -- for the
+    provenance strings only.
+    """
+    soft_value = storage_cfg.free_space_soft
+    soft_level = _free_space_level(soft_value, entry_level)
+    if soft_value is None:
+        soft_value = config.free_space.soft
+    soft_written = _resolve_free_space_value(soft_value, capacity_bytes)
+
+    hard_value = storage_cfg.free_space_hard
+    hard_level = _free_space_level(hard_value, entry_level)
+    if hard_value is None:
+        hard_value = config.free_space.hard
+    # ``None`` here is the *global* null -- "no dip below soft" -- and is
+    # settled after the fold below, so it tracks the folded soft rather than
+    # the pre-fold one. A written ``hard`` is validated and kept as written.
+    hard_written = (
+        None if hard_value is None else _resolve_free_space_value(hard_value, capacity_bytes)
+    )
+
+    if hard_written is not None and hard_written > soft_written:
+        raise TopologyError(
+            f"storage {storage_cfg.id!r}: free_space.hard ({hard_written} bytes) exceeds "
+            f"its resolved free_space.soft ({soft_written} bytes) -- a floor above the "
+            "requirement would make every plan for a compliant storage infeasible"
+        )
+    if soft_written >= capacity_bytes:
+        raise TopologyError(
+            f"storage {storage_cfg.id!r}: free_space.soft resolves to {soft_written} bytes, "
+            f"not less than its capacity ({capacity_bytes} bytes) -- a requirement no disk "
+            "could ever leave room for"
+        )
+
+    soft_bytes = max(soft_written, config.snapshot_reserve.min_free_bytes)
+    if soft_bytes >= capacity_bytes and soft_written < capacity_bytes:
+        warnings.append(
+            f"storage {storage_cfg.id!r}: snapshot_reserve.min_free_bytes "
+            f"({config.snapshot_reserve.min_free_bytes} bytes) exceeds its capacity "
+            f"({capacity_bytes} bytes) once folded into free_space.soft -- this storage "
+            "will report a permanent unfixable shortfall every run until the deprecated "
+            "key is lowered or removed"
+        )
+    soft_source = (
+        "folded from snapshot_reserve.min_free_bytes"
+        if soft_bytes > soft_written
+        else _free_space_source(soft_value, soft_level, capacity_bytes)
+    )
+    if hard_written is None:
+        # Section 5.3.1: ``hard: null`` means ``hard_s = soft_s`` -- the
+        # *folded* soft, so a deprecated-key-only config keeps section
+        # 8.1's transient charge as strong as the built
+        # ``max(f*max(Z,z), min_free_bytes)``.
+        return ResolvedFreeSpace(soft_bytes, soft_bytes, soft_source, "= soft (no dip)")
+    assert hard_value is not None
+    return ResolvedFreeSpace(
+        soft_bytes,
+        hard_written,
+        soft_source,
+        _free_space_source(hard_value, hard_level, capacity_bytes),
+    )
+
+
+def _entry_level(group_cfg: GroupConfig, storage_id: str) -> str:
+    """Which entry of ``group_cfg.storages`` supplied this expanded storage's
+    per-storage options: a literal entry (which always wins over a pattern,
+    section 11.4) or the ``/…/`` pattern that matched it."""
+    for entry in group_cfg.storages:
+        if entry.id == storage_id:
+            return "storage entry"
+    for entry in group_cfg.storages:
+        if is_storage_pattern(entry.id) and re.fullmatch(
+            storage_pattern_text(entry.id), storage_id
+        ):
+            return f"pattern {entry.id}"
+    return "storage entry"
 
 
 def _pick_active_node(storage_id: str, storage_resources: list[dict[str, Any]]) -> str:
@@ -281,6 +467,8 @@ def _match_pattern_entries(
                 capability_weight=storage_cfg.capability_weight,
                 reserve_factor=storage_cfg.reserve_factor,
                 saturation_load=storage_cfg.saturation_load,
+                free_space_soft=storage_cfg.free_space_soft,
+                free_space_hard=storage_cfg.free_space_hard,
             )
     return by_id, expansions
 
@@ -408,6 +596,23 @@ def _expand_and_validate_groups(
 
 def _default_format(storage_type: str) -> str:
     return _DEFAULT_FORMAT_BY_STORAGE_TYPE.get(storage_type, "raw")
+
+
+def _allowed_formats(storage_type: str) -> frozenset[str]:
+    """Section 5.3 (C2): the disk formats ``storage_type`` can hold. An
+    unrecognised type falls back to ``{"raw"}`` -- the same conservative
+    default ``_default_format`` uses, and the safe side for a type this
+    module has never seen: rejecting an unfamiliar format as an eligible
+    target is a balance-quality cost, landing a qcow2 disk on a storage
+    that cannot actually hold it is a broken move."""
+    return _ALLOWED_FORMATS_BY_STORAGE_TYPE.get(storage_type, frozenset({"raw"}))
+
+
+def storage_accepts_format(storage: Storage, disk_format: str) -> bool:
+    """Section 5.3 (C2): can ``disk_format`` land on ``storage`` at all?
+    The one place this question is answered -- both solver backends call
+    it to fix ``x_{d,s} = 0`` for an ineligible pair (AGENTS.md section 5)."""
+    return disk_format in storage.allowed_formats
 
 
 def _disk_snapshot_or_orphan_reason(
@@ -555,6 +760,27 @@ def _pin_reason(
     return None
 
 
+def content_item_size(item: Mapping[str, Any]) -> tuple[int, bool] | None:
+    """One content-listing entry's size in bytes and whether it is exact, or
+    ``None`` when the entry carries neither field -- the one place the
+    ``size`` -> ``approximate-size`` fallback order lives, shared by the
+    planning-time join here and by ``execute.py``'s live provisioned-use
+    read (AGENTS.md section 5).
+
+    ``size`` is PVE's exact figure. ``approximate-size`` is the storage
+    plugin's own estimate where an exact one is expensive to determine (see
+    :func:`_resolve_disk_size_and_format`), so the returned flag is ``False``
+    for it and each caller decides how loudly to say so. What ``None``
+    means is the caller's call too: a disk here falls back to the VM
+    config's ``size=``, a foreign volume is skipped with a warning, and
+    the live re-check refuses to start the move."""
+    if "size" in item:
+        return int(item["size"]), True
+    if "approximate-size" in item:
+        return int(item["approximate-size"]), False
+    return None
+
+
 def _resolve_disk_size_and_format(
     key: str,
     volid: str,
@@ -594,17 +820,18 @@ def _resolve_disk_size_and_format(
     disk_format = (content_item.get("format") if content_item else None) or _default_format(
         storage_type
     )
-    if content_item is not None:
-        if "size" in content_item:
-            return int(content_item["size"]), disk_format, None
-        if "approximate-size" in content_item:
-            warning = (
-                f"{key}: {volid!r} has no exact size= in {storage_id!r}'s content listing; "
-                "using its approximate-size instead"
-            )
-            return int(content_item["approximate-size"]), disk_format, warning
+    sized = content_item_size(content_item) if content_item is not None else None
+    if sized is not None:
+        listed_bytes, exact = sized
+        if exact:
+            return listed_bytes, disk_format, None
+        warning = (
+            f"{key}: {volid!r} has no exact size= in {storage_id!r}'s content listing; "
+            "using its approximate-size instead"
+        )
+        return listed_bytes, disk_format, warning
     gap = "not found in" if content_item is None else "has no size= or approximate-size in"
-    size_bytes = _parse_pve_config_size_bytes(params.get("size", "")) or 0
+    size_bytes = parse_pve_config_size_bytes(params.get("size", "")) or 0
     warning = (
         f"{key}: {volid!r} {gap} {storage_id!r}'s content listing; "
         "using the VM config's own size= instead, which can be stale if the volume was "
@@ -790,13 +1017,13 @@ def _build_storages(
             for item in data.content_by_id[sid]:
                 if item.get("volid") in referenced_volids[sid]:
                     continue
-                if "size" in item:
-                    foreign_bytes += int(item["size"])
-                elif "approximate-size" in item:
-                    # Same fallback tier _resolve_disk_size_and_format uses:
-                    # PVE's own estimate, preferred over dropping the
-                    # volume entirely.
-                    foreign_bytes += int(item["approximate-size"])
+                sized = content_item_size(item)
+                if sized is not None:
+                    # `approximate-size` is the same fallback tier
+                    # _resolve_disk_size_and_format uses: PVE's own
+                    # estimate, preferred over dropping the volume
+                    # entirely.
+                    foreign_bytes += sized[0]
                 else:
                     # Same content-listing gap _resolve_disk_size_and_format
                     # guards against, but a foreign volume has no VM config
@@ -819,19 +1046,30 @@ def _build_storages(
         # `payback.compute_wipe_duration_seconds()`, which is where the
         # magnitude is taken -- do not normalize it here.
         throughput = definition.get("saferemove_throughput")
+        capacity_bytes = int(status["total"])
+        free_space = _resolve_free_space(
+            storage_cfg, _entry_level(group_cfg, sid), config, capacity_bytes, warnings
+        )
+        storage_type = str(definition.get("type", ""))
         storages.append(
             Storage(
                 id=sid,
                 capability_weight=storage_cfg.capability_weight,
                 reserve_factor=_resolve_reserve_factor(storage_cfg, config),
                 saturation_load=storage_cfg.saturation_load,
-                capacity_bytes=int(status["total"]),
+                capacity_bytes=capacity_bytes,
                 used_bytes=int(status["used"]),
                 foreign_used_bytes=foreign_bytes,
                 saferemove=bool(definition.get("saferemove", False)),
                 saferemove_throughput_bytes_per_sec=(
                     float(throughput) if throughput is not None else None
                 ),
+                free_space_soft_bytes=free_space.soft_bytes,
+                free_space_hard_bytes=free_space.hard_bytes,
+                storage_type=storage_type,
+                allowed_formats=_allowed_formats(storage_type),
+                free_space_soft_source=free_space.soft_source,
+                free_space_hard_source=free_space.hard_source,
             )
         )
     return tuple(storages)

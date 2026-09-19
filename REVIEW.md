@@ -226,6 +226,126 @@ AB-01 through AB-05 and AB-07 are fixed (documentation/comment corrections only,
 change); AB-06 is acknowledged without a change, since the changelog entry it names is already
 tagged and released.
 
+A **twentieth pass** (section 39) reviews commit `9b44ba9` — the plan-only redesign of the
+free-space policy as per-storage requirements (§5.3.1, §5.3 (C5), the §6 override, the §7.3
+repair exemption, §8.1's hard floor, and the §14.8 companion fixture), the first new plan
+material since the nineteenth pass. Thirteen findings (AC-01..AC-13) are identified: five
+blocking — §7.3's per-move "excluded from both sums" exemption contradicts the plan-level
+override the built `payback.py` implements and, as written, changes `fc-tier1`'s recorded
+payback numbers (against the commit message's own "every existing fixture stays valid"); the
+exclusion semantics is undefined against §7.2's plan-level benefit while §14.8 renders the
+override semantics the same commit abandoned; §14.8's unique-optimum claim rests on the (C2)
+format rule both solver backends document as not implemented (the as-built optimum is a
+one-move repair at objective 1.081, positive benefit, payback-passing); §14.8's capacity gate is
+open at 127% against the 25% default, so its "the requirement, and nothing else" isolation
+claim is false; and the `hard: null` reversed-order arithmetic drops the very floor the commit
+introduced and uses a stale `Z_b`. Five spec gaps (the revert test vs the built "source
+presently violating" detection, with its evaluation point unspecified; a migration path for a
+per-storage `min_free_bytes` that never existed, with both-set precedence undefined; `hard:
+null` overloaded between global and per-storage; `100%` accepted by the grammar and rejected by
+`soft_s < C_s`; §8.1's false "relaxation of (C5)" claim, with a dip claim that fails whenever
+`r_s > 0`). Three smaller (§9.5's unrendered repair marker; the unaddressed thrash risk of an
+unsatisfiable requirement; phase 13's row missing the `min_free_bytes` signature-change sweep).
+**Section 40** records the resolution: all thirteen fixed in the plan, and resolving AC-01/AC-02
+surfaced one further defect in the commit's own semantics — a per-move trigger misses
+**redundant repairs** (fc-tier1's own shape: either move alone repairs, so neither is marked),
+which would let payback veto a repairing plan — so the exemption is re-hung on the plan's
+*outcome* (final `Σ r_s` strictly below the current assignment's), with the revert test kept as
+the per-move output marker; `fc-tier1`'s recorded numbers survive under every semantics
+considered, and the plan now says so with the arithmetic.
+
+A **twenty-first pass** (section 41) verifies the AC-01..AC-13 fixes in commit `15a8982` and
+re-derives the arithmetic they changed. All thirteen are resolved, and the redundant-repair
+defect the author found while resolving AC-01/AC-02 is confirmed independently (`fc-tier1`'s
+own two-move plan contains no revert-test repair, so the per-move trigger would have lost its
+exemption) — the outcome trigger is the right fix. Six new findings (AD-01..AD-06) are
+identified, all in the fix commit's own new material: two Medium (the `min_free_bytes` /
+`free_space.soft` both-set rule is self-contradicting and, because a fresh config spells out
+`soft: 0`, can silently lower a configured floor on upgrade — `max()` is the fail-safe
+resolution; and phase 13's row still misses the `evaluate_plan_payback()` signature change the
+plan-level outcome trigger forces, plus two of the four test modules asserting the old flag),
+three Low (an arithmetic slip and a stale `Z_b` in the two lines AC-05 rewrote; the exemption
+trigger's breadth argued in only one direction), one Info (§7.3's converse example leans on
+§8.2's exception 2, which the same commit documents as spec-only). **Section 42** records the
+resolution: all six fixed in the plan — AD-01 by folding the deprecated key into its replacement
+with `max()` (the fail-safe union) and adding the rule to §11.1's table, AD-02 by naming the
+`evaluate_plan_payback()` signature/data-flow change and the two omitted test modules in phase
+13's row, AD-03/AD-04 by correcting the two §14.8 lines, AD-05 by arguing the outcome trigger's
+breadth in both directions, AD-06 by qualifying the exception-2 scheduling claim.
+
+A **twenty-second pass** (section 43) verifies the AD-01..AD-06 fixes in commit `0feb648` and
+re-derives the two §14.8 lines they corrected (`5.0` and `9.3` both check, and the fix
+incidentally reconciles a third line that only holds at the corrected `Z_roomy = 0`). All six
+are resolved, `make check` is green on the tree and the PDF stamp matches the Markdown, so §42's
+verification line holds. Seven new findings (AE-01..AE-07), all in the fix commit's own new
+material: three Medium — AD-01's `max()` is specified at the **global** level, where a
+percentage has no single value and a per-storage `free_space.soft` still silently lowers the
+deprecated floor (the built key is a floor on *every* storage, so taking the `max()` per storage
+fixes both); that rule landed in §11.1's table, whose preamble says every row is a hard error
+and **never** a warning-and-continue; and phase 13's artefact sweep still misses the two shipped
+docs that document the flag being replaced (`docs/manual/27-plan.md`'s `--json` field list,
+`docs/internals/96-payback.md`'s normative statement of the exemption) plus the example config
+AD-01's own rationale now leans on — three Low (two further sweep gaps, the unpinned meaning of
+"final assignment", and the deprecated key inheriting the new `soft_s < C_s` startup error) and
+one Info (the outcome trigger is a strict *subset* of both §6's override and today's
+`has_reserve_override`, which is a stronger and more useful claim than the "same condition" the
+paragraph makes). **Section 44** records the resolution: all seven fixed in the plan — AE-01 by
+taking the `max()` per storage after percent conversion (matching what `min_free_bytes` means in
+the built code, and making the percentage case well defined), AE-02 by moving the both-set rule
+out of §11.1's hard-error table into a new warn-and-continue resolution list, AE-03/AE-04 by
+replacing phase 13's enumerated sweep with the two greps (`git grep -l resolves_reserve_violation`,
+`git grep -l evaluate_plan_payback`) and naming the shipped docs, the corpus bundles, the fifth
+call site and the example config, AE-05 by pinning "final assignment" to the R-02 scheduled state
+and naming the `reserve_statuses` source for the threaded sums, AE-06 by exempting the folded
+deprecated value from the `soft_s < C_s` startup error (warn and report as the unfixable shortfall
+it always was), AE-07 by stating the strict-subset property in place of the "same condition"
+claim.
+
+A **twenty-third pass** (section 45) verifies the AE-01..AE-07 fixes in commit `2622e6b`. All
+seven are resolved: the per-storage fold matches what the built key means (`reserve.py:143`,
+`schedule.py:147`), both greps were re-run and their recorded file lists are exact, the trigger
+is pinned to the scheduled assignment, and AE-07's strict-subset property holds as a proof.
+`make check` is green and the PDF stamp matches. Six new findings (AF-01..AF-06): three Medium —
+`config_schema.json` is missing from phase 13's row, and the schema is deliberately closed
+(`additionalProperties: false` throughout), so the whole `free_space` config surface is
+unreachable until it changes; the grep-defined sweep was applied to the flag and to one function
+signature but *not* to the phase's largest change, the `min_free_bytes` scalar → `soft_s`/`hard_s`
+pair and the deprecation of a documented config key (`git grep -l min_free_bytes` returns 30
+files, including the manual's own reference section for the key and `.agents/domain-invariants.md`,
+which states the invariant in terms of it); and the fold's place in the validate-then-resolve
+pipeline is unspecified, leaving `soft_s < C_s` reading as an error on exactly the case the new
+resolution list says must warn, and letting a `hard > soft` typo hide behind the deprecated key
+until the operator deletes it as instructed — two Low (an absolute "cannot be lowered at all"
+claim its own paragraph contradicts for `hard`; the example config's `free_space.hard` needing
+to ship as `null`) and one Info (the commit message claims an example-config change the commit
+does not contain). **Section 46** records the resolution: five fixed in the plan — AF-01 by
+listing `config_schema.json` first in phase 13's row with the shape the closed schema needs,
+AF-02 by defining the scalar sweep as a third grep (`git grep -l min_free_bytes`, 30 files
+today) and naming `execute.py` and `collect.py` in the module list, AF-03 by pinning the
+"validate as written, then fold" order in §5.3.1 and qualifying both §11.1 rows, AF-04 by
+scoping the claim to the plan endpoint, AF-05 by fixing the example config's values at
+`soft: 0` / `hard: null` — and AF-06 recorded rather than rewritten, because it is a defect in
+a commit message already in history.
+
+A **twenty-fourth pass** (section 47) reviews the accumulated `feat/free-space-requirements`
+branch as a whole — the full diff of `IMPLEMENTATION_PLAN.md` against `main` (five commits: the
+§5.3.1 redesign plus the AC-, AD-, AE- and AF-fix rounds), rather than the individual commits
+passes 20-23 already covered. Per §46's own request it re-checks the AF fixes (all six hold),
+re-runs the three sweep greps the phase-13 row is defined by (all three recorded lists exact),
+and re-derives §5.3.1/§7.3/§8.1/§14.8's arithmetic against the final accumulated text. Eight
+findings (AG-01..AG-08) are identified — five Low, three Info, none reopening a design decision.
+The headline is a §14.8 parenthetical whose payback arithmetic does not verify: the as-built
+one-move repair's benefit is negative (−6.2×10⁴ load·s) and it passes payback only via the same
+exemption the sentence implies it does not need.
+
+All eight are **resolved** (section 48), none refuted. Each was re-checked before being accepted
+— AG-01 by re-deriving all three §14.8 assignments from §5.3/§5.4/§7.1-7.2 (the table in §48
+reproduces every figure the plan states, and the one it does not), AG-04 against
+`payback.py:352-354` and `cli.py`'s execution gate, where the composition hole is real in the
+built code as well as in the specification. Two are fixed wider than the finding asked: AG-02 had
+a second instance of the same stale attribution one paragraph further down, and AG-04's fix
+covers the saturation deferral alongside the duration rejection.
+
 ---
 
 ## 0. Overall assessment
@@ -5769,6 +5889,1418 @@ coverage** (unchanged: no production logic changed beyond one added comment), `g
 --check` and `validate_corpus.py --check` both clean, `docs-check` clean (`IMPLEMENTATION_PLAN.pdf`
 and the manual PDF rebuilt and re-stamped in the same commit as their Markdown, per AGENTS.md
 §7.4).
+
+---
+
+## 39. Twentieth-pass review — the free-space policy redesign (§5.3.1, §7.3, §8.1, §14.8)
+
+Reviewed commit `9b44ba9` ("plan: redesign free-space policy as per-storage requirements (section
+5.3.1)") — the plan-only redesign of the free-space policy: per-storage `free_space.soft`/`hard`
+requirements (bytes, byte-unit strings, percentages; global, per-storage, per-`/regex/`-pattern),
+the (C5) integration `R_s = max(f_s·Z_s, soft_s)`, the §6 gate override, the §7.3 payback
+exemption for repairs, §8.1's transient hard floor, and the §14.8 companion fixture
+(`free-space-repair.yaml`, specified but not yet built — phase 13). The review verified every
+as-built claim against the code (`payback.py`'s `has_reserve_override` plan-level override,
+`schedule.py`'s `_resolves_reserve_violation` "source presently violating" detection,
+`heuristic.py`/`optimize.py`'s documented (C2) format gap, `config.py`'s global-scalar
+`min_free_bytes`, `fc-tier1.expected.json`'s recorded payback numbers) and re-derived §14.8's
+arithmetic independently (the initial table, `b̄ = 0.51`, `F = 1.608 → 1.216`, `E = 0 → 4.10`,
+objective 5.283 vs the 602-variant 5.308, the soft:0 counterfactual 0.804, benefit −1.23×10⁸,
+cost 15 729, ratio −7 827, both `hard`-sweep orders) — all confirmed.
+
+### 39.1 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| AC-01 | High | plan §7.3, `payback.py`, `fc-tier1.expected.json` | §7.3 as written specifies a per-move exemption ("exempt moves are excluded from both sums") that contradicts the built plan-level override (`payback.py:352` `aggregate_ok = has_reserve_override or benefit ≥ λ·cost`, every move in the sums) and, applied to `fc-tier1` — whose `102:scsi0` comes off a reserve-short storage — changes the fixture's recorded `total_cost_load_seconds: 26214.4` and its ratio, against the commit message's "every existing fixture and config stays valid" |
+| AC-02 | High | plan §7.3, §14.8 | "Excluded from both sums" is not well-defined: `benefit` is a plan-level quantity (§7.2's E/F/A before→after), not a sum over moves, and §14.8 renders "REJECT — overridden", the override semantics the same commit abandoned — pick one semantics and state it |
+| AC-03 | High | plan §14.8, `heuristic.py:51`, `optimize.py:72` | §14.8's unique two-move optimum rests on the (C2) format rule that is specified but not implemented (`topology.Storage` exposes no type/format, so every group storage is an eligible target); without it the one-move repair `601:scsi0 packed → swapme` is legal and optimal (objective ≈ 1.081, Σ r_s = 0, positive benefit, payback passes), collapsing the unique-optimum claim, the negative benefit and the whole exemption demonstration; phase 13's row named none of the required work (topology plumbing, both backends, fixture schema, oracle) |
+| AC-04 | Medium | plan §14.8 | The fixture's capacity gate is open: fills 0.75/0.68/0.10 give `(max b − min b)/b̄ = 0.65/0.51 = 127%` against `capacity_spread_threshold`'s 25% default, so "E = 0, both balance gates shut" names two of three gates and "the requirement, and nothing else, is what makes the engine act" is false — the gate's ACT is what lets the engine plan |
+| AC-05 | Medium | plan §14.8 | The `hard: null` reversed-order arithmetic is wrong twice over: it drops the `max(…, hard_b)` floor this same commit introduced (`5.8 + 0.5 + max(2·max(1.0, 0.5), 3.0) = 9.3`, not `6.3 + 2.0 = 8.3`) and reads `Z_b` from before `603` left; "drops roomy to 6.3 used" also conflates the post-603 state (5.8) with the post-601 one (6.3) |
+| AC-06 | Medium | plan §5.3/§7.3, `schedule.py:171` | The revert test is specified without saying how it relates to the built repair detection it replaces (`_resolves_reserve_violation`: "is this disk's current storage presently violating (C5)?"), which by construction cannot see the indirect repair §14.8 needs; the replacement touches `schedule.py`, `ScheduledMove`/`MoveCost` in `payback.py`, and `optimize.py`'s documented asymmetry, and the test's evaluation point (re-score vs re-solve) is unspecified |
+| AC-07 | Medium | plan §5.3.1, `config.py:122` | "A per-storage `min_free_bytes` keeps its storage's `soft_s`" describes a migration path for a key that does not exist: `StorageConfig` carries only `capability_weight`/`reserve_factor`/`saturation_load`, and `min_free_bytes` is one global scalar threaded as a parameter through ~14 call sites; what happens when both `snapshot_reserve.min_free_bytes` and `free_space.soft` are set is undefined |
+| AC-08 | Medium | plan §5.3.1 | `hard: null` is overloaded: the YAML comment says null = soft, the inheritance paragraph says per-storage null means inherit global — global `hard: "10%"` plus per-storage `hard: null` has two answers |
+| AC-09 | Low | plan §5.3.1, §11.1 | The percentage grammar accepts `0 ≤ N ≤ 100` while `soft_s < C_s` rejects 100% — a value the grammar accepts and no storage can ever satisfy; make the grammar `0 ≤ N < 100` |
+| AC-10 | Low | plan §8.1 | "This is a relaxation of (C5)" is wrong: only the floor component relaxes (hard ≤ soft); the snapshot term is *strengthened* (`f_b·max(Z_b, z_d) ≥ f_b·Z_b`) and the source is still charged — as written a reader could conclude §8.1 is implied by (C5); the following dip claim ("solely on a storage the finished plan leaves compliant") is also false whenever `r_s > 0`, which §5.3 explicitly permits |
+| AC-11 | Low | plan §9.5 | The example shows a `repair` marker and a `repair: true` plan-output field that no shipped renderer emits, inside a section whose surrounding prose is annotated "As built" — mark it phase 13 pending the way the other pending items are |
+| AC-12 | Low | plan §5.3.1 | The thrash risk of an unsatisfiable requirement (soft: 30% on an 85%-full cluster) is unaddressed: it bypasses the drift and imbalance gates on every run and is payback-exempt — both anti-thrash mechanisms disabled for exactly the case that recurs forever, leaving only `cooldown_per_disk`; §12's new row covers reporting, not this |
+| AC-13 | Low | plan §12 (phase 13 row) | The row does not name the `min_free_bytes` scalar → per-storage `soft_s`/`hard_s` signature change across `compute_reserve_status`/`run_heuristic`/`transient_invariant_ok`/`order_moves` and their `cli.py` call sites, nor the unit tests asserting the old flag |
+
+### 39.2 What the review verified as correct
+
+All of §14.8's numbers except the AC-05 line: the initial used/`Z_s`/`R_s`/free/`r_s` table,
+`b̄ = 0.51` and `F = 1.608 → 1.216` (ΔF = 0.392), `E = 0 → 4.10`, objective 5.283 (no-move at
+soft: 0.804) at α=1.0/β=0.25/γ=0.05/κ=0.5/δ=0.5, the γ tiebreak against the 602 variant (5.308,
+so the uniqueness claim holds *given the format rule*), benefit −1.2311×10⁸, cost 15 729
+(2 × duration, saferemove off, matching §7.1), ratio −7 827, `10.3 > 10` infeasible and
+`7.3 + 2.0 = 9.3` with the 2.7 TiB dip. The design itself — the `max()` integration, the
+lexicographic stage-1 minimization, the gate override, the soft/hard split with the endpoint
+checked by (C5) and the transient floor by §8.1 — is sound, and the worked example is unusually
+well-checked. What went wrong is scope honesty (AC-01, AC-03), not the model.
+
+---
+
+## 40. Resolution of twentieth-pass findings (AC-01..AC-13)
+
+All thirteen findings are fixed in `IMPLEMENTATION_PLAN.md` (this is a plan-only change; phase 13
+builds it). Resolving AC-01/AC-02 surfaced one further defect in the commit's own semantics,
+fixed with them:
+
+**The redundant-repair hole (found resolving AC-01/AC-02).** The commit's per-move trigger —
+"a plan that contains a repair move is exempt" — misses a plan of **redundant repairs**: two
+moves off a violating storage where *either one alone* repairs it. `fc-tier1` is exactly this
+shape (holding `102:scsi0` back leaves san-a at `3.5 + 4.0 = 7.5 ≤ 8`; holding `101:scsi1` back
+at `3.0 + 4.0 = 7.0 ≤ 8`), so neither move passes the revert test, the plan contains no repair
+move, loses its exemption, and a payback-failing redundant-repair plan would be vetoed —
+leaving the violation standing against the mandate. §7.3 now hangs the exemption on the plan's
+**outcome** — exempt iff the plan's final `Σ r_s` is strictly below the current assignment's —
+and keeps the revert test as the per-move `repair: true`/`false` output marker. The outcome
+trigger is deliberately narrower than the built `has_reserve_override` (a plan that moves a disk
+off a violating storage but ends no less short is exempt today and will not be), and the plan
+says so; §8.2's priority-1 scheduling test keeps its current-state form.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AC-01 | Resolved | §7.3's exemption is plan-level again, matching the built `payback.py`: the aggregate test is skipped for the whole plan, every move stays in the sums. The reviewer's fixture-churn concern is **refuted by the arithmetic**: under the revert test `fc-tier1`'s two-move plan contains no repair moves (either move alone repairs san-a), so the aggregate test runs and accepts at ratio 7 344.4 ≥ 10 — the fixture's recorded numbers (`total_cost_load_seconds: 26214.4`, `benefit_load_seconds: 192529137.63`, `ratio: 7344.4`, `accepted: true`) are unchanged under the old override, the commit's per-move semantics, and the final outcome trigger. §7.3 states this with the worked numbers, and §9.5's example now shows the correct rendering (both moves `repair: false`, exemption note on the plan, not on move 1). |
+| AC-02 | Resolved | The exemption semantics is stated explicitly: option (a) — any repairing plan skips the economic test for the whole plan — chosen because it matches the built code and needs no fixture churn; the revert test is defined as the per-move *marker*, evaluated by re-scoring `Σ r_s` on the final assignment with one `x` held (no re-solve), and §14.8 renders exactly that ("REJECT — overridden: the plan repairs (Σ r_s 0.5 → 0)"). The marker/trigger disagreement cases are spelled out (redundant repairs: plan repairs, no move marked; load-bearing move on a non-repairing plan: marked, plan not exempt). |
+| AC-03 | Resolved | §14.8 gained a "Two prerequisites" paragraph stating the (C2) gap openly: the as-built optimum is the one-move `601:scsi0 packed → swapme` (objective 1.081, positive benefit, payback passes), so the fixture ships **with** phase 13's format work, its expected file recording `requires_format_eligibility: true` so a premature run fails loudly; capacity cannot substitute (§8.1's predicate is monotone in `z_d`) and pinning `603` does not work either (verified: `601 → swapme` stays legal and optimal) — the reviewer's suggested `pinned: true` workaround is refuted. Phase 13's row now scopes in `topology.Storage` type/format fields, both backends' `x_{d,s}=0` fixing, the fixture schema and the oracle. |
+| AC-04 | Resolved | The fixture sets `gates.capacity_spread_threshold: null` and §14.8 says why: the gate's ACT is what lets the engine plan, the requirement is what makes the solver move — the isolation claim is about the solver's objective, not the gate stack. The soft:0 counterfactual is tied to §9.5's ACT-but-no-moves case (with the gate at its default) or the engine declining to act (with it nulled), pinned deliberately. |
+| AC-05 | Resolved | The reversed order is `603 → swapme` first (its own check on `swapme`: `1.0 + 1.0 + max(2·1.0, 3.0) = 6.0 ≤ 10` ✓), which empties `roomy` to 5.8 used; `601` then lands at `5.8 + 0.5 + max(2·max(1.0, 0.5), 3.0) = 9.3 ≤ 10` ✓ — the floor kept, `Z_roomy` re-read at 0.5 after `603` left, and the hard:10% reversed second move (`5.8 + 0.5 + max(1.0, 1.0) = 7.3`) added for symmetry. |
+| AC-06 | Resolved | §7.3 and phase 13's row name the replacement precisely: `ScheduledMove.resolves_reserve_violation` (set by `schedule.py`'s "source presently violating" test) is replaced by the outcome trigger plus per-move revert-test markers, while `order_moves()`'s internal priority-1 test keeps §8.2's current-state form; the evaluation point is fixed (re-score `Σ r_s` on the final assignment with one `x` held, no re-solve), and the unit tests asserting the old flag (`test_schedule.py`'s ordering assertions, `test_cli.py`'s JSON assertions) are swept with it. |
+| AC-07 | Resolved | §5.3.1 now states what the built code actually carries: `min_free_bytes` was never more than a global scalar (`config.py`'s `snapshot_reserve` block, no per-storage form, unlike `reserve_factor`), it is deprecated syntax for the global `free_space.soft`, and when both are set **`free_space.soft` wins** with the warning naming the ignored key — the same fail-safe posture as §11.1's other either/or rules. |
+| AC-08 | Resolved | The two `null`s never collide: global `hard: null` is a *value* ("no dip below soft"), per-storage `hard: null` is an *absence* ("inherit the global") — stated in the YAML comment, the inheritance paragraph and the defaults paragraph, the same inheritance `reserve_factor` already has. |
+| AC-09 | Resolved | The grammar is `0 ≤ N < 100` (grammar bullet and §11.1 row): `100%` is rejected by the grammar itself rather than accepted here and failed by `soft_s < C_s` later. |
+| AC-10 | Resolved | §8.1 now says only the *floor component* relaxes (hard ≤ soft); the snapshot term is **strengthened** (`f_b·max(Z_b, z_d) ≥ f_b·Z_b`) and the source is still charged — the two facts that make §8.1 a separate invariant rather than a corollary of (C5) — and the dip claim carries the `r_s > 0` case (a dip may also sit on a storage whose shortfall the plan already minimizes and reports, which §5.3 permits). |
+| AC-11 | Resolved | §9.5's example is corrected to the final semantics (no `repair` marker on move 1's line; the exemption note names the plan, and both moves are `repair: false` — redundant repairs) and the "As built, phase 13 pending" note now covers the exemption note, the per-move markers and the `--json` field, naming today's `resolves_reserve_violation` field as the built flag §7.3 replaces. |
+| AC-12 | Resolved | §5.3.1 gained a thrash paragraph: an unsatisfiable requirement bypasses the gates every run and a shortfall-reducing plan is payback-exempt — accepted on purpose (the alternative is hysteresis on a safety property, which §6 forbids for the snapshot reserve), with the reporting mitigations named (the §9.5 unfixable-shortfall line, every run) and an explicit warning not to "fix" it with a back-off timer without revisiting §6's no-hysteresis rule first. |
+| AC-13 | Resolved | Phase 13's row now names the full signature change: the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py` and every `cli.py` call site that threads the scalar today — plus the flag-asserting unit-test sweep (AC-06). |
+
+Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
+`docs-check` (the plan PDF rebuilt and re-stamped in the same commit as the Markdown, per
+AGENTS.md §7.4). No production code changed in this pass; every fix is to the plan text, and the
+one behavioural claim that changed (the exemption trigger) is specified against the built code it
+will replace in phase 13.
+
+---
+
+## 41. Twenty-first-pass review — verification of the AC-01..AC-13 fixes
+
+Reviewed commit `15a8982` ("plan: fix twentieth-pass review findings (AC-01..AC-13)") — a
+plan-and-REVIEW-only change (230 lines of `IMPLEMENTATION_PLAN.md`, the PDF rebuilt and
+re-stamped in the same commit; `7012840a…` verified matching on both sides). No production code
+touched, as the message states.
+
+### 41.1 Verification of the AC-fixes
+
+All thirteen are resolved. The load-bearing claims were re-derived rather than taken:
+
+- **AC-01/AC-02.** The plan-level outcome trigger is now stated consistently in §5.3 point 3,
+  §7.3, §9.5, §12's table and §14.8; no "excluded from both sums" survives anywhere in the plan.
+- **The redundant-repair defect the author found is real, and is a better finding than AC-01
+  was.** Confirmed independently against the fixture: `fc-tier1`'s san-a starts
+  `4.5 + 2·2.0 = 8.5 > 8.0` (`r = 0.5`, `Z = 2.0` from `101:scsi0`); holding `102:scsi0` back
+  leaves `3.5 + 4.0 = 7.5 ≤ 8`, holding `101:scsi1` back leaves `3.0 + 4.0 = 7.0 ≤ 8`. Neither
+  move passes the revert test, so under the commit's own per-move trigger the plan would have
+  contained no repair move and lost its exemption. The outcome trigger (final `Σ r_s = 0`
+  strictly below the current `0.5`) is the correct fix.
+- **The fixture-churn refutation holds.** `fc-tier1.expected.json` records
+  `total_cost_load_seconds: 26214.4`, `benefit_load_seconds: 192529137.63`, `ratio: 7344.4`,
+  `accepted: true` and **no** per-move flag — untouched under any of the three semantics, as
+  §7.3 now claims. The corpus expected files do record `resolves_reserve_violation`, all
+  `false`, exactly as stated.
+- **AC-03/AC-04.** The (C2) format gap and the open capacity gate are stated openly, with the
+  as-built one-move optimum (objective 1.081) recorded and `requires_format_eligibility: true`
+  as the loud-failure marker. The monotonicity argument refuting the reviewer's suggested
+  `pinned: true` substitute is correct: §8.1's predicate is monotone in `z_d`, so no capacity
+  shape accepts the 1.0 TiB `603` while rejecting the 0.5 TiB `601`.
+- **AC-05..AC-13.** The revert test's evaluation point, the `min_free_bytes`-as-global-scalar
+  correction, the two `null`s, `0 ≤ N < 100`, §8.1's "only the floor relaxes" plus the
+  `r_s > 0` dip case, §9.5's phase-13 note and the thrash paragraph are all correct as written.
+  §14.8's new revert-test worked example verifies: holding `603` leaves roomy at
+  `5.8 + 1.0 + 0.5 = 7.3` used, `R = 3.0`, `r = 0.3` — marked `repair: true` ✓.
+
+### 41.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| AD-01 | Medium | plan §5.3.1, §11.1, `config/drs.example.yaml` | The `min_free_bytes` / `free_space.soft` both-set rule is self-contradicting — "`free_space.soft` wins … refusing to guess which one is meant" (picking a winner *is* guessing; refusing would be a hard error) — and unsafe on upgrade: §5.3.1 documents the block as `free_space: soft: 0` and the example config spells out every knob (it ships `min_free_bytes: 0` today), so an operator adopting the new example config while keeping `snapshot_reserve.min_free_bytes: 1 TiB` hits the both-set case **by default** and loses a 1 TiB floor to a warning. Both keys express the same quantity — a minimum-free floor — so `max(min_free_bytes, free_space.soft)` is the fail-safe resolution and a hard error the second-best; "soft wins" is the only one of the three that can reduce safety. The rule also lives only in §5.3.1 prose: §11.1's table, the normative load-time rule list, has no row for it |
+| AD-02 | Medium | plan §12 (phase 13 row), `payback.py:319`, `cli.py:2415`, `tests/unit/test_payback.py` | The phase-13 row describes the AC-01 fix as replacing a flag, but `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s` at all — the plan-level outcome trigger needs the current and final slack threaded in from its sole caller (`cli.py:2415`), i.e. a signature and data-flow change, not a flag swap. The named test sweep also lists only `test_schedule.py` and `test_cli.py`; `test_payback.py` (two tests construct `resolves_reserve_violation=True` purely to assert the override being replaced, at `:334` and `:369`) and `test_execute.py` are omitted |
+| AD-03 | Low | plan §14.8 | Arithmetic slip on a line added to fix an arithmetic slip: the new `swapme` transient check reads `1.0 + 1.0 + max(2·1.0, 3.0) = 6.0 ≤ 10`; it is `5.0`. Verdict unchanged |
+| AD-04 | Low | plan §14.8 | AC-05's stale `Z_b` is only half-fixed: the corrected line still reads `max(2·max(1.0, 0.5), 3.0)`, contradicting the clause immediately after it ("`Z_roomy` has dropped to 0.5 with `603` gone") and the `hard: "10%"` parenthetical two bullets down, which correctly uses `2·0.5`. With `603` gone roomy holds no *managed* disk (the 5.8 TiB is foreign), so the inner term is `max(0, 0.5) = 0.5`. The `hard` floor dominates either way, so `9.3` stands — but this is the exact line AC-05 was raised about |
+| AD-05 | Low | plan §7.3, §5.3.1 | §7.3 argues the outcome trigger's breadth in one direction only (narrower than the built `has_reserve_override`) and never states the other: one byte of shortfall reduction exempts the **entire** plan — arbitrarily expensive balance moves included — from the economic test. Combined with §5.3.1's own new thrash paragraph (a permanently-short cluster yields a shortfall-reducing plan on every run), every plan on such a cluster is fully payback-exempt forever. Not a regression (the built override is broader still) and per-move exclusion was correctly rejected, but it is now a deliberate documented choice and deserves the same paragraph the thrash risk got |
+| AD-06 | Info | plan §7.3, §14.8 | §7.3's converse example says such a move is "scheduled first by §8.2's exception 2", while §14.8 in the same commit notes exception 2 is spec-only and phase 13 does not scope it — qualify it ("once exception 2 lands") or drop the scheduling half of the claim |
+
+### 41.3 Assessment
+
+The substantive redesign is right, and the commit is honest about what it changes in built
+behaviour — which is what the twentieth pass was actually complaining about. Four of the six
+new findings are presentational (AD-03, AD-04, AD-06) or a documentation gap in an argument that
+is itself sound (AD-05). AD-02 is ordinary scope bookkeeping for phase 13. **AD-01 is the one
+item that should not ship as written**: it is the only remaining finding that can make a running
+cluster less safe rather than a plan less clear, and the fix — resolve the deprecated key and
+its replacement with `max()` rather than a winner, and put the rule in §11.1's table — costs a
+sentence.
+
+---
+
+## 42. Resolution of twenty-first-pass findings (AD-01..AD-06)
+
+All six findings are fixed in `IMPLEMENTATION_PLAN.md` (plan-only, as with the two commits the
+findings are about; phase 13 builds all of it). None is refuted — each was verified against the
+built code before fixing (`payback.py:319`'s signature and its sole production caller
+`cli.py:2415`, `test_payback.py:334`/`:369` and `test_execute.py:117`'s flag constructions,
+`config/drs.example.yaml`'s `min_free_bytes: 0`), and the two arithmetic findings were re-derived
+by hand.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AD-01 | Resolved | §5.3.1's both-set rule is now the fail-safe union: the global soft floor is `max(min_free_bytes, free_space.soft)`, the warning names both keys and the resolved floor, and the paragraph states the upgrade scenario that makes a "winner" rule unsafe (adopting the new example config's `free_space: soft: 0` while keeping an old `min_free_bytes: 1 TiB` would drop a configured floor to zero behind a deprecation-shaped warning). §11.1's table gains the rule as a normative row, and §12's phase-13 row carries the same `max()` resolution so the implementation cannot reintroduce the winner semantics. |
+| AD-02 | Resolved | Phase 13's row now states the outcome trigger as a signature and data-flow change: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s`, so the current and final slack are threaded in from its sole production caller (`cli.py`'s plan builder). The test sweep names all four modules: `test_schedule.py`'s ordering assertions, `test_cli.py`'s `resolves_reserve_violation` JSON assertions, `test_payback.py`'s two override tests (`:334`, `:369`) and `test_execute.py`'s `ScheduledMove` constructions. |
+| AD-03 | Resolved | §14.8's `swapme` transient check corrected to `1.0 + 1.0 + max(2·1.0, 3.0) = 5.0 ≤ 10`. Verdict unchanged. |
+| AD-04 | Resolved | §14.8's reversed-order second move corrected to `max(2·max(0, 0.5), 3.0)`: with `603` gone `roomy` holds no managed disk (the 5.8 TiB is foreign, `601` has not arrived), so the inner term is `max(0, 0.5) = 0.5` and the `hard` floor of 3.0 dominates either way — `9.3` stands, now derived from the correct `Z_roomy = 0`. |
+| AD-05 | Resolved | §7.3 now argues the outcome trigger's breadth in both directions: the narrow side as before (narrower than the built `has_reserve_override`), and the wide side as a deliberate documented cost — one byte of shortfall reduction exempts the whole plan, so on a permanently-short cluster (§5.3.1's thrash paragraph) every shortfall-reducing plan is fully payback-exempt for as long as the shortfall stands. The paragraph gives the reason (the mandate does not grade repairs by size, and the plan-level benefit of §7.2 leaves no principled way to price only part of a repairing plan) and the bounds (the three hard rules still apply per move, the plan output carries every move's cost and `repair` marker, and the trigger requires an actual shortfall reduction — the same condition §6's override singles out). |
+| AD-06 | Resolved | §7.3's converse example no longer asserts the scheduling half unconditionally: the move is marked `repair: true`, and scheduled first only "once §8.2's exception 2 is implemented (it is spec-only today, as §14.8 records)". |
+
+Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
+`docs-check` (the plan PDF rebuilt and re-stamped in the same commit as the Markdown, per
+AGENTS.md §7.4). No production code changed; every fix is to the plan text and to this file.
+
+---
+
+## 43. Twenty-second-pass review — verification of the AD-01..AD-06 fixes
+
+Reviewed commit `0feb648` ("plan: fix twenty-first-pass review findings (AD-01..AD-06)") — 50
+lines of `IMPLEMENTATION_PLAN.md` and 103 of this file, the PDF rebuilt and re-stamped in the
+same commit (`3c7ab684…` verified matching the Markdown on both sides). No production code
+touched, as the message states. `make check` runs clean on the tree (941 passed, 96.38%
+coverage, `generate_expected.py --check` and `validate_corpus.py --check` both OK), so §42's
+verification line holds.
+
+### 43.1 Verification of the AD-fixes
+
+All six are resolved, and the two arithmetic ones were re-derived rather than taken:
+
+- **AD-03 ✓.** With `603 → swapme` scheduled first, `swapme` holds 1.0 used (`604:scsi0`),
+  `z_d = 1.0`, `Z_swapme = 1.0`, so §8.1's predicate is
+  `1.0 + 1.0 + max(2·max(1.0, 1.0), 3.0) = 5.0 ≤ 10` ✓ — as the line now reads.
+- **AD-04 ✓, and it repairs a line the finding did not name.** With `603` gone `roomy` holds
+  only the 5.8 TiB of foreign volumes, so `Z_roomy = 0` and `601` arriving gives
+  `5.8 + 0.5 + max(2·max(0, 0.5), 3.0) = 9.3 ≤ 10` ✓. The `hard: "10%"` bullet's parenthetical
+  — `5.8 + 0.5 + max(1.0, 1.0) = 7.3` — was already written against `Z_roomy = 0` (at the stale
+  `Z = 1.0` it would read `8.3`), so the two derivations agreed only after this fix; they
+  contradicted each other before it.
+- **AD-01/AD-02/AD-05/AD-06 ✓** are in the plan as §42 describes. The code claims in AD-02's new
+  row check out: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` at
+  `payback.py:319`, its sole production call site at `cli.py:2415`, `test_payback.py:334`/`:369`
+  and `test_execute.py`'s `ScheduledMove` constructions.
+- **AD-05's substance is right and its conclusion understated** — the true relation between the
+  outcome trigger and the conditions it is compared to is a strict subset, not a rough match;
+  see AE-07.
+
+The findings below are all in this commit's own new material, and none of them reopens a
+decision the plan has made: AD-01's resolution rule is right, and AE-01/AE-02 are about *where*
+it applies and *where* it is written down.
+
+### 43.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| AE-01 | Medium | plan §5.3.1, `reserve.py:143` | The `max()` is specified at the **global** level — "the global soft floor is `max(min_free_bytes, free_space.soft)`" — then handed to most-specific-wins inheritance. Two gaps. (a) **A percentage has no global value**: §5.3.1's own grammar makes `"10%"` a per-storage number ("one `"10%"` … demands 2 TiB and 200 GiB"), so with `soft: "10%"` and `min_free_bytes: 1 TiB` there is no single `max()` to take and no single "resolved floor" for the warning to name — the percentage wins on the 20 TiB LUN, the deprecated scalar on the 2 TiB one. (b) **A per-storage `free_space.soft` still silently lowers the deprecated floor**: fold-to-global-then-override means `storages[].free_space.soft: 100 GiB` beats a global `min_free_bytes: 1 TiB` on that storage — AD-01's hazard exactly, one level down, in the same mid-migration config shape. The built semantics settles both: `min_free_bytes` is applied today as a floor on *every* storage (`reserve.py:143`, `required = max(round(reserve_factor * largest), min_free_bytes)`), with no per-storage form, so resolving it per storage — `soft_s = max(soft_s_resolved, min_free_bytes)`, after percent conversion — preserves what the key means today *and* makes the percentage case well defined. The warning then says the deprecated floor applies as a lower bound to every storage instead of naming one number |
+| AE-02 | Medium | plan §11.1 | The new row is in the wrong table, and the table says so itself: §11.1's preamble reads "Every one of them is a failure that produces a clear error and a non-zero exit, **never a warning-and-continue** — a misconfigured balancer moving production disks is worse than one that refuses to start." The row immediately below it is a warn-and-continue *resolution* rule — the one `free_space` case §5.3.1 explicitly does not fail. An implementer working from §11.1 (where load-time rules are supposed to live) would make a both-set config a startup refusal, contradicting §5.3.1's "the old key keeps working" and turning the routine upgrade shape AD-01 is about into a hard stop. AD-01 asked for the rule to be normative alongside the other config rules; the table it landed in inverts its semantics. A short "resolution rules (warn and continue)" list under the table fixes it — the `free_space` rows that *are* errors stay where they are |
+| AE-03 | Medium | plan §12 (phase 13 row), `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, `config/drs.example.yaml` | The sweep AD-02 extended covers the tests but not the **shipped documentation** of the field being replaced. `docs/manual/27-plan.md:208` lists `resolves_reserve_violation` as a `moves[]` field of `--json` output and `:86-94` documents its meaning in prose; `docs/internals/96-payback.md:105` states the exemption normatively — "a plan containing any move with `resolves_reserve_violation=True` always passes the aggregate ratio test". §7.3 replaces both: the field becomes the per-move `repair` marker with a revert-test definition, and the exemption becomes plan-level. The manual's prose is not even a rename — it fuses the scheduling rule (§8.2 priority 1, which *keeps* the current-state form) with the payback exemption (which does not), so phase 13 has to split it in two. Neither file appears in the row, which says only "the manual documents the block" — a different edit, about `free_space`. AGENTS.md §8.0 (every shipped artefact stands without the plan) makes a stale `--json` field list and a false normative sentence a shipped defect, not a docs chore. The row also omits `config/drs.example.yaml`, which AD-01's rationale now leans on ("the new example config … spells out `free_space: soft: 0`"): it is a shipped artefact (§0, line 235) and today carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all |
+| AE-04 | Low | plan §12 (phase 13 row), §7.3 | Two more items the sweep list misses. (a) `evaluate_plan_payback()` has a **fifth** call site: `tests/unit/test_affinity_repair_fixture.py:226` calls it positionally with three arguments and asserts nothing about the flag — it breaks on the *signature* change the row now asserts, not on the flag removal, so "all four modules asserting the old flag" does not cover it. (b) `tests/corpus/*.expected.json` record the flag 41 times across the two bundles, and §7.3 sends the reader to §12's row for them ("re-validated in phase 13 with everything else that asserts the old flag — see §12's row") — but the row never mentions `tests/corpus/` |
+| AE-05 | Low | plan §7.3, §12 (phase 13 row), `cli.py:2374` | §7.3 triggers on "its final assignment's `Σ r_s`" without saying *which* final assignment, and the codebase has already decided this once: `cli.py:2374` evaluates `final_breakdown` against `schedule_result.final_assignment` — "the state reachable by the moves that actually got ordered … not an aspirational one a partial deadlock never reaches (REVIEW.md R-02)" — while the solver's own `.breakdown` is the target. A partially deadlocked plan can reach `Σ r_s = 0` in the target and not move the needle in the scheduled plan; taking the target would exempt a plan that does not repair. One clause, citing R-02, pins it. While there: the two numbers the row wants threaded in already exist at that call site — `ObjectiveBreakdown.reserve_statuses` carries `shortfall_bytes` per storage (`heuristic.py:103`, `:335`), and both `solve_outcome.initial_breakdown` and `final_breakdown` are in hand two lines above the `evaluate_plan_payback()` call. Naming that source makes the "data-flow change" actionable and bounds it: two sums over objects already passed to the benefit computation, no new plumbing through the solver |
+| AE-06 | Low | plan §5.3.1, §11.1 | Folding the deprecated key into `free_space.soft` also subjects it to the new `soft_s < C_s` **hard error**, and the `max()` rule can only raise the folded value. Today a `min_free_bytes` above some storage's capacity is not an error: `reserve.py:143` simply makes `R_s` unsatisfiable, that storage reports a permanent shortfall, and the tool keeps balancing (§9.5's unfixable-shortfall line is this case). After the fold the tool refuses to start — on upgrade, for a config that has been running. Defensible as typo-catching, but it is not "the old key keeps working". Either exempt the folded value from `soft_s < C_s` (warn, and let it report as an unfixable shortfall as today), or say in §5.3.1 that the fold deliberately promotes it to a startup error |
+| AE-07 | Info | plan §7.3 | The new bounding sentence says the trigger "requires an actual shortfall reduction, the same condition §6's override already singles out". Not the same condition: §6 fires on a storage **being** in violation at plan time, the outcome trigger on the plan **reducing** the total. The real relation is stronger and worth stating, because it is a migration-safety property: `Σ r_s` can only fall if some storage's `used_s` or `Z_s` falls, which requires a disk to *leave* that storage — and that storage was in violation. So every outcome-exempt plan is also exempt under today's `has_reserve_override`, and §6's override was already open for it: the change can only **remove** exemptions, never create one. The rarity argument survives intact (a subset of a rare condition is at least as rare), and "deliberately narrower" becomes a provable claim rather than a comparison |
+
+### 43.3 Assessment
+
+The commit does what its message says, and the two arithmetic fixes are right — including one
+line the AD-04 finding did not name, which only becomes consistent with the rest of §14.8 now.
+Nothing here reopens a decision: AD-01's `max()` is the correct resolution, AD-05's wide-side
+argument is honest about a real cost, and AD-06's qualification is exactly the scope the
+as-built code supports.
+
+**AE-01 is the one that should not ship as written.** It is the only finding left that can still
+lower a configured floor on a running cluster, and it does so through the two config shapes
+§5.3.1 itself blesses — a percentage soft, and a per-storage override. The fix is smaller than
+the rule it replaces: take the `max()` per storage after percent conversion, which is also
+precisely what `min_free_bytes` means in the built code today. AE-02 is next by cost-to-fix
+ratio (a misplaced row that tells an implementer to fail a config the prose says must keep
+working), then AE-03, which is the difference between phase 13 shipping with a manual that
+documents a `--json` field the code no longer emits.
+
+One structural note, since this is the third consecutive pass to find the same shape of defect:
+every one of AD-02, AE-03 and AE-04 is an *enumerated* sweep list that turned out to be one or
+two items short. The enumeration is the defect. Phase 13's row could say instead: "every file
+that mentions `resolves_reserve_violation` — `git grep -l` gives the list — is updated with it,"
+which is self-maintaining, shorter than the sentence it replaces, and today returns exactly the
+thirteen files at issue (four test modules, two corpus expected files, two shipped docs, three
+source modules, plus the plan and this file). The signature change needs its own grep — `git
+grep -l evaluate_plan_payback`, which is what surfaces AE-04's fifth call site, the one file
+that touches the function without ever naming the flag.
+
+---
+
+## 44. Resolution of twenty-second-pass findings (AE-01..AE-07)
+
+All seven findings are fixed in `IMPLEMENTATION_PLAN.md` (plan-only, as with the three commits the
+findings are about; phase 13 builds all of it). None is refuted — each was verified against the
+built code before fixing (`reserve.py:143`'s per-storage `max(round(f_s·largest), min_free_bytes)`,
+`95-schedule.md`'s documented fold of the same floor into the transient check, `27-plan.md`'s
+`--json` field list and fused prose, `96-payback.md:105`'s normative exemption sentence,
+`test_affinity_repair_fixture.py:226`'s positional call, the 41 corpus flag records,
+`cli.py:2374`'s R-02 comment), and both greps were run to confirm the file lists the structural
+note names.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AE-01 | Resolved | §5.3.1's fold is now per storage, after percent-to-bytes conversion: `soft_s = max(soft_s_resolved, min_free_bytes)` for every storage. The paragraph states both reasons: the built key is a floor on *every* storage (`reserve.py` applies it per storage, and the built transient check charges it on every in-flight state the same way), and a percentage has no global value to fold into (`"10%"` is 2 TiB on one LUN and 200 GiB on another). The warning now reports the deprecated key as a lower bound on every storage rather than one resolved number, and the paragraph notes the transient side needs no rule of its own (`hard: null` default keeps §8.1 exactly as strong as the built check). Phase 13's row carries the same per-storage fold. |
+| AE-02 | Resolved | The both-set rule is out of §11.1's hard-error table and into a new "Resolution rules (warn and continue)" list directly under it, which states explicitly that everything in the table is a hard error and that these two situations are resolutions that warn and continue by design. The `free_space` rows that are errors stay in the table. |
+| AE-03 | Resolved | Phase 13's row no longer enumerates the sweep: it is defined by `git grep -l resolves_reserve_violation` (with today's file list recorded: three source modules, four test modules, both corpus expected bundles, `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, plus the plan and REVIEW.md) and `git grep -l evaluate_plan_payback` (adding `test_affinity_repair_fixture.py` and `docs/internals/00-overview.md`). The row names the manual's prose as a *split*, not a rename — its scheduling half keeps §8.2 priority 1's current-state form, its exemption half becomes the plan-level outcome trigger — and adds `config/drs.example.yaml` to the phase (it gains the `free_space` block in the same commit; today it carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all). |
+| AE-04 | Resolved | Both sub-items are covered by the grep-defined sweep: the fifth `evaluate_plan_payback` call site (`test_affinity_repair_fixture.py`, whose positional three-argument call breaks on the signature change without ever naming the flag) is named explicitly in the row as the reason the second grep exists, and the corpus bundles are in the first grep's recorded list. |
+| AE-05 | Resolved | §7.3 pins "final assignment" to the **scheduled** one — `schedule_result.final_assignment`, the same R-02 distinction the payback benefit already draws — and says why: a partially deadlocked plan is scored on what it will really run, and a plan whose target repairs but whose schedule never gets there is not exempt. §5.3 point 3 and the revert-test sentence carry the same pinning. Phase 13's row names the data source for the threaded sums: `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses`, with `solve_outcome.initial_breakdown` and the R-02 `final_breakdown` already in hand at the call site — two sums over objects already passed to the benefit computation, no new plumbing through the solver. |
+| AE-06 | Resolved | §5.3.1 states the deliberate non-promotion: the fold does not subject the deprecated value to the `soft_s < C_s` startup error — a `min_free_bytes` above some storage's capacity has never been a startup failure (the built code reports it as that storage's permanent shortfall, §9.5), and "the old key keeps working" cannot mean a running config refuses to start on upgrade. The error applies to the new knob's own value; an oversized deprecated floor warns and reports as the unfixable shortfall it always was. The rule is also the second entry of §11.1's new resolution list. |
+| AE-07 | Resolved | §7.3's bounding sentence now states the strict-subset property instead of the "same condition" claim: `Σ r_s` can only fall if some storage's `used_s` or `Z_s` falls, which requires a disk to *leave* that storage — and a storage whose shortfall a move reduces was in violation when the move left it — so every outcome-exempt plan is also exempt under today's `has_reserve_override` and §6's override was already open for it. The change can only remove exemptions, never create one, which is what makes "deliberately narrower" a provable claim rather than a comparison. The rarity argument survives (a subset of a rare condition is at least as rare). |
+
+Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
+`docs-check` (the plan PDF rebuilt and re-stamped in the same commit as the Markdown, per
+AGENTS.md §7.4). No production code changed; every fix is to the plan text and to this file.
+
+---
+
+## 45. Twenty-third-pass review — verification of the AE-01..AE-07 fixes
+
+Reviewed commit `2622e6b` ("plan: fix twenty-second-pass review findings (AE-01..AE-07)") — 83
+lines of `IMPLEMENTATION_PLAN.md` and 130 of this file, the PDF rebuilt and re-stamped in the
+same commit (`dcd84304…` verified matching the Markdown on both sides). No production code
+touched. `make check` runs clean (941 passed, 96.38% coverage, fixtures and corpus `--check`
+OK), so §44's verification line holds.
+
+### 45.1 Verification of the AE-fixes
+
+All seven are resolved, and the code claims the fixes rest on were checked against the tree:
+
+- **AE-01 ✓.** The fold is per storage, after percent conversion, and both of its stated reasons
+  are true of the built code: `reserve.py:143` applies `min_free_bytes` as a floor on every
+  storage (`required = max(round(reserve_factor * largest), min_free_bytes)`), and
+  `schedule.py:147` folds the same floor into the transient check (`docs/internals/95-schedule.md:95`
+  documents it). One benefit the paragraph does not claim: because the deprecated key is now a
+  *bound* rather than a resolved number, the warning no longer needs storage capacities and can
+  be emitted at config-load time, where the rest of the deprecation lives.
+- **AE-02 ✓.** The row is out of the hard-error table and into a "Resolution rules (warn and
+  continue)" list that opens by saying everything above it is a hard error. See AF-03 for the
+  two hard-error statements that were not adjusted to match it.
+- **AE-03/AE-04 ✓.** Both greps were re-run here and the recorded lists are exact:
+  `git grep -l resolves_reserve_violation` returns the thirteen files the row names, and
+  `git grep -l evaluate_plan_payback` adds exactly `test_affinity_repair_fixture.py` and
+  `docs/internals/00-overview.md`. The manual's prose is correctly described as a *split*
+  rather than a rename.
+- **AE-05 ✓.** §7.3 and §5.3 point 3 both pin the trigger to `schedule_result.final_assignment`,
+  and the phase-13 row names `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses` as
+  the source — which is right: both breakdowns are in hand at `cli.py:2415`, and `cli.py:2374`
+  already evaluates `final_breakdown` against the scheduled assignment for R-02's reason.
+- **AE-06 ✓** in §5.3.1 and in the new resolution list — but not in the two places an
+  implementer reads the validation rules from; see AF-03.
+- **AE-07 ✓.** The strict-subset argument is sound as stated: `Σ r_s` is a sum of non-negative
+  terms, so it can only fall if some `r_s` falls; `r_s` can only fall if `used_s` or `Z_s` falls,
+  which requires a disk to leave `s`; and `r_s > 0` before means `s` was in violation in the
+  current assignment, which is exactly what `schedule.py:171`'s test asks. Every outcome-exempt
+  plan is therefore `has_reserve_override`-exempt today.
+
+The findings below are in this commit's new material and in what its two structural fixes did
+*not* reach. None of them reopens a resolved decision.
+
+### 45.2 Findings summary
+
+| ID | Severity | Module(s) | Summary |
+|----|----------|-----------|---------|
+| AF-01 | Medium | plan §12 (phase 13 row), `src/proxmox_storage_drs/config_schema.json` | Phase 13's row never mentions `config_schema.json`, and the schema is **deliberately closed**: its own `$comment` says "`additionalProperties: false` throughout is deliberate: a typo'd key is a knob with no formula … this is where it is caught". So until the schema gains a top-level `free_space` object *and* a `free_space` property on `groups[].storages[]`, every config using the block §5.3.1 specifies is rejected by structural validation before a line of the new `config.py` code can run — §11.1's own pipeline is "validate with `jsonschema` for structure, **then** apply these semantic rules". The row enumerates seven source modules and the schema is not one of them. It also needs §5.3.1's grammar, which is wider than the existing `min_free_bytes` entry's: `{"type": ["string", "number", "null"]}` for `soft` and `hard` in both locations (integer bytes, byte-unit string, `"N%"`, and `null` with two distinct meanings by level) |
+| AF-02 | Medium | plan §12 (phase 13 row), `docs/manual/10-configuration.md`, `docs/internals/{60,91,95}-*.md`, `.agents/domain-invariants.md` | The grep-defined sweep was applied to the flag and to `evaluate_plan_payback()` — but not to phase 13's *larger* change, the `min_free_bytes` scalar → `soft_s`/`hard_s` pair and the deprecation of a **documented config key**. That half is still an enumeration of source modules with no artefact list at all. `git grep -l min_free_bytes` returns 30 files; beyond the seven modules the row names and the files the other two greps cover, it adds `docs/manual/10-configuration.md:504` (a dedicated `### snapshot_reserve.min_free_bytes` reference section — the page where a deprecation has to be announced and the `free_space` block documented; the row says only "the manual documents the block"), `docs/manual/00-installation.md:42`, `docs/manual/30-safety-and-status.md:12`, `docs/internals/60-topology.md:25`, `docs/internals/91-optimize.md:81`, `docs/internals/95-schedule.md:95`, `.agents/domain-invariants.md:16` — which states invariant 2 as `used + max(f·Z_s, min_free_bytes) ≤ C_s`, the contract file agents read before touching this code — `.agents/testing.md:25`, `config_schema.json` (AF-01), and both `tests/corpus/*/config.yaml` inputs. §44 cites `95-schedule.md` as evidence for AE-01's fix, so that file was read during this commit and still did not enter the sweep. The remedy is the one the row already applies twice: define it as `git grep -l min_free_bytes` and record today's list |
+| AF-03 | Medium | plan §11.1, §5.3.1, §12 (phase 13 row) | The fold's position in the validate-then-resolve pipeline is unspecified, and two hard-error statements read as though it has already happened. (a) The table row `free_space.soft < C_s` **for every storage, after resolution** now covers the folded value, which is exactly the case the resolution list below it says must warn and continue — the row was not qualified when AE-06's exception was written, and phase 13's row repeats it unqualified ("validates `hard ≤ soft` and `soft < C_s`"). (b) Unaddressed anywhere: the fold can only *raise* `soft_s`, so a config whose written `hard` exceeds its written `soft` passes `hard ≤ soft` while a large `min_free_bytes` is present and becomes a **hard error the moment the operator deletes the deprecated key** — the deprecation warning's own advice turns a running config into a startup failure. One sentence fixes both: validate the `free_space` values as written, *then* fold the deprecated floor in, and say that order — with the `< C_s` row qualified as "the `free_space` value's own, before the fold (see the resolution rules)" |
+| AF-04 | Low | plan §5.3.1 | "Folded per storage, the deprecated floor cannot be lowered by the new knob **at all** — not by a smaller global `soft`, not by a per-storage override, not by a percentage landing on a small LUN" is contradicted three sentences later by the same paragraph: "an operator who then sets `hard` below it is using the new knob for the dip it exists to allow". The concession is the right call — `hard` exists to allow a transient dip — but "at all" is an absolute claim about a knob that demonstrably can lower the floor on the transient side. Say "cannot be lowered as a plan-endpoint floor", and let the `hard` sentence stand as the one deliberate exception |
+| AF-05 | Low | plan §12 (phase 13 row), `config/drs.example.yaml` | The row now requires the example config to gain the `free_space` block but not what it must contain, and one value is load-bearing: it must ship `hard: null`. With `soft: 0` the per-storage fold protects the deprecated floor at the plan endpoint (`max(0, min_free_bytes)`), but an example that spelled out any `hard` below that floor would weaken §8.1's transient charge for precisely the operators the fold exists to protect — the built check charges `min_free_bytes` on every in-flight state (`schedule.py:147`), and `hard_s` replaces it. `hard: null` (= `soft`) is the only value that leaves an upgrading deprecated-key config exactly as strong as it is today. One clause in the row, or a sentence in §5.3.1's example block |
+| AF-06 | Info | commit message | The message says the grep sweep pulls in "`docs/internals/00-overview.md`, and `config/drs.example.yaml`, **which gains the `free_space` block in the same commit**". It does not: this commit changes four files and the example config is not among them (it still has no `free_space` block). The plan's own wording is correct — in §12's row, "the same commit" means phase 13's implementation commit — but the sentence reads in `git log` as a claim about this commit, and the git record is the one artefact no later fix can amend |
+
+### 45.3 Assessment
+
+Both structural fixes in this commit are the right shape. Replacing an enumerated sweep with
+`git grep -l` is the correct generalisation of AE-03/AE-04, and the per-storage fold (AE-01) is
+strictly better than the global one: it matches what the built key means, it makes the
+percentage case well defined, and it turns the deprecation warning into something emittable at
+config-load time. AE-07's subset property is now a proof rather than a comparison, and it holds.
+
+**AF-01 and AF-02 are the two that should not ship as written**, and they are the same defect
+seen from two sides. The row generalised the sweep for the flag and for one function signature —
+the two things the previous pass happened to name — and left the phase's largest change, the one
+that deprecates a **documented config key**, on the enumeration that has now come up short three
+passes running. `config_schema.json` is the sharp end of it: a closed schema means the feature's
+entire config surface is unreachable until that file changes, and it is the one file in the
+phase whose omission cannot be discovered by reading the code the row does name. A third grep —
+`git grep -l min_free_bytes`, 30 files today — closes both, and would have closed AF-01 without
+anyone thinking about schemas at all.
+
+AF-03 is next, because it is the only finding here that can still turn a running configuration
+into a refusal to start, and (b) does it at the exact moment the operator follows the
+deprecation warning's instructions. AF-04 through AF-06 are one clause each.
+
+---
+
+## 46. Resolution of twenty-third-pass findings (AF-01..AF-06)
+
+Five of the six are fixed in `IMPLEMENTATION_PLAN.md` (plan-only, as with the three commits the
+findings are about; phase 13 builds all of it). AF-06 is a defect in a commit message that is
+already in history and is recorded rather than rewritten — history is not rewritten in this
+repository — with the plan wording that invited it disambiguated so it cannot recur.
+
+**These fixes were written by the reviewer who raised the findings**, unlike §§40/42/44, where
+the finder and the fixer were different. This section is therefore a record, not an independent
+verification: a later pass should re-check it the way §45 re-checked §44.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AF-01 | Resolved | §12's phase-13 row now lists `config_schema.json` **first**, with the reason (the schema is closed — `additionalProperties: false` throughout, deliberately — so a `free_space:` key is rejected structurally before `config.py` sees it) and the shape (a top-level `free_space` object and a `free_space` property on `groups[].storages[]`, each with `soft`/`hard` typed `["string", "number", "null"]` for §5.3.1's grammar). §5.3.1's closing sentence carries the same point, so the constraint is stated where the block is specified as well as where it is built. |
+| AF-02 | Resolved | The row defines the scalar → `soft_s`/`hard_s` sweep by `git grep -l min_free_bytes` — the third grep, alongside the two AE-03/AE-04 added — and records today's list of 30 files, calling out what the enumeration had missed: `docs/manual/10-configuration.md`'s `### snapshot_reserve.min_free_bytes` reference section (which becomes the deprecation notice and the `free_space` documentation), the other three manual pages, `docs/internals/{60-topology,91-optimize,95-schedule}.md`, `.agents/domain-invariants.md` (whose invariant 2 reads `used + max(f·Z_s, min_free_bytes) ≤ C_s` and becomes `soft_s`), `.agents/testing.md`, both `tests/corpus/*/config.yaml` replay inputs, and the seven test modules. Two source files the module list had also missed are now named in it: `execute.py`'s live execution-time re-check and `collect.py`'s bundle manifest, which serialises the scalar so a replayed bundle must carry the pair. |
+| AF-03 | Resolved | §5.3.1 gains a **"Validate as written, then fold"** paragraph pinning the pipeline — inheritance, percent-to-bytes conversion, §11.1's two `free_space` checks against the written values, *then* the fold — with both failure modes spelled out: `hard ≤ soft` checked after the fold lets a written `hard > soft` hide behind a large `min_free_bytes` and surface as a startup failure the moment the operator deletes the deprecated key (the very thing the warning asks for), and `soft_s < C_s` checked after the fold errors on the oversized deprecated floor that AE-06 deliberately does not promote. §11.1's two table rows carry the same qualification — `hard ≤ soft` "**before** the deprecated `min_free_bytes` fold", and `soft_s < C_s` "the `free_space` value's own, **not** the folded `min_free_bytes`" — and phase 13's row now says "on the written values, before that fold". |
+| AF-04 | Resolved | §5.3.1's absolute claim is scoped: the deprecated floor cannot be lowered **as a plan-endpoint requirement**, and the sentence now says outright that the transient floor is the one place the new knob may move it, pointing at the `hard` sentence that makes that deliberate. |
+| AF-05 | Resolved | Phase 13's row states the example config's values, not just that it gains the block: `soft: 0` / `hard: null`, with `hard: null` marked load-bearing — any spelled-out `hard` below the folded floor would weaken §8.1's transient charge for exactly the operators the fold protects, since the built check charges `min_free_bytes` on every in-flight state and `hard_s` replaces it, while `hard: null` (= `soft`) leaves an upgrading deprecated-key config exactly as strong as it is today. |
+| AF-06 | Recorded, not fixable | The message of `2622e6b` says `config/drs.example.yaml` "gains the `free_space` block in the same commit"; it does not — that commit changes four files and the example config is not among them. The commit is in history and history is not rewritten here (AGENTS.md §4), so the correction lives in this section: **the example config gains the block in phase 13's implementation commit, not in `2622e6b`.** The plan sentence that invited the misreading now says "in **phase 13's own commit**" instead of "in the same commit". |
+
+Verification: `make check` — fmt-check, lint, typecheck, tests with coverage, fixtures `--check`,
+`docs-check` (the plan PDF rebuilt and re-stamped alongside the Markdown, per AGENTS.md §7.4).
+No production code changed; every fix is to the plan text and to this file.
+
+---
+
+## 47. Twenty-fourth-pass review — the free-space branch as a whole
+
+Reviewed the accumulated `feat/free-space-requirements` branch against `main`: the full diff of
+`IMPLEMENTATION_PLAN.md` (+477/−21 over five commits — `9b44ba9`'s §5.3.1 redesign and the
+`15a8982`/`0feb648`/`2622e6b`/`b089bc6` AC/AD/AE/AF fix rounds), REVIEW.md's own passes 20-23,
+and the rebuilt PDF stamps. The four fix commits were each reviewed on landing (§§39, 41, 43,
+45); this pass reviews what none of them could see — the final accumulated text, where four
+rounds of fixes sit on top of one another — and, per §46's own request ("a later pass should
+re-check it the way §45 re-checked §44"), independently verifies the AF fixes, whose finder and
+fixer were the same reviewer.
+
+The accumulated design is sound and, for the first time in this feature's history, internally
+consistent on every load-bearing rule: the grammar, the two-level `null` semantics, the
+per-storage fold, the validate-as-written-then-fold order, the outcome trigger and the revert
+test now say the same thing in §5.3, §5.3.1, §7.3, §11.1, §12 and §14.8. What remains is
+residue of the fix rounds themselves: one number in §14.8 that does not verify (AG-01), three
+sentences that survived a later fix's blast radius (AG-02, AG-03, AG-06), one composition edge
+the newly precise trigger definition left unpinched (AG-04), and two small specification gaps
+(AG-05, AG-08).
+
+### 47.1 Verification run
+
+- `make check` at branch tip (`b089bc6`): green end to end — fmt-check, lint, typecheck,
+  **941 passed, 1 warning**, **96.38% line coverage**, `generate_expected.py --check` OK,
+  `validate_corpus.py --check` OK, and the PDF stamp matching the Markdown
+  (`sha256sum --check docs/IMPLEMENTATION_PLAN.pdf.sha256` → OK).
+- **All three sweep greps re-run; the phase-13 row's recorded lists are exact.**
+  `git grep -l resolves_reserve_violation` → 13 files, exactly the row's list (3 source modules,
+  4 test modules, both corpus expected files, `docs/manual/27-plan.md`,
+  `docs/internals/96-payback.md`, the plan, this file). `git grep -l evaluate_plan_payback` → 9
+  files; relative to the first list it adds exactly `test_affinity_repair_fixture.py` and
+  `docs/internals/00-overview.md`, as recorded. `git grep -l min_free_bytes` → **30 files**,
+  matching the row's count and its enumeration category by category (8 `src/` files — `config`,
+  `reserve`, `heuristic`, `schedule`, `optimize`, `execute`, `cli`, `collect`; 7 test modules —
+  including `test_gates.py` and `test_reserve.py`, which no enumeration had ever named; both
+  corpus `config.yaml` replay inputs; `config_schema.json`; `config/drs.example.yaml`; 4 manual
+  pages; 3 internals pages; both `.agents/` files; the plan and this file). No file outside the
+  recorded sweep.
+- **The row's artefact claims verified**: `config/drs.example.yaml:196` carries
+  `min_free_bytes: 0` under `snapshot_reserve` with no `free_space` block anywhere, exactly as
+  the row states; the corpus expected files record `resolves_reserve_violation` **41 times, all
+  `false`**, exactly as §7.3's fc-tier1 paragraph claims.
+- **§14.8 re-derived in full against the final text** (the pass-20/21/22 tradition, on the
+  accumulated wording rather than per commit): the initial table (`r_packed = 10.5 − 10 = 0.5`,
+  free 2.5/3.2/9.0), `b̄ = 0.51`, gate 127% (1.2745), `F_before = 0.82/0.51 = 1.6078`, both
+  `Σ r = 0` candidates with the γ tiebreak (5.2828 vs 5.3078 — the uniqueness claim holds), the
+  final table (roomy 6.3 used, `Z = 0.5`, free 3.7), `E: 0 → 4.10`, `F → 0.62/0.51 = 1.2157`,
+  benefit `(−4.1 + 0.098) × 31 536 000 = −123 114 071 ≈ −1.23×10⁸`, cost 15 728.64, ratio
+  **−7 827.4**, the soft:0 counterfactual optimum 0.8039, both `hard`-sweep orders (10.3 > 10
+  infeasible; 5.0, 9.3, 7.3 all ≤ 10; the 2.7-TiB dip and the 3.7 endpoint), and both
+  revert-test scores (holding `601` → `Σ r = 0.5`; holding `603` → 0.3 — both moves marked
+  `repair: true`, which §7.3's marker rule and §14.8's text are jointly consistent on). Every
+  number checks — **except the as-built one-move parenthetical (AG-01)**, whose benefit is
+  negative where the plan says positive.
+- **AE-07's strict-subset property re-proven from the accumulated definitions**: `Σ r_s` is a
+  sum of non-negative per-storage slacks; each `r_s` depends only on `used_s`, `Z_s` and the
+  fixed `R_s = max(f_s·Z_s, soft_s)`; so `Σ r_s` strictly falling requires some `r_s` to fall,
+  which requires a managed disk to leave that storage, and that storage had `r_s > 0` in the
+  current assignment — the exact condition `has_reserve_override` and §6's override test. Every
+  outcome-exempt plan is exempt today; the change only removes exemptions.
+- **The AF fixes all hold** as §46 records them: the schema listed first with its shape (AF-01),
+  the third grep and its 30 files (AF-02), the validate-then-fold paragraph with both §11.1 rows
+  qualified (AF-03), the scoped "plan-endpoint" claim (AF-04), `soft: 0`/`hard: null` with the
+  load-bearing reason (AF-05), and the "phase 13's own commit" wording (AF-06). §46's
+  self-verification is accurate on every row.
+
+### 47.2 Findings summary
+
+| ID | Severity | Location | Summary |
+|----|----------|----------|---------|
+| AG-01 | Low | §14.8 | The as-built one-move parenthetical "(objective 1.081, positive benefit, payback passes)" does not verify: the plan's benefit is **−61 835 load·s** (`α·ΔE + δ·ΔF = −0.10 + 0.098 < 0`; ratio −11.8; the aggregate test fails at λ·cost = 52 429), and it passes payback only via the repair exemption — which its own `Σ r_s: 0.5 → 0` grants under both the built override and the outcome trigger. The sentence's contrast (as-built passes on merit; "the negative benefit and the whole exemption demonstration depend on phase 13") is wrong in both halves: both variants have negative benefit and both are exemption cases; the format rule changes the plan's *shape* (two moves, the indirect repair, the revert-test marker), not its exemption status |
+| AG-02 | Low | §5.3.1 | The percentage grammar's stale dash-clause: the bullet narrows to `0 ≤ N < 100` (AC-09's fix) and then says "`100%` is rejected by §11.1's `soft_s < C_s` rule rather than accepted here and failed there" — the pre-AC-09 mechanism, contradicting the grammar bound in the same bullet, §11.1's own row (which carries `0 ≤ N < 100` as a load-time rule), and AC-09's recorded resolution ("rejected by the grammar itself"). Parse-time and inventory-time rejection are different error surfaces; the plan names both |
+| AG-03 | Low | §5.3 point 3 | "decided on the plan's outcome ... **exactly as** the built `payback.py`'s `has_reserve_override` short-circuits the aggregate test" equates the new outcome trigger with the built source-violating trigger that §7.3, five sections later, explicitly calls narrower-than-built — the mirror image of AE-07's "same condition" claim. A reader of §5.3 alone — the section an implementer builds (C5)'s repair semantics from — would implement (or believe already built) the wrong trigger |
+| AG-04 | Low | §7.3 | The trigger is pinned to `schedule_result.final_assignment`, but duration-rule rejections happen at the payback gate, *after* scheduling: a repair move exceeding `max_single_move_duration` sits in the order, makes the scheduled assignment repairing, grants the exemption, is then dropped as refused — and the remaining balance moves execute with no economic test on a plan that no longer repairs. The transient-invariant half is self-consistent (`order_moves` enforces §8.1, so a breaching move never reaches the order); the duration half is the hole |
+| AG-05 | Low | §9.5, §7.3, §16.6 | The exemption has no specified machine-readable surface: the pending note names only the per-move `repair` field reaching `--json`; the plan-level exemption note exists only in the human sample, nothing emits the `Σ r_s` pair it could be derived from (the X-07/Y-04 gap), and the corpus expected files' "payback arithmetic" would conflate accepted-on-merit with accepted-by-exemption in a bare `accepted: true` — the exact distinction §14.8's demonstration turns on |
+| AG-06 | Info | §13 | The hazard row's "its repair moves are scheduled first" is contradicted by §14.8's own worked example: `603 → swapme` is marked `repair: true` and scheduled *second* — exception 1 (built, and kept by phase 13) ranks only the direct repair first; the indirect, revert-test-marked repair waits for exception 2, which is spec-only and not scoped in phase 13 |
+| AG-07 | Info | §14.8 | Fix-round residue: the capacity-gate rationale appears twice (the "Second," prerequisite paragraph AC-04 added, and the original parenthetical it paraphrases), and the `hard: "10%"` bullet scopes roomy's dip "for the duration of the mirror" — 601's mirror — when the dip (7.3 used, 2.7 free) persists until 603's source release, through 603's entire mirror. The invariant claims are unaffected |
+| AG-08 | Info | §3.5 | `verify-storages` is untouched by the branch: it reports `saferemove`, sizes and the largest disk, but not the resolved per-storage `soft_s`/`hard_s` — the number that now drives the §6 override, the §7.3 exemption and §9.5's shortfall lines, and the one place where a percentage, a pattern-level setting and the deprecated-key fold resolve differently per LUN. Phase 13 does not scope it |
+
+### 47.3 AG-01 — the as-built one-move parenthetical's payback arithmetic does not verify
+
+**Severity:** Low
+**Where:** §14.8, the "Two prerequisites" paragraph.
+
+The sentence: "under that as-built behaviour the fixture's optimum is the *one*-move repair
+`601:scsi0 packed → swapme` (objective 1.081, positive benefit, payback passes) — the two-move
+shape, the negative benefit and the whole exemption demonstration depend on phase 13 landing the
+format rule first."
+
+The objective figure verifies (1.0809 = `E 0.10 + β 0.25 + γ 0.025 + δ·F 0.706`). Neither payback
+claim does. The one-move plan relocates the ℓ = 0.05 disk off a perfectly balanced group: loads
+become 2.00/2.05/2.10 (`E: 0 → 0.10`, so `ΔE = −0.10`) and fills become 0.70/0.68/0.15
+(`F: 1.6078 → 1.4118`, so `ΔF = +0.196`), giving
+
+```
+benefit = (α·ΔE + δ·ΔF) · H = (−0.10 + 0.5 × 0.196) × 31 536 000 ≈ −6.2×10⁴ load·s
+cost    = 2 × (0.5 TiB / 200 MiB/s) = 5 243 load·s
+ratio   = −11.8   <   λ = 10   → the aggregate test REJECTS
+```
+
+(Computed with the same script that reproduces every other §14.8 number to the digit.) The plan
+passes payback anyway — **via the exemption**: its final `Σ r_s` is also 0 (packed 7.0 + 3.0 =
+10.0, swapme 1.5 + 3.0 = 4.5), so both the built `has_reserve_override` (601's source is
+violating at scheduling time) and §7.3's outcome trigger (0.5 → 0) exempt it. So "positive
+benefit" is false, "payback passes" is true only for the reason the same sentence says the
+two-move variant alone needs, and the dash-clause is wrong on two of its three items: the
+negative benefit and the exemption demonstration do *not* depend on the format rule — the
+one-move counterfactual has both. What actually depends on it is the plan's *shape*: two moves
+instead of one, the indirect repair, the revert-test marker and the `hard`-sweep ordering flip.
+
+The claim entered the plan through AC-03's own finding text ("objective ≈ 1.081, Σ r_s = 0,
+positive benefit, payback passes") and was copied into §14.8 by the AC fixes unverified; the
+twentieth pass's verification run (§39.2) re-derived the two-move, counterfactual and γ-tiebreak
+numbers but never the one-move *payback* figures. This is AA-03/AB-02's class — a §14 number
+that does not hand-derive — with a behavioural edge: an implementer writing the fixture's
+partial-landing test from this sentence would assert the aggregate test passes and find that it
+does not. Inert to the mechanism the sentence serves (the `requires_format_eligibility: true`
+loud-failure marker does not depend on the payback numbers), hence Low.
+
+**Recommendation:** correct the parenthetical to "(objective 1.081, benefit ≈ −6.2×10⁴ load·s —
+it too passes only via the repair exemption)" and re-scope the dash-clause to what actually
+depends on the format rule: "the two-move shape, the indirect repair and both `hard`-sweep
+orders".
+
+### 47.4 AG-02 — the percentage bullet names two rejection mechanisms for one typo
+
+**Severity:** Low
+**Where:** §5.3.1, the grammar's percentage bullet.
+
+The bullet reads: "a string ending in `%` (`"10%"`), resolved as `round(C_s · N/100)` against
+*that storage's own capacity*, with `0 ≤ N < 100` — `100%` is rejected by §11.1's `soft_s < C_s`
+rule rather than accepted here and failed there." AC-09 narrowed the grammar to `N < 100`
+precisely so that, per its own recorded resolution (§40), "`100%` is rejected by the grammar
+itself rather than accepted here and failed by `soft_s < C_s` later" — and the trailing clause,
+which predates that fix, still attributes the rejection to the old mechanism. As the bullet now
+stands it contradicts itself (the bound rejects N = 100 at parse time; the clause says the
+semantic check does), contradicts §11.1's own row (which carries `0 ≤ N < 100` as a load-time
+validation rule), and specifies two different failure surfaces for the same typo: a
+config-parse error at load time versus the inventory-load error the `soft_s < C_s` row itself
+describes ("caught only once the inventory is loaded"). An implementer must pick one, and a test
+writer cannot know which failure mode a `"100%"` config should produce.
+
+**Recommendation:** one clause — "`100%` is rejected by the grammar itself, so §11.1's
+`soft_s < C_s` rule never needs to see it" — or delete the clause outright (§11.1's row already
+carries the bound).
+
+### 47.5 AG-03 — §5.3 point 3's "exactly as" equates the outcome trigger with the built one
+
+**Severity:** Low
+**Where:** §5.3 (C5)'s mandate paragraph, point 3.
+
+"The exemption is **plan-level** — decided on the plan's outcome, the `Σ r_s` of the scheduled
+assignment it ends at ... against the current assignment's — **exactly as** the built
+`payback.py`'s `has_reserve_override` short-circuits the aggregate test for a plan containing a
+reserve-resolving move." §7.3, five sections later, says the opposite about the same built
+function: "This is deliberately narrower in its trigger than the built `payback.py` already
+implements (`has_reserve_override` fires when *any* move's source was violating at scheduling
+time — a plan that moves a disk off a violating storage but ends no less short is exempt today
+and will not be under the outcome trigger)". The two sections share a plan-level *shape*
+(skip the aggregate test for the whole plan) but not a *trigger*, and "exactly as" asserts
+equivalence of the whole exemption. This is AE-07's mirror image: that pass replaced §7.3's
+"same condition" claim with the strict-subset property, and §5.3's phrase survived because
+grammatically it can be read as attaching to "short-circuits the aggregate test". But §5.3 is
+the section an implementer builds (C5)'s repair semantics from, and the risk is the
+T-03/V-01 family: confident prose describing machinery that works differently — here, a reader
+would either implement the source-violating trigger to match what they believe is built, or
+assume no change is needed because it already works that way.
+
+**Recommendation:** "— in the same plan-level way as the built `payback.py`'s
+`has_reserve_override` short-circuits the aggregate test, a trigger §7.3 then deliberately
+narrows."
+
+### 47.6 AG-04 — the exemption is granted on a schedule the duration rule then amputates
+
+**Severity:** Low
+**Where:** §7.3.
+
+The trigger's evaluation point is pinned (AE-05): the scheduled assignment,
+`schedule_result.final_assignment`. But the three hard per-move rules fire at the payback gate,
+*after* scheduling — the built gate drops `rejected_moves` from the order and only then consults
+`aggregate_ok` (the S-02 fix), and §7.3 keeps that shape ("the three hard rules above still
+apply to every move in an exempt plan"). Compose them: a repair move whose `duration_d` exceeds
+`max_single_move_duration` **is in the order** — scheduling knows nothing of the duration rule —
+so the scheduled assignment repairs, the outcome trigger grants the plan-level exemption, the
+gate then drops the repair move as refused, and the remaining balance moves — the ones the
+aggregate test exists to price — execute with no economic test, on a plan that no longer
+repairs and whose shortfall §9.5 now reports as unmet. The transient-invariant half of the same
+sentence is self-consistent by construction (`order_moves` enforces §8.1, so a
+transient-breaching move deadlocks out of the order and the trigger already scores the real
+schedule); the duration half is the hole. The closing sentence ("A repair that cannot finish
+inside `max_single_move_duration` ... is rejected like any other move and the shortfall
+reported as unfixable") addresses the move's fate, not the exemption of what remains. The same
+composition exists in the built override today, but phase 13 is the moment the trigger acquires
+a precise evaluation point, and the pinning should say which move set it scores.
+
+**Recommendation:** one sentence in §7.3: the trigger is evaluated on the order *after* the
+hard per-move rules' refusals — the plan's outcome is what it will actually run — with the
+phase-13 row naming where in `cli.py`'s gate sequence the sums are taken (after
+`_apply_payback_gate`'s drops, not before).
+
+### 47.7 AG-05 — the exemption has no machine-readable surface
+
+**Severity:** Low
+**Where:** §9.5's pending note, §7.3, §16.6 check 4.
+
+§9.5's "As built, phase 13 pending" note names exactly one JSON arrival: "The
+`repair: true`/`false` field likewise reaches `--json` only with phase 13". The exemption
+itself — the fact that the aggregate test was skipped, which §7.3 calls the plan's headline
+verdict and §9.5's human sample renders as the note under the payback line — has no specified
+`--json` field, and nothing emits the before/after `Σ r_s` from which it could be derived:
+`plan --json` carries no reserve-shortfall totals (the X-07/Y-04 gap, already documented twice
+in this file), and the per-move marker alone cannot distinguish "accepted, and would have
+passed anyway" (fc-tier1) from "accepted only because exempt" (§14.8) — the exact distinction
+§14.8's demonstration turns on. Downstream, §16.6's check 4 records "the payback arithmetic"
+per variant in the corpus expected files, where a bare `accepted: true` would conflate the two
+cases in a regression artefact. The cheapest closure rides with AE-05's data flow: the current
+and final slack are already threaded to `evaluate_plan_payback()` in phase 13 — one
+serialization of either the flag or the two sums into the payback block, named in §9.5's
+pending-note list.
+
+### 47.8 AG-06 — §13's "repair moves are scheduled first" vs §14.8's own second-scheduled repair
+
+**Severity:** Info
+**Where:** §13, the `free_space.soft` hazard row.
+
+The row: "a repairing plan is payback-exempt (§7.3) and its repair moves are scheduled first".
+§14.8's preferred order schedules `601 → roomy` first (exception 1: its source is violating)
+and `603 → swapme` — marked `repair: true` by the very test §7.3 defines — *second*, and §14.8
+says so ("exception 2 applies to that move too ..., but rule 1 outranks rule 2"). Exception 1
+is a current-state rule and cannot rank an indirect repair; exception 2, which would, is
+spec-only and explicitly not scoped in phase 13. "Its *direct* repair is scheduled first" is
+what both the build and phase 13 deliver; the unconditional plural over-promises against the
+plan's own worked example.
+
+### 47.9 AG-07 — two fix-round residues inside §14.8
+
+**Severity:** Info
+**Where:** §14.8.
+
+(a) The capacity-gate rationale now appears twice: the "Second, ..." prerequisite paragraph
+AC-04's fix added ("the group's fills (0.75/0.68/0.10) put the capacity gate at ... 127%, far
+above the 25% default — the gate is what lets the engine *plan* here, and the fixture sets
+`gates.capacity_spread_threshold: null` ...") and the older parenthetical after the initial
+state ("The capacity gate is open on this group — 127%, above — which is why the fixture nulls
+it: the gate's ACT is what lets the engine plan ..."), which the fix paraphrased rather than
+replaced. (b) The `hard: "10%"` bullet scopes roomy's dip "below its 3.0 soft requirement for
+the duration of the mirror" — 601's mirror — but the dip (roomy at 7.3 used, 2.7 free) begins
+with 601's target allocation and persists until 603's *source release*, i.e. through 603's
+entire mirror and drain; "for the duration of the repair" would be accurate. Both invariant
+claims (never below `hard`; endpoint back to 3.7) are unaffected, as is every number.
+
+### 47.10 AG-08 — `verify-storages` does not surface the resolved requirement
+
+**Severity:** Info
+**Where:** §3.5, `pve-storage-drs verify-storages`.
+
+The branch touches every consumer of the free-space policy except the one command whose §3.5
+charter is storage-config diagnosis: `verify-storages` reports `type`, `shared`, `content`,
+`saferemove`, throughput, sizes and the largest disk, but not the resolved per-storage
+`soft_s`/`hard_s` — the number that now drives the §6 override, the §7.3 exemption and §9.5's
+shortfall lines, and the one quantity whose *derivation* (pattern expansion, percentage
+conversion against each LUN's own capacity, the deprecated-key fold) an operator cannot
+predict without exactly the display this command exists to provide. §3.5's own justification
+for showing the pattern expansion there — "so an over-broad or dead pattern is visible before
+any plan relies on it" — is the same argument one feature later. Not a defect (once phase 13
+lands, `show-load`/`plan` reserve status carries the shortfall), but phase 13's row does not
+scope it, and the row is where it would naturally belong.
+
+### 47.11 What this pass confirms
+
+- **The accumulated text is self-consistent on every rule the four fix rounds touched**: the
+  grammar ↔ §11.1's rows ↔ the resolution list; the fold's position ↔ both row qualifications;
+  the two `null`s; the trigger ↔ the marker ↔ §5.3 point 3's numbers; §8.1's predicate ↔
+  §14.8's two orders; the phase-13 row ↔ the greps that define it (verified exact, all three).
+  Passes 20-23 each fixed the commit in front of them; this pass confirms the fixes compose.
+- **§46's self-verification is accurate.** All six AF resolutions hold as described, including
+  the two a same-person fix is most likely to overstate: AF-02's 30-file list is exact to the
+  file, and AF-03's ordering constraint is carried in all three places it needs to be (§5.3.1,
+  both §11.1 rows, the row).
+- **§14.8's specified arithmetic verifies to the digit**, including the γ tiebreak's second
+  candidate (5.3078), both `hard`-sweep orders, and both revert-test scores — the fixture's
+  future generator has a fully checked target. The one failure (AG-01) is in the *as-built
+  counterfactual* paragraph, the only part of §14.8 no previous pass had computed.
+- **AE-07's strict-subset property holds as a proof**, not a plausibility argument, on the
+  accumulated definitions — and AG-03 notwithstanding, it is stated correctly in §7.3 itself.
+- **The branch's process discipline held where the eighteenth pass's did not**: five commits,
+  each on the feature branch, each rebuilding and re-stamping the PDF in the same commit
+  (AF-06's commit-message erratum aside — already recorded in §46), no production code touched,
+  `make check` green at tip.
+
+### 47.12 Assessment
+
+Four fix rounds in five commits have converged: every design decision this review series has
+examined — the outcome trigger over the per-move exemption, the revert test as marker rather
+than trigger, the per-storage fold, the validate-as-written-then-fold order, the strict-subset
+property — survives independent re-derivation from the final text, and the grep-defined sweeps
+that replaced three consecutive passes of one-short enumerations are exact against the tree.
+What is left is small and mostly cosmetic: one wrong parenthetical (AG-01, the only §14.8
+number that fails verification, and the one an implementer writing the partial-landing test
+will read), two stale sentences naming superseded mechanisms (AG-02, AG-03), one scheduling
+claim §14.8 itself contradicts (AG-06), one edge to pinch while the trigger is being
+implemented (AG-04 — a sentence, but one that decides whether an economic test runs at all in
+its corner), and two gaps an afternoon covers (AG-05's JSON field, AG-08's display line). Fix
+AG-01 before phase 13 starts; AG-02/AG-03/AG-04 belong in phase 13's specification tidying;
+the rest is optional. None of the eight blocks the branch's purpose: the free-space
+requirements design is now specified completely enough to build.
+
+---
+
+## 48. Resolution of twenty-fourth-pass findings (AG-01..AG-08)
+
+All eight are fixed in `IMPLEMENTATION_PLAN.md`. Every one was independently re-checked against
+the plan text and, where it makes a claim about behaviour, against `src/` before being accepted —
+none was taken on the finding's own word, and none was refuted. Two are fixed slightly wider than
+the finding asked: AG-02 had a second instance the finding did not name, and AG-04's fix covers
+the saturation deferral as well as the duration rejection, which have the same shape.
+
+**Verification of AG-01 before fixing it.** The §14.8 fixture was re-derived from scratch — all
+three assignments (current, the as-built one-move optimum, the two-move optimum) scored against
+§5.3 (C5)/(C6)/(C7), §5.4 and §7.1/§7.2 with the fixture's own weights (`α = 1.0`, `β = 0.25`,
+`γ = 0.05`, `δ = 0.5`, `f = 2.0`, `soft = 3.0`, `H = 365d`, `λ = 10`, 200 MiB/s, `ω = 2`):
+
+| | used | loads | `E` | `F` | `Σ r_s` | objective | benefit | cost | ratio |
+|---|---|---|---|---|---|---|---|---|---|
+| current | 7.5 / 6.8 / 1.0 | 2.05 / 2.05 / 2.05 | 0 | 1.6078 | 0.5 | 0.8039 | — | — | — |
+| one-move (as built) | 7.0 / 6.8 / 1.5 | 2.00 / 2.05 / 2.10 | 0.10 | 1.4118 | 0 | 1.0809 | **−61 835** | 5 243 | **−11.79** |
+| two-move (with C2) | 7.0 / 6.3 / 2.0 | 2.00 / 0.05 / 4.10 | 4.10 | 1.2157 | 0 | 5.2828 | −123 114 071 | 15 729 | −7 827.4 |
+
+Every figure §14.8 states is reproduced to the digit — the initial table, `b̄ = 0.51`, both
+objectives, the `soft: 0` counterfactual's 0.8039, the two-move benefit/cost/ratio. The only
+figure that is *not* reproduced is the one AG-01 names: the as-built one-move plan's benefit is
+**−61 835 load·s**, not positive, its ratio is −11.79 against `λ = 10`, and the aggregate test
+therefore fails on it (`λ·cost = 52 429`). It clears the gate through the repair exemption, its
+own `Σ r_s` falling 0.5 → 0 — which both the built `has_reserve_override` (601's source is
+violating when the move leaves it) and §7.3's outcome trigger grant. The finding is exactly
+right, including its reading of why the dash-clause is wrong in two of its three items.
+
+**Verification of AG-04 against the built pipeline.** The composition hole is real in the code as
+well as in the specification. `payback.py:352-354` computes `aggregate_ok = has_reserve_override
+or benefit >= λ·cost` and `rejected` from `exceeds_max_duration` in the same call, and
+`cli.py`'s execution gate then tests `aggregate_ok` *first* and only afterwards filters
+`rejected_moves | deferred_moves` out of the order (`excluded_keys`, the S-02 fix). So a plan
+whose repair move exceeds `max_single_move_duration` today: sets the override, passes
+`aggregate_ok`, loses the repair move to the filter, and executes its remaining balance moves
+with no economic test on a plan that no longer repairs. Phase 13 inherits the shape unless the
+trigger's evaluation point says otherwise, which is what AG-04 asked for.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AG-01 | Resolved | §14.8's as-built parenthetical now states the arithmetic instead of asserting the opposite of it: objective 1.081, `E: 0 → 0.10` against `F: 1.608 → 1.412`, benefit ≈ −6.2×10⁴ load·s against a 5 243 load·s cost, ratio −11.8, clearing the gate only through the same repair exemption the two-move plan needs (its own `Σ r_s: 0.5 → 0`, which both the built override and the outcome trigger fire on). The dash-clause is re-scoped to what actually depends on the format rule — the plan's **shape**: the two-move repair, the indirect repair the revert test marks, and both `hard`-sweep orders — with "not its economics" said outright, since the one-move counterfactual carries the negative benefit and the exemption too. |
+| AG-02 | Resolved, and wider | The grammar bullet now attributes the rejection to the grammar itself, at config-parse time, and names §11.1's `soft_s < C_s` rule as the *other*, inventory-time surface it therefore never reaches. **A second instance the finding did not name got the same fix**: §5.3.1's "Two validation rules" paragraph closed with "Percentages above 100 are therefore rejected by the same rule", the identical pre-AC-09 attribution, and now says they never reach that rule. Fixing only the bullet would have left the contradiction one paragraph further down. |
+| AG-03 | Resolved | §5.3 point 3's "exactly as" is gone. The sentence now says the exemption is plan-level *in the same way* the built `has_reserve_override` short-circuits the aggregate test for the whole plan, but on a deliberately **narrower trigger** than that flag's "some move's source was violating at scheduling time" — with a pointer to §7.3, which states the difference and proves the strict subset, and an explicit "do not read 'plan-level' as 'already built'" for the implementer who reads §5.3 alone. |
+| AG-04 | Resolved | §7.3's pinning gains the move set, not just the assignment: "what it will really run" is defined as *after* the hard per-move rules have taken their moves out, the sums are taken over the order minus the refused and deferred moves, and the reason it is well-defined is stated (neither refusal depends on the exemption — both are per-move verdicts on `cost_d`/`duration_d`, computed before the aggregate test is consulted). The saturation deferral is covered alongside the duration rejection: same shape, same hole. §8.1's transient invariant is explicitly excluded, since `order_moves()` enforces it while building the order. Phase 13's row carries the implementation consequence: the refusal computation that today lives inside `evaluate_plan_payback()` must produce its verdicts *before* the trigger's sums are taken, and `_execute_group_plan()`'s `excluded_keys` filtering stops being the only place the drop is applied. |
+| AG-05 | Resolved | §9.5's pending note now specifies the surface: `repair_exempt` plus the `reserve_shortfall_bytes_before`/`_after` pair the trigger is computed from, in `--json`'s payback block. The note says why the existing fields do not cover it (`aggregate_ok`/`accepted` do not say *why* the test passed; the per-move `repair` markers cannot, since the redundant-repair plan is exempt with no marked move) and concedes the one thing the finding did not: a consumer *can* re-derive it as `aggregate_ok and ratio < λ`, but only by supplying a `payback_ratio` the block does not carry — re-deriving a verdict the tool already reached is not a specification. The pair is also the first instalment on §16.6's X-07/Y-04 gap: it makes check 2's `Σ r_s = 0` invariant checkable from `plan --json` without the emitted order, and lets check 4's expected files distinguish accepted-on-merit from accepted-by-exemption. Named in phase 13's row too. |
+| AG-06 | Resolved | §13's `free_space.soft` hazard row now says the **direct** repair — the move off the short storage — is scheduled first, cites §8.2 exception 1 as the rule that does it, and says an *indirect* repair waits for the spec-only exception 2, "as §14.8's second move shows". The row and the worked example now agree. |
+| AG-07 | Resolved | (a) The older capacity-gate parenthetical no longer restates the 127% figure and the fixture's nulling of the gate — it keeps only what the prerequisite paragraph does not say (the gate's ACT lets the engine plan, the requirement makes the solver move, and the isolation claim is about the objective rather than the gate stack) and points at the prerequisite for the arithmetic. (b) The `hard: "10%"` bullet's dip is re-scoped from "for the duration of the mirror" to its actual span: from `601`'s target allocation until `603`'s source volume is observed gone — both mirrors and the drain between them. No number changed; both invariant claims were already correct. |
+| AG-08 | Resolved | §3.5's `verify-storages` report gains the resolved `soft_s`/`hard_s` per storage with the level each came from, and the paragraph gives the same argument that put the pattern expansion there: a percentage resolves against each LUN's own capacity, a pattern entry's `free_space` lands on every storage it matched, and the deprecated `min_free_bytes` folds in per storage on top — three ways for one line of config to mean a different number per LUN, and `soft_s` now drives §6's override, §7.3's exemption and §9.5's shortfall lines. Phase 13's row scopes it, **and names the sweep consequence the finding did not**: `docs/manual/25-show-load-and-verify-storages.md` matches none of the row's three greps today, so it joins the phase's file set explicitly rather than being missed by a grep re-run that comes back "exact". |
+
+### 48.1 What a later pass should re-check
+
+As with §46, **these fixes were written by the reviewer who raised the findings** — §47's own
+caveat applies again. Three specific things to re-check rather than take on trust:
+
+- **AG-04's fix is the only one with build consequences.** It changes where `Σ r_s` is summed,
+  which is a sequencing constraint on a signature change phase 13 has not made yet. Re-check
+  that §7.3's wording and the phase-13 row's wording describe the same order of operations, and
+  that neither contradicts §7.2's benefit, which is still evaluated against the unfiltered
+  `final_breakdown` at `cli.py:2374` — the plan does not (yet) say whether the benefit should
+  move with the trigger, and that is a real open question, not an oversight this section closed.
+- **AG-05 and AG-08 add specified output** — two JSON fields and one `verify-storages` line —
+  to a phase that is already the largest in §12. Neither is load-bearing for the mandate; if
+  phase 13 is split, both belong with the reporting half.
+- **The §14.8 arithmetic is now verified in full**, as-built counterfactual included, by the
+  derivation above. A future change to the fixture's weights invalidates the table in this
+  section, not just §14.8's prose.
+
+---
+
+## 49. Twenty-fifth-pass review — the phase 13 implementation
+
+Reviewed `ba1f0eb` ("feat: implement phase 13 free-space requirements"), the implementation commit
+of §12's phase 13, against the specification that passes 20-24 built: §5.3.1's grammar and
+resolution order, §7.3's outcome trigger and revert test, §8.1's `hard_b` floor, §9.5's reporting,
+the (C2) format eligibility the mandate needs, and the three grep-defined sweeps the §12 row
+uses to define "done". The method is the one §45/§47 established for implementation passes:
+re-derive the fixture arithmetic independently, read every consumer of the changed surfaces, and
+check the plan's as-built notes against the code that actually landed — the plan is the
+specification, so a shipped behaviour that contradicts it is a finding regardless of how
+reasonable the code looks.
+
+The implementation is faithful to the specification on every rule this series examined — with
+one exception, and it is not documentation: the resolver's global-`hard: null` path drops the
+deprecated `min_free_bytes` floor from the transient charge (AH-01), silently weakening §8.1 for
+exactly the upgrading configs the fold exists to protect. Everything else is plan-text and sweep
+residue: four as-built passages the implementation commit left describing the pre-implementation
+tree (AH-02), a fixture marker the plan says is recorded and is not (AH-03), a display line missing
+its specified provenance half (AH-04), a stale `.agents/` note (AH-05), two un-swept replay
+inputs (AH-06), an ineffective remedy string in a warning (AH-07), and the manpage's top-level
+key list (AH-08).
+
+### 49.1 Verification run
+
+- `make check` at branch tip (`ba1f0eb`): green end to end — fmt-check (black + isort), lint,
+  typecheck, **981 passed, 1 warning**, **96.22% line coverage**, `generate_expected.py --check`
+  OK, `validate_corpus.py --check` OK, and all three PDF stamps matching their Markdown
+  (`sha256sum --check` → OK for the plan, the internals and the manual).
+- **§14.8's specified arithmetic reproduced to the digit, two ways.** The independent exhaustive
+  oracle (`generate_expected.py`) and the real engine (`test_free_space_repair_fixture.py`,
+  which drives the actual `src/` pipeline) agree on: the initial table (`r_packed = 0.5`, free
+  2.5/3.2/9.0), `b̄ = 0.51`, the gate's 127%, `E: 0 → 4.10`, `F: 1.607843 → 1.215686`, objective
+  5.282843, benefit −123 114 070.59, cost 15 728.64, ratio −7 827.38, `Σ r_s: 0.5 → 0`, both
+  revert-test markers `true` (the *indirect* repair — `roomy`'s own move, whose source never
+  violated — is marked, exactly as §7.3's marker rule requires), both `hard`-sweep orders
+  (603-first at `hard: null`, 601-first at `hard: "10%"` — the reversal), and the
+  `soft: 0` counterfactual's no-moves optimum (0.803922).
+- **The grammar and the schema match the spec**: percentages outside `0 ≤ N < 100` are rejected
+  at parse time (the grammar itself, per AC-09/AG-02 — verified by test), the closed schema
+  carries `free_space` at both levels with `soft`/`hard` typed `["string", "number", "null"]`,
+  and the two `null`s keep their distinct meanings (global null = "no dip", per-storage null =
+  "inherit the global").
+- **Validate-as-written-then-fold is built as specified**: `hard ≤ soft` and `soft < C_s` are
+  checked against the written values before the fold (`topology.py:290-301`), and an oversized
+  *deprecated* floor warns instead of erroring — §5.3.1's one deliberate non-promotion.
+- **(C2) format eligibility is one function, everywhere**: `storage_accepts_format()` is called
+  by both MILP backends (via the shared `_fixed_zero_pairs()`) and by every heuristic
+  candidate-generating helper; a disk already resident on a storage is never fixed away from it;
+  and the `lvm`-also-accepts-`qcow2` correction is confirmed against real dogfooding data and
+  documented in `60-topology.md` with its PVE 9.2 mechanism.
+- **AG-04's sequencing constraint is respected**: `move_costs` verdicts → `excluded_disk_keys`
+  → `executed_assignment()` → the two `total_shortfall_bytes()` sums →
+  `evaluate_plan_payback()` (`cli.py:2392-2437`), and the execution path filters exactly the
+  same set (`rejected_moves | deferred_moves`), so the exemption's move set is precisely what
+  runs — a repair a hard rule blocks is correctly *not* exempt, and `96-payback.md` documents
+  that consequence.
+- **The exemption surface is complete**: `repair_exempt` plus
+  `reserve_shortfall_bytes_before`/`_after` in `--json` (`cli.py:1284-1286`), the
+  `overridden:` note in human output (996-1002), `[repair]` per move (959-960), and both corpus
+  expected files record all of it (`validate_corpus.py --check` passes on the regenerated
+  files).
+- **`collect.py` writes the resolved per-storage pair and drops the scalar** — the bundle shape
+  §16.3 specifies, with the "resolved, not re-derivable" choice `reserve_factor` already made.
+- **`order_moves()` keeps §8.2's current-state priority-1 test**: `resolves_reserve_violation`
+  survives as a scheduling signal only, never read by payback — and `payback.py`'s docstring
+  records the strict-subset property (the outcome trigger can only remove exemptions).
+- **The manual documents the block in full** (`10-configuration.md`: grammar, two-level nulls,
+  per-storage percentage semantics, the deprecation fold), the safety page extends "never
+  traded" to the configured free space, and `27-plan.md` splits the old flag's prose exactly as
+  §12's row requires — scheduling half kept, exemption half replaced.
+
+### 49.2 Findings summary
+
+| ID | Severity | Location | Summary |
+|----|----------|----------|---------|
+| AH-01 | High | `topology.py` `_resolve_free_space()` | Global `hard: null` resolves to the **pre-fold** soft, but the deprecated-key fold raises only soft — so a config carrying `snapshot_reserve.min_free_bytes: 1 TiB` with no `free_space` block gets `soft_s = 1 TiB, hard_s = 0`: the §8.1 transient charge loses the floor the built code charged (`max(f·max(Z,z), min_free_bytes)`), silently (the deprecation warning is deliberately silent in the min_free_bytes-only case), in both the scheduler's model check and `execute.py`'s live re-check. Violates §5.3.1's own "the folded floor keeps the §8.1 predicate exactly as strong as the built check" and §12's "leaves an upgrading deprecated-key config exactly as strong as it is today". The fixture oracle implements the plan correctly (`hard_map = f.soft`, folded) — production disagrees with its own oracle, and no test drives `min_free_bytes > 0` through `build_topology()` to catch it |
+| AH-02 | Medium | `IMPLEMENTATION_PLAN.md` §7.3/§9.5/§14.8/§16.6 | `ba1f0eb` changed the code without updating the plan's as-built notes in the same commit (AGENTS §7 rule 7). Four passages now contradict the built state: §14.8's "Two prerequisites" still says the (C2) format rule is "not yet implemented" and `topology.Storage` lacks type/format (both false); §9.5's "As built, phase 13 pending" still says no renderer emits the exemption note, the markers or `repair_exempt` (all false); §7.3's "fc-tier1.expected.json records no per-move flag, so it is untouched" (the branch adds `disk_key`, `repair_markers`, `repair_exempt` and the shortfall pair — the recorded *numbers* are unchanged, the file is not); and §16.6's check-2/check-4 gap bullets still say `Σ r_s` "needs the emitted order, which no `plan --json` field carries" — contradicted by §9.5's own new instalment sentence, added on this branch, and by the `reserve_shortfall_bytes_after` field the corpus expected files now record |
+| AH-03 | Low | `tests/fixtures/free-space-repair.expected.json` | The expected file records neither the `requires_format_eligibility: true` marker nor the as-built one-move optimum that §14.8 ("its expected file records the as-built one-move optimum as an explicit `requires_format_eligibility: true` marker") and §12's row say it records — the string exists only in the plan and this file. The marker's purpose (fail loudly before the format rule lands) is moot now that the rule landed in the same commit, but the plan's claim is false, and the AG-01-corrected one-move figures (objective 1.0809, benefit ≈ −6.2×10⁴, ratio −11.8) are recorded nowhere machine-checkable |
+| AH-04 | Low | `cli.py` `verify-storages` | Prints the resolved `soft`/`hard` bytes but not "the level each came from" — §3.5's own updated text and §12's row both specify the provenance (global / per-storage literal / pattern / percent-converted / folded), and §3.5's argument for it is exactly that three config shapes can produce one number per LUN that an operator cannot otherwise predict. The manual documents what *is* printed, so no doc lie — the spec is simply half-met |
+| AH-05 | Low | `.agents/domain-invariants.md` | The "As built" note added by `0dbd33c` "until phase 13 lands" survived the landing: it still says `soft_s` "is still the global scalar `snapshot_reserve.min_free_bytes` (`reserve.py:143`)" — false on both the claim and the line number (`reserve.py:166` now reads `storage.free_space_soft_bytes`). §12's sweep names this file explicitly |
+| AH-06 | Low | `tests/corpus/*/config.yaml` | Both replay inputs still carry `snapshot_reserve.min_free_bytes: 0` with no `free_space` block, though §12's min_free_bytes sweep names them as updated with the scalar→pair replacement — they are the one swept file type the branch did not touch, and they no longer match the shape `collect.py` now writes. Behaviorally identical at 0, but it also means the corpus never exercises the deprecated-key path through the new resolver: the one end-to-end `min_free_bytes > 0` coverage that would have caught AH-01 does not exist |
+| AH-07 | Info | `topology.py:304-311` | The oversized-deprecated-floor warning lists "overridden with a smaller `free_space.soft`" as a remedy — ineffective by construction: the fold is `max(soft_written, min_free_bytes)`, so a smaller `free_space.soft` cannot lower the folded floor. The remedy list should be "lowered or removed" only. The branch is also uncovered (no test drives an oversized deprecated floor through `build_topology()`) |
+| AH-08 | Low | `man/pve-storage-drs.1.md` | The CONFIGURATION section enumerates the top-level keys and `free_space` is absent — neither the `.1.md` nor the generated page was touched by the branch, and no test guards the manpage's key list against the schema (`test_documentation.py` checks manual↔schema and help↔manpage, not this), so the gap is invisible to `make check`. AGENTS §8.4 makes the top-level key list the manpage's job; `solver`/`schema_version` were already absent pre-branch, but `free_space` is this branch's omission |
+
+### 49.3 AH-01 — global `hard: null` drops the deprecated floor from the transient charge
+
+**Severity:** High
+**Where:** `src/proxmox_storage_drs/topology.py:255-312` (`_resolve_free_space`), consumed by
+`schedule.transient_invariant_ok()` and `execute.py`'s live re-check (lines 382, 1460).
+
+The resolver computes `hard_bytes = soft_written` when the global `hard` is null (lines 284-288),
+then folds the deprecated scalar into soft *only* (line 303: `soft_bytes = max(soft_written,
+config.snapshot_reserve.min_free_bytes)`). So for the exact config the fold exists to protect —
+`min_free_bytes: 1 TiB`, no `free_space` block at all — the resolved pair is `soft_s = 1 TiB,
+hard_s = 0`. Reproduced live against the branch:
+
+```
+soft_s = 1.0 TiB   hard_s = 0.0 TiB   warnings=[]
+```
+
+The §8.1 transient predicate is `used_b + z_d + max(f_b·max(Z_b, z_d), hard_b) ≤ C_b`, so the
+floor component drops from the built `min_free_bytes` (1 TiB) to zero. With the plan's own
+motivating shape for the deprecated key — a small largest disk on a big LUN, `f = 2.0`,
+`Z_b = 0.1 TiB` — the built check charged `max(0.2, 1.0) = 1.0 TiB`; the branch charges
+`max(0.2, 0.0) = 0.2 TiB`. A mirror target may be left 0.8 TiB below the operator's configured
+absolute floor, mid-migration, on every storage, and the weakening is **silent**: the
+deprecation warning deliberately does not fire for a `min_free_bytes`-only config
+(`test_free_space_deprecation_warning_silent_with_only_min_free_bytes` asserts exactly that),
+and the fold itself never warns below the oversized case.
+
+This contradicts the specification in its own words, three times over:
+
+- §5.3.1: "`hard: null` (the default) means `hard_s = soft_s`, so the folded floor keeps the
+  §8.1 predicate **exactly as strong as** the built `max(f_b·max(Z_b,z_d), min_free_bytes)`
+  check" — the folded floor keeps nothing if `hard_s` is the pre-fold soft.
+- §12's phase-13 row: "`hard: null` (= `soft`) leaves an upgrading deprecated-key config
+  exactly as strong as it is today" — the row's own load-bearing argument for the example
+  config's `hard: null`.
+- `.agents/domain-invariants.md` §2a: "The default `hard: null` means `hard_s = soft_s`: no dip
+  at all, and §8.1 exactly as strong as before free-space requirements existed."
+
+The branch's own test oracle implements the plan correctly — `generate_expected.py`'s ordering
+oracle uses `hard_map = hard if hard is not None else f.soft`, where `f.soft` is the *resolved*
+(folded) soft — so production disagrees with its own oracle. The fixture cannot catch it
+because `free-space-repair.yaml` sets `soft` explicitly (30% → 3.0 TiB) with no `min_free_bytes`,
+so folded equals written there. And no test anywhere drives `min_free_bytes > 0` through
+`build_topology()` into the transient check: the only such tests are config-level warning tests
+(`test_config.py:541-574`), which never load an inventory. A collected bundle bakes the weakened
+`hard` in as an explicit value too (`collect.py` writes `s.free_space_hard_bytes` verbatim), so
+replays reproduce it as a seemingly deliberate config.
+
+This is S-01/AA-01's class — a shipped correctness bug in the safety-critical path — and it
+weakens the very invariant AGENTS §6 point 4 protects. **Recommendation:** resolve global-null
+`hard` to the *folded* soft (validation stays pre-fold on the written values, exactly as
+§5.3.1's "validate as written, then fold" requires — a written `hard` remains as written and
+warned, per the plan's "an operator who then sets `hard` below it is using the new knob for the
+dip it exists to allow"); add the missing test (`min_free_bytes > 0`, no `free_space` block,
+assert `free_space_hard_bytes == min_free_bytes`); and re-run the corpus and fixtures.
+
+### 49.4 AH-02 — four as-built passages the implementation commit left behind
+
+**Severity:** Medium
+**Where:** `IMPLEMENTATION_PLAN.md` §7.3 (line 1997), §9.5 (lines 2458-2478), §14.8 (lines
+3228-3250), §16.6 (lines 3852-3880).
+
+AGENTS §7 rule 7 and §7 point 2 require the plan and the code to move together. `ba1f0eb`
+touches 46 files; `IMPLEMENTATION_PLAN.md` is not among them — the plan's phase-13 text was
+finalized in `4d06dce` and earlier, and its as-built notes still describe the pre-implementation
+tree. Four passages are now false:
+
+1. **§14.8's "Two prerequisites"** still says the (C2) format rule "is specified but **not yet
+   implemented**: `topology.Storage` does not expose storage type/format, so both solver
+   backends currently treat every group storage as an eligible target" — all false:
+   `Storage.storage_type`/`allowed_formats` exist (`topology.py:195-196`), both backends fix
+   `x_{d,s}=0` via the shared `_fixed_zero_pairs()`, and the heuristic excludes ineligible
+   targets. The paragraph's as-built one-move counterfactual is moot with it.
+2. **§9.5's "As built, phase 13 pending"** still says the exemption note and the per-move
+   `repair` markers "are emitted by no shipped renderer yet — `plan`/`apply` print neither" and
+   that the field "reaches `--json` only with phase 13" — all false: `cli.py:996-1002` prints
+   the note, 959-960 prints `[repair]`, 1217 emits the field, 1284-1286 emit `repair_exempt`
+   and the shortfall pair.
+3. **§7.3's fc-tier1 sentence** — "`fc-tier1.expected.json` records no per-move flag, so it is
+   untouched" — the branch adds `disk_key`, `aggregate_ok`, `reserve_shortfall_tib_before`/
+   `_after`, `repair_exempt` and `repair_markers` to it. The recorded payback numbers are
+   indeed unchanged (verified by diff: cost 26 214.4, benefit 1.93×10⁸, ratio 7 344.4,
+   `accepted: true` all intact), so the sentence's substance survives; "untouched" does not.
+4. **§16.6's check-2/check-4 gap bullets** still say `Σ r_s = 0` "need[s] the emitted *order*,
+   which no `plan --json` field carries" and "no expected file can record them" — contradicted
+   by §9.5's own new instalment sentence (added on this branch): "check 2's `Σ r_s = 0`
+   invariant becomes checkable from `plan --json` without the emitted order", and by the
+   `reserve_shortfall_bytes_after` field both corpus expected files now record. The plan now
+   disagrees with itself between §9.5 and §16.6.
+
+**Recommendation:** one plan-only commit: delete or convert each as-built note to past tense
+with its REVIEW.md ID (the §14.8 prerequisites paragraph in particular — its one-move
+counterfactual is now historical), and reconcile §16.6's two bullets with §9.5's instalment
+sentence (the `Σ r_s` half of the gap is closed; the emitted-order and objective-breakdown
+halves are not). Rebuild and re-stamp the PDF in the same commit.
+
+### 49.5 AH-03 — the fixture's expected file is missing the marker the plan says it records
+
+**Severity:** Low
+**Where:** `tests/fixtures/free-space-repair.expected.json` vs §14.8 (lines 3243-3245) and
+§12's phase-13 row.
+
+§14.8: "its expected file records the as-built one-move optimum as an explicit
+`requires_format_eligibility: true` marker so a premature run fails loudly rather than passing
+vacuously." The expected file records neither: `requires_format_eligibility` appears nowhere in
+`tests/` (grep — only the plan and this file carry the string), and the file's `cases` list has
+one entry (the two-move plan); the one-move optimum (objective 1.0809, benefit ≈ −6.2×10⁴
+load·s, ratio −11.8 — the AG-01-corrected figures §14.8 now derives in prose) is recorded
+nowhere machine-checkable. Since `ba1f0eb` landed the format rule in the same commit as the
+fixture, the marker's failure mode can no longer fire — the premise is gone — but the plan's
+claim about the file is false, and the §14.8 paragraph an implementer reads to understand the
+fixture's design points at a record that does not exist. **Recommendation:** either record both
+(the marker as an inert-but-true field, the one-move case as a second `cases` entry with its
+own payback block) or fix the plan to say the marker was dropped because the rule landed in
+the same commit — the latter is smaller and honest.
+
+### 49.6 AH-04 — `verify-storages` prints the pair but not the level each came from
+
+**Severity:** Low
+**Where:** `src/proxmox_storage_drs/cli.py:3319-3321` vs §3.5 (lines 773-788) and §12's row.
+
+§3.5's updated text — added on this branch — specifies the report carries "the **resolved**
+free-space requirement `soft_s`/`hard_s` **with the level each came from**", and §12's row
+repeats it ("with the level each came from"). The built renderer prints
+`free_space: soft=0 B  hard=0 B` — byte values only. The provenance is the whole point of the
+§3.5 paragraph: a percentage resolves against each LUN's own capacity, a pattern entry lands
+on every storage it matched, and the deprecated key folds in per storage — "three ways for one
+line of config to mean a different number per storage, and this is the one command where that
+derivation is visible before a plan depends on it". An operator staring at `soft=3221225472 B`
+cannot tell a global `"15%"` from a per-LUN `"30%"` from a folded `min_free_bytes` without
+exactly the display this sentence specifies. The manual (`25-show-load-and-verify-storages.md`)
+documents what *is* printed, so there is no doc lie — the specification is half-met.
+**Recommendation:** extend the line with the provenance (e.g. `soft=3.0TiB (pattern "10%" of
+30TiB) hard=1.0TiB (literal)`) and update the manual's sample in the same commit; the
+`--json` side already carries the resolved pair and needs only a `source` field if the same
+argument applies there.
+
+### 49.7 AH-05 — the `.agents/` "until phase 13 lands" note outlived phase 13
+
+**Severity:** Low
+**Where:** `.agents/domain-invariants.md` lines 26-28.
+
+`0dbd33c` added: "**As built:** `soft_s` is still the global scalar
+`snapshot_reserve.min_free_bytes` (`reserve.py:143`, `required = max(round(f·largest),
+min_free_bytes)`). Phase 13 replaces that scalar with the per-storage `soft_s`/`hard_s` pair
+everywhere it is threaded; until it lands, read `soft_s` here as that one number applied to
+every storage." Phase 13 landed in `ba1f0eb`; the note is now false on both the claim and the
+line number — `reserve.py:166` reads `required = max(round(storage.reserve_factor * largest),
+storage.free_space_soft_bytes)`. §12's min_free_bytes sweep names this file explicitly, and the
+note is the first thing an agent working on the reserve reads. **Recommendation:** delete the
+note (the surrounding §2/§2a text is already correct — and is one of the three plan-equivalent
+statements AH-01 violates, which makes removing the stale half more important, not less).
+
+### 49.8 AH-06 — the corpus replay inputs kept the deprecated shape
+
+**Severity:** Low
+**Where:** `tests/corpus/bzed-dev-cluster-24h/config.yaml:97`,
+`tests/corpus/bzed-dev-cluster-7d-holt-winters/config.yaml:97`.
+
+§12's min_free_bytes sweep names "both `tests/corpus/*/config.yaml` replay inputs" as updated
+with the scalar→pair replacement; the branch touched only the two `.expected.json` files. Both
+replay inputs still carry `snapshot_reserve: {min_free_bytes: 0}` with no `free_space` block —
+no longer the shape `collect.py` writes for a new bundle (per-storage `free_space` pair, scalar
+dropped). At `0` the behaviour is identical (the fold is `max(soft, 0)`; global-null hard
+resolves to the same 0), so this is sweep-completeness, not behaviour. But it has a testing
+cost the sweep's own standard makes worth naming: the corpus is the only end-to-end harness
+that drives a *config file* through the full resolver, and with the deprecated key pinned at 0
+it never exercises the fold — the one path where AH-01 lives. **Recommendation:** rewrite both
+to the new shape (`free_space: {soft: 0, hard: null}`, `min_free_bytes` removed) in the fix
+commit for AH-01, and add one corpus- or fixture-level case with `min_free_bytes > 0` so the
+fold path has end-to-end coverage from then on.
+
+### 49.9 AH-07 — the oversized-floor warning offers a remedy that cannot work
+
+**Severity:** Info
+**Where:** `src/proxmox_storage_drs/topology.py:304-311`.
+
+The warning ends: "until the deprecated key is lowered, removed, or overridden with a smaller
+`free_space.soft`". The third remedy is ineffective by the fold's own construction —
+`soft_bytes = max(soft_written, min_free_bytes)` — a smaller `free_space.soft` cannot lower a
+floor the deprecated key props up; only lowering or removing `min_free_bytes` can. An operator
+who follows the warning's advice will conclude the tool is broken. The branch is also
+uncovered: `topology.py:305` appears in the coverage report's missing-lines list, and no test
+drives an oversized deprecated floor through `build_topology()`. **Recommendation:** drop the
+third remedy from the string and add the missing test (an oversized `min_free_bytes` warns and
+does not raise — the §5.3.1 non-promotion, which is currently asserted nowhere).
+
+### 49.10 AH-08 — the manpage's top-level key list is missing `free_space`
+
+**Severity:** Low
+**Where:** `man/pve-storage-drs.1.md` CONFIGURATION (lines 204-210).
+
+The manpage's CONFIGURATION section enumerates the top-level keys — "Top-level keys:
+**proxmox** … **snapshot_reserve**, **load** … **forecast** and **support**" — and `free_space`
+is absent: the branch touched neither the `.1.md` nor the generated `.1`. AGENTS §8.4 assigns
+the manpage's CONFIGURATION section "the file's location and its top-level keys", and §8.6's
+test-enforced cross-references cover manual↔schema (`test_manual_covers_every_schema_key`) and
+help↔manpage, but nothing asserts the manpage's key list against the schema — so this gap is
+invisible to `make check` and will recur for the next new block. (`solver` and `schema_version`
+are also absent from the list, but that predates this branch; `free_space` is this branch's
+omission, and the one a reader upgrading for the new feature will look for.)
+**Recommendation:** add `free_space` to the list in the same commit that fixes AH-02's plan
+text (both are the phase's documentation tail), and add a
+`test_manpage_names_every_top_level_schema_key` to `test_documentation.py` so the list cannot
+drift again.
+
+### 49.11 What this pass confirms
+
+- **The specification built over passes 20-24 was implemented as written, on every rule this
+  series derived**: the grammar and its parse-time rejection, the closed schema at both levels,
+  the two `null`s, the per-storage fold, validate-as-written-then-fold, the (C2) format rule in
+  one shared function across both backends and the heuristic, the outcome trigger with its
+  AG-04 sequencing, the revert test as marker (indirect repairs marked, redundant ones not),
+  the `--json`/human exemption surfaces, the bundle's resolved pair, and the manual's split of
+  the old flag's prose. The grep-defined sweeps are exact against the tree for
+  `resolves_reserve_violation` (now a scheduling signal only, as specified) and
+  `evaluate_plan_payback` (the signature change landed with every caller updated).
+- **§14.8's arithmetic is now verified three ways** — the twentieth pass's hand derivation, the
+  oracle's exhaustive enumeration, and the real engine — and they agree to the digit, including
+  the hard-sweep order reversal and the soft:0 counterfactual. The fixture is a genuine
+  acceptance test of the mandate, not a self-consistent one.
+- **`make check` is green at tip** with the coverage floor cleared by 11 points (96.22% vs the
+  85% floor), and the three PDF stamps match their Markdown — the branch's process discipline
+  (docs and PDFs in the same commit as the code) held for every artefact it did touch.
+- **The one behavioural defect (AH-01) is narrow and precisely bounded**: it requires a
+  non-zero `min_free_bytes`, no `free_space` block, and a snapshot term below the deprecated
+  floor — and it is invisible to every shipped test, which is the finding's second half.
+
+### 49.12 Assessment
+
+Phase 13 landed the free-space mandate substantially as specified: the mandate's repair
+semantics, the exemption's outcome trigger, the revert-test markers and the format rule all
+verify against the plan and against independent re-derivation. What this pass adds to the
+record is one real defect and a documentation tail. AH-01 is the only finding that changes
+behaviour, and it should block the merge to `main`: it silently weakens §8.1 for exactly the
+upgrading configs the deprecation fold was designed to protect, it contradicts the plan in
+three places, and the branch's own oracle implements the correct rule — so the fix is small,
+the test that pins it is easy to write, and the corpus inputs (AH-06) are the natural place to
+give it end-to-end coverage. AH-02's four stale passages and AH-08's manpage line are the
+phase's unfinished documentation tail — one plan-only commit plus a manpage line, with the PDF
+rebuilt in the same commit. AH-03 through AH-07 are small and can follow. None of the eight
+undermines the design: the specification is sound, and the implementation now needs to be made
+to agree with it in one resolver line and a handful of sentences.
+
+---
+
+
+## 50. Resolution of twenty-fifth-pass findings (AH-01..AH-08)
+
+Seven fixed, one fixed in a narrower form than the finding asked (AH-06's remedy is refuted; its
+concern is addressed another way). Every finding was checked against the tree before acting;
+AH-01 was reproduced first, and its two regression tests were confirmed to **fail on the
+pre-fix resolver** before the fix went in.
+
+**AH-01 verified.** Reading `_resolve_free_space()` gave the reviewer's account exactly:
+`hard_bytes = soft_written` on a global null, then `soft_bytes = max(soft_written,
+min_free_bytes)` — so `min_free_bytes: 1 TiB` alone produced `(soft, hard) = (1 TiB, 0)`, against
+§5.3.1's "`hard: null` means `hard_s = soft_s`, so the folded floor keeps the §8.1 predicate
+exactly as strong". The reviewer is also right that nothing caught it: the only tests with
+`min_free_bytes > 0` are config-level warning tests that never build a topology.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AH-01 | Resolved | `topology._resolve_free_space()` now settles a null `hard` **after** the fold, from the folded `soft_s`. Validation stays on the written values (a written `hard` is still checked against the written `soft` and is never raised by the fold), exactly as §5.3.1 says. Four `build_topology()` tests pin it: deprecated key alone → `(floor, floor)`; a written `hard` below the folded floor stays as written; global-null `hard` follows whichever of written-soft and deprecated floor won the `max()`; and the oversized-floor non-promotion (AH-07). Two of the four fail on the old resolver. Two end-to-end replay tests drive the same path through a captured bundle and through a pre-`free_space` bundle. §5.3.1 gained a paragraph stating the ordering consequence outright — the "validate as written, then fold" list is easy to over-apply to a null, which is how the code came to read it — and `docs/internals/60-topology.md` says the same. |
+| AH-02 | Resolved | All four passages verified false against the tree and rewritten: §7.3's fc-tier1 sentence (now records the new fields, notes `repair_exempt: true`, and says every payback *number* is unchanged — checked by diffing the file across the commit), §9.5's "phase 13 pending" note (now "as built": `[repair]`, the exemption note and the JSON fields), §14.8's "Two prerequisites" (the format rule is history, not a gap), and §16.6's check-2/check-4 bullets (the `Σ r_s` half of the gap is closed by `reserve_shortfall_bytes_after`; the order and objective-breakdown halves are not). §12's row was also reconciled. The PDF and its stamp were rebuilt in the same commit. |
+| AH-03 | Resolved (plan side) | The smaller remedy the finding offered: §14.8 and §12's row now say the marker was never recorded **because the rule landed in the same commit as the fixture**, so the premature run it guarded against cannot occur. The one-move figures stay where AG-01 derived them (REVIEW.md §48). Recording an inert `requires_format_eligibility: true` field, or a second case for a plan the engine can no longer produce, would add an assertion about a state that no longer exists. |
+| AH-04 | Resolved | `verify-storages` prints the level each half came from — `global`, `storage entry`, `pattern /re/`, `…, N% of <capacity>`, `folded from snapshot_reserve.min_free_bytes`, and `= soft (no dip)` for a null `hard` — via a display-only `ResolvedFreeSpace`/`Storage.free_space_*_source` pair that no solver, scheduler or executor path reads. `--json` gets the same two strings. The manual's sample and a legend table were updated; three topology tests and one CLI test (both renderers) cover it. |
+| AH-05 | Resolved | The stale "as built … until it lands" note is deleted from `.agents/domain-invariants.md`. The surrounding §2/§2a text was already correct. |
+| AH-06 | **Refuted as a remedy; concern addressed** | The finding asks to rewrite both `tests/corpus/*/config.yaml` files to the new shape. Not done, and §12's sweep sentence now says so. A committed bundle is real captured data — `tests/corpus/README.md` calls it "not something to hand-edit freely" and describes exactly one repair path, for a *collector bug* (rebuild the derived file from the bundle's own data, recompute `SHA256SUMS`, record it in the submission note); "make it look like what a newer collector writes" is not that. It would also delete the one piece of evidence that a bundle captured *before* `free_space` still replays: a real operator holding an old bundle is exactly the case the deprecated-key path exists for. Behaviour at `min_free_bytes: 0` is identical either way (`validate_corpus.py --check` passes). What *is* right in the finding is that the fold path had no end-to-end coverage. That is closed without touching captured data: `test_replay.py` now replays (a) a freshly captured bundle from a `min_free_bytes > 0` config and (b) the same bundle with its `config.yaml` rewritten to the pre-`free_space` shape, and asserts both resolve to `(floor, floor)`. |
+| AH-07 | Resolved | The warning now offers "lowered or removed" only; the "overridden with a smaller `free_space.soft`" remedy is gone (the finding's argument is right: the fold is a `max()`). A test drives an oversized `min_free_bytes` through `build_topology()`, asserting it warns rather than raises — §5.3.1's one deliberate non-promotion, previously asserted nowhere — and that the string names no ineffective remedy. |
+| AH-08 | Resolved, wider | The manpage's top-level key list is now the schema's list. It was wrong in more than the reviewer's three places: besides `free_space`, `schema_version` and `solver` it named **`load`**, which is not a key (`load_weights` is). `test_manpage_names_every_top_level_schema_key` reads `properties` from the shipped schema and fails on any key the CONFIGURATION section does not name in bold — confirmed to fail against the old list, naming all four. |
+
+### 50.1 What a later pass should re-check
+
+- **AH-01's fix changes a shipped number.** A config with a non-zero `min_free_bytes` now plans
+  with a *stronger* transient check than the branch tip before it (the correct one, equal to the
+  built pre-phase-13 check). Any expected file recorded from such a config — none is committed
+  today — would move. Worth one look at any operator-supplied bundle a later pass replays.
+- **The provenance strings are free text.** They are display-only by construction (nothing reads
+  them), which is why they are plain `str` rather than an enum; if a machine consumer of
+  `verify-storages --json` ever appears, that should become a structured field first.
+- **`validate_corpus.py`'s `check_invariants()` now asserts the `Σ r_s` invariant** — as
+  `after ≤ before`, not the `= 0` this section first proposed: an oversized deprecated
+  `min_free_bytes`, or a group with no feasible repair, legitimately ends above zero. *Why* it
+  holds is backend- and `hard`-dependent, and this bullet originally gave one reason for all of
+  it; see §52 (AI-01) for the corrected account — the MILP stage-1 minimum for cbc/cpsat's
+  endpoint, and the scheduler's arrival check at `hard = soft` for the executed plan of every
+  backend, the heuristic included.
+
+---
+
+## 51. Twenty-sixth-pass review — the fixed phase 13 implementation
+
+Reviewed the branch tip `37a0788` ("corpus: assert the plan never raises the reserve shortfall"),
+two commits past the implementation commit `ba1f0eb` this series reviewed in §49: `d6317ed`
+("fix: phase 13 review findings AH-01..AH-08", which also added §50, the fixer's own resolution
+record) and the follow-up `37a0788` (which amended §50.1's third bullet). The method is the one
+§45/§47/§49 established: verify each resolution against the tree rather than trusting §50's
+account, re-derive the arithmetic independently, and read the two new commits' own additions with
+the same scrutiny the implementation got — a fix commit is an implementation commit.
+
+The eight AH resolutions all hold as §50 records them, and the two new commits add no defect of
+their own beyond one: the corpus check `37a0788` added justifies its invariant with a mechanism
+that is real for two of the three backends it sweeps and absent from the third. It is a
+documentation-accuracy finding, not a behavioural one — the committed bundles cannot trip it.
+
+### 51.1 Verification run
+
+- `make check` at branch tip (`37a0788`): green end to end — fmt-check (black + isort), lint,
+  typecheck, **997 passed, 1 warning**, **96.29% line coverage**, `generate_expected.py --check`
+  OK, `validate_corpus.py --check` OK, and all three PDF stamps matching their Markdown.
+- **AH-01's fix verified live, six cases.** A scratchpad harness drove `build_topology()` through
+  the resolver directly: `min_free_bytes: 1 TiB` alone → `(soft, hard) = (1 TiB, 1 TiB)` with the
+  sources `("folded from snapshot_reserve.min_free_bytes", "= soft (no dip)")`; a written `hard`
+  stays as written under the fold; a written `hard` above a written `soft` still raises; an
+  oversized floor warns once with "lowered or removed" (no "overridden"); and the two replay
+  tests (`test_replay.py:105/116`) drive the same path end to end through a captured bundle and
+  through a pre-`free_space` bundle. All six pass.
+- **§50's "two of the four fail on the old resolver" claim reproduced exactly.** The `ba1f0eb`
+  tree was extracted to a scratchpad copy and `d6317ed`'s four new `build_topology()` tests were
+  run against it: two fail (the folded-floor pair and the warning string), two pass — the split
+  §50 reports, confirmed rather than trusted.
+- **AH-02**: all four passages rewritten as claimed — §7.3's fc-tier1 sentence (now "As built
+  (AH-02)", recording the new fields, `repair_exempt: true`, and the unchanged payback numbers),
+  §9.5's "As built (phase 13)", §14.8's history-not-gap framing, §16.6's closed-`Σ r_s`-half
+  bullets; §5.3.1 gained the null-hard-after-fold paragraph; the PDF stamp matches the Markdown
+  in the same commit.
+- **AH-03**: §14.8 and §12's row now say no `requires_format_eligibility` marker was recorded
+  because the format rule landed in the same commit as the fixture — the string exists only in
+  the plan and this file, and the one-move figures stay where AG-01 derived them.
+- **AH-04**: `_source_suffix()` (`cli.py:3310`) renders the provenance in human output and
+  `free_space_soft_source`/`free_space_hard_source` (`cli.py:3386-3387`) in `--json`; the manual's
+  legend table documents both; `test_topology.py:410/435/461` and the CLI test cover both
+  renderers.
+- **AH-05**: the stale "as built … until it lands" note is gone from
+  `.agents/domain-invariants.md`; the surrounding §2/§2a text stands.
+- **AH-06's refutation is sound.** `tests/corpus/README.md` restricts bundle repair to collector
+  bugs with one rebuild path; rewriting captured configs to a newer shape is not that, and it
+  would erase the one bundle that proves the pre-`free_space` replay path works. The concern's
+  true half — no end-to-end fold coverage — is closed by the two replay tests above, and §12's
+  row now says the corpus configs are "left as captured".
+- **AH-07**: the warning names "lowered or removed" only;
+  `test_oversized_deprecated_floor_warns_and_does_not_raise` (`test_topology.py:392`) pins both
+  the warn-not-raise and the string.
+- **AH-08 verified wider than the finding asked.** The manpage's CONFIGURATION section now names
+  every top-level schema key — including `schema_version` and `solver`, and the fix also caught
+  `load` → `load_weights`, a key that never existed. An independent reimplementation of
+  `test_manpage_names_every_top_level_schema_key` (schema `properties` vs the manpage's bold
+  list) reports `missing: []`.
+- **`37a0788`'s own addition verified.** `check_invariants()` check 4 asserts
+  `reserve_shortfall_bytes_after <= reserve_shortfall_bytes_before` per group per variant
+  (`validate_corpus.py:710-717`), deliberately not `= 0`; both committed bundles pass it; the
+  unit tests for the check pass. The `≤` choice is correct — an oversized deprecated
+  `min_free_bytes` or a group with no feasible repair legitimately ends above zero, and `= 0`
+  would false-positive on exactly the configs AH-01 concerns.
+
+### 51.2 Findings summary
+
+| ID | Severity | Location | Summary |
+|----|----------|----------|---------|
+| AI-01 | Low | `tests/corpus/validate_corpus.py:665-671` (docstring), `:716` (violation message) | Check 4's justification names a mechanism the heuristic backend does not have. "The lexicographic stage minimises `Σ r_s` first (section 5.4)" is true of both MILP backends (`optimize.py`'s two-stage solve, stage 1 = `Σ r_s` alone) but `run_variant_matrix()` always sweeps the heuristic too, and the heuristic has no lexicographic stage: `_repair()` enforces a strict group-total decrease, then `_descend()` optimises the full §5.4 objective in which the shortfall enters only as `reserve_penalty_term = configured P × shortfall_tib` — and §5.3's V-01 note records that this `P` is unfloored, not provably dominant. What actually holds `after ≤ before` for the committed bundles is `order_moves()`'s transient check (`schedule.py:238`) with `hard = soft` (corpus configs carry `min_free_bytes: 0`, no `free_space` block): every arrival storage's endpoint satisfies soft, lost-disk storages can only improve, untouched ones are unchanged. For a hypothetical `hard < soft` config on the heuristic backend, `_descend()` could legitimately accept a shortfall-raising move the hard floor permits, and the check would flag a legal plan — a latent false positive, no live failure. The citation is also the wrong section: the lexicographic stage is §5.3/§5.5's solve, §5.4 is the objective |
+
+### 51.3 AI-01 — check 4's justification does not cover the heuristic backend it sweeps
+
+**Severity:** Low
+**Where:** `tests/corpus/validate_corpus.py:665-671` (check 4's docstring), `:716` (the violation
+message), and the same reasoning in REVIEW.md §50.1's third bullet; the plan's §16.6 and §9.5
+passages state the invariant without the lexicographic claim and are accurate as written.
+
+**Analysis.** The check itself is sound for what it asserts on the committed corpus — this is a
+finding about the *reason given*, not the assertion. Three mechanisms are conflated:
+
+1. **The MILP backends (cbc, cpsat).** Here the justification is exact: `optimize.py`'s
+   lexicographic solve minimises `Σ r_s` alone in stage 1 and fixes it as a constraint in stage 2,
+   so the final assignment's shortfall is the proven minimum over all feasible assignments —
+   never above the current one's, which is one of the candidates. "Never raised" is a theorem
+   here.
+2. **The heuristic backend.** `run_variant_matrix()` sweeps it in every mode (narrow mode is
+   hardcoded `["heuristic", "cbc"]`, full mode adds cpsat), so every corpus run applies check 4
+   to heuristic plans. The heuristic has no lexicographic stage: `_repair()`
+   (`heuristic.py:509-573`) enforces a strict group-total shortfall decrease per step, and
+   `_descend()` (`heuristic.py:685-777`) then optimises the full §5.4 objective, in which the
+   shortfall appears only as `reserve_penalty_term = objective.reserve_violation_penalty *
+   reserve_shortfall_tib` (`heuristic.py:364`) — the configured `P`, which §5.3's V-01 as-built
+   note (plan lines 1487-1493) records is unfloored and not provably dominant. A
+   balance-improving move that raises the shortfall can therefore be net-improving on the
+   heuristic's single objective, and `_descend()` accepts it.
+3. **What actually holds for the committed bundles.** Both corpus configs carry
+   `snapshot_reserve.min_free_bytes: 0` and no `free_space` block, so `hard_s = soft_s` for
+   every storage. `order_moves()`'s transient check (`schedule.py:238`) then guarantees the
+   scheduled endpoint: a move is only accepted into the order if the arrival storage clears
+   `hard = soft` at its endpoint, a storage that only loses disks can only improve, and an
+   untouched storage is unchanged — so the executed plan's `Σ r_s` never exceeds the current
+   assignment's, and the `after` sum is taken over exactly that executed assignment
+   (`payback.executed_assignment`, the one the outcome trigger scores). The check passes on the
+   committed corpus because of this mechanism, not the one the docstring names.
+
+The corner where the named mechanism matters: a config with `hard < soft` (a deliberate dip
+permitted by §5.3.1) on the heuristic backend. There `_descend()` could accept a
+shortfall-raising move the hard floor permits, the plan would be legal, and check 4 would flag it
+— a false positive that would send a future operator hunting a defect that is not there. No such
+config is committed, so nothing is tripped today.
+
+The citation is also wrong as a citation: the lexicographic stage is specified in §5.3 (the
+constraint set, whose slack `r_s` it minimises) and §5.5 (the solver backends that implement the
+two-stage solve); §5.4 is the objective — the very section whose single-stage `P`-weighted form
+is the alternative the lexicographic solve exists to avoid.
+
+**Recommendation.** Reword the docstring and the violation message to name the mechanisms that
+actually hold, per backend: the MILP's stage-1 minimum for cbc/cpsat, and — for the heuristic —
+the scheduler's transient check at `hard = soft`, with the `hard < soft` corner named as the one
+configuration where the heuristic's unfloored `P` could let a legal plan raise the shortfall and
+the check would flag it. Alternatively, scope the check's justification to the MILP variants and
+note the heuristic's guarantee is the transient check's, not the objective's. Either way §50.1's
+third bullet inherits the fix. No code change is required: the assertion itself is correct on
+every committed bundle, and the latent false positive only fires on a config shape the corpus
+does not carry.
+
+### 51.4 What this pass confirms
+
+- **All eight AH resolutions hold as §50 records them.** Each was verified against the tree, not
+  the record: the resolver fix reproduced live in six cases, the "two of four fail on the old
+  resolver" split reproduced exactly against the extracted `ba1f0eb` tree, and the four plan
+  passages, the provenance renderers, the warning string, the manpage list and the two replay
+  tests all match §50's account.
+- **AH-06's refutation is sound, and the narrower remedy is the right one.** A committed bundle is
+  captured data with one sanctioned repair path (collector bugs); rewriting its config to a newer
+  shape is not that, and it would delete the compatibility evidence the deprecated-key path
+  exists to keep. The fold's missing end-to-end coverage is closed without touching captured
+  data.
+- **AH-08's fix is wider than the finding asked** — the manpage now names every top-level schema
+  key, and the fix caught a pre-existing wrong key (`load` → `load_weights`) the finding never
+  mentioned.
+- **`37a0788`'s `≤`-not-`==` choice is correct.** `= 0` would false-positive on exactly the
+  oversized-`min_free_bytes` / no-feasible-repair configs AH-01 concerns; `after ≤ before` is the
+  invariant that actually holds, and both committed bundles pass it.
+- **`make check` is green at tip** with the coverage floor cleared by 11 points (96.29% vs the
+  85% floor), and the three PDF stamps match their Markdown.
+
+### 51.5 Assessment
+
+The fixes have converged. Every finding §49 raised is resolved or refuted with the resolution
+verified against the tree, the one behavioural defect (AH-01) is fixed with regression tests that
+provably fail on the old resolver, and the branch's process discipline held: the plan passages,
+the manual, the manpage and the PDF stamps all moved in the same commits as the code they
+describe. The one finding this pass adds (AI-01) is a documentation-accuracy nit inside the fix
+commit's own addition — the corpus check's justification names the MILP's lexicographic stage
+where the heuristic's actual guarantee is the scheduler's transient check — with no behavioural
+effect on any committed bundle and a latent false positive only reachable by a config shape the
+corpus does not carry. It does not block the merge: fix it in the same breath as the next
+doc-only commit, or wave it as Info. The branch is otherwise merge-ready.
+
+---
+
+
+## 52. Resolution of twenty-sixth-pass finding (AI-01)
+
+Fixed, and slightly wider than the finding: the reviewer's premise is right and one of their three
+mechanisms is incomplete in a way that strengthens the finding. Each claim was checked against the
+code before anything was reworded, and the central one was demonstrated rather than read.
+
+**Verification.**
+
+- *The heuristic has no lexicographic stage* — confirmed: `_descend()` accepts any single move,
+  swap or VM co-relocation that lowers `evaluate_assignment(...).total`, and the shortfall enters
+  that total only as `reserve_violation_penalty × TiB short` (`heuristic.py:364`), the configured
+  value, unfloored — §5.3's V-01 as-built note says so in as many words.
+- *…so a balance-improving move can raise the shortfall* — **demonstrated**, not just read. Two
+  10 TiB storages, `san-b` requiring 9.001 TiB free (compliant now, 1 GiB short once a 1 TiB disk
+  lands), two 1 TiB disks on `san-a`, and the *default* `reserve_violation_penalty` of 1000:
+  `run_heuristic()` moves one disk and takes the group from 0 to **1.024 GiB** short, for balance.
+  A penalty of 1000 per TiB is not dominant below a few GiB, which is exactly V-01's "silently
+  tradeable below roughly 25 GiB".
+- *At `hard = soft` the scheduler stops it* — confirmed on the same group: `order_moves()`
+  reports `1:scsi0` deadlocked, schedules nothing, and `final_assignment` keeps a shortfall of 0.
+- *At `hard < soft` it does not* — confirmed: with `hard = 0` the move is scheduled and the
+  executed shortfall is 1.024 GiB, which check 4 would flag.
+- *The citation was wrong* — the two-stage solve is specified in §5.3's slack discussion and
+  implemented per §5.5's backends; §5.4 is the objective. Corrected.
+
+**The part the finding did not say.** Mechanism 3 (the transient check guarantees the executed
+plan at `hard = soft`) is stated for the heuristic's benefit, but it is also what protects the
+*MILP* backends' executed plan, not only their endpoint: a rejected, deferred or deadlocked move is
+dropped after the solver, so a MILP endpoint that was never above the current shortfall can still
+execute as a plan that is. At `hard = soft` the arrival check closes that; at `hard < soft` nothing
+does. So the honest scope of "never raised" is: solver **endpoint** for cbc/cpsat always; **executed
+plan** for every backend when `hard = soft`; neither guaranteed when `hard < soft`.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AI-01 | Resolved, wider | `check_invariants()`' docstring now states the per-backend and per-`hard` account above instead of one lexicographic claim, cites §5.3/§5.5, and says a violation at `hard < soft` is a real signal (the heuristic trading reserve for balance is a documented limitation, not noise) rather than a false positive. The violation message no longer asserts a mechanism. Two `test_schedule.py` tests pin the guarantee the corpus actually relies on — at `hard = soft` a target assignment that would raise `Σ r_s` is dropped whatever backend produced it, and at `hard < soft` it is permitted by design — using a hand-written target assignment, so neither asserts the heuristic's misbehaviour. §50.1's third bullet points here. |
+
+**New evidence the reviewer could not have had.** The corpus now carries a bundle in exactly the
+configuration AI-01 worries about: `bzed-dev-cluster-free-space` has `hard` 10% against `soft`
+70–85% on every storage. Both variants the narrow sweep runs — heuristic and cbc — take the group
+from 1903 to 545 GiB of shortfall, the proven minimum (an independent CP-SAT model of stage 1 gives
+545 GiB to the byte), so check 4 does not fire there. That is one real cluster, not a proof; the
+probe above is why the check's wording now says it can.
+
+**Deliberately not done.** The finding's root cause — the heuristic's unfloored penalty — is
+V-01's known limitation and unchanged. Making `_descend()` refuse any move that raises `Σ r_s`
+would turn "never raised" into a theorem for the heuristic's endpoint too, and is consistent with
+AGENTS §6 point 2, but it changes solver behaviour and belongs to its own change with its own
+fixture; it is offered, not slipped into a documentation fix.
+
+### 52.1 Related change, not a review finding: over-provisioning is never considered
+
+Requested alongside this pass. Every disk already counted at its provisioned size in the model, but
+the rule was implicit and one knob contradicted it. Changed: plan §5.1 states the rule; §13's
+"Thin provisioning" row, which described an allocated-size mode that was never implemented
+(`migration.assume_thick_provisioning` had no consumer in `src/` beyond `config.py` and the
+collector), now says there is none; `false` is refused at startup naming the setting, `true`/absent
+load unchanged so no existing config breaks; AGENTS §6 point 8, `.agents/domain-invariants.md` §2b,
+the manual entry and `config/drs.example.yaml` say the same, with the consequence spelled out (on a
+thin pool a `free_space.soft` can show a shortfall the pool's own numbers do not).
+
+**One deviation found and recorded, not fixed:** `execute.py`'s live pre-move re-check reads PVE's
+`used` (allocated bytes), so on a thin pool it is weaker than the plan's provisioned-size check.
+§9.2 step 2 now says so. The fix is a design question — a live *provisioned* figure has to avoid
+double-counting the in-flight mirror's own target volume, which RBD lists at full size on creation —
+so it is left as a separate task rather than guessed at in the execution path.
+
+### 52.2 The deviation §52.1 recorded, now fixed
+
+`execute.py`'s live re-check no longer reads PVE's `used`; plan §5.1's rule (provisioned, never
+allocated) now holds at execution time too, and §9.2 step 2 and the "as built" exception in §5.1 are
+rewritten to say so. Decisions, since the design question §52.1 left open has more than one answer:
+
+- **Live provisioned `used_b` = `Σ size` over `GET .../storage/{s}/content`**, the quantity
+  `schedule.transient_invariant_ok()` sums from the model (`Σ z_d + Uˢᵉˣᵗ`), read fresh. `total`
+  still comes from `/status`. The shared `reserve.transient_charge_ok()` core is unchanged (AGENTS §5).
+  `storage_content` needs `Datastore.Allocate`, which the tool's credential already requires.
+- **No `max(provisioned, used)`.** Taking PVE's `used` as a further floor would make the allocated
+  figure a model input again, and on ZFS (snapshots) or any pool with metadata overhead `used` can
+  exceed the provisioned sum, so the executor would refuse moves the plan accepted and `replan_needed`
+  would loop. The live check has to be the same quantity as the plan's, only fresher.
+- **In-flight mirror targets are excluded from the listing sum, not the charges.** `move_disk` picks
+  the target volume's name, so it is identified rather than known: at most one volume per in-flight
+  move that was not in the target's listing when the move launched (recorded on `_InflightMove`),
+  belongs to the same VM, and has the size `move_disk` allocates the target at. Deliberately narrow —
+  see the plan. Per the operator (not read from PVE's source): thin to thin of the same kind, the
+  target is the source image's size; between different storage types or thin to thick, it is the disk
+  line's `size=` in the VM config. Both sizes are accepted (the pre-flight already parses the config
+  one). A first version matched the listed size only and would have missed every cross-type move; if
+  PVE ever picks a third size, nothing matches and the consequence is over-conservatism, never a weaker
+  check. **Charge:** the moving disk's own `z_m` is the listed size, except between different storage types or
+  when a qcow2 disk would land raw, where the live check charges `max(listed, config size=)`
+  (`_move_charge_bytes()`, at the operator's direction) so a cross-type target allocated at a larger
+  config size is not charged under what it will occupy. A same-kind move keeps the listed size. The
+  plan-time check (`schedule.transient_invariant_ok()`) still uses the listed size, so on a cross-type
+  move whose config `size=` exceeds the listed one the live check can be slightly stricter than the plan.
+  The conversion branch is a guard: no `format=` is ever passed and (C2) keeps qcow2 off raw-only storage.
+- **A listed volume with neither `size` nor `approximate-size` refuses the move**, naming the volume.
+  Planning skips such a *foreign* volume with a warning (an undercount); a check deciding whether to
+  touch the storage right now must not. Cost: a storage that persistently lists an unsized volume
+  blocks every move onto it until that is dealt with. Loosening it to skip-and-warn like planning
+  would be a one-line change, but it reopens a hole the task asked to close, so it is left strict.
+- **An API error reading either endpoint is `replan_needed`**, where it used to propagate and abort
+  the run.
+- `show-load`/`explain` print `provisioned X/C` (with `(pool reports Y allocated)` when they differ)
+  instead of the pool's `used` beside a shortfall computed from the provisioned sum; `--json` gains
+  `provisioned_used_bytes` next to `used_bytes`.
+
+Covered by `tests/unit/test_execute.py` (thin pool with small `used` and large provisioned content is
+refused; the pool's `used` is never read; unsized and errored reads fail safe; an in-flight mirror
+target is not counted twice, at either the listed or the config size; a foreign, pre-existing same-VM or
+other-sized volume still is) and
+`tests/unit/test_cli.py`.
 
 ---
 

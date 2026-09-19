@@ -6,9 +6,19 @@ history a model needs, and what does each of `quantile`/`seasonal_naive`/
 
 ## The one rule, in one place
 
-`IMPLEMENTATION_PLAN.md` section 10.1's table says how much history each
-model needs, independent of `window.lookback` (the *decision* window). That
-rule has exactly one implementation: three small pure functions,
+Every model needs at least `window.lookback` seconds of history (the
+*decision* window, since a forecaster's point estimate is always over that
+window) — `quantile` needs nothing more than that. `seasonal_naive` needs
+whichever is larger of `window.lookback` and `forecast.seasonal_lookback_days`
+converted to seconds (`* 86400`): enough calendar days that every
+hour-of-day bucket (see `SeasonalNaiveForecaster` below) has actually been
+sampled at least once, not just the decision window itself. `holt_winters`
+needs whichever is larger of `window.lookback` and `2 *
+forecast.holt_winters.seasonal_periods * metrics.step` seconds — two full
+seasonal cycles' worth of samples at the configured scrape step, matching
+`statsmodels`'s own "needs at least two periods to fit a seasonal
+component at all" requirement (see its own fallback rule below). That rule
+has exactly one implementation: three small pure functions,
 `_quantile_required_range_seconds`, `_seasonal_naive_required_range_seconds`
 and `_holt_winters_required_range_seconds`, each called from **two** places —
 the free function `required_range_seconds()` that `config.py`'s startup
@@ -18,7 +28,8 @@ arithmetic between those two call sites, rather than sharing the pure
 function, is exactly the kind of "second copy of a rule" AGENTS.md section 5
 forbids — a change to the Holt-Winters requirement made in only one of them
 would silently desynchronize config validation from what the forecaster
-itself believes it needs.
+itself believes it needs. (`IMPLEMENTATION_PLAN.md` section 10.1 has the
+full per-model table this generalizes from.)
 
 ## Why the upper bound, never the point estimate
 

@@ -59,7 +59,12 @@ BACKENDS = [
 
 
 def make_disk(
-    key: str, size_tib: float, load: float, storage: str, pinned: str | None = None
+    key: str,
+    size_tib: float,
+    load: float,
+    storage: str,
+    pinned: str | None = None,
+    format: str = "raw",
 ) -> Disk:
     vmid, device = key.split(":")
     return Disk(
@@ -70,7 +75,7 @@ def make_disk(
         node="pve01",
         size_bytes=round(size_tib * TIB),
         current_storage=storage,
-        format="raw",
+        format=format,
         pinned_reason=pinned,
     )
 
@@ -81,6 +86,9 @@ def make_storage(
     capability_weight: float = 1.0,
     reserve_factor: float = 2.0,
     foreign_used_tib: float = 0.0,
+    free_space_soft_bytes: int = 0,
+    free_space_hard_bytes: int | None = None,
+    allowed_formats: frozenset[str] = frozenset({"raw", "qcow2"}),
 ) -> Storage:
     return Storage(
         id=id_,
@@ -92,6 +100,12 @@ def make_storage(
         foreign_used_bytes=round(foreign_used_tib * TIB),
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=free_space_soft_bytes,
+        free_space_hard_bytes=(
+            free_space_hard_bytes if free_space_hard_bytes is not None else free_space_soft_bytes
+        ),
+        storage_type="dir",
+        allowed_formats=allowed_formats,
     )
 
 
@@ -113,14 +127,12 @@ def _solve(
     loads: dict[str, float],
     objective: ObjectiveConfig,
     backend: str,
-    min_free_bytes: int = 0,
     cooldown_storages: frozenset[str] = frozenset(),
 ) -> OptimizeResult:
     result = solve(
         group,
         loads,
         objective,
-        min_free_bytes,
         backend,
         time_limit_seconds=10.0,
         mip_gap=0.0,
@@ -190,7 +202,6 @@ def test_solve_returns_none_when_the_library_is_unavailable(
         group,
         {"101:scsi0": 1.0},
         DEFAULT_OBJECTIVE,
-        0,
         backend,
         time_limit_seconds=1.0,
         mip_gap=0.0,
@@ -285,7 +296,7 @@ def test_tiny_disk_bytes_lets_a_tiny_disk_reunite_with_its_vm_for_free(backend: 
     objective = dataclasses.replace(DEFAULT_OBJECTIVE, beta_move_count=1.0)
 
     without_exemption = solve(
-        group, loads, objective, 0, backend, time_limit_seconds=10.0, mip_gap=0.0
+        group, loads, objective, backend, time_limit_seconds=10.0, mip_gap=0.0
     )
     assert without_exemption is not None
     assert without_exemption.assignment["201:efidisk0"] == "san-b"  # not worth a full migration
@@ -294,7 +305,6 @@ def test_tiny_disk_bytes_lets_a_tiny_disk_reunite_with_its_vm_for_free(backend: 
         group,
         loads,
         objective,
-        0,
         backend,
         time_limit_seconds=10.0,
         mip_gap=0.0,
@@ -445,7 +455,6 @@ def test_stage_one_reserve_floor_ignores_a_generous_mip_gap(backend: str) -> Non
         reserve_tradeoff_group(),
         {"201:scsi0": 5.0, "202:scsi0": 5.0},
         objective,
-        0,
         backend,
         time_limit_seconds=10.0,
         mip_gap=0.5,
@@ -628,6 +637,33 @@ def test_solve_still_allows_a_disk_to_move_away_from_a_cooldown_storage(backend:
     }
 
 
+# ------------------------------------------------------- (C2) format eligibility
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_solve_never_places_a_disk_on_a_storage_that_cannot_hold_its_format(
+    backend: str,
+) -> None:
+    """Section 5.3 (C2): `x_{d,s}=0` for a format-ineligible pair, fixed in
+    the model rather than merely scored against -- `block` (raw-only, an
+    LVM-shaped storage) would otherwise be the solver's obvious pick for
+    `201:scsi0` (qcow2), since it alone would perfectly balance the group's
+    heavily skewed load. The solver must never place it there, whatever it
+    decides for the rest of the group."""
+    block = make_storage("block", allowed_formats=frozenset({"raw"}))
+    file_storage = make_storage("file", allowed_formats=frozenset({"raw", "qcow2"}))
+    disks = (
+        make_disk("201:scsi0", 1.0, 10.0, "file", format="qcow2"),
+        make_disk("202:scsi0", 1.0, 0.1, "file", format="raw"),
+    )
+    group = Group(name="g", storages=(block, file_storage), disks=disks)
+    loads = {"201:scsi0": 10.0, "202:scsi0": 0.1}
+
+    result = _solve(group, loads, DEFAULT_OBJECTIVE, backend)
+
+    assert result.assignment["201:scsi0"] == "file"  # never the raw-only storage
+
+
 # ------------------------------------------------------- section 5.5 assertions
 
 
@@ -694,7 +730,6 @@ def test_gamma_trap_assertion_fires_end_to_end_for_a_sub_kilobyte_disk() -> None
             group,
             {"101:scsi0": 1.0},
             DEFAULT_OBJECTIVE,
-            0,
             "cpsat",
             time_limit_seconds=5.0,
             mip_gap=0.0,

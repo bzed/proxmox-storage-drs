@@ -97,9 +97,15 @@ built from the same (anonymized) inputs by construction.
 ## Anonymization: allowlist, then pseudonym, then timestamp
 
 `anonymize.py`'s `Mapper` is a plain dataclass holding the salt plus one
-piece of real state: `_vmid_map`, because vmid pseudonyms need the
-section 16.3 linear-probing collision rule, and that rule has to be
-*order-independent* — the same original vmid must map to the same
+piece of real state: `_vmid_map`, because a vmid pseudonym cannot be a
+pure function of the salt and the vmid alone the way a node or storage
+pseudonym is. `Mapper.vmid()`'s own hash lands in a fixed range
+(`100..999999`); when two different real vmids hash to the same
+candidate, the second one keeps stepping to `candidate + 1` (wrapping
+back to the low end of the range) until it finds a value nothing has
+claimed yet — linear probing, the same collision-resolution technique an
+open-addressing hash table uses. That has to be *order-independent* — the
+same original vmid must map to the same
 pseudonym regardless of which order a caller happens to visit VMs in.
 `register_vmids()` is the only place that matters: it sorts every not-yet
 -seen vmid before assigning, once, up front. Every other `Mapper` method

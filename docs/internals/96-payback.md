@@ -11,8 +11,16 @@ verdict — and why does a reserve-fixing plan always pass? Describes
 source `topology.Storage` — no new fetch, no new state. `duration_mirror`
 is `z_d / migration.bwlimit_bytes_per_sec`; `duration_wipe` is `z_d /
 |saferemove_throughput|` when `migration.account_saferemove_wipe` and the
-source has `saferemove` on, else zero. `cost_load_seconds` is zero below
-`migration.tiny_disk_bytes` (section 5.4/7.1) — `duration_mirror`/
+source has `saferemove` on, else zero. `cost_load_seconds` — in the same
+**load-seconds** unit (average in-flight I/O requests multiplied by
+seconds) `compute_benefit_load_seconds()` produces below, which is what
+makes the two comparable at all — is `duration_mirror *
+(migration.source_load_weight + migration.target_load_weight) +
+duration_wipe * migration.wipe_load_weight`: the extra in-flight I/O the
+migration itself imposes on the source and the target while the mirror
+runs, plus, for as long as the old volume takes to be zeroed, the extra
+load a running `saferemove` wipe imposes on the source alone. It is zero
+below `migration.tiny_disk_bytes` (section 5.4/7.1) — `duration_mirror`/
 `duration_wipe` are still the real numbers, so `exceeds_max_duration`/
 `saturation_deferred` still fire normally for a tiny disk that happens to
 be throttled hard enough; only the economic charge is waived.
@@ -20,8 +28,14 @@ be throttled hard enough; only the economic charge is waived.
 `compute_benefit_load_seconds()` implements section 7.2's `benefit =
 (alpha_spread*(E_before-E_after) + delta_capacity_spread*(F_before-F_after) +
 kappa_vm_affinity*(A_before-A_after)) * H` (sections 12 and, for the third
-term, 5.4/7.2's affinity-payback fix): it takes the pre-plan/post-plan
-pair of `heuristic.raw_spread()` values (E, the *raw*, unweighted
+term, 5.4/7.2's affinity-payback fix). `H` is
+`migration.payback_horizon_seconds` (default `365d`, converted to
+seconds) — the length of time the plan's improvement is assumed to keep
+paying off, which is why both sides of the payback ratio end up in the
+same **load-seconds** unit: benefit is a load-shaped quantity held for
+`H` seconds, and cost (below) is a duration in seconds multiplied by a
+load-shaped weight. `compute_benefit_load_seconds()` itself takes the
+pre-plan/post-plan pair of `heuristic.raw_spread()` values (E, the *raw*, unweighted
 imbalance quantity), `heuristic.raw_capacity_spread()` values (F, the raw
 data-spread quantity, section 5.3 (C7)) and `heuristic.raw_affinity_debt()`
 values (A, the raw — `w_v`-weighted but not `kappa`-scaled — affinity debt,
@@ -79,7 +93,8 @@ shape of it is worth remembering. `duration_wipe` came out negative;
 `duration_d = duration_mirror + duration_wipe` therefore collapsed
 towards zero, and to **exactly** zero on the common configuration where
 `|saferemove_throughput|` equals `migration.bwlimit_bytes_per_sec`. On
-such a cluster section 7.3's `max_single_move_duration` rejection could
+such a cluster the `max_single_move_duration` rejection (a move whose
+mirror plus wipe would run longer than that is refused outright) could
 not fire for a disk of any size — a hypothetical 100 TiB move reported a
 total duration of 0 s and sailed past a 6 h limit — and
 `verify-storages`' two warnings (`cooldown_per_storage_too_short`,
@@ -104,24 +119,79 @@ underspecified formula, not silently worked around.
 
 ## The reserve-override exemption
 
+`evaluate_plan_payback()`'s aggregate ratio test is `benefit_load_seconds
+>= migration.payback_ratio * total_cost_load_seconds` (default
+`payback_ratio: 10.0` — a plan's benefit must be worth at least ten
+times what executing it costs, both sides in the same load-seconds unit
+`compute_benefit_load_seconds()` produces above). `PaybackResult.ratio`
+is that same `benefit / cost` division exposed for reporting; the test
+itself never divides, to stay well-defined when `total_cost_load_seconds`
+is `0`.
+
 Section 7's payback test weighs a move's cost against the *balance*
-benefit it buys. That framing has an edge it does not name: a move
-resolving an active (C4)/(C5) violation is not optional the way a
-balance-driven move is, and its "benefit" under the section 7.2 formula
-can easily be zero or even structurally zero — moving the only loaded disk
-in a two-storage group between the two storages changes which one carries
-it without changing `E` at all, no matter how urgently the move is needed
-for capacity reasons. Rejecting that move on economic grounds would
-contradict section 13's own "the reserve is never traded against
-balance," which `gates.py` already treats as absolute for the drift/
-imbalance gates. `evaluate_plan_payback()` applies the identical rule
-here: **a plan containing any move with `resolves_reserve_violation=True`
-always passes the aggregate ratio test**, regardless of the computed
-`ratio`. The hard per-move `max_single_move_duration` rule is not
-exempted this way — section 7.3 lists it as applying "regardless of the
-aggregate test" precisely because it is an operational limit (a mirror
-that takes that long has other costs an economic ratio does not capture),
-not an economic one.
+benefit it buys. That framing has an edge it does not name: a plan
+resolving an active (C4)/(C5) violation, or section 5.3.1's configured
+free-space requirement, is not optional the way a balance-driven move is,
+and its "benefit" under the section 7.2 formula can easily be zero or even
+structurally zero — moving the only loaded disk in a two-storage group
+between the two storages changes which one carries it without changing
+`E` at all, no matter how urgently the move is needed for capacity
+reasons. Rejecting that move on economic grounds would contradict section
+13's own "the reserve is never traded against balance," which `gates.py`
+already treats as absolute for the drift/imbalance gates.
+`evaluate_plan_payback()` applies the identical rule, but as an
+**outcome** trigger, not a per-move flag: it takes two extra parameters,
+`current_shortfall_bytes` and `final_shortfall_bytes` — `Σ r_s`
+(`reserve.total_shortfall_bytes()`) on the group's current assignment and
+on the plan's *executed* endpoint respectively — and `repair_exempt =
+final_shortfall_bytes < current_shortfall_bytes` always passes the
+aggregate ratio test when true, regardless of the computed `ratio`. The
+hard per-move `max_single_move_duration` rule is not exempted this way —
+section 7.3 lists it as applying "regardless of the aggregate test"
+precisely because it is an operational limit (a mirror that takes that
+long has other costs an economic ratio does not capture), not an economic
+one.
+
+**This replaced a per-move flag** (`ScheduledMove.resolves_reserve_violation`,
+still there but narrowed to section 8.2's own priority-1 scheduling
+signal — "this move's source was violating when scheduled first" — never
+read by payback anymore). The flag fired whenever *any* move's source was
+violating at scheduling time, which is provably a superset of the outcome
+trigger (`Σ r_s` can only fall if some storage's `used`/`Z_s` falls, which
+needs a disk to leave a storage that was therefore violating when it
+left — so every outcome-exempt plan was already flag-exempt, never the
+reverse): a plan that moves a disk off a violating storage but leaves the
+group no less short is flag-exempt but not outcome-exempt. The two extra
+parameters are computed once, in `cli.py`'s `_plan_group()` — the
+function's sole production caller — from objects it already has in hand:
+`current_shortfall_bytes` is `reserve.total_shortfall_bytes()` over the
+current assignment (`group.disks`' own `current_storage`);
+`final_shortfall_bytes` is the same sum over `payback.
+executed_assignment()`'s result, `schedule_result.final_assignment` with
+every disk a hard per-move rule excluded (`exceeds_max_duration` or
+`saturation_deferred`, both already known from `move_costs` by then) held
+back at its current storage — "what the plan will really run," not merely
+what got scheduled, so a repair a hard rule then blocks is correctly
+*not* exempt.
+
+**The revert test, `payback.repair_markers()`**, is the per-move report a
+caller shows an operator ("which move carried the repair"): a move is
+`repair: true` iff holding its own disk back on its current storage —
+against that same `executed_assignment()` result — would strictly raise
+`Σ r_s`. This is deliberately a *different* question from the trigger:
+the trigger asks whether the plan as a whole reduced `Σ r_s`; the marker
+asks, move by move, which ones the plan's own repair actually depends on.
+The two can disagree in either direction — a redundant-repair plan (two
+moves off a violating storage, either alone sufficient) repairs with no
+move individually marked, since holding *either one back alone* still
+leaves the other to do the job — and the marker also catches an
+*indirect* repair: a move whose own source never violated anything, but
+which empties the destination another repair needs (section 14.8's
+`free-space-repair.yaml`, `roomy`'s own move, is exactly this case). Both
+`executed_assignment()` and `repair_markers()` take the same `Group` and
+assignment shape `reserve.py`'s functions already use, so the revert test
+is two extra `total_shortfall_bytes()` calls per move, not a second
+implementation of (C5)'s arithmetic.
 
 `test_plan_json_output` and
 `test_plan_json_output_accepts_payback_when_saferemove_is_off` in
@@ -129,20 +199,43 @@ not an economic one.
 same reserve-driven, zero-benefit move is accepted when its duration is
 within the limit and rejected (correctly, via the hard rule, not the
 economic one) when a slow `saferemove` wipe pushes it over
-`max_single_move_duration`.
+`max_single_move_duration` — and, because that hard rule then excludes the
+move from `executed_assignment()`, the plan is *not* `repair_exempt`
+either in that second case, even though the plan's aspirational target
+would have repaired the violation.
 
 ## The section 7.3 saturation guard: `compute_move_cost()`'s optional `target`
+
+The guard defers a move (never rejects it outright) when the load it
+would add to either endpoint, forecast over the mirror, would push that
+storage past an operator-declared ceiling: a move is deferred whenever
+`L_during(s) > saturation_ceiling * N_s` for either endpoint `s`. `N_s`
+is that storage's own `storages[].saturation_load` — an operator-supplied
+number, in the same average-in-flight-I/O-requests unit every other load
+figure in this codebase uses, above which the operator judges the
+storage should not run for a sustained period; it is optional, and a
+storage that never sets it is never checked at all (below).
+`saturation_ceiling` is `migration.saturation_ceiling` (default `0.85`),
+the fraction of `N_s` a move's own forecast load is allowed to reach.
+`L_during(s) = L_hat_s(duration_mirror) + omega_role(s)`: `L_hat_s
+(duration_mirror)` is the forecast upper bound of `s`'s own load over the
+move's mirror duration — `forecast.storage_upper_bound()`, section 10.1,
+summed over the disks *currently* resident on that storage, not the
+moving disk's own hypothetical arrival, since during mirroring it is
+still served from `src` — and `omega_role(s)` is the same per-role load
+charge the cost formula itself uses for a mirroring move,
+`migration.source_load_weight` (`ω_src`) when `s` is the source or
+`migration.target_load_weight` (`ω_dst`) when `s` is the target (never
+both on the same endpoint).
 
 `compute_move_cost()` stays pure (the module docstring's own promise:
 "nothing fetches anything") by taking the guard's inputs already
 computed, rather than fetching a forecast itself: `target`, and
 `l_hat_src`/`l_hat_dst` — the caller's own already-computed
-`L_hat_s(duration_mirror)` for each endpoint
-(`forecast.storage_upper_bound()`, section 10.1, summed over the disks
-*currently* resident on that storage — not the moving disk's own
-hypothetical arrival, since during mirroring it is still served from
-`src`, and its mirror-write traffic to `dst` is exactly what the
-`ω_dst` charge below already accounts for separately). Left at their
+`L_hat_s(duration_mirror)` for each endpoint, per the formula above (its
+`ω_dst` charge below already accounts for the moving disk's own
+mirror-write traffic to `dst` separately, so `l_hat_dst` itself must
+never double-count it). Left at their
 defaults (`target=None`, both `0.0`) the check is simply inactive — every
 call site written before this existed, and `cli.py`'s own `dry-run`/
 `plan` paths that have not been updated to compute a forecast, keep
@@ -158,12 +251,11 @@ call `mirror_duration_seconds()`, use it as the horizon for
 `forecast.storage_upper_bound()` against each endpoint's own resident
 disks, then call `compute_move_cost()` with the results.
 
-`_saturation_deferred()` charges `migration.source_load_weight`/
-`target_load_weight` (`ω_src`/`ω_dst`) on top of each endpoint's own
-`l_hat`, matching section 7.3's `ω_role` table for the mirroring state —
-the same two config values `compute_move_cost()`'s own cost formula
-already uses (AGENTS.md section 5: no second pair of weights invented
-for this). `MoveCost.saturation_deferred`/`PaybackResult.deferred_moves`
+`_saturation_deferred()` is where `L_during(s) > saturation_ceiling * N_s`
+above is actually evaluated per endpoint — the same two `ω_src`/`ω_dst`
+config values `compute_move_cost()`'s own cost formula already uses, not
+a second pair invented for this check (AGENTS.md section 5).
+`MoveCost.saturation_deferred`/`PaybackResult.deferred_moves`
 mirror `exceeds_max_duration`/`rejected_moves`'s existing shape exactly,
 but are kept as distinct fields — section 7.3 itself draws the same
 distinction ("reject the move" vs. "defer the move to a later run"), and
@@ -177,18 +269,21 @@ neither being non-empty.
 - **Any materiality floor on the benefit.** A plan of nothing but tiny
   disks has `total_cost_load_seconds == 0`, so `aggregate_ok` reduces to
   `benefit_load_seconds >= 0` and `PaybackResult.ratio` reports `+inf`:
-  such a plan passes the aggregate test unconditionally. That is section
-  7.3's "needs no verdict" working as specified — the whole point of the
-  section 7.1 exemption is that a 528 KiB `efidisk0` rejoining its VM
-  must not have to out-earn a rule written for multi-terabyte migrations.
+  such a plan passes the aggregate test unconditionally (a repairing plan
+  skips the test anyway, so this matters for the non-repairing case). That
+  is intended: a disk below `tiny_disk_bytes` is exempt from the payback
+  arithmetic precisely so that a 528 KiB `efidisk0` rejoining its VM does
+  not have to out-earn a rule written for multi-terabyte migrations.
 
   What the code does not show, and what is worth knowing before touching
   either module, is the consequence: for such a plan **nothing downstream
-  of the section 5.4 objective asks whether the moves are worth making**,
+  of the solver's objective asks whether the moves are worth making**,
   and no objective term has a materiality floor either, so any `+ε` is
   enough. The affinity term's correctness is load-bearing for tiny moves
   in a way it is not for any other kind of move. That is not theoretical:
-  while section 5.3 (C3) still excluded pinned disks by default, two
+  while `objective.affinity_counts_pinned_disks` still defaulted to
+  `false` — so a disk that could not move was left out of the affinity
+  count, and a VM's pinned disks exerted no pull on its movable ones — two
   528 KiB `efidisk0` moves on a real cluster were emitted on a `3.6e-7`
   capacity-spread difference — a relative improvement of `6e-8`, on which
   CP-SAT and CBC did not even agree — with a `kappa` gain of exactly
@@ -224,8 +319,10 @@ neither being non-empty.
   saturation_ceiling * N_s` for each endpoint (see the section above),
   but only at the mirroring-phase horizon the section's own
   header names ("push either endpoint above ... during *the mirror*") —
-  not a second, separate check for the *draining* phase (`ω_wipe` over
-  `duration_wipe_seconds`), which the full generalized in-flight-set
+  not a second, separate check for the *draining* phase (`ω_wipe` —
+  `migration.wipe_load_weight`, the same weight the cost formula above
+  charges for a running wipe — over `duration_wipe_seconds`), which the
+  full generalized in-flight-set
   model implies but which needs `schedule.py` to reason about overlapping
   moves, something it does not do (`95-schedule.md`). `N_s` unset on a
   storage still skips the check for that endpoint entirely, exactly as

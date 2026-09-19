@@ -16,20 +16,31 @@ the group's last *executed* balance (`last_load`, `None` if there isn't
 one). It checks, in section 6's own order, stopping at the first that
 decides:
 
-1. **Reserve override.** Any storage in `reserve_statuses` with `.violated`
-   set forces `act=True` immediately, bypassing drift and imbalance
-   entirely — section 13's "safety is not subject to hysteresis" made
-   literal, not just documented intent.
-2. **Drift gate.** `‖ℓ_now − ℓ_last‖₁ / ‖ℓ_last‖₁ ≥ gates.drift_threshold`,
-   vectors aligned over the **union** of disk keys (a disk absent from one
-   side contributes its full load in the other as drift — a new or deleted
-   disk is a genuine change to the group's I/O profile). `last_load=None`
-   skips this gate outright, per section 6's own degenerate-case table —
-   not "treat as zero drift", which would make an operator's very first run
-   fail to act on an already-imbalanced cluster.
-3. **Imbalance gate.** `(max_s u_s − min_s u_s) / u* ≥ gates.imbalance_threshold`,
-   `u*` from `GroupLoad.average_utilization`. `u* == 0` (idle group, section
-   4) always means no-act — there is nothing to spread evenly.
+1. **Reserve override.** `.violated` is `reserve.ReserveStatus.violated` —
+   `True` exactly when a storage's committed usage plus its snapshot-reserve
+   floor would exceed capacity (the shortfall arithmetic is
+   `docs/internals/60-topology.md`'s "`reserve.py`: one (C4)/(C5) evaluator,
+   shared"). Any storage in `reserve_statuses` with `.violated` set forces
+   `act=True` immediately, bypassing drift and imbalance entirely — section
+   13's "safety is not subject to hysteresis" made literal, not just
+   documented intent.
+2. **Drift gate.** `‖ℓ_now − ℓ_last‖₁ / ‖ℓ_last‖₁ ≥ gates.drift_threshold` —
+   `ℓ_now`/`ℓ_last` are this run's and the last-executed-balance's per-disk
+   load vectors (each entry one disk's `ℓ_d`, section 4; see
+   `docs/internals/70-loadmodel.md`), and `‖·‖₁` is the sum of absolute
+   values over every entry. Vectors are aligned over the **union** of disk
+   keys (a disk absent from one side contributes its full load in the other
+   as drift — a new or deleted disk is a genuine change to the group's I/O
+   profile). `last_load=None` skips this gate outright, per section 6's own
+   degenerate-case table — not "treat as zero drift", which would make an
+   operator's very first run fail to act on an already-imbalanced cluster.
+3. **Imbalance gate.** `(max_s u_s − min_s u_s) / u* ≥ gates.imbalance_threshold` —
+   `u_s` is each storage's own fill fraction and `u*` the group's average
+   across storages (`GroupLoad.average_utilization`; both section 4, see
+   `docs/internals/70-loadmodel.md`), so the gate fires once the spread
+   between the fullest and emptiest storage, relative to the group's
+   average fill, crosses the threshold. `u* == 0` (idle group, section 4)
+   always means no-act — there is nothing to spread evenly.
 
 ## `last_load` is real now, for `show-load` and `plan`
 
@@ -44,15 +55,16 @@ this identically (`cli.py` calls the one function, not two copies).
 `docs/internals/15-state.md` for the read side, and this page's next
 section for what is still missing).
 
-**What this does not yet do.** `state.json`'s `last_balance` is only ever
-*read* here -- nothing in this codebase calls `state.with_recorded_balance()`
-yet, because nothing executes a migration yet (`execute.py`, phase 7). Until
-then, `last_balance.load_vector` for any group stays exactly what it was
+**This module only ever reads `last_balance`.** `gates.py` itself never
+calls `state.with_recorded_balance()` — that write happens once, in
+`cli.py`'s `_handle_apply()`, after any group whose plan actually executed
+at least one migration (`"moved"`/`"draining"` outcomes; see
+`docs/internals/92-execute.md`). Until a group's first `apply` run writes
+one, `last_balance.load_vector` for that group stays exactly what it was
 the last time a human (or a test) wrote it by hand; a config with no
 `state.json` on disk, or a fresh install, still behaves exactly as this
 page originally described -- `last_load=None`, drift gate skipped, decision
-reduces to "reserve override, else imbalance". The wiring is real; the
-writer that would make it self-sustaining is not built yet.
+reduces to "reserve override, else imbalance".
 
 ## `show-load`'s gate line is diagnostic, not a real decision
 
@@ -71,10 +83,12 @@ stale line `show-load` printed a moment (or a run) earlier.
 
 `gates.cooldown_per_disk`/`cooldown_per_storage` decide which *individual*
 disks or storages are movable once a plan is already being built — the
-same kind of decision (C2)'s other pin reasons make in `topology.py`, not
-a group-wide act/no-act verdict, so this module still has no cooldown
-logic of its own. Both are now implemented, in the modules this page
-always said they belonged with: the per-disk cooldown is a `topology.py`
+same kind of decision (C2)'s other pin reasons make in `topology.py` ((C2)
+is the plan's per-disk eligibility constraint: a pinned disk cannot be
+reassigned at all, see `docs/internals/60-topology.md`), not a group-wide
+act/no-act verdict, so this module still has no cooldown logic of its own.
+Both are now implemented, in the modules this page always said they
+belonged with: the per-disk cooldown is a `topology.py`
 (C2) pin (`docs/internals/60-topology.md`), and the per-storage cooldown
 is a `heuristic.py` target-eligibility filter
 (`docs/internals/90-heuristic.md`), both reading `state.py`'s cooldown

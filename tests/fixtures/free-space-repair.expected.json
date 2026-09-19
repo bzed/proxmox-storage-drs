@@ -1,0 +1,223 @@
+{
+  "schema_version": 1,
+  "generated_by": "tests/fixtures/generate_expected.py (exhaustive enumeration)",
+  "assumptions": {
+    "account_saferemove_wipe": false,
+    "wipe_load_weight": 1.0,
+    "saferemove_by_storage": {
+      "packed": false,
+      "roomy": false,
+      "swapme": false
+    }
+  },
+  "derived": {
+    "total_load": 6.15,
+    "u_star": 2.05,
+    "b_bar": 0.51,
+    "initial": {
+      "packed": {
+        "load": 2.05,
+        "used_tib": 7.5,
+        "largest_tib": 1.0,
+        "required_tib": 10.5,
+        "violates_reserve": true
+      },
+      "roomy": {
+        "load": 2.05,
+        "used_tib": 6.8,
+        "largest_tib": 1.0,
+        "required_tib": 9.8,
+        "violates_reserve": false
+      },
+      "swapme": {
+        "load": 2.05,
+        "used_tib": 1.0,
+        "largest_tib": 1.0,
+        "required_tib": 4.0,
+        "violates_reserve": false
+      }
+    },
+    "E_before": 0.0,
+    "F_before": 1.607843,
+    "spread_before": 0.0,
+    "capacity_spread_before": 1.27451
+  },
+  "cases": [
+    {
+      "beta_move_count": 0.25,
+      "delta_capacity_spread": 0.5,
+      "expected_objective": 5.282843,
+      "expected_move_count": 2,
+      "expected_E_after": 4.1,
+      "expected_F_after": 1.215686,
+      "expected_fragmentation": 0.0,
+      "expected_moves": [
+        "601:scsi0:packed->roomy",
+        "603:scsi0:roomy->swapme"
+      ],
+      "expected_order": [
+        {
+          "disk_key": "603:scsi0",
+          "move": "603:scsi0:roomy->swapme",
+          "transient_target_used_tib": 2.0,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 5.0,
+          "capacity_tib": 10.0,
+          "ok": true
+        },
+        {
+          "disk_key": "601:scsi0",
+          "move": "601:scsi0:packed->roomy",
+          "transient_target_used_tib": 6.3,
+          "transient_reserve_basis_tib": 0.5,
+          "transient_required_tib": 9.3,
+          "capacity_tib": 10.0,
+          "ok": true
+        }
+      ],
+      "expected_final_loads": {
+        "packed": 2.0,
+        "roomy": 0.05,
+        "swapme": 4.1
+      },
+      "expected_final_reserve": {
+        "packed": {
+          "load": 2.0,
+          "used_tib": 7.0,
+          "largest_tib": 1.0,
+          "required_tib": 10.0,
+          "violates_reserve": false
+        },
+        "roomy": {
+          "load": 0.05,
+          "used_tib": 6.3,
+          "largest_tib": 0.5,
+          "required_tib": 9.3,
+          "violates_reserve": false
+        },
+        "swapme": {
+          "load": 4.1,
+          "used_tib": 2.0,
+          "largest_tib": 1.0,
+          "required_tib": 5.0,
+          "violates_reserve": false
+        }
+      },
+      "expected_spread_after": 1.97561,
+      "expected_capacity_spread_after": 0.980392,
+      "lexicographic": {
+        "min_total_slack_tib": 0.0,
+        "expected_objective_nonreserve": 5.282843,
+        "expected_move_count": 2,
+        "expected_moves": [
+          "601:scsi0:packed->roomy",
+          "603:scsi0:roomy->swapme"
+        ],
+        "agrees_with_big_m_at_configured_p": true,
+        "big_m_agreement_threshold_p": 13.679739,
+        "big_m_p_configured": 1000.0,
+        "big_m_p_min_computed": 22867694.933
+      }
+    }
+  ],
+  "payback_two_move_plan": {
+    "beta_move_count": 0.25,
+    "delta_capacity_spread": 0.5,
+    "per_move": [
+      {
+        "disk": "601:scsi0",
+        "size_tib": 0.5,
+        "duration_mirror_seconds": 2621.44,
+        "duration_wipe_seconds": 0.0,
+        "duration_seconds": 2621.44,
+        "cost_load_seconds": 5242.88
+      },
+      {
+        "disk": "603:scsi0",
+        "size_tib": 1.0,
+        "duration_mirror_seconds": 5242.88,
+        "duration_wipe_seconds": 0.0,
+        "duration_seconds": 5242.88,
+        "cost_load_seconds": 10485.76
+      }
+    ],
+    "total_cost_load_seconds": 15728.64,
+    "benefit_load_seconds": -123114070.59,
+    "ratio": -7827.38,
+    "aggregate_ok": false,
+    "reserve_shortfall_tib_before": 0.5,
+    "reserve_shortfall_tib_after": 0.0,
+    "repair_exempt": true,
+    "accepted": true,
+    "repair_markers": {
+      "601:scsi0": true,
+      "603:scsi0": true
+    }
+  },
+  "payback_rejected_archive_disk": {
+    "size_tib": 4.0,
+    "delta_E": 0.01,
+    "delta_F": 0.0,
+    "cost_load_seconds": 41943.04,
+    "benefit_load_seconds": 315360.0,
+    "ratio": 7.519,
+    "accepted": false
+  },
+  "hard_sweep": [
+    {
+      "hard_tib": null,
+      "orderable": true,
+      "order": [
+        {
+          "disk_key": "603:scsi0",
+          "move": "603:scsi0:roomy->swapme",
+          "transient_target_used_tib": 2.0,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 5.0,
+          "capacity_tib": 10.0,
+          "ok": true
+        },
+        {
+          "disk_key": "601:scsi0",
+          "move": "601:scsi0:packed->roomy",
+          "transient_target_used_tib": 6.3,
+          "transient_reserve_basis_tib": 0.5,
+          "transient_required_tib": 9.3,
+          "capacity_tib": 10.0,
+          "ok": true
+        }
+      ]
+    },
+    {
+      "hard_tib": 1.0,
+      "orderable": true,
+      "order": [
+        {
+          "disk_key": "601:scsi0",
+          "move": "601:scsi0:packed->roomy",
+          "transient_target_used_tib": 7.3,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 9.3,
+          "capacity_tib": 10.0,
+          "ok": true
+        },
+        {
+          "disk_key": "603:scsi0",
+          "move": "603:scsi0:roomy->swapme",
+          "transient_target_used_tib": 2.0,
+          "transient_reserve_basis_tib": 1.0,
+          "transient_required_tib": 4.0,
+          "capacity_tib": 10.0,
+          "ok": true
+        }
+      ]
+    }
+  ],
+  "counterfactual_free_space_soft_zero": {
+    "beta_move_count": 0.25,
+    "delta_capacity_spread": 0.5,
+    "expected_objective": 0.803922,
+    "expected_moves": [],
+    "expected_move_count": 0
+  }
+}

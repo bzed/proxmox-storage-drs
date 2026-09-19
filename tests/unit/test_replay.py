@@ -93,6 +93,45 @@ def test_replay_pve_client_serves_topology(tmp_path: Path) -> None:
     assert topology.groups[0].disks[0].vmid != 101  # anonymized, not the original
 
 
+def _free_space_pairs(topology: object) -> list[tuple[int, int]]:
+    """Per storage, sorted -- a bundle's storage ids are anonymized."""
+    return sorted(
+        (s.free_space_soft_bytes, s.free_space_hard_bytes)
+        for g in topology.groups  # type: ignore[attr-defined]
+        for s in g.storages
+    )
+
+
+def test_replay_of_a_captured_min_free_bytes_config_keeps_the_folded_floor(tmp_path: Path) -> None:
+    """AH-01/AH-06: a live config carrying only the deprecated
+    ``min_free_bytes`` is collected as the resolved per-storage pair, and
+    replaying it through the real resolver yields the same soft *and* hard --
+    the deprecated floor is still charged on every in-flight state."""
+    floor = 1 << 30
+    bundle_dir = write_bundle(tmp_path, snapshot_reserve={"min_free_bytes": floor})
+    topology = build_topology(replay.ReplayPveClient(bundle_dir), _config_from_bundle(bundle_dir))
+    assert _free_space_pairs(topology) == [(floor, floor), (floor, floor)]
+
+
+def test_replay_of_a_pre_free_space_bundle_still_folds_min_free_bytes(tmp_path: Path) -> None:
+    """A bundle collected before ``free_space`` existed carries the scalar
+    and no per-storage pair; replay must keep reading it, with the same
+    fold -- the compatibility a committed corpus bundle exists to prove."""
+    import yaml
+
+    floor = 1 << 30
+    bundle_dir = write_bundle(tmp_path)
+    config_path = bundle_dir / "config.yaml"
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    for group in data["groups"]:
+        for storage in group["storages"]:
+            storage.pop("free_space", None)
+    data["snapshot_reserve"] = {"min_free_bytes": floor}
+    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    topology = build_topology(replay.ReplayPveClient(bundle_dir), _config_from_bundle(bundle_dir))
+    assert _free_space_pairs(topology) == [(floor, floor), (floor, floor)]
+
+
 def _config_from_bundle(bundle_dir: Path):  # type: ignore[no-untyped-def]
     from proxmox_storage_drs.config import load_config
 

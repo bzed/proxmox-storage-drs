@@ -74,23 +74,41 @@ actually enforce the invariant against whatever really ends up running
 together.
 
 The actual arithmetic — `used_b + sum(z_m) + f_b * max(Z_b, max(z_m)) <=
-C_b` — lives in `reserve.transient_charge_ok()`, taking a *list* of
+C_b` (storage `b`'s bytes already used, plus every in-flight charge
+landing on it, plus its reserve headroom sized off the larger of what
+already resides there and the largest single charge in flight, must not
+exceed its capacity — `f_b` is the storage's own `reserve_factor`, `z_m`
+each in-flight move's disk size, `Z_b` the largest disk already resident,
+`C_b` the storage's capacity in bytes) — lives in
+`reserve.transient_charge_ok()`, taking a *list* of
 charges rather than one disk, so it degenerates to section 8.1's original
 single-move form when called with `[disk.size_bytes]` (what this module
 does) and generalizes correctly to several moves landing on the same
 storage at once when `execute._launch_decision()` calls it with more than
 one, for real, under concurrent execution (AGENTS.md section 5: this is
 the *one* place that formula is written, not two functions that happen to
-agree). `execute._live_transient_check()` (sequential) and
-`execute._launch_decision()` (concurrent) both call it against a live
-`storage_status()` read instead of this module's model-derived numbers —
-see `92-execute.md`.
+agree). `execute._live_transient_check()` — called by both the
+sequential executor and `execute._launch_decision()` (concurrent) — calls
+it with live numbers instead of this module's model-derived ones: capacity
+from `storage_status()`, and `used_b` summed from the target's content
+listing at *provisioned* sizes, so it stays the same quantity this module
+computes rather than PVE's lower allocated `used` on a thin pool — see
+`92-execute.md`.
 
-The `min_free_bytes` floor is folded into the transient check the same way
-(C5) folds it into the steady-state one (`max(f_b * max(Z_b, z_d),
-min_free_bytes)`) — the plan's own section 8.1 formula does not mention
-the floor, but there is no reason a storage's absolute minimum free space
-should stop applying just because a migration happens to be in flight.
+Section 5.3.1's transient floor is folded into the check the same way
+(C5) folds `soft_s` into the steady-state one — `max(f_b * max(Z_b, z_d),
+hard_b)` — except the floor here is `hard_b`
+(`target_storage.free_space_hard_bytes`), not `soft_b`: section 8.1's own
+formula does not mention a floor at all, but there is no reason a
+storage's configured minimum free space should stop applying just because
+a migration happens to be in flight, and `hard_b` (not `soft_b`) is what
+this transient state is allowed to relax to — with the default `hard:
+null` (`hard_b = soft_b`) the two floors coincide and the check is exactly
+as strong as it would be with `soft_b`; an operator who sets `hard` below
+`soft` is deliberately buying room for a bounded, in-flight dip on a
+storage the finished plan still leaves compliant (`.agents/domain-invariants.md`
+section 2a; `topology.py` resolves both onto the `Storage` this function
+already receives, so no separate parameter threads either one in here).
 
 ## The heuristic can accept a residual violation; the scheduler cannot execute one
 

@@ -32,6 +32,18 @@ and cooldowns, and now **written** by `apply` after any run that actually
 executed a migration — see [`15-state.md`](15-state.md),
 [`80-gates.md`](80-gates.md) and [`92-execute.md`](92-execute.md).
 
+A handful of short symbols recur below and in every other page this one
+links to, so they are worth fixing once, here: `D` is the set of every
+managed disk a group places (pinned or not), `S` its set of storages, and
+`Uˢᵉˣᵗ` the bytes on a storage that belong to no managed disk at all —
+orphans, other groups' foreign volumes (`60-topology.md`). `(C2)` is the
+plan's per-disk eligibility constraint (a pinned disk cannot be
+reassigned); `(C4)`/`(C5)` are the largest-disk and capacity/snapshot-
+reserve constraints `reserve.py` evaluates per storage, both in
+`60-topology.md`. `ℓ_d` is one disk's own blended load; `L_s`/`u_s` a
+storage's summed load and I/O-share utilization; `u*` the group's average
+utilization — all four in [`70-loadmodel.md`](70-loadmodel.md).
+
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
    │  Prometheus          │        │   Proxmox VE API           │
@@ -96,14 +108,14 @@ executed a migration — see [`15-state.md`](15-state.md),
 | `logging_setup.py` | Structured JSON logging to **stderr** | section 2.1 (amended, see [`40-cli-and-logging.md`](40-cli-and-logging.md)) |
 | `metrics.py` | `PrometheusClient`, PromQL construction, `verify_metrics()`, `compute_disk_coverage()` | sections 3.1-3.4 |
 | `pve.py` | `PveClient` (built on `proxmoxer`), `build_client()` | section 3.5 |
-| `topology.py` | `build_topology()`: the disk/storage/group join, `D`, `S`, `Uˢᵉˣᵗ`, (C2) pins | sections 3.5-3.7, 5.1, 5.3 (C2) |
-| `reserve.py` | `compute_reserve_status()`: (C4)/(C5), shared by `show-load` today and the solver later; `transient_charge_ok()`: section 8.1's transient invariant, generalized to any number of concurrent charges on one target, shared by `schedule.py` (model-based) and `execute.py` (live) | section 5.3 (C4)/(C5), section 8.1 |
+| `topology.py` | `build_topology()`: the disk/storage/group join, `D`, `S`, `Uˢᵉˣᵗ`, (C2) pins; resolves `free_space.soft`/`.hard` onto `Storage.free_space_soft_bytes`/`.free_space_hard_bytes` (section 5.3.1) and `storage_type`/`allowed_formats` for `storage_accepts_format()` (C2) | sections 3.5-3.7, 5.1, 5.3 (C2), 5.3.1 |
+| `reserve.py` | `compute_reserve_status()`: (C4)/(C5) against `storage.free_space_soft_bytes`, shared by `show-load`/`plan`/`explain` and the solver; `transient_charge_ok()`: section 8.1's transient invariant against `hard_b`, generalized to any number of concurrent charges on one target, shared by `schedule.py` (model-based) and `execute.py` (live); `total_shortfall_bytes()`: `Σ r_s`, section 7.3's outcome trigger and revert test | section 5.3 (C4)/(C5)/5.3.1, section 8.1 |
 | `loadmodel.py` | `compute_group_load()`: the raw-series-to-`ℓ_d` blend, `min_coverage` rejection, current `L_s`/`u_s` | section 4 |
 | `gates.py` | `evaluate_group_gates()`: reserve override, drift, imbalance — the act/no-act verdict, with reasoning | section 6 |
-| `heuristic.py` | `run_heuristic()`: seed/repair/descend, and `evaluate_assignment()`, the section 5.4 objective shared with the MILP path too | sections 5.4/5.5 |
-| `optimize.py` | `solve()`: CP-SAT/CBC, section 5.3's constraints, the lexicographic two-stage reserve solve | section 5.5 |
+| `heuristic.py` | `run_heuristic()`: seed/repair/descend, and `evaluate_assignment()`, the section 5.4 objective shared with the MILP path too; every candidate-generating helper excludes a (C2) format-ineligible target | sections 5.4/5.5, 5.3 (C2) |
+| `optimize.py` | `solve()`: CP-SAT/CBC, section 5.3's constraints (including (C2) format eligibility, `_fixed_zero_pairs()`), the lexicographic two-stage reserve solve | section 5.5, 5.3 (C2) |
 | `schedule.py` | `order_moves()`: transient-feasible ordering of a target assignment's moves, deadlock reporting | section 8 |
-| `payback.py` | `evaluate_plan_payback()`: the cost/benefit acceptance test, with a reserve-override exemption mirroring `gates.py`'s | section 7 |
+| `payback.py` | `evaluate_plan_payback()`: the cost/benefit acceptance test, with a plan-outcome repair exemption (`current_shortfall_bytes`/`final_shortfall_bytes`, section 7.3) mirroring `gates.py`'s reserve override in spirit but scored on the plan's own `Σ r_s`, not a per-move flag; `repair_markers()`/`executed_assignment()`: the section 7.3 revert test | section 7, 5.3.1 |
 | `execute.py` | `execute_plan()`: pre-flight re-check per move, VM-lock wait, `move_disk`, the three-condition completion criterion, orphan detection on failure, `auto`'s own time-window/migration-count budgets | section 9 |
 | `timewindow.py` | `current_deadline()`: is `now` (local time) inside a configured `execution.time_windows` entry, and when does it close | section 9.1 |
 | `cli.py` | Argument parsing, command dispatch, `--manual`, the mode-override rule, `show-load`, `verify-storages`, `plan`, `apply`, `collect-testdata`, the global `--replay` | section 11.3 |

@@ -65,7 +65,7 @@ import re
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from proxmox_storage_drs.config import ExcludeConfig, ExecutionConfig, LocksConfig, MigrationConfig
 from proxmox_storage_drs.exceptions import PveApiError
@@ -78,9 +78,13 @@ from proxmox_storage_drs.topology import (
     Disk,
     Group,
     Storage,
+    content_item_size,
     parse_disk_spec,
+    parse_pve_config_size_bytes,
     pending_disk_reasons,
+    storage_accepts_format,
 )
+from proxmox_storage_drs.units import format_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +188,11 @@ class _PreflightResult:
     node: str | None = None
     lock: str | None = None
     volid: str | None = None
+    # The disk line's own `size=` in the VM config, in bytes: what PVE
+    # allocates the mirror target at for a move between different storage
+    # types or from thin to thick, where the target is not a copy of the
+    # source image's own size. `None` when the line carries no parseable one.
+    config_size_bytes: int | None = None
 
 
 def _vm_resource(client: PveClient, vmid: int) -> dict[str, object] | None:
@@ -236,7 +245,7 @@ def _preflight(
     value = config.get(move.device)
     if not isinstance(value, str):
         return _PreflightResult(f"{move.disk_key} is no longer present in the VM's config")
-    storage_id, volume_name, _params = parse_disk_spec(value)
+    storage_id, volume_name, params = parse_disk_spec(value)
     if storage_id != move.from_storage:
         return _PreflightResult(
             f"{move.disk_key} is now on {storage_id!r}, not the planned {move.from_storage!r}"
@@ -269,7 +278,11 @@ def _preflight(
     lock = config.get("lock")
     volid = f"{move.from_storage}:{volume_name}"
     return _PreflightResult(
-        None, node=node, lock=lock if isinstance(lock, str) else None, volid=volid
+        None,
+        node=node,
+        lock=lock if isinstance(lock, str) else None,
+        volid=volid,
+        config_size_bytes=parse_pve_config_size_bytes(params.get("size", "")),
     )
 
 
@@ -348,34 +361,197 @@ def _log_task_lock_retry(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _LiveCheck:
+    """:func:`_live_transient_check`'s result: ``refusal`` is ``None`` when
+    the move may start, else the operator-facing reason it may not (the
+    ``replan_needed`` outcome's ``detail``). ``listed_volids`` is every
+    volume the target's content listing showed at that instant -- the
+    concurrent executor records it on the move it then launches, as the
+    baseline :func:`_inflight_target_volids` needs to recognise that move's
+    own mirror target later."""
+
+    refusal: str | None
+    listed_volids: frozenset[str] = frozenset()
+
+
+def _is_mirror_target(item: Mapping[str, Any], im: _InflightMove, taken: set[str]) -> bool:
+    """Is this content entry the volume ``im``'s ``move_disk`` created on
+    its target? A mirror target is a volume that (a) was not in the target's
+    listing when ``im`` launched, (b) belongs to the same VM, and (c) has
+    one of the two sizes ``move_disk`` allocates it at: the source image's
+    own size (``im.disk.size_bytes``, from its content listing) for a move
+    between storages of the same thin kind, or the disk line's ``size=`` in
+    the VM config (``im.config_size_bytes``) when moving between different
+    storage types or from thin to thick. Either can differ from the other
+    when a volume was resized outside PVE or its storage rounds sizes, so
+    both are accepted. ``taken`` are volids an earlier in-flight move
+    already claimed, so two moves never share one."""
+    volid = item.get("volid")
+    sized = content_item_size(item)
+    return (
+        isinstance(volid, str)
+        and volid not in taken
+        and volid not in im.target_baseline_volids
+        and item.get("vmid") == im.disk.vmid
+        and sized is not None
+        and sized[0] in (im.disk.size_bytes, im.config_size_bytes)
+    )
+
+
+def _inflight_target_volids(
+    content: Sequence[Mapping[str, Any]], inflight_here: Sequence[_InflightMove]
+) -> set[str]:
+    """The volids in ``content`` that are the mirror targets of this run's
+    own in-flight moves onto this storage -- at most one per move.
+
+    Those volumes are already charged as ``z_m`` by :func:`_live_transient_check`,
+    so counting them again from the listing would charge every in-flight
+    move twice. Whether a target is listed yet is not something the caller
+    can assume either way: on Ceph RBD, LVM and file storage the new image
+    exists at its full provisioned size the moment ``move_disk`` allocates
+    it, but there is a window between ``move_disk`` returning its UPID and
+    that allocation. A move whose target is not listed yet simply matches
+    nothing here and stays charged by ``z_m`` alone.
+
+    Deliberately narrow (see :func:`_is_mirror_target`): when nothing
+    matches, nothing is excluded, and the volume is counted -- a wrongly
+    kept volume only makes the check stricter, a wrongly dropped one would
+    make it weaker, and weaker is the direction this tool never accepts."""
+    taken: set[str] = set()
+    for im in inflight_here:
+        for item in content:
+            if _is_mirror_target(item, im, taken):
+                taken.add(str(item["volid"]))
+                break
+    return taken
+
+
+def _provisioned_used_bytes(
+    content: Sequence[Mapping[str, Any]], mirror_volids: set[str]
+) -> tuple[int, str | None]:
+    """Sum of every listed volume's *provisioned* size, skipping
+    ``mirror_volids``, as ``(bytes, None)`` -- or ``(0, volid)`` naming the
+    first volume with neither ``size`` nor ``approximate-size``, whose size
+    is unknowable from the listing. Planning skips such a foreign volume
+    with a warning; a check that decides whether to touch the storage
+    right now cannot, so the caller refuses instead."""
+    total = 0
+    for item in content:
+        if item.get("volid") in mirror_volids:
+            continue
+        sized = content_item_size(item)
+        if sized is None:
+            return 0, str(item.get("volid", "?"))
+        total += sized[0]
+    return total, None
+
+
+def _move_charge_bytes(
+    disk: Disk, config_size_bytes: int | None, source: Storage, target: Storage
+) -> int:
+    """``z_m`` for section 8.1's transient invariant: the bytes this move
+    puts on ``target``. That is the disk's listed size (``Disk.size_bytes``,
+    the source image's own) unless the move changes what kind of volume is
+    made -- between different storage types, or a qcow2 disk landing on a
+    target that cannot hold qcow2, so PVE writes it raw -- where the target
+    is allocated at the disk line's ``size=`` in the VM config and the larger
+    of the two is charged (``config_size_bytes`` is ``None`` when the line
+    carries no parseable ``size=``, which leaves the listed size).
+
+    This is what the operator describes PVE doing (not read from PVE's
+    source). A same-kind move keeps the listed size on purpose: there the
+    target is a copy of the source image, and charging more would refuse
+    moves for a discrepancy that does not apply. This tool never passes
+    ``format=`` to ``move_disk`` and (C2) keeps a qcow2 disk off storage that
+    cannot hold it, so the conversion case is a guard rather than something
+    a plan produces today."""
+    changes_kind = source.storage_type != target.storage_type
+    converts_to_raw = disk.format == "qcow2" and not storage_accepts_format(target, "qcow2")
+    if (changes_kind or converts_to_raw) and config_size_bytes is not None:
+        return max(disk.size_bytes, config_size_bytes)
+    return disk.size_bytes
+
+
 def _live_transient_check(
     client: PveClient,
     node: str,
     target: Storage,
-    disk: Disk,
-    min_free_bytes: int,
+    charge_bytes: int,
     existing_largest_bytes: int,
-) -> bool:
-    """Section 9.2 step 2, re-derived from a *live* ``storage_status()``
-    call rather than the in-memory model ``schedule.transient_invariant_ok()``
-    checks against, via the shared :func:`reserve.transient_charge_ok`
-    (section 8.1's one arithmetic core, AGENTS.md section 5) -- the model
-    function's ``used``/``total`` come from summing this tool's own disk
-    list and ``Storage.capacity_bytes``, while a live re-check specifically
-    wants PVE's own authoritative current ``used``/``total`` instead, which
-    already reflects anything else that touched the storage since
-    planning. Not a second implementation of the *rule*, only of the
-    *data source* the model-based function was never built to accept."""
-    status = client.storage_status(node, target.id)
-    live_used = int(status["used"])
+    inflight_here: Sequence[_InflightMove] = (),
+) -> _LiveCheck:
+    """Section 9.2 step 2 -- section 8.1's transient invariant re-derived
+    from *live* figures, via the shared :func:`reserve.transient_charge_ok`
+    (one arithmetic core, AGENTS.md section 5), for a move that puts
+    ``charge_bytes`` (:func:`_move_charge_bytes`) onto ``target`` and has
+    not been issued yet.
+
+    **Provisioned, never allocated** (section 5.1, domain rule 8): the
+    ``used`` this feeds the rule is the sum of ``size`` over the target's
+    live content listing -- what every volume there was *provisioned* at,
+    which is exactly the quantity ``schedule.transient_invariant_ok()``
+    sums from the model -- and never ``storage_status()``'s own ``used``.
+    On a thin pool (Ceph RBD, LVM-thin, ZFS) that is the allocated figure
+    and far lower, and a re-check built on it could only ever confirm the
+    plan, never notice that other provisioning filled the pool since. What
+    still comes from ``storage_status()`` is ``total``, the capacity, for
+    the same reason planning takes it there: the LUN may have been resized.
+
+    ``inflight_here`` is every move of *this run* currently in flight onto
+    ``target`` (the concurrent executor's; the sequential one has none).
+    Their mirror targets are excluded from the listing sum
+    (:func:`_inflight_target_volids`) because the caller charges each of
+    them as a ``z_m`` already.
+
+    Fails safe: an API error, or a listed volume with no size to count,
+    refuses the move (``replan_needed``) rather than checking against a
+    partial figure. The floor stays ``target.free_space_hard_bytes`` --
+    section 5.3.1's ``hard_b``, resolved once at run start; only the usage
+    and capacity are re-read live."""
+    try:
+        status = client.storage_status(node, target.id)
+        content = client.storage_content(node, target.id)
+    except PveApiError as exc:
+        logger.warning(
+            "could not re-read %s for the live transient check: %s",
+            target.id,
+            exc,
+            extra={"event": "live_check_failed", "storage": target.id},
+        )
+        return _LiveCheck(
+            f"could not re-read {target.id!r}'s live state ({exc}); not starting a move "
+            "onto it without that"
+        )
+    listed = frozenset(str(i["volid"]) for i in content if "volid" in i)
+    live_used, unsized_volid = _provisioned_used_bytes(
+        content, _inflight_target_volids(content, inflight_here)
+    )
+    if unsized_volid is not None:
+        return _LiveCheck(
+            f"{target.id!r} lists {unsized_volid!r} with no size, so its provisioned use "
+            "cannot be established just before starting; not moving onto it blind",
+            listed,
+        )
     live_total = int(status["total"])
-    return transient_charge_ok(
+    charges = [
+        _move_charge_bytes(im.disk, im.config_size_bytes, im.source, im.target)
+        for im in inflight_here
+    ] + [charge_bytes]
+    if transient_charge_ok(
         target.reserve_factor,
         live_total,
         live_used,
         existing_largest_bytes,
-        [disk.size_bytes],
-        min_free_bytes,
+        charges,
+        target.free_space_hard_bytes,
+    ):
+        return _LiveCheck(None, listed)
+    return _LiveCheck(
+        f"{target.id!r} no longer has enough free space to safely hold this disk "
+        "during the move, checked again just before starting "
+        f"(provisioned {format_bytes(live_used)} of {format_bytes(live_total)})",
+        listed,
     )
 
 
@@ -632,7 +808,6 @@ def _execute_one_move(
     storages_by_id: dict[str, Storage],
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     largest_by_storage: dict[str, int],
     clock: Clock,
     exclude: ExcludeConfig,
@@ -693,14 +868,17 @@ def _execute_one_move(
             )
 
     target = storages_by_id[move.to_storage]
-    if not _live_transient_check(
-        client, preflight.node, target, disk, min_free_bytes, largest_by_storage[move.to_storage]
-    ):
-        return outcome(
-            "replan_needed",
-            f"{target.id!r} no longer has enough free space to safely hold this disk "
-            "during the move, checked again just before starting",
-        )
+    live = _live_transient_check(
+        client,
+        preflight.node,
+        target,
+        _move_charge_bytes(
+            disk, preflight.config_size_bytes, storages_by_id[move.from_storage], target
+        ),
+        largest_by_storage[move.to_storage],
+    )
+    if live.refusal is not None:
+        return outcome("replan_needed", live.refusal)
 
     source = storages_by_id[move.from_storage]
     task_retries_used = 0
@@ -909,7 +1087,6 @@ def execute_plan(
     schedule_result: ScheduleResult,
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     mode: str,
     exclude: ExcludeConfig,
     confirm: ConfirmCallback | None = None,
@@ -974,7 +1151,6 @@ def execute_plan(
             schedule_result,
             migration,
             execution,
-            min_free_bytes,
             exclude,
             clock,
             deadline,
@@ -989,7 +1165,6 @@ def execute_plan(
         schedule_result,
         migration,
         execution,
-        min_free_bytes,
         mode,
         exclude,
         confirm,
@@ -1008,7 +1183,6 @@ def _execute_sequential(
     schedule_result: ScheduleResult,
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     mode: str,
     exclude: ExcludeConfig,
     confirm: ConfirmCallback | None,
@@ -1090,7 +1264,6 @@ def _execute_sequential(
             storages_by_id,
             migration,
             execution,
-            min_free_bytes,
             largest_by_storage,
             clock,
             exclude,
@@ -1156,6 +1329,14 @@ class _InflightMove:
     # `task_retries_used` -- carried here since nothing on this path holds
     # a call stack per move across poll cycles.
     task_retries_used: int = 0
+    # Every volid the target storage's content listing showed at the
+    # instant this move launched -- what `_inflight_target_volids()` needs
+    # to tell this move's own mirror target from a volume that was already
+    # there (which section 5.1's provisioned sum must keep counting).
+    target_baseline_volids: frozenset[str] = frozenset()
+    # `_PreflightResult.config_size_bytes` at launch -- the second size
+    # `_is_mirror_target()` recognises this move's mirror target by.
+    config_size_bytes: int | None = None
 
 
 def _per_storage_inflight_counts(inflight: Sequence[_InflightMove]) -> dict[str, int]:
@@ -1169,13 +1350,9 @@ def _per_storage_inflight_counts(inflight: Sequence[_InflightMove]) -> dict[str,
     return counts
 
 
-def _target_charges(inflight: Sequence[_InflightMove], storage_id: str) -> list[int]:
-    """Every in-flight move's ``z_m`` whose *target* is ``storage_id`` --
-    the ``charge_sizes_bytes`` :func:`reserve.transient_charge_ok` needs
-    to account for moves this run has already launched onto the same
-    storage (see that function's own docstring for why this does not try
-    to guess whether a live ``used`` read already reflects them)."""
-    return [im.disk.size_bytes for im in inflight if im.move.to_storage == storage_id]
+def _inflight_onto(inflight: Sequence[_InflightMove], storage_id: str) -> list[_InflightMove]:
+    """This run's in-flight moves whose *target* is ``storage_id``."""
+    return [im for im in inflight if im.move.to_storage == storage_id]
 
 
 def _poll_inflight_once(
@@ -1370,6 +1547,10 @@ class _LaunchDecision:
     outcome: MoveOutcome | None = None
     preflight: _PreflightResult | None = None
     lock_wait: _LockWaitTracker = _LockWaitTracker()
+    # The target's listing at the moment of the live check, for a
+    # ``"launch"`` verdict: becomes the launched move's
+    # `_InflightMove.target_baseline_volids`.
+    target_baseline_volids: frozenset[str] = frozenset()
 
 
 def _launch_lock_decision(
@@ -1414,7 +1595,6 @@ def _launch_decision(
     disk: Disk,
     storages_by_id: dict[str, Storage],
     execution: ExecutionConfig,
-    min_free_bytes: int,
     largest_by_storage: dict[str, int],
     exclude: ExcludeConfig,
     inflight: Sequence[_InflightMove],
@@ -1452,27 +1632,27 @@ def _launch_decision(
         )
 
     target = storages_by_id[candidate.to_storage]
-    status = client.storage_status(preflight.node, target.id)
-    charges = _target_charges(inflight, target.id) + [disk.size_bytes]
-    if not transient_charge_ok(
-        target.reserve_factor,
-        int(status["total"]),
-        int(status["used"]),
+    live = _live_transient_check(
+        client,
+        preflight.node,
+        target,
+        _move_charge_bytes(
+            disk, preflight.config_size_bytes, storages_by_id[candidate.from_storage], target
+        ),
         largest_by_storage[target.id],
-        charges,
-        min_free_bytes,
-    ):
+        _inflight_onto(inflight, target.id),
+    )
+    if live.refusal is not None:
         outcome = MoveOutcome(
             candidate.disk_key,
             candidate.from_storage,
             candidate.to_storage,
             "replan_needed",
-            f"{target.id!r} no longer has enough free space to safely hold this disk "
-            "during the move, checked again just before starting",
+            live.refusal,
         )
         return _LaunchDecision("resolved", outcome=outcome)
 
-    return _LaunchDecision("launch", preflight=preflight)
+    return _LaunchDecision("launch", preflight=preflight, target_baseline_volids=live.listed_volids)
 
 
 def _advance_pending(
@@ -1484,7 +1664,6 @@ def _advance_pending(
     storages_by_id: dict[str, Storage],
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     largest_by_storage: dict[str, int],
     drained_storages: set[str],
     exclude: ExcludeConfig,
@@ -1536,7 +1715,6 @@ def _advance_pending(
         disk,
         storages_by_id,
         execution,
-        min_free_bytes,
         largest_by_storage,
         exclude,
         inflight,
@@ -1594,6 +1772,8 @@ def _advance_pending(
                 source=storages_by_id[candidate.from_storage],
                 target=storages_by_id[candidate.to_storage],
                 volid=pf.volid,
+                target_baseline_volids=decision.target_baseline_volids,
+                config_size_bytes=pf.config_size_bytes,
             )
         )
         pending.pop(0)
@@ -1614,7 +1794,6 @@ def _execute_concurrent(
     schedule_result: ScheduleResult,
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     exclude: ExcludeConfig,
     clock: Clock,
     deadline: datetime | None,
@@ -1704,7 +1883,6 @@ def _execute_concurrent(
                 storages_by_id,
                 migration,
                 execution,
-                min_free_bytes,
                 largest_by_storage,
                 drained_storages,
                 exclude,
