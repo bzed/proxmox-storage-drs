@@ -14,16 +14,34 @@ section rather than invented for this page:
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml show-load
 Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the normal drift/imbalance thresholds -- a capacity shortfall is never delayed by them
-  san-a  used 4.50 TiB/8.00 TiB  L=6.50 u=6.50  ⚠ reserve short by 512.00 GiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
+  san-a  provisioned 4.50 TiB/8.00 TiB  L=6.50 u=6.50  ⚠ reserve short by 512.00 GiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
     101:scsi0        2.00 TiB  raw     ℓ 3.00
     101:scsi1        1.00 TiB  raw     ℓ 1.00
     102:scsi0        1.50 TiB  raw     ℓ 2.50
-  san-b  used 1.50 TiB/8.00 TiB  L=0.70 u=0.70  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
+  san-b  provisioned 1.50 TiB/8.00 TiB  L=0.70 u=0.70  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
     103:scsi0      512.00 GiB  raw     ℓ 0.40
     104:scsi0        1.00 TiB  raw     ℓ 0.30
-  san-c  used 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
+  san-c  provisioned 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
     105:scsi0      512.00 GiB  raw     ℓ 0.20
 ```
+
+`provisioned` on a storage's line is the sum of every disk's *provisioned*
+size on it (the managed disks, plus any foreign volumes — templates, ISOs,
+backups, other groups' disks) against the storage's capacity — the figure
+the reserve shortfall beside it is computed from. The tool never counts on
+over-provisioning: a thin-provisioned pool (Ceph RBD, LVM-thin, ZFS) is
+counted at what its disks were provisioned at, not at what happens to be
+allocated. On a thick pool the two are the same number. On a thin one the
+pool's own, lower figure is printed next to it so the shortfall does not
+look like a mistake:
+
+```
+  ceph-a  provisioned 3.36 TiB/9.48 TiB (pool reports 1.45 TiB allocated)  L=2.10 u=2.10  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
+```
+
+Only the provisioned figure ever enters a decision; the allocated one is
+shown for information. (`--json` carries both: `provisioned_used_bytes` and
+`used_bytes`.)
 
 `L=`/`u=` on a storage's line are `L_s` — the sum of `ℓ` over every disk
 currently on that storage — and `u_s = L_s / capability_weight`, the

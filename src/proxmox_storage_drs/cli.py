@@ -711,9 +711,21 @@ def _render_storage_and_disk_load_lines(
         if storage.id in storage_loads:
             sl = storage_loads[storage.id]
             load_prefix = f"L={sl.load:.2f} u={sl.utilization:.2f}  "
+        # Section 5.1: the figure the reserve shortfall is computed from is
+        # the *provisioned* sum, not PVE's own `used`. On a thick pool the
+        # two agree and only the first is shown; on a thin one (Ceph RBD,
+        # LVM-thin, ZFS) `used` is the lower, allocated figure, so it is
+        # printed alongside rather than in the shortfall's place -- else
+        # a shortfall beside a half-empty pool would read as a mistake.
+        allocated_note = (
+            f" (pool reports {format_bytes(storage.used_bytes)} allocated)"
+            if storage.used_bytes != status.managed_used_bytes
+            else ""
+        )
         lines.append(
-            f"  {storage.id}  used {format_bytes(storage.used_bytes)}/"
-            f"{format_bytes(storage.capacity_bytes)}  {load_prefix}{reserve_str}  "
+            f"  {storage.id}  provisioned {format_bytes(status.managed_used_bytes)}/"
+            f"{format_bytes(storage.capacity_bytes)}{allocated_note}  "
+            f"{load_prefix}{reserve_str}  "
             f"(largest disk {format_bytes(status.largest_disk_bytes)}, "
             f"requires {format_bytes(status.required_reserve_bytes)} free)"
         )
@@ -805,6 +817,7 @@ def _render_show_load_json(
             entry: dict[str, object] = {
                 "id": storage.id,
                 "used_bytes": storage.used_bytes,
+                "provisioned_used_bytes": status.managed_used_bytes,
                 "capacity_bytes": storage.capacity_bytes,
                 "foreign_used_bytes": storage.foreign_used_bytes,
                 "largest_disk_bytes": status.largest_disk_bytes,
@@ -1725,6 +1738,7 @@ def _render_group_explain_json(
         entry: dict[str, object] = {
             "id": storage.id,
             "used_bytes": storage.used_bytes,
+            "provisioned_used_bytes": status.managed_used_bytes,
             "capacity_bytes": storage.capacity_bytes,
             "foreign_used_bytes": storage.foreign_used_bytes,
             "largest_disk_bytes": status.largest_disk_bytes,

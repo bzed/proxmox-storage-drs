@@ -143,7 +143,15 @@ Before *every* move, `apply` re-checks the live cluster rather than
 trusting the plan: the VM may have moved node, the disk may no longer be
 on the expected source, a snapshot may have appeared, it may have been
 tagged for exclusion, or the target storage's free space may no longer
-satisfy the section 8.1 transient invariant. Any of these stops the
+satisfy the transient invariant (the target must still hold every disk on
+it, plus the disk being moved, plus the snapshot reserve, while both copies
+of the moving disk exist). That last re-check reads the target's volume
+listing afresh and counts every volume at its *provisioned* size, exactly
+as planning did — not the pool's own allocated figure, which on a
+thin-provisioned pool is much lower and would let a move through onto a
+pool that other provisioning has since filled. If the target cannot be read
+at that moment, or lists a volume with no size at all, the move is refused
+too rather than checked against a partial figure. Any of these stops the
 group's run with `replan_needed`. In `dry-run`/`confirm`, that is the end
 of it — the operator re-runs `apply` by hand once ready; see "Reading
 `auto` mode" below for what `auto` itself does about it automatically.

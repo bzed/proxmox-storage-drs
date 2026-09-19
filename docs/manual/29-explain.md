@@ -31,16 +31,16 @@ Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   payback: benefit 2.52e+08 load·s vs cost 4.72e+04 load·s → ratio 5.34e+03 (need 10) ✓
   objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 1.43 + spread 0.25 + reserve 0 = 3.5
   measured load:
-  san-a  used 5.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 1.50 TiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
+  san-a  provisioned 5.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 1.50 TiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
     101:scsi0        2.00 TiB  raw     ℓ 3.00
     101:scsi1        1.00 TiB  raw     ℓ 1.00
     102:scsi0        1.50 TiB  raw     ℓ 2.50
     106:scsi0        1.00 TiB  raw     ℓ 0.90  [pinned: snapshots present (2)]
-  san-b  used 2.00 TiB/8.00 TiB  L=0.80 u=0.80  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
+  san-b  provisioned 2.00 TiB/8.00 TiB  L=0.80 u=0.80  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
     103:scsi0      512.00 GiB  raw     ℓ 0.40
     104:scsi0        1.00 TiB  raw     ℓ 0.30
     106:scsi1      512.00 GiB  raw     ℓ 0.10
-  san-c  used 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
+  san-c  provisioned 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
     105:scsi0      512.00 GiB  raw     ℓ 0.20
   pinned (not movable this run):
     106:scsi0        1.00 TiB  on san-a  ℓ 0.90  ℓ/z 0.90  -- snapshots present (2)  → clear snapshots to unblock

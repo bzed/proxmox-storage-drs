@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 import pytest
 
@@ -140,6 +141,7 @@ DEFAULT_RESPONSES: dict[str, object] = {
     "nodes/pve01/qemu/101/snapshot": [{"name": "current"}],
     "nodes/pve01/qemu/101/pending": [],
     "nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 0},
+    "nodes/pve01/storage/san-b/content": [],
     "nodes/pve01/qemu/101/move_disk": UPID,
     f"nodes/pve01/tasks/{UPID}/status": {"status": "stopped", "exitstatus": "OK"},
     "nodes/pve01/qemu/101/status/current": {"lock": None},
@@ -677,30 +679,78 @@ def test_vm_resource_returns_none_when_not_found() -> None:
 
 
 # --------------------------------------------------------- live transient check
+#
+# Section 5.1 / domain rule 8: the live re-check counts every volume on the
+# target at its *provisioned* size (the sum of the content listing's
+# `size`), never PVE's own allocated `used` from `storage_status()` -- the
+# tests below give the two figures different values on purpose.
+
+
+def _vol(volid: str, vmid: int, size_tib: float) -> dict[str, object]:
+    return {"volid": volid, "vmid": vmid, "size": round(size_tib * TIB)}
 
 
 def test_live_transient_check_failure_triggers_replan() -> None:
-    # san-b nearly full: 7.9 TiB used of 8 TiB, leaves no room for the 1 TiB
-    # move plus its 2x reserve.
+    # san-b holds 7.9 TiB of provisioned volumes in an 8 TiB pool: no room
+    # for the 1 TiB move plus its 2x reserve.
     client, _api = client_with(
-        {"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": round(7.9 * TIB)}}
+        {"nodes/pve01/storage/san-b/content": [_vol("san-b:vm-900-disk-0", 900, 7.9)]}
     )
     result = run(client, default_group(), (make_move(),))
     assert result.outcomes[0].status == "replan_needed"
     assert "no longer has enough free space" in result.outcomes[0].detail
+    assert not any(c[1].endswith("/move_disk") for c in _api.calls)
+
+
+def test_live_transient_check_refuses_a_thin_pool_whose_used_is_small() -> None:
+    """The deviation this replaced: PVE's `used` on a thin pool (Ceph RBD,
+    LVM-thin, ZFS) is the *allocated* figure, far below what was
+    provisioned. Here the pool reports 100 GiB used, while 7.9 TiB of
+    volumes are provisioned on it -- the move must be refused, which a
+    check reading `used` would have waved through."""
+    client, api = client_with(
+        {
+            "nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 100 * (1 << 30)},
+            "nodes/pve01/storage/san-b/content": [
+                _vol("san-b:vm-900-disk-0", 900, 4.0),
+                _vol("san-b:vm-901-disk-0", 901, 3.9),
+            ],
+        }
+    )
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "replan_needed"
+    assert "provisioned 7.90 TiB of 8.00 TiB" in result.outcomes[0].detail
+    assert not any(c[1].endswith("/move_disk") for c in api.calls)
+
+
+def test_live_transient_check_never_reads_the_pools_used_figure() -> None:
+    """`used` is display-only: a status reply with no `used` key at all
+    (or a huge one) must not matter, only `total` and the listing do."""
+    client, _api = client_with(
+        {
+            "nodes/pve01/storage/san-b/status": {"total": 8 * TIB},
+            "nodes/pve01/storage/san-b/content": [_vol("san-b:vm-900-disk-0", 900, 1.0)],
+        }
+    )
+    assert run(client, default_group(), (make_move(),)).outcomes[0].status == "moved"
+
+    client2, _api2 = client_with(
+        {"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 8 * TIB}}
+    )
+    assert run(client2, default_group(), (make_move(),)).outcomes[0].status == "moved"
 
 
 def test_live_transient_check_helper_directly() -> None:
     client, _api = client_with({"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 0}})
     target = make_storage("san-b", capacity_tib=8.0)
     disk = default_group().disks[0]
-    assert _live_transient_check(client, "pve01", target, disk, 0) is True
+    assert _live_transient_check(client, "pve01", target, disk, 0).refusal is None
 
 
 def test_live_transient_check_applies_the_target_storages_hard_free_space_floor() -> None:
     """Section 5.3.1's `hard_b` -- resolved once onto `Storage.
     free_space_hard_bytes` at plan time -- is what the live re-check
-    charges, not a re-derived value; only `used`/`total` are re-fetched
+    charges, not a re-derived value; only usage and total are re-read
     live (see `_live_transient_check()`'s own docstring)."""
     client, _api = client_with({"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 0}})
     huge_floor = round(7.5 * TIB)
@@ -712,12 +762,56 @@ def test_live_transient_check_applies_the_target_storages_hard_free_space_floor(
     )
     disk = default_group().disks[0]  # 1 TiB
     # used(0) + z(1) + max(f*max(Z,z), hard(7.5)) = 0+1+7.5 = 8.5 > 8.0 capacity.
-    assert _live_transient_check(client, "pve01", target, disk, 0) is False
+    assert _live_transient_check(client, "pve01", target, disk, 0).refusal is not None
 
     client2, _api2 = client_with(
-        {"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": round(7.9 * TIB)}}
+        {"nodes/pve01/storage/san-b/content": [_vol("san-b:vm-900-disk-0", 900, 7.9)]}
     )
-    assert _live_transient_check(client2, "pve01", target, disk, 0) is False
+    assert _live_transient_check(client2, "pve01", target, disk, 0).refusal is not None
+
+
+def test_live_transient_check_counts_approximate_size_when_size_is_missing() -> None:
+    """Same fallback tier planning uses (`topology.content_item_size()`): a
+    listing entry with only `approximate-size` still counts, at that."""
+    client, _api = client_with(
+        {
+            "nodes/pve01/storage/san-b/content": [
+                {"volid": "san-b:vm-900-disk-0", "vmid": 900, "approximate-size": round(7.9 * TIB)}
+            ]
+        }
+    )
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "replan_needed"
+
+
+def test_live_transient_check_refuses_when_a_listed_volume_has_no_size() -> None:
+    """Fails safe: a volume with neither `size` nor `approximate-size` makes
+    the provisioned total unknowable, so the move is refused (naming the
+    volume) rather than checked against a figure that silently omits it."""
+    client, api = client_with(
+        {"nodes/pve01/storage/san-b/content": [{"volid": "san-b:vm-900-disk-0", "vmid": 900}]}
+    )
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "replan_needed"
+    assert "san-b:vm-900-disk-0" in result.outcomes[0].detail
+    assert "no size" in result.outcomes[0].detail
+    assert not any(c[1].endswith("/move_disk") for c in api.calls)
+
+
+@pytest.mark.parametrize("failing", ["status", "content"])
+def test_live_transient_check_fails_safe_when_the_live_read_errors(failing: str) -> None:
+    """A PVE API error while re-reading the target refuses the move
+    (`replan_needed`) -- never lets it through unchecked, and never
+    crashes the run with the exception."""
+
+    def raise_error(**kwargs: object) -> object:
+        raise PveApiError("boom")
+
+    client, api = client_with({f"nodes/pve01/storage/san-b/{failing}": raise_error})
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "replan_needed"
+    assert "could not re-read 'san-b'" in result.outcomes[0].detail
+    assert not any(c[1].endswith("/move_disk") for c in api.calls)
 
 
 # --------------------------------------------------------------------- failures
@@ -730,8 +824,11 @@ def test_task_failure_marks_failed_and_detects_orphans() -> None:
                 "status": "stopped",
                 "exitstatus": "mirror failed",
             },
+            # A real listing carries `size` on every image volume; the live
+            # check that runs before the move needs it (and this same
+            # listing doubles as the post-failure orphan check's input).
             "nodes/pve01/storage/san-b/content": [
-                {"volid": "san-b:vm-101-disk-0", "vmid": 101},
+                {"volid": "san-b:vm-101-disk-0", "vmid": 101, "size": TIB},
             ],
         }
     )
@@ -1386,7 +1483,9 @@ def concurrent_client_with(overrides: dict[str, object]) -> tuple[PveClient, Fak
         "nodes/pve01/qemu/202/move_disk": UPID_B,
         f"nodes/pve01/tasks/{UPID_B}/status": {"status": "stopped", "exitstatus": "OK"},
         "nodes/pve01/storage/san-c/status": {"total": 8 * TIB, "used": 0},
+        "nodes/pve01/storage/san-c/content": [],
         "nodes/pve01/storage/san-d/status": {"total": 8 * TIB, "used": 0},
+        "nodes/pve01/storage/san-d/content": [],
     }
     responses.update(overrides)
     api = fake_api(responses)
@@ -1584,6 +1683,128 @@ def test_concurrent_transient_invariant_blocks_a_second_move_onto_a_tight_target
     assert outcomes_by_key["201:scsi0"].status == "moved"
     assert outcomes_by_key["202:scsi0"].status == "replan_needed"
     assert "no longer has enough free space" in outcomes_by_key["202:scsi0"].detail
+
+
+def _two_moves_onto_san_c_group(capacity_tib: float) -> tuple[Group, tuple[ScheduledMove, ...]]:
+    moves = (
+        make_move("201:scsi0", 201, "scsi0", "san-a", "san-c"),
+        make_move("202:scsi0", 202, "scsi0", "san-b", "san-c"),
+    )
+    group = Group(
+        name="fc-tier1",
+        storages=(
+            make_storage("san-a"),
+            make_storage("san-b"),
+            make_storage("san-c", capacity_tib=capacity_tib),
+        ),
+        disks=(make_disk("201:scsi0", 1.0, "san-a"), make_disk("202:scsi0", 1.0, "san-b")),
+    )
+    return group, moves
+
+
+def _san_c_content_after_201_launches(
+    extra: list[dict[str, object]],
+) -> tuple[Callable[..., list[dict[str, object]]], Callable[..., str]]:
+    """A `san-c` content responder plus a `move_disk` responder for 201.
+    The listing is empty until `move_disk` for 201 has been issued, then
+    shows 201's mirror target at full provisioned size (what Ceph RBD, LVM
+    and file storage do the moment `move_disk` allocates the new volume)
+    plus ``extra``."""
+    launched = {"n": 0}
+
+    def content(**kwargs: object) -> list[dict[str, object]]:
+        if launched["n"] == 0:
+            return []
+        return [_vol("san-c:vm-201-disk-1", 201, 1.0), *extra]
+
+    def move_disk_201(**kwargs: object) -> str:
+        launched["n"] += 1
+        return UPID_A
+
+    return content, move_disk_201
+
+
+def _run_two_onto_san_c(
+    capacity_tib: float, extra_after_launch: list[dict[str, object]]
+) -> dict[str, str]:
+    poll_count = {"n": 0}
+
+    def upid_a_status(**kwargs: object) -> dict[str, object]:
+        # 201 stays in flight through 202's launch decision.
+        poll_count["n"] += 1
+        return (
+            {"status": "running"}
+            if poll_count["n"] == 1
+            else {"status": "stopped", "exitstatus": "OK"}
+        )
+
+    content, move_disk_201 = _san_c_content_after_201_launches(extra_after_launch)
+    group, moves = _two_moves_onto_san_c_group(capacity_tib)
+    client, _api = concurrent_client_with(
+        {
+            f"nodes/pve01/tasks/{UPID_A}/status": upid_a_status,
+            "nodes/pve01/storage/san-c/status": {"total": round(capacity_tib * TIB), "used": 0},
+            "nodes/pve01/storage/san-c/content": content,
+            "nodes/pve01/qemu/201/move_disk": move_disk_201,
+        }
+    )
+    execution = ExecutionConfig(max_concurrent_migrations=2, max_concurrent_per_storage=2)
+    result = run_concurrent(client, group, moves, execution)
+    return {o.disk_key: o.status for o in result.outcomes}
+
+
+def test_concurrent_inflight_mirror_target_is_not_counted_twice() -> None:
+    """201's mirror target is already *listed* on san-c at its full 1 TiB by
+    the time 202 is considered, and `_live_transient_check()` also charges
+    201 as an in-flight `z_m`. Counting both would put 1 (listed) + 2
+    (charges) + 2 (f * max z) = 5 TiB against san-c's 4 TiB and wrongly
+    refuse 202; counted once it is 0 + 2 + 2 = 4 TiB, which fits exactly."""
+    assert _run_two_onto_san_c(4.0, []) == {"201:scsi0": "moved", "202:scsi0": "moved"}
+
+
+def test_concurrent_a_foreign_volume_appearing_after_launch_is_still_counted() -> None:
+    """The exclusion is narrow: only 201's *own* mirror target (same VM, the
+    disk's size, not listed when 201 launched) is left out of the sum. A
+    1 TiB volume of another VM that showed up meanwhile is real provisioned
+    space, so the same 4 TiB storage that fitted both moves above now refuses
+    202."""
+    statuses = _run_two_onto_san_c(4.0, [_vol("san-c:vm-900-disk-0", 900, 1.0)])
+    assert statuses == {"201:scsi0": "moved", "202:scsi0": "replan_needed"}
+
+
+def test_concurrent_a_preexisting_same_vm_volume_is_not_taken_for_the_mirror_target() -> None:
+    """A leftover 1 TiB volume of VM 201 already on san-c when 201 launched
+    (an orphan from an earlier failed attempt, say) matches the mirror
+    target on VM and size, but it is in the launch-time baseline, so it is
+    never mistaken for it. That matters while the real target is not listed
+    yet (the window right after `move_disk` returns): 202's check must
+    still count the orphan -- 1 (orphan) + 2 (charges) + 2 = 5 TiB > 4.5 --
+    and refuse, where mistaking it for 201's target would have shown
+    0 + 2 + 2 = 4 TiB and let 202 through onto space that is not there."""
+    poll_count = {"n": 0}
+
+    def upid_a_status(**kwargs: object) -> dict[str, object]:
+        poll_count["n"] += 1
+        return (
+            {"status": "running"}
+            if poll_count["n"] == 1
+            else {"status": "stopped", "exitstatus": "OK"}
+        )
+
+    group, moves = _two_moves_onto_san_c_group(4.5)
+    client, _api = concurrent_client_with(
+        {
+            f"nodes/pve01/tasks/{UPID_A}/status": upid_a_status,
+            "nodes/pve01/storage/san-c/status": {"total": round(4.5 * TIB), "used": 0},
+            "nodes/pve01/storage/san-c/content": [_vol("san-c:vm-201-disk-0", 201, 1.0)],
+        }
+    )
+    execution = ExecutionConfig(max_concurrent_migrations=2, max_concurrent_per_storage=2)
+    result = run_concurrent(client, group, moves, execution)
+    assert {o.disk_key: o.status for o in result.outcomes} == {
+        "201:scsi0": "moved",
+        "202:scsi0": "replan_needed",
+    }
 
 
 def test_concurrent_strict_fifo_does_not_skip_a_locked_head() -> None:
@@ -1938,6 +2159,7 @@ def test_concurrent_waits_for_a_free_slot_before_launching_a_third_move() -> Non
             "nodes/pve01/qemu/203/move_disk": upid_c,
             f"nodes/pve01/tasks/{upid_c}/status": {"status": "stopped", "exitstatus": "OK"},
             "nodes/pve01/storage/san-f/status": {"total": 8 * TIB, "used": 0},
+            "nodes/pve01/storage/san-f/content": [],
             f"nodes/pve01/tasks/{UPID_A}/status": delayed_status("a"),
             f"nodes/pve01/tasks/{UPID_B}/status": delayed_status("b"),
         }
@@ -1972,7 +2194,9 @@ def test_concurrent_orphan_detection_after_a_move_fails_while_polled() -> None:
                 "status": "stopped",
                 "exitstatus": "mirror failed",
             },
-            "nodes/pve01/storage/san-c/content": [{"volid": "san-c:vm-201-disk-0", "vmid": 201}],
+            "nodes/pve01/storage/san-c/content": [
+                {"volid": "san-c:vm-201-disk-0", "vmid": 201, "size": TIB}
+            ],
         }
     )
     execution = ExecutionConfig(max_concurrent_migrations=2)

@@ -1163,8 +1163,9 @@ thin-provisioned storage (Ceph RBD, LVM-thin, ZFS), where the pool may report fa
 tool never counts on over-provisioning: a plan that fits only while the disks stay thin is one a
 growing guest can turn into a full pool, and nothing here can bound that growth. So (C4)/(C5), the
 free-space requirement (§5.3.1), §8.1's transient predicate and the cost model all read the same
-provisioned sums, and `used` from `GET .../status` is a display figure, never a model input (with one
-as-built exception, named in §9.2). The consequence is deliberate: on a thin pool a `free_space.soft`
+provisioned sums, and `used` from `GET .../status` is a display figure, never a model input — including
+at execution time, where §9.2 step 2 re-reads the provisioned figure live from the content listing. The
+consequence is deliberate: on a thin pool a `free_space.soft`
 can show a shortfall the pool's own numbers do not.
 
 #### 5.1.1 Computing `Uˢᵉˣᵗ`
@@ -2303,16 +2304,33 @@ Before **every** move, re-read the live state rather than trusting the plan:
 1. re-fetch `/nodes/{node}/qemu/{vmid}/config` and confirm the disk is still on the expected source
    — the VM may have been touched by an operator, or live-migrated to another node by the PVE 9.2
    Dynamic Load Balancer (§1), changing `{node}`;
-2. re-fetch `/nodes/{node}/storage/{target}/status` and re-check the transient invariant against
-   *actual* current free space. **Known deviation from §5.1's provisioned-size rule (as built):**
-   `execute.py` reads PVE's `used` — allocated bytes — for this re-check, while the plan it is
-   guarding was computed from provisioned sums. On a thick pool the two agree; on a thin pool
-   (Ceph RBD, LVM-thin, ZFS) `used` is far lower, so the live re-check is *weaker* than the plan's
-   own transient check and can only ever confirm it, never catch a pool that other provisioning has
-   filled *in provisioned terms* since planning. The rule says the re-check should count provisioned
-   space too; how to obtain a live provisioned figure without double-counting the in-flight mirror's
-   own target volume (a new RBD image is listed at full size the moment it is created) is the open
-   design question, so this is recorded here rather than papered over;
+2. re-read the target storage live and re-check the transient invariant (§8.1) against *actual*
+   current usage — in **provisioned** terms, like every other check (§5.1). `used` from
+   `/nodes/{node}/storage/{target}/status` is the pool's *allocated* figure and is never an input: on a
+   thin pool (Ceph RBD, LVM-thin, ZFS) it is far lower than what is provisioned, and a re-check built
+   on it could only ever confirm the plan, never catch a pool that other provisioning has filled *in
+   provisioned terms* since planning. The live `used_b` is instead
+   `Σ size(vol) : vol ∈ GET /nodes/{node}/storage/{target}/content` — the same quantity
+   `schedule.transient_invariant_ok()` sums from the model (`Σ z_d + Uˢᵉˣᵗ`), read fresh — while `C_b`
+   still comes from `/status`'s `total`, since the LUN may have been resized. A listing entry without
+   `size` counts at its `approximate-size`; one with neither makes the figure unknowable, and the move is
+   refused. Any failure to read either endpoint refuses the move too: the check never passes on a partial
+   figure. Both refusals are `replan_needed`.
+
+   **No double counting under concurrency.** With `max_concurrent_migrations > 1` the invariant sums a
+   charge `z_m` for every move of this run already in flight onto the same target (§8.1), so those
+   moves' own mirror targets must not also be counted from the listing — a new RBD image is listed at
+   its full provisioned size the moment `move_disk` allocates it. The executor therefore records, when
+   it launches a move, which volumes the target's listing held at that instant, and leaves out of the
+   sum at most one volume per in-flight move: one that is *not* in that launch-time listing, belongs to
+   the *same VM*, and has the *size of the disk being moved*. That last condition rests on the mirror
+   target being allocated at exactly the source's size, which is expected but **not verified against
+   PVE's source**; if it does not hold nothing matches, the target stays counted as well as charged,
+   and the check is merely stricter than it needs to be. Nothing else is ever excluded — a foreign volume that appeared since, or a
+   leftover of the same VM that was already there, still counts — and where nothing matches (the window
+   between `move_disk` returning and the allocation) the move is charged by its `z_m` alone. Wrongly
+   keeping a volume only makes the check stricter; wrongly dropping one would weaken it, so the match is
+   deliberately narrow. The sequential executor has no in-flight set and excludes nothing;
 3. confirm the VM is still running and untagged for exclusion;
 4. confirm `config.lock` is empty — if not, wait per §9.3 rather than failing;
 5. confirm no snapshot has appeared for the VM since planning (§3.7); if one has, drop the move and

@@ -68,9 +68,16 @@ which nothing bounds. Consequence to expect, not to fix: on a thin pool a `free_
 a shortfall the pool's numbers do not. Do not add an allocated-size mode; the
 `assume_thick_provisioning: false` setting is refused for exactly that reason.
 
-**Known deviation (as built):** `execute.py`'s live pre-move re-check (`_live_transient_check()` and
-the launch check) reads PVE's `used`, so on a thin pool it is weaker than the plan's own check —
-see plan §9.2 step 2. New code must not copy that pattern.
+**No exceptions, execution included.** `execute.py`'s live pre-move re-check (`_live_transient_check()`,
+called by both the sequential path and the concurrent launch check) sums `size` over the target's live
+`GET .../content` — provisioned, like the plan's own check — and takes only `total` from `/status`;
+plan §9.2 step 2. A live re-check that read `used` would be weaker than the plan it guards on a thin
+pool and could only ever confirm it. Under concurrency the in-flight moves' own mirror targets are left
+out of that sum (at most one volume per move: not in the launch-time listing, same VM, the moved disk's
+size) because each is already charged as a `z_m`; the match is narrow on purpose — keeping a volume
+too many only tightens the check, dropping one too many would weaken it. A live read that errors, or a
+listed volume with no size, refuses the move (`replan_needed`); it never falls back to `used` and never
+passes on a partial figure. `show-load` prints the provisioned figure and the pool's own alongside.
 
 ## 3. The invariant holds *during* moves (§8.1)
 

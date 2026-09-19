@@ -87,10 +87,13 @@ does) and generalizes correctly to several moves landing on the same
 storage at once when `execute._launch_decision()` calls it with more than
 one, for real, under concurrent execution (AGENTS.md section 5: this is
 the *one* place that formula is written, not two functions that happen to
-agree). `execute._live_transient_check()` (sequential) and
-`execute._launch_decision()` (concurrent) both call it against a live
-`storage_status()` read instead of this module's model-derived numbers —
-see `92-execute.md`.
+agree). `execute._live_transient_check()` — called by both the
+sequential executor and `execute._launch_decision()` (concurrent) — calls
+it with live numbers instead of this module's model-derived ones: capacity
+from `storage_status()`, and `used_b` summed from the target's content
+listing at *provisioned* sizes, so it stays the same quantity this module
+computes rather than PVE's lower allocated `used` on a thin pool — see
+`92-execute.md`.
 
 Section 5.3.1's transient floor is folded into the check the same way
 (C5) folds `soft_s` into the steady-state one — `max(f_b * max(Z_b, z_d),

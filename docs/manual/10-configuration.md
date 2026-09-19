@@ -771,6 +771,14 @@ plenty of *actually* free space can therefore show a large shortfall in
 `plan`/`explain`, and the engine will migrate disks off it. That is the
 intended behaviour, not a miscalculation.
 
+The same holds at the moment of the move: the check `apply` makes just before
+each `move_disk` re-reads the target's volume listing and sums the volumes'
+provisioned sizes, never the pool's allocated figure, so it can refuse a move
+onto a thin pool that still looks half empty in the PVE UI. `show-load`,
+`plan` and `explain` print the provisioned figure as the storage's usage and,
+when the pool's own number differs, add it in brackets as `(pool reports X
+allocated)`.
+
 ### `migration.tiny_disk_bytes`
 
 Size, default `67108864` (64 MiB).

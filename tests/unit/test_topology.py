@@ -30,10 +30,21 @@ from proxmox_storage_drs.topology import (
     _pin_reason,
     _split_tags,
     build_topology,
+    content_item_size,
     parse_disk_spec,
     pending_disk_reasons,
 )
 from tests.unit.fakes import fake_api
+
+
+def test_content_item_size_prefers_the_exact_size_over_the_estimate() -> None:
+    """The one fallback order every consumer of a content entry shares
+    (planning's disk and foreign-volume sums, `execute.py`'s live check):
+    exact `size`, then `approximate-size` flagged as inexact, else nothing."""
+    assert content_item_size({"volid": "s:v", "size": 10, "approximate-size": 99}) == (10, True)
+    assert content_item_size({"volid": "s:v", "approximate-size": 99}) == (99, False)
+    assert content_item_size({"volid": "s:v"}) is None
+
 
 # --------------------------------------------------------------------- config
 
