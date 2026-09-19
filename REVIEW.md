@@ -7272,9 +7272,16 @@ rewritten to say so. Decisions, since the design question §52.1 left open has m
 - **In-flight mirror targets are excluded from the listing sum, not the charges.** `move_disk` picks
   the target volume's name, so it is identified rather than known: at most one volume per in-flight
   move that was not in the target's listing when the move launched (recorded on `_InflightMove`),
-  belongs to the same VM, and has the moved disk's size. Deliberately narrow — see the plan. The size
-  equality assumes `move_disk` allocates the target at the source's size; that is **not verified
-  against PVE's source**, and if it fails the consequence is over-conservatism, never a weaker check.
+  belongs to the same VM, and has the size `move_disk` allocates the target at. Deliberately narrow —
+  see the plan. Per the operator (not read from PVE's source): thin to thin of the same kind, the
+  target is the source image's size; between different storage types or thin to thick, it is the disk
+  line's `size=` in the VM config. Both sizes are accepted (the pre-flight already parses the config
+  one). A first version matched the listed size only and would have missed every cross-type move; if
+  PVE ever picks a third size, nothing matches and the consequence is over-conservatism, never a weaker
+  check. **Not changed, worth a decision:** the moving disk's own charge `z_m` stays the listed size,
+  so a cross-type target allocated at a larger config `size=` is charged a little under what it will
+  occupy; charging `max(listed, config)` in the live check would close that but makes it slightly
+  stricter than the plan's own.
 - **A listed volume with neither `size` nor `approximate-size` refuses the move**, naming the volume.
   Planning skips such a *foreign* volume with a warning (an undercount); a check deciding whether to
   touch the storage right now must not. Cost: a storage that persistently lists an unsized volume
@@ -7288,7 +7295,8 @@ rewritten to say so. Decisions, since the design question §52.1 left open has m
 
 Covered by `tests/unit/test_execute.py` (thin pool with small `used` and large provisioned content is
 refused; the pool's `used` is never read; unsized and errored reads fail safe; an in-flight mirror
-target is not counted twice; a foreign or pre-existing same-VM volume still is) and
+target is not counted twice, at either the listed or the config size; a foreign, pre-existing same-VM or
+other-sized volume still is) and
 `tests/unit/test_cli.py`.
 
 ---

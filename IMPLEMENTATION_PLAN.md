@@ -2323,10 +2323,14 @@ Before **every** move, re-read the live state rather than trusting the plan:
    its full provisioned size the moment `move_disk` allocates it. The executor therefore records, when
    it launches a move, which volumes the target's listing held at that instant, and leaves out of the
    sum at most one volume per in-flight move: one that is *not* in that launch-time listing, belongs to
-   the *same VM*, and has the *size of the disk being moved*. That last condition rests on the mirror
-   target being allocated at exactly the source's size, which is expected but **not verified against
-   PVE's source**; if it does not hold nothing matches, the target stays counted as well as charged,
-   and the check is merely stricter than it needs to be. Nothing else is ever excluded — a foreign volume that appeared since, or a
+   the *same VM*, and has one of the two sizes `move_disk` allocates it at. As the operator describes
+   PVE's behaviour (not read from PVE's source): between storages of the same thin kind the target is
+   the same size as the source image (the size in its content listing); between different storage types,
+   or from thin to thick, the target is allocated at the disk line's `size=` in the VM config. Either
+   figure can differ from the other (a volume resized outside PVE, a storage that rounds sizes), so the
+   pre-flight's parsed `size=` is kept alongside the listed size and a volume of either size matches. If
+   PVE ever allocates a target at some third size, nothing matches, the target stays counted as well as
+   charged, and the check is merely stricter than it needs to be. Nothing else is ever excluded — a foreign volume that appeared since, or a
    leftover of the same VM that was already there, still counts — and where nothing matches (the window
    between `move_disk` returning and the allocation) the move is charged by its `z_m` alone. Wrongly
    keeping a volume only makes the check stricter; wrongly dropping one would weaken it, so the match is

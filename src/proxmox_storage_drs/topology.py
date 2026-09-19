@@ -111,7 +111,7 @@ _ALLOWED_FORMATS_BY_STORAGE_TYPE: dict[str, frozenset[str]] = {
 }
 
 
-def _parse_pve_config_size_bytes(value: str) -> int | None:
+def parse_pve_config_size_bytes(value: str) -> int | None:
     """Parse a `size=` value from a VM config line, e.g. ``"512G"``.
 
     Returns ``None`` if it does not match -- callers fall back further, or
@@ -831,7 +831,7 @@ def _resolve_disk_size_and_format(
         )
         return listed_bytes, disk_format, warning
     gap = "not found in" if content_item is None else "has no size= or approximate-size in"
-    size_bytes = _parse_pve_config_size_bytes(params.get("size", "")) or 0
+    size_bytes = parse_pve_config_size_bytes(params.get("size", "")) or 0
     warning = (
         f"{key}: {volid!r} {gap} {storage_id!r}'s content listing; "
         "using the VM config's own size= instead, which can be stale if the volume was "

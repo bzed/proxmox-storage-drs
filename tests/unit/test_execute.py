@@ -1703,7 +1703,7 @@ def _two_moves_onto_san_c_group(capacity_tib: float) -> tuple[Group, tuple[Sched
 
 
 def _san_c_content_after_201_launches(
-    extra: list[dict[str, object]],
+    extra: list[dict[str, object]], mirror_size_tib: float = 1.0
 ) -> tuple[Callable[..., list[dict[str, object]]], Callable[..., str]]:
     """A `san-c` content responder plus a `move_disk` responder for 201.
     The listing is empty until `move_disk` for 201 has been issued, then
@@ -1715,7 +1715,7 @@ def _san_c_content_after_201_launches(
     def content(**kwargs: object) -> list[dict[str, object]]:
         if launched["n"] == 0:
             return []
-        return [_vol("san-c:vm-201-disk-1", 201, 1.0), *extra]
+        return [_vol("san-c:vm-201-disk-1", 201, mirror_size_tib), *extra]
 
     def move_disk_201(**kwargs: object) -> str:
         launched["n"] += 1
@@ -1725,7 +1725,10 @@ def _san_c_content_after_201_launches(
 
 
 def _run_two_onto_san_c(
-    capacity_tib: float, extra_after_launch: list[dict[str, object]]
+    capacity_tib: float,
+    extra_after_launch: list[dict[str, object]],
+    mirror_size_tib: float = 1.0,
+    config_size_201: str = "1024G",
 ) -> dict[str, str]:
     poll_count = {"n": 0}
 
@@ -1738,7 +1741,7 @@ def _run_two_onto_san_c(
             else {"status": "stopped", "exitstatus": "OK"}
         )
 
-    content, move_disk_201 = _san_c_content_after_201_launches(extra_after_launch)
+    content, move_disk_201 = _san_c_content_after_201_launches(extra_after_launch, mirror_size_tib)
     group, moves = _two_moves_onto_san_c_group(capacity_tib)
     client, _api = concurrent_client_with(
         {
@@ -1746,6 +1749,7 @@ def _run_two_onto_san_c(
             "nodes/pve01/storage/san-c/status": {"total": round(capacity_tib * TIB), "used": 0},
             "nodes/pve01/storage/san-c/content": content,
             "nodes/pve01/qemu/201/move_disk": move_disk_201,
+            "nodes/pve01/qemu/201/config": {"scsi0": f"san-a:vm-201-disk-0,size={config_size_201}"},
         }
     )
     execution = ExecutionConfig(max_concurrent_migrations=2, max_concurrent_per_storage=2)
@@ -1760,6 +1764,25 @@ def test_concurrent_inflight_mirror_target_is_not_counted_twice() -> None:
     (charges) + 2 (f * max z) = 5 TiB against san-c's 4 TiB and wrongly
     refuse 202; counted once it is 0 + 2 + 2 = 4 TiB, which fits exactly."""
     assert _run_two_onto_san_c(4.0, []) == {"201:scsi0": "moved", "202:scsi0": "moved"}
+
+
+def test_concurrent_mirror_target_at_the_configs_size_is_not_counted_twice() -> None:
+    """Between different storage types, or from thin to thick, `move_disk`
+    allocates the target at the disk line's `size=` from the VM config, which
+    can differ from the source image's own listed size (here 1100 GiB against
+    the model's 1 TiB). The mirror target is recognised by either size, so
+    the 4 TiB storage that fits both moves when it is counted once still
+    does."""
+    statuses = _run_two_onto_san_c(4.0, [], mirror_size_tib=1100 / 1024, config_size_201="1100G")
+    assert statuses == {"201:scsi0": "moved", "202:scsi0": "moved"}
+
+
+def test_concurrent_a_new_same_vm_volume_at_neither_size_is_still_counted() -> None:
+    """The match stays narrow: a same-VM volume that appeared after launch
+    but has neither the source image's size nor the config's is not taken for
+    the mirror target, so it counts and 202 is refused."""
+    statuses = _run_two_onto_san_c(4.0, [], mirror_size_tib=1200 / 1024, config_size_201="1100G")
+    assert statuses == {"201:scsi0": "moved", "202:scsi0": "replan_needed"}
 
 
 def test_concurrent_a_foreign_volume_appearing_after_launch_is_still_counted() -> None:

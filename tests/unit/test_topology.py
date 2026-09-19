@@ -26,12 +26,12 @@ from proxmox_storage_drs.topology import (
     Topology,
     _allowed_formats,
     _default_format,
-    _parse_pve_config_size_bytes,
     _pin_reason,
     _split_tags,
     build_topology,
     content_item_size,
     parse_disk_spec,
+    parse_pve_config_size_bytes,
     pending_disk_reasons,
 )
 from tests.unit.fakes import fake_api
@@ -955,12 +955,12 @@ def test_parse_disk_spec_no_params() -> None:
     ],
 )
 def test_parse_pve_config_size_bytes(value: str, expected: int) -> None:
-    assert _parse_pve_config_size_bytes(value) == expected
+    assert parse_pve_config_size_bytes(value) == expected
 
 
 def test_parse_pve_config_size_bytes_invalid() -> None:
-    assert _parse_pve_config_size_bytes("not-a-size") is None
-    assert _parse_pve_config_size_bytes("") is None
+    assert parse_pve_config_size_bytes("not-a-size") is None
+    assert parse_pve_config_size_bytes("") is None
 
 
 @pytest.mark.parametrize(

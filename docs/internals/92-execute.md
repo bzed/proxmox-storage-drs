@@ -97,12 +97,21 @@ charged twice. `_LiveCheck.listed_volids` — every volid the target's
 listing held at the moment a move launched — is stored on the launched
 move as `_InflightMove.target_baseline_volids`. `_inflight_target_volids()`
 then leaves out of the sum **at most one volume per in-flight move**: one
-not in that baseline, of the *same VM*, whose size equals the disk being
-moved (`_is_mirror_target()`). The size condition assumes `move_disk`
-allocates the mirror target at exactly the source's size; that is expected
-but **not verified against PVE's source**. If it is wrong, nothing matches,
-the target is counted as well as charged, and the check is merely stricter
-than necessary. The matching is deliberately narrow for the same reason: a
+not in that baseline, of the *same VM*, whose size is one of the two sizes
+`move_disk` allocates a mirror target at (`_is_mirror_target()`). As the
+operator describes PVE's behaviour (it has not been read from PVE's
+source): between storages of the same thin kind the target is the same size
+as the source image, i.e. `Disk.size_bytes` from its content listing;
+between different storage types, or from thin to thick, it is the disk
+line's `size=` in the VM config. The pre-flight already parses that line, so
+`_PreflightResult.config_size_bytes` is carried onto
+`_InflightMove.config_size_bytes` and a volume of either size matches — the
+two can differ when a volume was resized outside PVE or its storage rounds
+sizes. If PVE allocates some third size, nothing matches, the target is
+counted as well as charged, and the check is merely stricter than necessary.
+One consequence left as it was: the moving disk's own charge `z_m` is the
+listed size, so a cross-type target allocated at a larger config `size=` is
+charged slightly under what it will occupy. The matching is deliberately narrow for the same reason: a
 foreign volume that appeared since the launch, or a leftover of the same VM
 that was already there (it is in the baseline), is never excluded — wrongly
 keeping a volume only tightens the check, wrongly dropping one would weaken

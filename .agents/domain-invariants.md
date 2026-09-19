@@ -73,8 +73,8 @@ called by both the sequential path and the concurrent launch check) sums `size` 
 `GET .../content` — provisioned, like the plan's own check — and takes only `total` from `/status`;
 plan §9.2 step 2. A live re-check that read `used` would be weaker than the plan it guards on a thin
 pool and could only ever confirm it. Under concurrency the in-flight moves' own mirror targets are left
-out of that sum (at most one volume per move: not in the launch-time listing, same VM, the moved disk's
-size) because each is already charged as a `z_m`; the match is narrow on purpose — keeping a volume
+out of that sum (at most one volume per move: not in the launch-time listing, same VM, and the moved disk's
+listed size or its config `size=` — the two sizes `move_disk` allocates a target at) because each is already charged as a `z_m`; the match is narrow on purpose — keeping a volume
 too many only tightens the check, dropping one too many would weaken it. A live read that errors, or a
 listed volume with no size, refuses the move (`replan_needed`); it never falls back to `used` and never
 passes on a partial figure. `show-load` prints the provisioned figure and the pool's own alongside.

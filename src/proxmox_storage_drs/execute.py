@@ -80,6 +80,7 @@ from proxmox_storage_drs.topology import (
     Storage,
     content_item_size,
     parse_disk_spec,
+    parse_pve_config_size_bytes,
     pending_disk_reasons,
 )
 from proxmox_storage_drs.units import format_bytes
@@ -186,6 +187,11 @@ class _PreflightResult:
     node: str | None = None
     lock: str | None = None
     volid: str | None = None
+    # The disk line's own `size=` in the VM config, in bytes: what PVE
+    # allocates the mirror target at for a move between different storage
+    # types or from thin to thick, where the target is not a copy of the
+    # source image's own size. `None` when the line carries no parseable one.
+    config_size_bytes: int | None = None
 
 
 def _vm_resource(client: PveClient, vmid: int) -> dict[str, object] | None:
@@ -238,7 +244,7 @@ def _preflight(
     value = config.get(move.device)
     if not isinstance(value, str):
         return _PreflightResult(f"{move.disk_key} is no longer present in the VM's config")
-    storage_id, volume_name, _params = parse_disk_spec(value)
+    storage_id, volume_name, params = parse_disk_spec(value)
     if storage_id != move.from_storage:
         return _PreflightResult(
             f"{move.disk_key} is now on {storage_id!r}, not the planned {move.from_storage!r}"
@@ -271,7 +277,11 @@ def _preflight(
     lock = config.get("lock")
     volid = f"{move.from_storage}:{volume_name}"
     return _PreflightResult(
-        None, node=node, lock=lock if isinstance(lock, str) else None, volid=volid
+        None,
+        node=node,
+        lock=lock if isinstance(lock, str) else None,
+        volid=volid,
+        config_size_bytes=parse_pve_config_size_bytes(params.get("size", "")),
     )
 
 
@@ -368,9 +378,14 @@ def _is_mirror_target(item: Mapping[str, Any], im: _InflightMove, taken: set[str
     """Is this content entry the volume ``im``'s ``move_disk`` created on
     its target? A mirror target is a volume that (a) was not in the target's
     listing when ``im`` launched, (b) belongs to the same VM, and (c) has
-    the size of the disk being moved -- ``move_disk`` allocates the new
-    volume at the source's size. ``taken`` are volids an earlier in-flight
-    move already claimed, so two moves never share one."""
+    one of the two sizes ``move_disk`` allocates it at: the source image's
+    own size (``im.disk.size_bytes``, from its content listing) for a move
+    between storages of the same thin kind, or the disk line's ``size=`` in
+    the VM config (``im.config_size_bytes``) when moving between different
+    storage types or from thin to thick. Either can differ from the other
+    when a volume was resized outside PVE or its storage rounds sizes, so
+    both are accepted. ``taken`` are volids an earlier in-flight move
+    already claimed, so two moves never share one."""
     volid = item.get("volid")
     sized = content_item_size(item)
     return (
@@ -379,7 +394,7 @@ def _is_mirror_target(item: Mapping[str, Any], im: _InflightMove, taken: set[str
         and volid not in im.target_baseline_volids
         and item.get("vmid") == im.disk.vmid
         and sized is not None
-        and sized[0] == im.disk.size_bytes
+        and sized[0] in (im.disk.size_bytes, im.config_size_bytes)
     )
 
 
@@ -1282,6 +1297,9 @@ class _InflightMove:
     # to tell this move's own mirror target from a volume that was already
     # there (which section 5.1's provisioned sum must keep counting).
     target_baseline_volids: frozenset[str] = frozenset()
+    # `_PreflightResult.config_size_bytes` at launch -- the second size
+    # `_is_mirror_target()` recognises this move's mirror target by.
+    config_size_bytes: int | None = None
 
 
 def _per_storage_inflight_counts(inflight: Sequence[_InflightMove]) -> dict[str, int]:
@@ -1716,6 +1734,7 @@ def _advance_pending(
                 target=storages_by_id[candidate.to_storage],
                 volid=pf.volid,
                 target_baseline_volids=decision.target_baseline_volids,
+                config_size_bytes=pf.config_size_bytes,
             )
         )
         pending.pop(0)
