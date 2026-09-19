@@ -353,7 +353,6 @@ def _live_transient_check(
     node: str,
     target: Storage,
     disk: Disk,
-    min_free_bytes: int,
     existing_largest_bytes: int,
 ) -> bool:
     """Section 9.2 step 2, re-derived from a *live* ``storage_status()``
@@ -365,7 +364,12 @@ def _live_transient_check(
     wants PVE's own authoritative current ``used``/``total`` instead, which
     already reflects anything else that touched the storage since
     planning. Not a second implementation of the *rule*, only of the
-    *data source* the model-based function was never built to accept."""
+    *data source* the model-based function was never built to accept.
+
+    The floor stays ``target.free_space_hard_bytes`` -- section 5.3.1's
+    ``hard_b`` -- resolved once at run start like everywhere else; only
+    ``used``/``total`` are re-fetched live, never the free-space
+    requirement itself."""
     status = client.storage_status(node, target.id)
     live_used = int(status["used"])
     live_total = int(status["total"])
@@ -375,7 +379,7 @@ def _live_transient_check(
         live_used,
         existing_largest_bytes,
         [disk.size_bytes],
-        min_free_bytes,
+        target.free_space_hard_bytes,
     )
 
 
@@ -632,7 +636,6 @@ def _execute_one_move(
     storages_by_id: dict[str, Storage],
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     largest_by_storage: dict[str, int],
     clock: Clock,
     exclude: ExcludeConfig,
@@ -694,7 +697,7 @@ def _execute_one_move(
 
     target = storages_by_id[move.to_storage]
     if not _live_transient_check(
-        client, preflight.node, target, disk, min_free_bytes, largest_by_storage[move.to_storage]
+        client, preflight.node, target, disk, largest_by_storage[move.to_storage]
     ):
         return outcome(
             "replan_needed",
@@ -909,7 +912,6 @@ def execute_plan(
     schedule_result: ScheduleResult,
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     mode: str,
     exclude: ExcludeConfig,
     confirm: ConfirmCallback | None = None,
@@ -974,7 +976,6 @@ def execute_plan(
             schedule_result,
             migration,
             execution,
-            min_free_bytes,
             exclude,
             clock,
             deadline,
@@ -989,7 +990,6 @@ def execute_plan(
         schedule_result,
         migration,
         execution,
-        min_free_bytes,
         mode,
         exclude,
         confirm,
@@ -1008,7 +1008,6 @@ def _execute_sequential(
     schedule_result: ScheduleResult,
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     mode: str,
     exclude: ExcludeConfig,
     confirm: ConfirmCallback | None,
@@ -1090,7 +1089,6 @@ def _execute_sequential(
             storages_by_id,
             migration,
             execution,
-            min_free_bytes,
             largest_by_storage,
             clock,
             exclude,
@@ -1414,7 +1412,6 @@ def _launch_decision(
     disk: Disk,
     storages_by_id: dict[str, Storage],
     execution: ExecutionConfig,
-    min_free_bytes: int,
     largest_by_storage: dict[str, int],
     exclude: ExcludeConfig,
     inflight: Sequence[_InflightMove],
@@ -1460,7 +1457,7 @@ def _launch_decision(
         int(status["used"]),
         largest_by_storage[target.id],
         charges,
-        min_free_bytes,
+        target.free_space_hard_bytes,
     ):
         outcome = MoveOutcome(
             candidate.disk_key,
@@ -1484,7 +1481,6 @@ def _advance_pending(
     storages_by_id: dict[str, Storage],
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     largest_by_storage: dict[str, int],
     drained_storages: set[str],
     exclude: ExcludeConfig,
@@ -1536,7 +1532,6 @@ def _advance_pending(
         disk,
         storages_by_id,
         execution,
-        min_free_bytes,
         largest_by_storage,
         exclude,
         inflight,
@@ -1614,7 +1609,6 @@ def _execute_concurrent(
     schedule_result: ScheduleResult,
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     exclude: ExcludeConfig,
     clock: Clock,
     deadline: datetime | None,
@@ -1704,7 +1698,6 @@ def _execute_concurrent(
                 storages_by_id,
                 migration,
                 execution,
-                min_free_bytes,
                 largest_by_storage,
                 drained_storages,
                 exclude,

@@ -39,7 +39,7 @@ storages in your `groups`, not backup targets):
   make the tool fail loudly — it makes it under-count what already occupies
   each storage, which quietly erodes the **snapshot reserve**: the free
   capacity `pve-storage-drs` always keeps clear on every managed storage
-  (sized from `snapshot_reserve.factor`/`min_free_bytes` — see
+  (sized from `snapshot_reserve.factor`/`free_space.soft` — see
   [`10-configuration.md`](10-configuration.md)) so that a snapshot, or a
   disk mid-migration existing on two storages at once, never runs a LUN
   out of space. An under-counted storage looks to have more headroom than

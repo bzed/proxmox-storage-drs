@@ -22,9 +22,11 @@ Config-excluded disks (`exclude.vmids`/`exclude.disks`/tags) are *not*
 foreign: (C2) pins them into `D` specifically so their bytes still count
 toward a storage's reserve check — **(C4)/(C5)**: `Z_s`, the largest disk
 resident on a storage, sets a reserve floor `R_s = max(reserve_factor_s ·
-Z_s, min_free_bytes)` that must stay free on top of every disk's actual
-usage there (the exact shortfall arithmetic is in "`reserve.py`: one
-(C4)/(C5) evaluator, shared" below) — and toward **`κ`**, the objective's
+Z_s, soft_s)` that must stay free on top of every disk's actual usage
+there (`soft_s` is section 5.3.1's configured free-space requirement,
+resolved per storage onto `Storage.free_space_soft_bytes` below — the
+exact shortfall arithmetic is in "`reserve.py`: one (C4)/(C5) evaluator,
+shared" below) — and toward **`κ`**, the objective's
 per-VM fragmentation penalty, which charges a VM for every extra storage
 its disks are spread across (section 5.4; see `90-heuristic.md`) (section
 3.6, "Pinned disks are modelled, not ignored"). An earlier draft of section
@@ -307,3 +309,54 @@ equivalent bound directly as a scaled linear constraint instead. The
 section 14 worked example's initial state (`tests/unit/test_reserve.py`)
 is the proof this reproduces the plan's own arithmetic exactly, not merely
 a self-consistent unit test.
+
+## `free_space` resolution: `soft_s`/`hard_s`, resolved once, here
+
+Section 5.3.1's `soft_s`/`hard_s` pair is resolved onto
+`Storage.free_space_soft_bytes`/`.free_space_hard_bytes` in
+`_build_storages()`, by `_resolve_free_space()` -- the same place and the
+same per-storage pattern `_resolve_reserve_factor()` already uses for
+`reserve_factor`, and for the same reason: a `/…/` pattern's `free_space`
+entry applies to every storage it matches, a literal entry overrides it,
+and only a real storage's `capacity_bytes` (known here, not in `config.py`)
+can resolve a percentage. The mandated order is inheritance, then
+percent-to-bytes conversion, then the two section 11.1 hard rules against
+the *written* values (`hard_s <= soft_s`, `soft_s < C_s` -- both raise
+`TopologyError`, exactly like the pattern-expansion rules above, since both
+need the cluster inventory config.py never has), and only then the
+deprecated `snapshot_reserve.min_free_bytes` fold (`soft_s = max(soft_s,
+min_free_bytes)`) -- "validate as written, then fold": folding first would
+let a written `hard > soft` hide behind a large `min_free_bytes` and
+surface as a startup failure only once the operator deletes the deprecated
+key, exactly the upgrade path the fold exists to keep safe. By the time
+`compute_reserve_status()` reads `storage.free_space_soft_bytes`, or
+`schedule.transient_invariant_ok()` reads `.free_space_hard_bytes`, both
+are plain, already-resolved byte constants -- section 5.3.1's own grammar
+(percentages, patterns, the deprecated key) is never seen again past this
+module.
+
+## (C2) format eligibility: `storage_type`/`allowed_formats`
+
+`Storage` also carries `storage_type` (from `GET /storage`'s own `type`
+field, never guessed) and `allowed_formats` -- the disk formats that type
+can actually hold, from a fixed table keyed by the same storage-type
+partition `_default_format()` already draws for the fallback format of a
+content listing with no `format` field of its own: a block-backed type
+(`lvmthin`, `zfspool`, `rbd`, `iscsi`, `iscsidirect`) holds `raw` only --
+there is no image container on the array, a volume *is* the raw block
+device -- and a file-backed type (`dir`, `nfs`, `cifs`, `cephfs`) holds
+whatever `qemu-img` formats PVE offers a regular file for. Ordinary
+(non-thin) `lvm` is the one block-backed exception: current PVE versions
+also accept `qcow2` there, since PVE 9.2 added snapshot support on plain
+LVM by formatting the LV itself as a qcow2 image rather than using it raw
+(the same mechanism `_resolve_disk_size_and_format()`'s `approximate-size`
+note above describes) -- `lvmthin` needs no such carve-out, since its
+snapshots are native LVM-thin COW, never qcow2-on-the-LV. Section 5.3
+(C2)'s "`s` cannot hold the disk's format" is `topology.
+storage_accepts_format(storage, disk.format)` -- one function, called by
+both MILP backends (`91-optimize.md`) and by `heuristic.py`'s own
+candidate-generating helpers to fix `x_{d,s}=0` (or exclude the pair from
+the neighbourhood the heuristic searches) for every ineligible target.
+Unlike the free-space floor, format eligibility needs no per-run
+resolution step of its own -- it is a pure function of `storage_type`,
+computed once when `Storage` is built and read directly thereafter.

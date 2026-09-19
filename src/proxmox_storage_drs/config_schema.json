@@ -41,6 +41,15 @@
         "bearer_token": { "type": ["string", "null"] }
       }
     },
+    "free_space": {
+      "type": "object",
+      "$comment": "Section 5.3.1. Same shape reused verbatim on groups[].storages[].free_space below -- one grammar, two levels, most-specific-wins.",
+      "additionalProperties": false,
+      "properties": {
+        "soft": { "type": ["string", "number", "null"] },
+        "hard": { "type": ["string", "number", "null"] }
+      }
+    },
     "metrics": {
       "type": "object",
       "additionalProperties": false,
@@ -107,7 +116,15 @@
                 "id": { "type": "string", "minLength": 1 },
                 "capability_weight": { "type": "number", "exclusiveMinimum": 0 },
                 "reserve_factor": { "type": ["number", "null"], "minimum": 0 },
-                "saturation_load": { "type": ["number", "null"], "exclusiveMinimum": 0 }
+                "saturation_load": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+                "free_space": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "soft": { "type": ["string", "number", "null"] },
+                    "hard": { "type": ["string", "number", "null"] }
+                  }
+                }
               }
             }
           }

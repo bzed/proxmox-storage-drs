@@ -33,7 +33,7 @@
                 "from_storage": "stor-9034bbcd",
                 "imbalance_reduction": 0.0,
                 "load_per_tib": 0.0,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 1048576,
                 "to_storage": "stor-593d0eeb",
                 "vmid": 92831
@@ -48,7 +48,7 @@
                 "from_storage": "stor-9034bbcd",
                 "imbalance_reduction": -0.046529344988747834,
                 "load_per_tib": 0.9529209853695587,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 26843545600,
                 "to_storage": "stor-593d0eeb",
                 "vmid": 92831
@@ -63,7 +63,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": 0.017040655991211295,
                 "load_per_tib": 0.11633087823333653,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 80530636800,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 244122
@@ -78,7 +78,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": 0.0,
                 "load_per_tib": 0.0,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 53687091200,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 244122
@@ -93,7 +93,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": 0.06030289689881463,
                 "load_per_tib": 0.4750012801875858,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 69793218560,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 589980
@@ -108,7 +108,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": 0.05325522677131089,
                 "load_per_tib": 0.8441568384526242,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 37580963840,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 589980
@@ -122,6 +122,9 @@
               "deferred_moves": [],
               "ratio": 42.59379933918676,
               "rejected_moves": [],
+              "repair_exempt": false,
+              "reserve_shortfall_bytes_after": 0,
+              "reserve_shortfall_bytes_before": 0,
               "total_cost_load_seconds": 2560.0
             },
             "solver_backend": "heuristic",
@@ -170,7 +173,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": 0.0,
                 "load_per_tib": 0.0,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 1048576,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 156937
@@ -185,7 +188,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": 0.054977528600450354,
                 "load_per_tib": 0.9408971828161133,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 68719476736,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 156937
@@ -200,7 +203,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": -0.03570794806630162,
                 "load_per_tib": 0.9141234704973211,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 21474836480,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 509010
@@ -215,7 +218,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": -0.1959644656141597,
                 "load_per_tib": 2.866680182698562,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 37580963840,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 393932
@@ -230,7 +233,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": -0.017040655991211295,
                 "load_per_tib": 0.11633087823333653,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 80530636800,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 244122
@@ -245,7 +248,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": 0.0,
                 "load_per_tib": 0.0,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 53687091200,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 244122
@@ -260,7 +263,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": -0.09231366722504886,
                 "load_per_tib": 0.23632298809612542,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 214748364800,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 204608
@@ -275,7 +278,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": -0.3396340248385079,
                 "load_per_tib": 1.7389262071731597,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 107374182400,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 204608
@@ -290,7 +293,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": -1.071960651542584,
                 "load_per_tib": 2.1953754143592117,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 268435456000,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 204608
@@ -305,7 +308,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": -0.060302896898814407,
                 "load_per_tib": 0.4750012801875858,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 69793218560,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 589980
@@ -320,7 +323,7 @@
                 "from_storage": "stor-593d0eeb",
                 "imbalance_reduction": -0.05770603387859774,
                 "load_per_tib": 0.8441568384526242,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 37580963840,
                 "to_storage": "stor-9034bbcd",
                 "vmid": 589980
@@ -335,7 +338,7 @@
                 "from_storage": "stor-9034bbcd",
                 "imbalance_reduction": 0.8668895988436105,
                 "load_per_tib": 2.9589831640528566,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 161061273600,
                 "to_storage": "stor-593d0eeb",
                 "vmid": 489208
@@ -350,7 +353,7 @@
                 "from_storage": "stor-9034bbcd",
                 "imbalance_reduction": 0.9572996691286548,
                 "load_per_tib": 5.6976201755962315,
-                "resolves_reserve_violation": false,
+                "repair": false,
                 "size_bytes": 107374182400,
                 "to_storage": "stor-593d0eeb",
                 "vmid": 489208
@@ -364,6 +367,9 @@
               "deferred_moves": [],
               "ratio": 16.43695771461612,
               "rejected_moves": [],
+              "repair_exempt": false,
+              "reserve_shortfall_bytes_after": 0,
+              "reserve_shortfall_bytes_before": 0,
               "total_cost_load_seconds": 11714.56
             },
             "solver_backend": "cbc",

@@ -41,6 +41,8 @@ def make_storage(
     capacity_tib: float = 8.0,
     reserve_factor: float = 2.0,
     foreign_used_tib: float = 0.0,
+    free_space_soft_bytes: int = 0,
+    free_space_hard_bytes: int | None = None,
 ) -> Storage:
     return Storage(
         id=id_,
@@ -52,6 +54,12 @@ def make_storage(
         foreign_used_bytes=round(foreign_used_tib * TIB),
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=free_space_soft_bytes,
+        free_space_hard_bytes=(
+            free_space_hard_bytes if free_space_hard_bytes is not None else free_space_soft_bytes
+        ),
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
 
 
@@ -98,12 +106,10 @@ DEFAULT_OBJECTIVE = ObjectiveConfig(
 
 def test_section_14_4_ordering_reproduced_exactly() -> None:
     group = section_14_group()
-    heuristic_result = run_heuristic(group, _SECTION_14_LOADS, DEFAULT_OBJECTIVE, min_free_bytes=0)
+    heuristic_result = run_heuristic(group, _SECTION_14_LOADS, DEFAULT_OBJECTIVE)
     assert heuristic_result.breakdown.moves == 3  # sanity: this is the three-move plan
 
-    result = order_moves(
-        group, heuristic_result.assignment, _SECTION_14_LOADS, DEFAULT_OBJECTIVE, min_free_bytes=0
-    )
+    result = order_moves(group, heuristic_result.assignment, _SECTION_14_LOADS, DEFAULT_OBJECTIVE)
 
     assert not result.deadlocked
     # 102:scsi0 first (resolves the reserve violation), same as before.
@@ -130,23 +136,17 @@ def test_section_14_4_transient_checks_match_the_plan_exactly() -> None:
 
     # Move 1: 102:scsi0 (1.5 TiB) -> san-c. san-c has 105:scsi0 (0.5 TiB)
     # only: used 0.5+1.5=2.0, f*max(0.5,1.5)=2*1.5=3.0, total 5.0 <= 8.0.
-    assert transient_invariant_ok(
-        group, state, disks_by_key["102:scsi0"], storages_by_id["san-c"], 0
-    )
+    assert transient_invariant_ok(group, state, disks_by_key["102:scsi0"], storages_by_id["san-c"])
     state["102:scsi0"] = "san-c"
 
     # Move 2: 101:scsi1 (1.0 TiB) -> san-b. san-b has 103(0.5)+104(1.0)=1.5
     # used: used 1.5+1.0=2.5, f*max(1.0,1.0)=2.0, total 4.5 <= 8.0.
-    assert transient_invariant_ok(
-        group, state, disks_by_key["101:scsi1"], storages_by_id["san-b"], 0
-    )
+    assert transient_invariant_ok(group, state, disks_by_key["101:scsi1"], storages_by_id["san-b"])
     state["101:scsi1"] = "san-b"
 
     # Move 3: 105:scsi0 (0.5 TiB) -> san-b. san-b now has 103+104+101:scsi1
     # = 2.5 used: used 2.5+0.5=3.0, f*max(1.0,0.5)=2.0, total 5.0 <= 8.0.
-    assert transient_invariant_ok(
-        group, state, disks_by_key["105:scsi0"], storages_by_id["san-b"], 0
-    )
+    assert transient_invariant_ok(group, state, disks_by_key["105:scsi0"], storages_by_id["san-b"])
 
 
 def test_transient_invariant_rejects_a_move_that_would_overflow_the_target() -> None:
@@ -159,23 +159,38 @@ def test_transient_invariant_rejects_a_move_that_would_overflow_the_target() -> 
     target = next(s for s in group.storages if s.id == "san-b")
     disk = group.disks[0]
     # 3.0 used + 2*max(0,3.0)=6.0 -> 9.0 > 2.0 capacity.
-    assert not transient_invariant_ok(group, state, disk, target, 0)
+    assert not transient_invariant_ok(group, state, disk, target)
 
 
-def test_transient_invariant_applies_the_min_free_bytes_floor() -> None:
+def test_transient_invariant_applies_the_hard_free_bytes_floor() -> None:
     """A storage with no existing disks and a tiny arriving one must still
-    reserve `min_free_bytes`, not just `f_b * z_d`."""
+    reserve `free_space_hard_bytes`, not just `f_b * z_d`."""
+    huge_floor = round(2.0 * TIB)  # bigger than san-b's whole 1.0 TiB capacity
     group = Group(
         name="g",
-        storages=(make_storage("san-a"), make_storage("san-b", capacity_tib=1.0)),
+        storages=(
+            make_storage("san-a"),
+            make_storage(
+                "san-b",
+                capacity_tib=1.0,
+                free_space_soft_bytes=huge_floor,
+                free_space_hard_bytes=huge_floor,
+            ),
+        ),
         disks=(make_disk("101:scsi0", 0.01, "san-a"),),
     )
     state = {"101:scsi0": "san-a"}
     target = next(s for s in group.storages if s.id == "san-b")
     disk = group.disks[0]
-    assert transient_invariant_ok(group, state, disk, target, min_free_bytes=0)
-    huge_floor = round(2.0 * TIB)  # bigger than san-b's whole 1.0 TiB capacity
-    assert not transient_invariant_ok(group, state, disk, target, min_free_bytes=huge_floor)
+    assert not transient_invariant_ok(group, state, disk, target)
+
+    no_floor_group = Group(
+        name="g",
+        storages=(make_storage("san-a"), make_storage("san-b", capacity_tib=1.0)),
+        disks=(make_disk("101:scsi0", 0.01, "san-a"),),
+    )
+    no_floor_target = next(s for s in no_floor_group.storages if s.id == "san-b")
+    assert transient_invariant_ok(no_floor_group, state, disk, no_floor_target)
 
 
 # ---------------------------------------------------------------------- deadlock
@@ -196,7 +211,7 @@ def test_deadlock_is_reported_not_forced() -> None:
     loads = {"101:scsi0": 1.0, "102:scsi0": 5.0}
     target_assignment = {"101:scsi0": "san-b", "102:scsi0": "san-a"}  # a straight swap
 
-    result = order_moves(group, target_assignment, loads, DEFAULT_OBJECTIVE, min_free_bytes=0)
+    result = order_moves(group, target_assignment, loads, DEFAULT_OBJECTIVE)
 
     assert result.order == ()
     assert set(result.deadlocked) == {"101:scsi0", "102:scsi0"}
@@ -207,10 +222,8 @@ def test_deadlock_is_reported_not_forced() -> None:
 
 def test_no_deadlock_message_when_fully_scheduled() -> None:
     group = section_14_group()
-    heuristic_result = run_heuristic(group, _SECTION_14_LOADS, DEFAULT_OBJECTIVE, min_free_bytes=0)
-    result = order_moves(
-        group, heuristic_result.assignment, _SECTION_14_LOADS, DEFAULT_OBJECTIVE, min_free_bytes=0
-    )
+    heuristic_result = run_heuristic(group, _SECTION_14_LOADS, DEFAULT_OBJECTIVE)
+    result = order_moves(group, heuristic_result.assignment, _SECTION_14_LOADS, DEFAULT_OBJECTIVE)
     assert result.deadlocked_msg is None
 
 
@@ -254,7 +267,7 @@ def test_reserve_resolving_move_is_scheduled_before_a_non_resolving_one() -> Non
         # san-a is never transient-feasible, so it is not part of this plan.
     }
 
-    result = order_moves(group, target_assignment, loads, DEFAULT_OBJECTIVE, min_free_bytes=0)
+    result = order_moves(group, target_assignment, loads, DEFAULT_OBJECTIVE)
 
     assert result.order[0].disk_key == "101:scsi0"
     assert result.order[0].resolves_reserve_violation
@@ -292,13 +305,11 @@ def test_ordering_prefers_the_larger_persistent_reduction_once_delta_matters() -
         kappa_vm_affinity=0.0,
         delta_capacity_spread=0.0,
     )
-    result_no_delta = order_moves(group, target_assignment, loads, imbalance_only, min_free_bytes=0)
+    result_no_delta = order_moves(group, target_assignment, loads, imbalance_only)
     assert result_no_delta.order[0].disk_key == "102:scsi0"
 
     delta_matters = dataclasses.replace(imbalance_only, delta_capacity_spread=2.0)
-    result_with_delta = order_moves(
-        group, target_assignment, loads, delta_matters, min_free_bytes=0
-    )
+    result_with_delta = order_moves(group, target_assignment, loads, delta_matters)
     assert result_with_delta.order[0].disk_key == "101:scsi0"
 
 
@@ -340,10 +351,8 @@ def test_tiny_disk_bytes_ranks_a_zero_cost_move_first_regardless_of_its_own_redu
         delta_capacity_spread=0.0,
     )
 
-    no_exemption = order_moves(group, target, loads, objective, min_free_bytes=0)
+    no_exemption = order_moves(group, target, loads, objective)
     assert no_exemption.order[0].disk_key == "302:efidisk0"  # bigger reduction wins on ratio
 
-    with_exemption = order_moves(
-        group, target, loads, objective, min_free_bytes=0, tiny_disk_bytes=2 * 1024 * 1024
-    )
+    with_exemption = order_moves(group, target, loads, objective, tiny_disk_bytes=2 * 1024 * 1024)
     assert with_exemption.order[0].disk_key == "301:efidisk0"  # zero cost wins outright

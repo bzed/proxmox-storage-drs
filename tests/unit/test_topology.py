@@ -24,6 +24,7 @@ from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.topology import (
     Disk,
     Topology,
+    _allowed_formats,
     _default_format,
     _parse_pve_config_size_bytes,
     _pin_reason,
@@ -283,6 +284,66 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
     # Capacity/used from the authoritative status call.
     assert storages_by_id["san-a"].capacity_bytes == 10 * (1 << 40)
     assert storages_by_id["san-a"].used_bytes == 3 * (1 << 40)
+
+
+# --------------------------------------------------------------------- free space
+
+
+def _one_vm_two_storage_cluster() -> PveClient:
+    vm_resources = [_vm(301, "node1")]
+    vm_configs = {301: {"name": "vm301", "scsi0": "san-a:vm-301-disk-0,size=10G"}}
+    return build_fake_client(
+        vm_resources,
+        vm_configs,
+        {301: []},
+        {"san-a": [_content("san-a", 301, "disk-0", 10 * (1 << 30))], "san-b": []},
+    )
+
+
+def test_build_topology_rejects_a_hard_floor_above_its_resolved_soft(tmp_path: Path) -> None:
+    """Section 5.3.1: ``hard_s > soft_s`` is a validation error -- a floor
+    above the requirement would make every plan for a compliant storage
+    infeasible. san-a's capacity is 10 TiB (STORAGE_STATUS); a 2 GiB hard
+    floor above a 1 GiB soft one triggers it regardless."""
+    config = make_config(
+        tmp_path,
+        groups=[
+            {
+                "name": "g1",
+                "storages": [
+                    {
+                        "id": "san-a",
+                        "free_space": {"soft": "1GiB", "hard": "2GiB"},
+                    },
+                    {"id": "san-b"},
+                ],
+            }
+        ],
+    )
+    client = _one_vm_two_storage_cluster()
+    with pytest.raises(TopologyError, match="free_space.hard.*exceeds.*free_space.soft"):
+        build_topology(client, config)
+
+
+def test_build_topology_rejects_a_soft_floor_not_below_capacity(tmp_path: Path) -> None:
+    """Section 5.3.1: ``soft_s >= C_s`` is a validation error -- a
+    requirement no disk could ever leave room for. san-a's capacity is
+    10 TiB (STORAGE_STATUS)."""
+    config = make_config(
+        tmp_path,
+        groups=[
+            {
+                "name": "g1",
+                "storages": [
+                    {"id": "san-a", "free_space": {"soft": "20TiB"}},
+                    {"id": "san-b"},
+                ],
+            }
+        ],
+    )
+    client = _one_vm_two_storage_cluster()
+    with pytest.raises(TopologyError, match="free_space.soft resolves to"):
+        build_topology(client, config)
 
 
 # --------------------------------------------------------------------- cooldowns
@@ -800,6 +861,33 @@ def test_split_tags(raw: str, expected: set[str]) -> None:
 )
 def test_default_format(storage_type: str, expected: str) -> None:
     assert _default_format(storage_type) == expected
+
+
+@pytest.mark.parametrize(
+    "storage_type,expected",
+    [
+        # Ordinary (non-thin) lvm is the one block-backed type current PVE
+        # versions also accept qcow2 on (PVE 9.2's snapshot-on-plain-LVM
+        # feature formats the LV itself as a qcow2 image) -- confirmed
+        # against real dogfooding-cluster data (tests/corpus/local).
+        ("lvm", frozenset({"raw", "qcow2"})),
+        # lvmthin's snapshots are native LVM-thin COW, never qcow2-on-the-LV
+        # -- it stays raw-only, unlike plain lvm above.
+        ("lvmthin", frozenset({"raw"})),
+        ("zfspool", frozenset({"raw"})),
+        ("rbd", frozenset({"raw"})),
+        ("iscsi", frozenset({"raw"})),
+        ("iscsidirect", frozenset({"raw"})),
+        ("dir", frozenset({"raw", "qcow2", "vmdk"})),
+        ("nfs", frozenset({"raw", "qcow2", "vmdk"})),
+        ("cifs", frozenset({"raw", "qcow2", "vmdk"})),
+        ("cephfs", frozenset({"raw", "qcow2"})),
+        ("pbs", frozenset()),
+        ("unknown-type", frozenset({"raw"})),
+    ],
+)
+def test_allowed_formats(storage_type: str, expected: frozenset[str]) -> None:
+    assert _allowed_formats(storage_type) == expected
 
 
 def test_pin_reason_priority_order() -> None:

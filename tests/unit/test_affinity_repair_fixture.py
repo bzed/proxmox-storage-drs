@@ -82,6 +82,10 @@ def _make_storage(id_: str, foreign_used_tib: float = 0.0) -> Storage:
         foreign_used_bytes=round(foreign_used_tib * TIB),
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
 
 
@@ -128,9 +132,7 @@ def _loads() -> dict[str, float]:
 def test_heuristic_reunites_the_tiny_disks_for_free() -> None:
     group = _affinity_repair_group()
     loads = _loads()
-    result = run_heuristic(
-        group, loads, OBJECTIVE, min_free_bytes=0, tiny_disk_bytes=TINY_DISK_BYTES
-    )
+    result = run_heuristic(group, loads, OBJECTIVE, tiny_disk_bytes=TINY_DISK_BYTES)
 
     assert result.assignment["301:efidisk0"] == "stor-a"
     assert result.assignment["301:tpmstate0"] == "stor-a"
@@ -151,7 +153,6 @@ def test_both_milp_backends_agree_with_the_heuristic(backend: str) -> None:
         group,
         loads,
         OBJECTIVE,
-        min_free_bytes=0,
         backend=backend,
         time_limit_seconds=10.0,
         mip_gap=0.0,
@@ -177,15 +178,12 @@ def test_end_to_end_plan_accepts_payback_at_zero_cost() -> None:
     formula)."""
     group = _affinity_repair_group()
     loads = _loads()
-    solve_outcome = run_heuristic(
-        group, loads, OBJECTIVE, min_free_bytes=0, tiny_disk_bytes=TINY_DISK_BYTES
-    )
+    solve_outcome = run_heuristic(group, loads, OBJECTIVE, tiny_disk_bytes=TINY_DISK_BYTES)
     schedule_result = order_moves(
         group,
         solve_outcome.assignment,
         loads,
         OBJECTIVE,
-        min_free_bytes=0,
         tiny_disk_bytes=TINY_DISK_BYTES,
     )
     assert not schedule_result.deadlocked
@@ -203,7 +201,6 @@ def test_end_to_end_plan_accepts_payback_at_zero_cost() -> None:
         schedule_result.final_assignment,
         loads,
         OBJECTIVE,
-        0,
         group_average_utilization(group, loads),
         group_average_fill(group),
         TINY_DISK_BYTES,
@@ -223,8 +220,15 @@ def test_end_to_end_plan_accepts_payback_at_zero_cost() -> None:
     )
     assert benefit == pytest.approx(31_536_006.65, abs=1.0)  # affinity-repair.expected.json
 
-    payback_result = evaluate_plan_payback(move_costs, benefit, MIGRATION.payback_ratio)
+    payback_result = evaluate_plan_payback(
+        move_costs,
+        benefit,
+        MIGRATION.payback_ratio,
+        current_shortfall_bytes=0,
+        final_shortfall_bytes=0,
+    )
     assert payback_result.total_cost_load_seconds == 0.0
     assert payback_result.ratio == float("inf")
     assert payback_result.aggregate_ok
     assert payback_result.accepted
+    assert not payback_result.repair_exempt  # no reserve/free-space shortfall in this fixture

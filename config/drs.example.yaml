@@ -190,13 +190,46 @@ snapshot_reserve:
   # transiently during a migration. PVE 9 volume-chain snapshots allocate a new
   # full-size LV per snapshot, which is what this protects.
   factor: 2.0
-  # Absolute floor, applied as reserve = max(factor * largest_disk, min_free_bytes).
-  # Matters when a storage's largest disk is small: with factor=2 and a 10 GiB
-  # largest disk, the snapshot term alone reserves only 20 GiB on a 20 TiB LUN.
+  # DEPRECATED: syntax for free_space.soft below. Still accepted -- folded in
+  # as a per-storage lower bound on top of the resolved free_space.soft, never
+  # as a substitute for it -- but new configs should set free_space.soft
+  # instead, which has per-storage and percentage forms this scalar never had.
   min_free_bytes: 0
   # Count volumes not managed by DRS (templates, orphans, other clusters)
   # against capacity. Strongly recommended.
   count_foreign_volumes: true
+
+# ---------------------------------------------------------------- free space
+# Keep N bytes (or N% of capacity) free on top of the snapshot reserve above --
+# the larger of the two wins, on every storage, always (section 5.3 (C5)/5.3.1).
+# This is the Storage-DRS mandate: an admin's new VM lands on a storage that is
+# now too full, and the engine migrates data off it until the requirement is
+# met again -- bypassing the drift/imbalance gates and the payback economics,
+# exactly like a snapshot-reserve violation does.
+free_space:
+  # The plan-ENDPOINT requirement: (C5) enforces it on the finished plan, and
+  # a violation is repaired unconditionally. An integer byte count, a
+  # byte-unit string ("500GiB"), or a percentage ("10%", resolved per storage
+  # against that storage's own capacity). 0 = no requirement beyond the
+  # snapshot reserve above -- this default changes nothing for a config that
+  # sets nothing here.
+  soft: 0
+  # The TRANSIENT floor: how far a storage may dip below `soft` while a move
+  # is in flight (section 8.1) -- a mirror target is fully allocated before
+  # its source releases anything, so a plan that lands a disk on a storage
+  # heading toward `soft` needs room to pass through it. null (the default)
+  # means hard = soft: no dip at all, the same strength this invariant had
+  # before free_space existed. Leave this null unless you have deliberately
+  # decided to trade a bounded, planned dip for it -- never set it lower "to
+  # make a plan fit"; that is what soft itself is for.
+  hard: null
+  # Per-storage or per-pattern override, most specific wins (same shape,
+  # placed inside a groups[].storages[] entry):
+  #
+  #   - id: san-a
+  #     free_space:
+  #       soft: "15%"      # this LUN alone keeps 15% of its own capacity free
+  #       hard: null        # null here means "inherit the global value above"
 
 # ------------------------------------------------------------------- gating
 gates:

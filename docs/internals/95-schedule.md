@@ -92,11 +92,20 @@ agree). `execute._live_transient_check()` (sequential) and
 `storage_status()` read instead of this module's model-derived numbers —
 see `92-execute.md`.
 
-The `min_free_bytes` floor is folded into the transient check the same way
-(C5) folds it into the steady-state one (`max(f_b * max(Z_b, z_d),
-min_free_bytes)`) — the plan's own section 8.1 formula does not mention
-the floor, but there is no reason a storage's absolute minimum free space
-should stop applying just because a migration happens to be in flight.
+Section 5.3.1's transient floor is folded into the check the same way
+(C5) folds `soft_s` into the steady-state one — `max(f_b * max(Z_b, z_d),
+hard_b)` — except the floor here is `hard_b`
+(`target_storage.free_space_hard_bytes`), not `soft_b`: section 8.1's own
+formula does not mention a floor at all, but there is no reason a
+storage's configured minimum free space should stop applying just because
+a migration happens to be in flight, and `hard_b` (not `soft_b`) is what
+this transient state is allowed to relax to — with the default `hard:
+null` (`hard_b = soft_b`) the two floors coincide and the check is exactly
+as strong as it would be with `soft_b`; an operator who sets `hard` below
+`soft` is deliberately buying room for a bounded, in-flight dip on a
+storage the finished plan still leaves compliant (`.agents/domain-invariants.md`
+section 2a; `topology.py` resolves both onto the `Storage` this function
+already receives, so no separate parameter threads either one in here).
 
 ## The heuristic can accept a residual violation; the scheduler cannot execute one
 

@@ -97,11 +97,18 @@ from proxmox_storage_drs.payback import (
     compute_move_cost,
     compute_wipe_duration_seconds,
     evaluate_plan_payback,
+    executed_assignment,
     mirror_duration_seconds,
+    repair_markers,
 )
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.pve import build_client as build_pve_client
-from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, largest_disk_bytes
+from proxmox_storage_drs.reserve import (
+    ReserveStatus,
+    compute_reserve_status,
+    largest_disk_bytes,
+    total_shortfall_bytes,
+)
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult, order_moves
 from proxmox_storage_drs.state import (
     LockHandle,
@@ -749,10 +756,7 @@ def _render_show_load_human(
     for group in topology.groups:
         group_load = group_loads.get(group.name)
         reserve_statuses = {
-            storage.id: compute_reserve_status(
-                storage, group.disks, config.snapshot_reserve.min_free_bytes
-            )
-            for storage in group.storages
+            storage.id: compute_reserve_status(storage, group.disks) for storage in group.storages
         }
         header = f"Group {group.name}"
         if group_load is not None:
@@ -793,10 +797,7 @@ def _render_show_load_json(
         )
         storage_loads = {s.storage_id: s for s in group_load.storages} if group_load else {}
         reserve_statuses = {
-            storage.id: compute_reserve_status(
-                storage, group.disks, config.snapshot_reserve.min_free_bytes
-            )
-            for storage in group.storages
+            storage.id: compute_reserve_status(storage, group.disks) for storage in group.storages
         }
         storages_out = []
         for storage in group.storages:
@@ -955,8 +956,10 @@ def _render_plan_move_line(
         duration_str = f"~{format_duration_seconds(move_cost.duration_mirror_seconds)}"
         if move_cost.duration_wipe_seconds:
             duration_str += f" +wipe {format_duration_seconds(move_cost.duration_wipe_seconds)}"
+        if move_cost.repair:
+            flag += "  [repair]"
         if move_cost.exceeds_max_duration:
-            flag = "  ⚠ exceeds migration.max_single_move_duration"
+            flag += "  ⚠ exceeds migration.max_single_move_duration"
     change = -move.imbalance_reduction
     load_per_tib = _load_per_tib(load_by_key, move.disk_key, move.size_bytes)
     line = (
@@ -990,6 +993,13 @@ def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: flo
         f"cost {payback_result.total_cost_load_seconds:.3g} load·s → "
         f"ratio {payback_result.ratio:.3g} (need {payback_ratio:g}) {mark}"
     ]
+    if payback_result.repair_exempt:
+        lines.append(
+            "  overridden: this plan repairs a reserve/free-space shortfall "
+            f"({format_bytes(payback_result.reserve_shortfall_bytes_before)} → "
+            f"{format_bytes(payback_result.reserve_shortfall_bytes_after)}), "
+            "exempt from the economic test (section 7.3)"
+        )
     if not payback_result.aggregate_ok:
         lines.append(
             "  ⚠ this plan's balance benefit does not outweigh its migration cost -- "
@@ -1204,7 +1214,7 @@ def _render_group_plan_json(
                     "to_storage": move.to_storage,
                     "size_bytes": move.size_bytes,
                     "imbalance_reduction": move.imbalance_reduction,
-                    "resolves_reserve_violation": move.resolves_reserve_violation,
+                    "repair": move_cost.repair if move_cost else None,
                     "load_per_tib": _load_per_tib(load_by_key, move.disk_key, move.size_bytes),
                     "duration_mirror_seconds": (
                         move_cost.duration_mirror_seconds if move_cost else None
@@ -1271,6 +1281,9 @@ def _render_group_plan_json(
             "rejected_moves": list(payback_result.rejected_moves),
             "deferred_moves": list(payback_result.deferred_moves),
             "accepted": payback_result.accepted,
+            "repair_exempt": payback_result.repair_exempt,
+            "reserve_shortfall_bytes_before": payback_result.reserve_shortfall_bytes_before,
+            "reserve_shortfall_bytes_after": payback_result.reserve_shortfall_bytes_after,
         }
     return {
         "name": group.name,
@@ -1473,7 +1486,6 @@ def _render_no_moves_lines(
     group: Group,
     group_plan: "_GroupPlan",
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     tiny_disk_bytes: int,
 ) -> list[str]:
     """Only called when the gate decided to ACT but the *final* assignment
@@ -1500,7 +1512,6 @@ def _render_no_moves_lines(
         group,
         group_plan.group_load.load_by_disk_key(),
         objective,
-        min_free_bytes,
         group_plan.group_load.average_utilization,
         group_average_fill(group),
         group_plan.final_breakdown,
@@ -1616,7 +1627,6 @@ def _render_group_explain_human(
                     group,
                     group_plan,
                     resolved.config.objective,
-                    resolved.config.snapshot_reserve.min_free_bytes,
                     resolved.config.migration.tiny_disk_bytes,
                 )
             )
@@ -1624,10 +1634,7 @@ def _render_group_explain_human(
     # per-storage/per-disk picture, section 4 (AGENTS.md section 5: one
     # implementation, reused rather than a second rendering of it).
     reserve_statuses = {
-        storage.id: compute_reserve_status(
-            storage, group.disks, resolved.config.snapshot_reserve.min_free_bytes
-        )
-        for storage in group.storages
+        storage.id: compute_reserve_status(storage, group.disks) for storage in group.storages
     }
     extra.append("  measured load:")
     extra.extend(
@@ -1683,7 +1690,6 @@ def _render_group_explain_json(
     group: Group,
     group_plan: "_GroupPlan",
     warn_fraction: float,
-    min_free_bytes: int,
     objective: ObjectiveConfig,
     tiny_disk_bytes: int,
 ) -> dict[str, object]:
@@ -1711,8 +1717,7 @@ def _render_group_explain_json(
         else {}
     )
     reserve_statuses = {
-        storage.id: compute_reserve_status(storage, group.disks, min_free_bytes)
-        for storage in group.storages
+        storage.id: compute_reserve_status(storage, group.disks) for storage in group.storages
     }
     storages_out = []
     for storage in group.storages:
@@ -1763,7 +1768,6 @@ def _render_group_explain_json(
             group,
             load_by_key,
             objective,
-            min_free_bytes,
             group_plan.group_load.average_utilization,
             group_average_fill(group),
             breakdown,
@@ -1826,13 +1830,11 @@ def _render_explain_json(
     node_selector: str | None,
 ) -> dict[str, object]:
     warn_fraction = resolved.config.report.warn_pinned_load_fraction
-    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     groups_out = [
         _render_group_explain_json(
             group,
             group_plans[group.name],
             warn_fraction,
-            min_free_bytes,
             resolved.config.objective,
             resolved.config.migration.tiny_disk_bytes,
         )
@@ -1930,7 +1932,6 @@ def _solve_group(
     group: Group,
     load_by_key: dict[str, float],
     resolved: ResolvedConfig,
-    min_free_bytes: int,
     cooldown_storages: frozenset[str],
 ) -> _SolveOutcome:
     """Section 5.5's backend dispatch. ``solver.backend: auto`` cascades
@@ -1959,7 +1960,6 @@ def _solve_group(
             group,
             load_by_key,
             resolved.config.objective,
-            min_free_bytes,
             backend,
             solver.time_limit_seconds,
             solver.mip_gap,
@@ -1993,7 +1993,6 @@ def _solve_group(
         group,
         load_by_key,
         resolved.config.objective,
-        min_free_bytes,
         solver.heuristic_iterations,
         cooldown_storages,
         resolved.config.migration.tiny_disk_bytes,
@@ -2287,6 +2286,9 @@ def _log_payback_verdict(group: Group, payback: PaybackResult, required_ratio: f
             "required_ratio": required_ratio,
             "rejected_moves": list(payback.rejected_moves),
             "deferred_moves": list(payback.deferred_moves),
+            "repair_exempt": payback.repair_exempt,
+            "reserve_shortfall_bytes_before": payback.reserve_shortfall_bytes_before,
+            "reserve_shortfall_bytes_after": payback.reserve_shortfall_bytes_after,
         },
     )
 
@@ -2295,7 +2297,6 @@ def _plan_group(
     group: Group,
     resolved: ResolvedConfig,
     prom_client: PrometheusClient,
-    min_free_bytes: int,
     last_loads_by_group: dict[str, dict[str, float] | None],
     state: State,
     now: datetime,
@@ -2332,8 +2333,7 @@ def _plan_group(
 
     _log_load_digest(group, group_load)
     reserve_statuses: dict[str, ReserveStatus] = {
-        storage.id: compute_reserve_status(storage, group.disks, min_free_bytes)
-        for storage in group.storages
+        storage.id: compute_reserve_status(storage, group.disks) for storage in group.storages
     }
     decision = evaluate_group_gates(
         group_load,
@@ -2351,15 +2351,12 @@ def _plan_group(
             state, group.name, resolved.config.gates.cooldown_per_storage_seconds, now
         )
     )
-    solve_outcome = _solve_group(
-        group, group_load.load_by_disk_key(), resolved, min_free_bytes, cooldown_storages
-    )
+    solve_outcome = _solve_group(group, group_load.load_by_disk_key(), resolved, cooldown_storages)
     schedule_result = order_moves(
         group,
         solve_outcome.assignment,
         group_load.load_by_disk_key(),
         resolved.config.objective,
-        min_free_bytes,
         resolved.config.migration.tiny_disk_bytes,
     )
 
@@ -2376,7 +2373,6 @@ def _plan_group(
         schedule_result.final_assignment,
         group_load.load_by_disk_key(),
         resolved.config.objective,
-        min_free_bytes,
         group_average_utilization(group, group_load.load_by_disk_key()),
         group_average_fill(group),
         resolved.config.migration.tiny_disk_bytes,
@@ -2412,8 +2408,32 @@ def _plan_group(
         raw_affinity_debt(solve_outcome.initial_breakdown),
         raw_affinity_debt(final_breakdown),
     )
+    # Section 7.3's outcome trigger and revert test both score the plan's
+    # *executed* endpoint -- final_assignment with every disk a hard
+    # per-move rule has taken out (exceeds_max_duration/saturation_deferred,
+    # both already known from move_costs) held back at its current storage
+    # -- not the solver's raw target. "What it will really run", not merely
+    # "what got ordered".
+    excluded_disk_keys = frozenset(
+        mc.disk_key for mc in move_costs if mc.exceeds_max_duration or mc.saturation_deferred
+    )
+    executed_final_assignment = executed_assignment(
+        group, schedule_result.final_assignment, excluded_disk_keys
+    )
+    repair_by_key = repair_markers(group, schedule_result.order, executed_final_assignment)
+    move_costs = [dataclasses.replace(mc, repair=repair_by_key[mc.disk_key]) for mc in move_costs]
+    current_shortfall_bytes = total_shortfall_bytes(group.storages, group.disks)
+    final_shortfall_bytes = total_shortfall_bytes(
+        group.storages,
+        group.disks,
+        storage_of=lambda d: executed_final_assignment.get(d.key, d.current_storage),
+    )
     payback_result = evaluate_plan_payback(
-        move_costs, benefit, resolved.config.migration.payback_ratio
+        move_costs,
+        benefit,
+        resolved.config.migration.payback_ratio,
+        current_shortfall_bytes,
+        final_shortfall_bytes,
     )
     _log_plan_selected(group, solve_outcome, schedule_result, final_breakdown, group_load)
     _log_payback_verdict(group, payback_result, resolved.config.migration.payback_ratio)
@@ -2441,7 +2461,6 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
     )
     prom_client = _metrics_client_for(resolved, args)
     node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
-    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     last_loads_by_group = _last_loads_by_group(state, topology)
 
     group_loads: dict[str, GroupLoad] = {}
@@ -2457,7 +2476,6 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
             group,
             resolved,
             prom_client,
-            min_free_bytes,
             last_loads_by_group,
             state,
             now,
@@ -2539,7 +2557,6 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
     )
     prom_client = _metrics_client_for(resolved, args)
     node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
-    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     last_loads_by_group = _last_loads_by_group(state, topology)
 
     group_plans = {
@@ -2547,7 +2564,6 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
             group,
             resolved,
             prom_client,
-            min_free_bytes,
             last_loads_by_group,
             state,
             now,
@@ -2661,7 +2677,6 @@ def _apply_payback_gate(
     group_plan: _GroupPlan,
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    min_free_bytes: int,
     mode: str,
     payback_ratio: float,
     exclude: ExcludeConfig,
@@ -2746,7 +2761,6 @@ def _apply_payback_gate(
         filtered,
         migration,
         execution,
-        min_free_bytes,
         mode,
         exclude,
         confirm=confirm,
@@ -2793,7 +2807,6 @@ def _run_auto_group(
     client: PveClient,
     resolved: ResolvedConfig,
     prom_client: PrometheusClient,
-    min_free_bytes: int,
     state_box: _InflightStateBox,
     group: Group,
     group_plan: _GroupPlan,
@@ -2882,7 +2895,6 @@ def _run_auto_group(
             group_plan,
             resolved.config.migration,
             execution,
-            min_free_bytes,
             "auto",
             resolved.config.migration.payback_ratio,
             resolved.config.exclude,
@@ -2955,7 +2967,6 @@ def _run_auto_group(
             fresh_group,
             resolved,
             prom_client,
-            min_free_bytes,
             fresh_last_loads,
             state_box.value,
             fresh_now,
@@ -3132,7 +3143,6 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
         )
         prom_client = _metrics_client_for(resolved, args)
         node_selector = _resolve_node_selector_for_run(client, resolved.config.metrics)
-        min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
         last_loads_by_group = _last_loads_by_group(state, topology)
         # execution.max_migrations_per_run is a per-*invocation* cap,
         # shared across every group this run visits -- not reset per
@@ -3148,7 +3158,6 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                 group,
                 resolved,
                 prom_client,
-                min_free_bytes,
                 last_loads_by_group,
                 state,
                 now,
@@ -3193,7 +3202,6 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     client,
                     resolved,
                     prom_client,
-                    min_free_bytes,
                     state_box,
                     group,
                     group_plan,
@@ -3210,7 +3218,6 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     group_plan,
                     resolved.config.migration,
                     resolved.config.execution,
-                    min_free_bytes,
                     mode,
                     resolved.config.migration.payback_ratio,
                     resolved.config.exclude,
@@ -3308,6 +3315,11 @@ def _render_verify_storages_human(topology: Topology, config: Any) -> str:
             largest = largest_disk_bytes(group.disks, storage.id)
             state = "on" if storage.saferemove else "off"
             lines.append(f"  {storage.id}  saferemove={state}")
+            lines.append(
+                "    free_space: soft="
+                f"{format_bytes(storage.free_space_soft_bytes)}  hard="
+                f"{format_bytes(storage.free_space_hard_bytes)}"
+            )
             wipe_seconds = compute_wipe_duration_seconds(
                 largest, storage.saferemove_throughput_bytes_per_sec
             )
@@ -3363,6 +3375,8 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
                     "saferemove_throughput_bytes_per_sec": (
                         storage.saferemove_throughput_bytes_per_sec
                     ),
+                    "free_space_soft_bytes": storage.free_space_soft_bytes,
+                    "free_space_hard_bytes": storage.free_space_hard_bytes,
                     "largest_disk_bytes": largest,
                     "implied_wipe_seconds": wipe_seconds,
                     "cooldown_per_storage_too_short": (

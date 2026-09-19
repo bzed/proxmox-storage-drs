@@ -85,6 +85,8 @@ def make_storage(
     capacity_tib: float = 8.0,
     saferemove: bool = False,
     saferemove_throughput: float | None = None,
+    free_space_soft_bytes: int = 0,
+    free_space_hard_bytes: int | None = None,
 ) -> Storage:
     return Storage(
         id=id_,
@@ -96,6 +98,12 @@ def make_storage(
         foreign_used_bytes=0,
         saferemove=saferemove,
         saferemove_throughput_bytes_per_sec=saferemove_throughput,
+        free_space_soft_bytes=free_space_soft_bytes,
+        free_space_hard_bytes=(
+            free_space_hard_bytes if free_space_hard_bytes is not None else free_space_soft_bytes
+        ),
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
 
 
@@ -174,7 +182,6 @@ def run(
         schedule_result,
         MIGRATION,
         execution,
-        0,
         mode,
         exclude,
         confirm=confirm,  # type: ignore[arg-type]
@@ -687,12 +694,30 @@ def test_live_transient_check_helper_directly() -> None:
     client, _api = client_with({"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 0}})
     target = make_storage("san-b", capacity_tib=8.0)
     disk = default_group().disks[0]
-    assert _live_transient_check(client, "pve01", target, disk, 0, 0) is True
+    assert _live_transient_check(client, "pve01", target, disk, 0) is True
+
+
+def test_live_transient_check_applies_the_target_storages_hard_free_space_floor() -> None:
+    """Section 5.3.1's `hard_b` -- resolved once onto `Storage.
+    free_space_hard_bytes` at plan time -- is what the live re-check
+    charges, not a re-derived value; only `used`/`total` are re-fetched
+    live (see `_live_transient_check()`'s own docstring)."""
+    client, _api = client_with({"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 0}})
+    huge_floor = round(7.5 * TIB)
+    target = make_storage(
+        "san-b",
+        capacity_tib=8.0,
+        free_space_soft_bytes=huge_floor,
+        free_space_hard_bytes=huge_floor,
+    )
+    disk = default_group().disks[0]  # 1 TiB
+    # used(0) + z(1) + max(f*max(Z,z), hard(7.5)) = 0+1+7.5 = 8.5 > 8.0 capacity.
+    assert _live_transient_check(client, "pve01", target, disk, 0) is False
 
     client2, _api2 = client_with(
         {"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": round(7.9 * TIB)}}
     )
-    assert _live_transient_check(client2, "pve01", target, disk, 0, 0) is False
+    assert _live_transient_check(client2, "pve01", target, disk, 0) is False
 
 
 # --------------------------------------------------------------------- failures
@@ -1390,7 +1415,6 @@ def run_concurrent(
         schedule_result,
         MIGRATION,
         execution,
-        0,
         "auto",
         EXCLUDE,
         clock=fc.clock(),
