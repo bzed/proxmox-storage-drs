@@ -47,7 +47,7 @@ from proxmox_storage_drs.config import (
 from proxmox_storage_drs.exceptions import TopologyError
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.state import State, active_disk_cooldowns, empty_state
-from proxmox_storage_drs.units import format_duration_seconds
+from proxmox_storage_drs.units import format_bytes, format_duration_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +194,11 @@ class Storage:
     # ineligible pair.
     storage_type: str
     allowed_formats: frozenset[str]
+    # Where each half of the pair came from, spelled for ``verify-storages``
+    # (section 3.5) and nothing else -- display-only, never consulted by the
+    # solver, the scheduler or execute.py. Empty for a hand-built Storage.
+    free_space_soft_source: str = ""
+    free_space_hard_source: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,9 +257,37 @@ def _resolve_free_space_value(value: FreeSpaceValue, capacity_bytes: int) -> int
     return round(capacity_bytes * value.percent / 100.0)
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedFreeSpace:
+    """One storage's resolved ``soft_s``/``hard_s`` and where each came from
+    (section 5.3.1, section 3.5's ``verify-storages``). The two ``*_source``
+    strings are display-only."""
+
+    soft_bytes: int
+    hard_bytes: int
+    soft_source: str
+    hard_source: str
+
+
+def _free_space_source(value: FreeSpaceValue, level: str, capacity_bytes: int) -> str:
+    """``level`` (global / storage entry / pattern ``/re/``), plus the
+    percent-to-bytes conversion when the value was written as a percentage."""
+    if value.percent is None:
+        return level
+    return f"{level}, {value.percent:g}% of {format_bytes(capacity_bytes)}"
+
+
+def _free_space_level(storage_value: FreeSpaceValue | None, entry_level: str) -> str:
+    return "global" if storage_value is None else entry_level
+
+
 def _resolve_free_space(
-    storage_cfg: StorageConfig, config: Config, capacity_bytes: int, warnings: list[str]
-) -> tuple[int, int]:
+    storage_cfg: StorageConfig,
+    entry_level: str,
+    config: Config,
+    capacity_bytes: int,
+    warnings: list[str],
+) -> ResolvedFreeSpace:
     """Section 5.3.1: resolve ``soft_s``/``hard_s`` for one storage.
 
     The mandated order -- inheritance, then percent-to-bytes conversion,
@@ -271,25 +304,34 @@ def _resolve_free_space(
     so -- like section 11.4's pattern rules -- they live here, once the
     cluster inventory is loaded, not in ``config.py``. The oversized-
     deprecated-floor case is a warning, appended to ``warnings`` in place,
-    never an error (section 11.1's resolution rules).
+    never an error (section 11.1's resolution rules). A null ``hard`` (the
+    global default) resolves to the *folded* ``soft_s``, so the deprecated
+    floor stays charged on every in-flight state (section 8.1).
+
+    ``entry_level`` names the config entry that supplied a per-storage
+    value -- ``"storage entry"`` or ``"pattern /re/"`` -- for the
+    provenance strings only.
     """
     soft_value = storage_cfg.free_space_soft
+    soft_level = _free_space_level(soft_value, entry_level)
     if soft_value is None:
         soft_value = config.free_space.soft
     soft_written = _resolve_free_space_value(soft_value, capacity_bytes)
 
     hard_value = storage_cfg.free_space_hard
+    hard_level = _free_space_level(hard_value, entry_level)
     if hard_value is None:
         hard_value = config.free_space.hard
-    hard_bytes = (
-        soft_written
-        if hard_value is None
-        else _resolve_free_space_value(hard_value, capacity_bytes)
+    # ``None`` here is the *global* null -- "no dip below soft" -- and is
+    # settled after the fold below, so it tracks the folded soft rather than
+    # the pre-fold one. A written ``hard`` is validated and kept as written.
+    hard_written = (
+        None if hard_value is None else _resolve_free_space_value(hard_value, capacity_bytes)
     )
 
-    if hard_bytes > soft_written:
+    if hard_written is not None and hard_written > soft_written:
         raise TopologyError(
-            f"storage {storage_cfg.id!r}: free_space.hard ({hard_bytes} bytes) exceeds "
+            f"storage {storage_cfg.id!r}: free_space.hard ({hard_written} bytes) exceeds "
             f"its resolved free_space.soft ({soft_written} bytes) -- a floor above the "
             "requirement would make every plan for a compliant storage infeasible"
         )
@@ -307,9 +349,41 @@ def _resolve_free_space(
             f"({config.snapshot_reserve.min_free_bytes} bytes) exceeds its capacity "
             f"({capacity_bytes} bytes) once folded into free_space.soft -- this storage "
             "will report a permanent unfixable shortfall every run until the deprecated "
-            "key is lowered, removed, or overridden with a smaller free_space.soft"
+            "key is lowered or removed"
         )
-    return soft_bytes, hard_bytes
+    soft_source = (
+        "folded from snapshot_reserve.min_free_bytes"
+        if soft_bytes > soft_written
+        else _free_space_source(soft_value, soft_level, capacity_bytes)
+    )
+    if hard_written is None:
+        # Section 5.3.1: ``hard: null`` means ``hard_s = soft_s`` -- the
+        # *folded* soft, so a deprecated-key-only config keeps section
+        # 8.1's transient charge as strong as the built
+        # ``max(f*max(Z,z), min_free_bytes)``.
+        return ResolvedFreeSpace(soft_bytes, soft_bytes, soft_source, "= soft (no dip)")
+    assert hard_value is not None
+    return ResolvedFreeSpace(
+        soft_bytes,
+        hard_written,
+        soft_source,
+        _free_space_source(hard_value, hard_level, capacity_bytes),
+    )
+
+
+def _entry_level(group_cfg: GroupConfig, storage_id: str) -> str:
+    """Which entry of ``group_cfg.storages`` supplied this expanded storage's
+    per-storage options: a literal entry (which always wins over a pattern,
+    section 11.4) or the ``/…/`` pattern that matched it."""
+    for entry in group_cfg.storages:
+        if entry.id == storage_id:
+            return "storage entry"
+    for entry in group_cfg.storages:
+        if is_storage_pattern(entry.id) and re.fullmatch(
+            storage_pattern_text(entry.id), storage_id
+        ):
+            return f"pattern {entry.id}"
+    return "storage entry"
 
 
 def _pick_active_node(storage_id: str, storage_resources: list[dict[str, Any]]) -> str:
@@ -944,8 +1018,8 @@ def _build_storages(
             foreign_bytes = 0
         throughput = definition.get("saferemove_throughput")
         capacity_bytes = int(status["total"])
-        soft_free_bytes, hard_free_bytes = _resolve_free_space(
-            storage_cfg, config, capacity_bytes, warnings
+        free_space = _resolve_free_space(
+            storage_cfg, _entry_level(group_cfg, sid), config, capacity_bytes, warnings
         )
         storage_type = str(definition.get("type", ""))
         storages.append(
@@ -961,10 +1035,12 @@ def _build_storages(
                 saferemove_throughput_bytes_per_sec=(
                     float(throughput) if throughput is not None else None
                 ),
-                free_space_soft_bytes=soft_free_bytes,
-                free_space_hard_bytes=hard_free_bytes,
+                free_space_soft_bytes=free_space.soft_bytes,
+                free_space_hard_bytes=free_space.hard_bytes,
                 storage_type=storage_type,
                 allowed_formats=_allowed_formats(storage_type),
+                free_space_soft_source=free_space.soft_source,
+                free_space_hard_source=free_space.hard_source,
             )
         )
     return tuple(storages)

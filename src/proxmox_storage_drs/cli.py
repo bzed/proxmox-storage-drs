@@ -3307,6 +3307,10 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
     return 1 if any_failure else 0
 
 
+def _source_suffix(source: str) -> str:
+    return f" ({source})" if source else ""
+
+
 def _render_verify_storages_human(topology: Topology, config: Any) -> str:
     lines: list[str] = []
     for group in topology.groups:
@@ -3317,8 +3321,10 @@ def _render_verify_storages_human(topology: Topology, config: Any) -> str:
             lines.append(f"  {storage.id}  saferemove={state}")
             lines.append(
                 "    free_space: soft="
-                f"{format_bytes(storage.free_space_soft_bytes)}  hard="
+                f"{format_bytes(storage.free_space_soft_bytes)}"
+                f"{_source_suffix(storage.free_space_soft_source)}  hard="
                 f"{format_bytes(storage.free_space_hard_bytes)}"
+                f"{_source_suffix(storage.free_space_hard_source)}"
             )
             wipe_seconds = compute_wipe_duration_seconds(
                 largest, storage.saferemove_throughput_bytes_per_sec
@@ -3377,6 +3383,8 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
                     ),
                     "free_space_soft_bytes": storage.free_space_soft_bytes,
                     "free_space_hard_bytes": storage.free_space_hard_bytes,
+                    "free_space_soft_source": storage.free_space_soft_source,
+                    "free_space_hard_source": storage.free_space_hard_source,
                     "largest_disk_bytes": largest,
                     "implied_wipe_seconds": wipe_seconds,
                     "cooldown_per_storage_too_short": (

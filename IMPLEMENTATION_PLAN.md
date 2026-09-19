@@ -1392,6 +1392,15 @@ implementation.
   upgrade. The error applies to the new knob's own value; an oversized deprecated floor warns and
   reports as the unfixable shortfall it always was.
 
+The order has a third consequence, and it is the one an implementation gets wrong by following the
+list above too literally (REVIEW.md AH-01): the two validations run on *written* values, but a
+**null** `hard` is not a written value — it is defined as `hard_s = soft_s`, and that `soft_s` is the
+*folded* one. A null `hard` is therefore settled **after** the fold, from the folded `soft_s`;
+resolving it before the fold (to `soft_s_resolved`) would leave `hard_s = 0` for a config carrying
+only `min_free_bytes` and drop the floor from §8.1's transient charge — silently, since that config
+gets no deprecation warning. A **written** `hard` stays as written: it is the operator's explicit
+dip, validated against the written `soft` and never raised by the fold.
+
 No `schema_version` bump: the old key keeps working, and the new block is additive — but the
 block is only *reachable* once `config_schema.json` carries it, because that schema is closed
 (`additionalProperties: false` throughout, deliberately: §11.1's structural pass is where a
@@ -1993,10 +2002,13 @@ repairs, so both are marked `repair: false`. The fixture's recorded payback numb
 (`fc-tier1.expected.json`: cost 26 214.4, benefit 1.93×10⁸, ratio 7 344.4, `accepted: true`) are
 untouched — the sums are computed in full whatever the trigger, and this plan clears the
 aggregate test on its own anyway (7 344 ≥ 10). Only the per-move flag changes (`102:scsi0` is
-`resolves_reserve_violation: true` today, unmarked under the revert test). `fc-tier1.expected.json`
-records no per-move flag, so it is untouched; the corpus expected files do record it (all `false`
-today) and are re-validated in phase 13 with everything else that asserts the old flag — see §12's
-row.
+`resolves_reserve_violation: true` before phase 13, unmarked under the revert test).
+**As built (AH-02):** `fc-tier1.expected.json` never recorded the old flag, but it does record the
+new surface — per-move `disk_key`, the plan's `aggregate_ok`, the `reserve_shortfall_tib_before`/
+`_after` pair (0.5 → 0.0), `repair_exempt: true` (the outcome trigger fires; the plan would have
+cleared the aggregate test regardless) and `repair_markers` (both `false`, the redundant-repair
+case) — with every recorded payback *number* unchanged; the corpus expected files record the same
+fields.
 
 **Defining "during the mirror".** `u_s` as used everywhere else is a p95 over the lookback window —
 a robust *statistic*, not an instantaneous reading — so adding an instantaneous `ω` to it would mix
@@ -2455,15 +2467,13 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
   pinned load 1.2 of 8.6 (14%, warn at 25%);  best achievable spread given pins: 44.6%
 ```
 
-**As built, phase 13 pending:** the exemption note under the payback line and the per-move
-`repair` markers are part of §7.3's specified output and are emitted by no shipped renderer yet
-— `plan`/`apply` print neither, for the same reason as every other pending item below. The
-`repair: true`/`false` field likewise reaches `--json` only with phase 13 (today's
-`resolves_reserve_violation` JSON field carries the built "source presently violating" flag,
-which §7.3 replaces with the revert test).
+**As built (phase 13):** the exemption note under the payback line and the per-move `[repair]`
+markers are printed by `plan`/`apply`, and the `repair` field reaches `--json` per move —
+computed by §7.3's revert test, not by the old "source presently violating" flag, which now
+survives only as `order_moves()`'s scheduling signal (§8.2 priority 1).
 
-The **exemption itself needs a field of its own**, and phase 13 adds it. `--json`'s payback block
-carries `benefit_load_seconds`, `total_cost_load_seconds`, `ratio`, `aggregate_ok`,
+The **exemption itself needed a field of its own**, and phase 13 added it. `--json`'s payback block
+carried `benefit_load_seconds`, `total_cost_load_seconds`, `ratio`, `aggregate_ok`,
 `rejected_moves`, `deferred_moves` and `accepted` — none of which says *why* the aggregate test
 passed, so a plan accepted on merit and a plan accepted only because it repairs are the same
 object to a machine. (A consumer can re-derive it as `aggregate_ok and ratio < λ`, but only by
@@ -2889,7 +2899,7 @@ Each phase is independently testable and useful on its own.
 | 10 | `anonymize.py`, `collect.py`, `replay.py`, `tests/corpus/` (§16) | A bundle collected from a live cluster replays to the same plan the live run produced; the scrub audit and the determinism test pass on it |
 | 11 | Logging policy (§2.3) | **Done.** A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
 | 12 | Capacity-spread objective and gate, one-year payback horizon (§5.3 (C7), §5.4 `δ`, §6, §7.2) | **Done.** Fixtures regenerated with the `delta_values` sweep and the 365d horizon; a replayed bundle shows the capacity gate deciding; `explain` reports the fill deviation; the manual documents `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` and the new `payback_horizon` default (the manpage documents no individual knob, by §11's own established convention) |
-| 13 | Free-space requirements (§5.3.1, §5.3 (C5), §6 override, §7.3 repair exemption, §8.1 hard floor) **and the (C2) format-compatibility eligibility it needs** | `config_schema.json` gains the block **first** — the schema is closed (`additionalProperties: false` throughout, deliberately: it is where a typo'd key is caught, §11.1's structural pass), so a `free_space:` key is rejected before `config.py` ever sees it: a top-level `free_space` object and a `free_space` property on `groups[].storages[]`, each with `soft`/`hard` typed `["string", "number", "null"]` for §5.3.1's grammar (integer bytes, byte-unit string, `"N%"`, and `null` with its two by-level meanings); `config.py` then resolves `free_space.soft/hard` per storage (bytes, byte-unit strings, percentages; global, per-storage, per-pattern; the global `snapshot_reserve.min_free_bytes` scalar deprecated, folded in per storage after percent conversion as `soft_s = max(soft_s_resolved, min_free_bytes)` — §5.3.1), validates `hard ≤ soft` and `soft < C_s` **on the written values, before that fold** (§5.3.1, "validate as written, then fold"); the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py`, `execute.py`'s live execution-time re-check and every `cli.py` call site that threads the scalar today, and `collect.py`'s bundle manifest (which serialises the scalar, so a replayed bundle carries the pair instead — §16); `topology.Storage` gains the type/format fields (C2) needs and both solver backends fix `x_{d,s}=0` for format-incompatible targets; `payback.py`'s repair detection (`ScheduledMove.resolves_reserve_violation`, set by `schedule.py`'s "source presently violating" test) is replaced by §7.3's outcome trigger (exempt iff the plan's final `Σ r_s` is strictly below the current assignment's) plus a per-move `repair` marker computed by the revert test — re-scoring `Σ r_s` on the final assignment with one `x` held — while `order_moves()`'s internal priority-1 test keeps §8.2's "source currently violating" form (a current-state rule, not a plan-outcome one); the outcome trigger is a **signature and data-flow change**, not a flag swap: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s`, so the current and final slack are threaded in from its sole production caller (`cli.py`'s plan builder, `evaluate_plan_payback()`'s only call site outside tests) — both sums already exist there as `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses` (`solve_outcome.initial_breakdown` and the R-02 `final_breakdown` are in hand at the call site), so the change is two sums over objects already passed to the benefit computation, no new plumbing through the solver — with one sequencing constraint the signature change must respect: the final sum is taken over the move set the gate will actually execute, i.e. **after** the per-move duration rejections and saturation deferrals are known and their moves removed (§7.3), so the refusal computation that today lives inside `evaluate_plan_payback()` has to produce its verdicts before the trigger's sums are taken rather than alongside them, and `_execute_group_plan()`'s `excluded_keys` filtering stops being the only place the drop is applied; the exemption also gains a `--json` surface it has never had — `repair_exempt` plus `reserve_shortfall_bytes_before`/`_after` in the payback block (§9.5), without which an exempt plan and one accepted on merit are the same object to `validate_corpus.py`'s expected files (§16.6 checks 2 and 4); the sweep is defined by grep, not by enumeration — every file matching `git grep -l resolves_reserve_violation` (today: `payback.py`, `schedule.py`, `cli.py`, `test_schedule.py`, `test_cli.py`, `test_payback.py`, `test_execute.py`, both `tests/corpus/*.expected.json` bundles, `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, plus the plan and REVIEW.md) is updated with it, and every file matching `git grep -l evaluate_plan_payback` (which adds `test_affinity_repair_fixture.py`, whose positional three-argument call breaks on the signature change without ever naming the flag, and `docs/internals/00-overview.md`) with the signature change — the manual's `resolves_reserve_violation` prose must be *split*, not renamed: its scheduling half (§8.2 priority 1) keeps the current-state form, its exemption half becomes the plan-level outcome trigger; the §14.8 fixture (which requires the format rule, and records `requires_format_eligibility: true` so it fails loudly before that lands) proves the mandate, the exemption and both `hard`-sweep orders; the manual documents the block, and `config/drs.example.yaml` gains it in **phase 13's own commit** as `soft: 0` / `hard: null` (it is a shipped artefact, §8, and today carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all) — `hard: null` there is load-bearing rather than cosmetic: any spelled-out `hard` below the folded floor would weaken §8.1's transient charge for exactly the operators the fold protects, because the built check charges `min_free_bytes` on every in-flight state and `hard_s` is what replaces it, while `hard: null` (= `soft`) leaves an upgrading deprecated-key config exactly as strong as it is today; and the scalar → pair replacement gets the same grep treatment as the flag, because it deprecates a **documented config key** and reaches further than the code: every file matching `git grep -l min_free_bytes` (today 30 — the `src/` files named above plus `config_schema.json`, seven test modules, both `tests/corpus/*/config.yaml` replay inputs, `config/drs.example.yaml`, `docs/manual/10-configuration.md` — whose `### snapshot_reserve.min_free_bytes` reference section becomes the deprecation notice and the `free_space` documentation — `docs/manual/00-installation.md`, `docs/manual/27-plan.md`, `docs/manual/30-safety-and-status.md`, `docs/internals/60-topology.md`, `docs/internals/91-optimize.md`, `docs/internals/95-schedule.md` — which documents the built fold of the scalar into the transient check — `.agents/domain-invariants.md`, whose invariant 2 is written `used + max(f·Z_s, min_free_bytes) ≤ C_s` and becomes `soft_s`, `.agents/testing.md`, plus the plan and REVIEW.md) is updated with it; **one file the sweep does not name still needs the same treatment**: `verify-storages` gains the resolved `soft_s`/`hard_s` per storage, with the level each came from (§3.5 — the derivation an operator cannot otherwise predict, and the same argument that put the pattern expansion there), so `docs/manual/25-show-load-and-verify-storages.md` joins the phase's file set even though it matches none of the three greps today |
+| 13 | Free-space requirements (§5.3.1, §5.3 (C5), §6 override, §7.3 repair exemption, §8.1 hard floor) **and the (C2) format-compatibility eligibility it needs** | `config_schema.json` gains the block **first** — the schema is closed (`additionalProperties: false` throughout, deliberately: it is where a typo'd key is caught, §11.1's structural pass), so a `free_space:` key is rejected before `config.py` ever sees it: a top-level `free_space` object and a `free_space` property on `groups[].storages[]`, each with `soft`/`hard` typed `["string", "number", "null"]` for §5.3.1's grammar (integer bytes, byte-unit string, `"N%"`, and `null` with its two by-level meanings); `config.py` then resolves `free_space.soft/hard` per storage (bytes, byte-unit strings, percentages; global, per-storage, per-pattern; the global `snapshot_reserve.min_free_bytes` scalar deprecated, folded in per storage after percent conversion as `soft_s = max(soft_s_resolved, min_free_bytes)` — §5.3.1), validates `hard ≤ soft` and `soft < C_s` **on the written values, before that fold** (§5.3.1, "validate as written, then fold"); the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py`, `execute.py`'s live execution-time re-check and every `cli.py` call site that threads the scalar today, and `collect.py`'s bundle manifest (which serialises the scalar, so a replayed bundle carries the pair instead — §16); `topology.Storage` gains the type/format fields (C2) needs and both solver backends fix `x_{d,s}=0` for format-incompatible targets; `payback.py`'s repair detection (`ScheduledMove.resolves_reserve_violation`, set by `schedule.py`'s "source presently violating" test) is replaced by §7.3's outcome trigger (exempt iff the plan's final `Σ r_s` is strictly below the current assignment's) plus a per-move `repair` marker computed by the revert test — re-scoring `Σ r_s` on the final assignment with one `x` held — while `order_moves()`'s internal priority-1 test keeps §8.2's "source currently violating" form (a current-state rule, not a plan-outcome one); the outcome trigger is a **signature and data-flow change**, not a flag swap: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s`, so the current and final slack are threaded in from its sole production caller (`cli.py`'s plan builder, `evaluate_plan_payback()`'s only call site outside tests) — both sums already exist there as `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses` (`solve_outcome.initial_breakdown` and the R-02 `final_breakdown` are in hand at the call site), so the change is two sums over objects already passed to the benefit computation, no new plumbing through the solver — with one sequencing constraint the signature change must respect: the final sum is taken over the move set the gate will actually execute, i.e. **after** the per-move duration rejections and saturation deferrals are known and their moves removed (§7.3), so the refusal computation that today lives inside `evaluate_plan_payback()` has to produce its verdicts before the trigger's sums are taken rather than alongside them, and `_execute_group_plan()`'s `excluded_keys` filtering stops being the only place the drop is applied; the exemption also gains a `--json` surface it has never had — `repair_exempt` plus `reserve_shortfall_bytes_before`/`_after` in the payback block (§9.5), without which an exempt plan and one accepted on merit are the same object to `validate_corpus.py`'s expected files (§16.6 checks 2 and 4); the sweep is defined by grep, not by enumeration — every file matching `git grep -l resolves_reserve_violation` (today: `payback.py`, `schedule.py`, `cli.py`, `test_schedule.py`, `test_cli.py`, `test_payback.py`, `test_execute.py`, both `tests/corpus/*.expected.json` bundles, `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, plus the plan and REVIEW.md) is updated with it, and every file matching `git grep -l evaluate_plan_payback` (which adds `test_affinity_repair_fixture.py`, whose positional three-argument call breaks on the signature change without ever naming the flag, and `docs/internals/00-overview.md`) with the signature change — the manual's `resolves_reserve_violation` prose must be *split*, not renamed: its scheduling half (§8.2 priority 1) keeps the current-state form, its exemption half becomes the plan-level outcome trigger; the §14.8 fixture (which requires the format rule, landed in the same commit — so it carries no `requires_format_eligibility` marker, see §14.8's AH-03 note) proves the mandate, the exemption and both `hard`-sweep orders; the manual documents the block, and `config/drs.example.yaml` gains it in **phase 13's own commit** as `soft: 0` / `hard: null` (it is a shipped artefact, §8, and today carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all) — `hard: null` there is load-bearing rather than cosmetic: any spelled-out `hard` below the folded floor would weaken §8.1's transient charge for exactly the operators the fold protects, because the built check charges `min_free_bytes` on every in-flight state and `hard_s` is what replaces it, while `hard: null` (= `soft`) leaves an upgrading deprecated-key config exactly as strong as it is today; and the scalar → pair replacement gets the same grep treatment as the flag, because it deprecates a **documented config key** and reaches further than the code: every file matching `git grep -l min_free_bytes` (today 30 — the `src/` files named above plus `config_schema.json`, seven test modules, both `tests/corpus/*/config.yaml` replay inputs (**left as captured** — AH-06: a committed bundle is real captured data, and a pre-`free_space` bundle is the compatibility case replay must keep serving), `config/drs.example.yaml`, `docs/manual/10-configuration.md` — whose `### snapshot_reserve.min_free_bytes` reference section becomes the deprecation notice and the `free_space` documentation — `docs/manual/00-installation.md`, `docs/manual/27-plan.md`, `docs/manual/30-safety-and-status.md`, `docs/internals/60-topology.md`, `docs/internals/91-optimize.md`, `docs/internals/95-schedule.md` — which documents the built fold of the scalar into the transient check — `.agents/domain-invariants.md`, whose invariant 2 is written `used + max(f·Z_s, min_free_bytes) ≤ C_s` and becomes `soft_s`, `.agents/testing.md`, plus the plan and REVIEW.md) is updated with it; **one file the sweep does not name still needs the same treatment**: `verify-storages` gains the resolved `soft_s`/`hard_s` per storage, with the level each came from (§3.5 — the derivation an operator cannot otherwise predict, and the same argument that put the pattern expansion there), so `docs/manual/25-show-load-and-verify-storages.md` joins the phase's file set even though it matches none of the three greps today |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
@@ -3226,24 +3236,27 @@ Three 10 TiB storages `packed`/`roomy`/`swapme`, `f = 2.0`, equal capabilities, 
 eligibility — which is what makes the repair a *two*-move plan rather than a one-move one.
 
 **Two prerequisites this fixture states openly rather than assumes.** First, the (C2)
-format-compatibility rule it leans on is specified but **not yet implemented**: `topology.Storage`
-does not expose storage type/format, so both solver backends currently treat every group storage
-as an eligible target for every disk, and under that as-built behaviour the fixture's optimum is
-the *one*-move repair `601:scsi0 packed → swapme` (objective 1.081 — but **not** a plan that
-pays for itself: it relocates the quiet 0.05 disk off a perfectly balanced group, so `E: 0 → 0.10`
-against `F: 1.608 → 1.412`, benefit `(−0.100 + 0.5 × 0.196) × 31 536 000 ≈ −6.2×10⁴ load·s`
-against a 5 243 load·s cost, ratio −11.8, and it clears the gate only through the same repair
-exemption the two-move plan needs — its own `Σ r_s` is 0.5 → 0, so both the built
-`has_reserve_override` and §7.3's outcome trigger fire on it). What depends on phase 13 landing
-the format rule first is the plan's *shape*, not its economics: the two-move repair, the indirect
-repair the revert test marks, and both `hard`-sweep orders below. Capacity alone cannot
-substitute for the format rule: §8.1's predicate is monotone in `z_d`, so any storage that
-accepts the 1.0 TiB `603` accepts the 0.5 TiB `601`, and pinning `603` (the
+format-compatibility rule it leans on. *It was not implemented when the fixture was specified* —
+`topology.Storage` did not expose storage type/format, so both solver backends treated every
+group storage as an eligible target for every disk — and under that behaviour the fixture's
+optimum would have been the *one*-move repair `601:scsi0 packed → swapme` (objective 1.081 — but
+**not** a plan that pays for itself: it relocates the quiet 0.05 disk off a perfectly balanced
+group, so `E: 0 → 0.10` against `F: 1.608 → 1.412`, benefit
+`(−0.100 + 0.5 × 0.196) × 31 536 000 ≈ −6.2×10⁴ load·s` against a 5 243 load·s cost, ratio −11.8,
+and it clears the gate only through the same repair exemption the two-move plan needs — its own
+`Σ r_s` is 0.5 → 0, so both the built `has_reserve_override` and §7.3's outcome trigger fire on
+it). What depends on the format rule is the plan's *shape*, not its economics: the two-move
+repair, the indirect repair the revert test marks, and both `hard`-sweep orders below. Capacity
+alone cannot substitute for the format rule: §8.1's predicate is monotone in `z_d`, so any storage
+that accepts the 1.0 TiB `603` accepts the 0.5 TiB `601`, and pinning `603` (the
 `affinity-repair.yaml` mechanism) does not help either — it leaves `601 → swapme` legal and
-optimal. The fixture therefore ships **with** phase 13's format work,
-not before it, and its expected file records the as-built one-move optimum as an explicit
-`requires_format_eligibility: true` marker so a premature run fails loudly rather than passing
-vacuously. Second, the group's fills (0.75/0.68/0.10) put the capacity gate at
+optimal. **As built (AH-03):** phase 13 landed the rule (`Storage.storage_type`/`allowed_formats`,
+one shared `storage_accepts_format()`, both backends fixing `x_{d,s}=0`) *in the same commit* as
+the fixture, so the one-move counterfactual above is history rather than a state the fixture can
+observe — which is why the expected file carries no `requires_format_eligibility` marker: its only
+job was to fail loudly on a run *before* the rule existed, and no such run can exist. The
+one-move figures survive as the hand derivation in REVIEW.md §48 (AG-01), not as a recorded
+case. Second, the group's fills (0.75/0.68/0.10) put the capacity gate at
 `(0.75 − 0.10)/0.51 = 127%`, far above the 25% default — the gate is what lets the engine *plan*
 here, and the fixture sets `gates.capacity_spread_threshold: null` to keep that planning decision
 from being the fixture's own doing: with the gate open, the soft-less counterfactual below is
@@ -3854,8 +3867,10 @@ Four kinds of assertion that do hold:
    rejected or deferred never also appears as an accepted move (§7.3's saturation guard,
    structurally). These are checkable without knowing the optimum, and they are what
    `check_invariants()` actually asserts. Three properties this bullet used to claim as checked and
-   is not: `Σ r_s = 0` in the final assignment and §8.1's per-step transient predicate both need the
-   emitted *order*, which no `plan --json` field carries; "the objective the scheduler was handed
+   is not: §8.1's per-step transient predicate needs the emitted *order*, which no `plan --json`
+   field carries (the `Σ r_s = 0` half of this gap is closed as of phase 13 — the payback block's
+   `reserve_shortfall_bytes_after` is the final `Σ r_s`, so the invariant is readable from the
+   plan itself; wiring it into `check_invariants()` is still open); "the objective the scheduler was handed
    equals the objective recomputed from the final assignment" needs the six-term breakdown, which
    today only `explain --json` emits. A real and deliberate gap, named here rather than discovered
    later (the same shape as this section's own pattern-expansion gap above) — either sweep
@@ -3876,8 +3891,9 @@ Four kinds of assertion that do hold:
 4. **Regression.** `<name>.expected.json` records, per variant, the gate verdict, the plan (as a
    sorted list of moves with their per-move costs), the payback arithmetic and the findings —
    as built: `plan --json`'s group report carries neither an emitted *order* nor the six-term
-   objective breakdown (Y-04; the exact gap checks 2 and 3 above name), so no expected file can
-   record them either. It is generated by `validate_corpus.py` and asserted current by
+   objective breakdown (Y-04; the exact gaps checks 2 and 3 above name), so no expected file can
+   record those two — it *does* record the payback block's `reserve_shortfall_bytes_before`/
+   `_after` and `repair_exempt` since phase 13. It is generated by `validate_corpus.py` and asserted current by
    `validate_corpus.py --check`, exactly as `tests/fixtures/generate_expected.py` is for §14 — and
    for the same reason: an expected file that a human may edit is an expected file that will be
    edited to match a bug.

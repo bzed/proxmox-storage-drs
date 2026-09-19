@@ -23,11 +23,6 @@ One slack per storage, not one per reason: `Σ r_s` covers the snapshot term and
 free-space requirement together, so a byte of configured free space is exactly as non-negotiable
 as a byte of snapshot reserve.
 
-**As built:** `soft_s` is still the global scalar `snapshot_reserve.min_free_bytes`
-(`reserve.py:143`, `required = max(round(f·largest), min_free_bytes)`). Phase 13 replaces that
-scalar with the per-storage `soft_s`/`hard_s` pair everywhere it is threaded; until it lands,
-read `soft_s` here as that one number applied to every storage.
-
 ## 2a. The three floors, and which one wins (§5.3 (C5), §5.3.1, §8.1)
 
 Three quantities want space free on a storage, and they compose in **one fixed order**. Get this

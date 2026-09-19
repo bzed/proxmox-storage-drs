@@ -346,6 +346,124 @@ def test_build_topology_rejects_a_soft_floor_not_below_capacity(tmp_path: Path) 
         build_topology(client, config)
 
 
+def _pair(topology: Any, storage_id: str) -> tuple[int, int]:
+    storage = next(s for g in topology.groups for s in g.storages if s.id == storage_id)
+    return storage.free_space_soft_bytes, storage.free_space_hard_bytes
+
+
+def test_deprecated_min_free_bytes_alone_folds_into_both_soft_and_hard(tmp_path: Path) -> None:
+    """AH-01: a config carrying only ``snapshot_reserve.min_free_bytes`` has
+    ``hard: null``, which section 5.3.1 defines as ``hard_s = soft_s`` -- the
+    *folded* soft -- so section 8.1's transient charge keeps the floor the
+    built ``max(f*max(Z,z), min_free_bytes)`` check charged."""
+    floor = 1 << 40
+    config = make_config(tmp_path, snapshot_reserve={"min_free_bytes": floor})
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _pair(topology, "san-a") == (floor, floor)
+    assert _pair(topology, "san-b") == (floor, floor)
+
+
+def test_written_hard_stays_as_written_under_the_deprecated_fold(tmp_path: Path) -> None:
+    """Section 5.3.1: an operator who sets ``hard`` below the folded floor is
+    using the new knob for the dip it exists to allow -- the fold raises soft
+    only, and a written hard is neither raised nor rejected."""
+    floor = 1 << 40
+    config = make_config(
+        tmp_path,
+        snapshot_reserve={"min_free_bytes": floor},
+        free_space={"soft": "100GiB", "hard": "10GiB"},
+    )
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _pair(topology, "san-a") == (floor, 10 * (1 << 30))
+
+
+def test_global_hard_null_follows_the_folded_soft_when_soft_is_written(tmp_path: Path) -> None:
+    """Both keys set, ``hard`` left null: hard tracks whichever of the written
+    soft and the deprecated floor won the ``max()``."""
+    config = make_config(
+        tmp_path,
+        snapshot_reserve={"min_free_bytes": 1 << 30},
+        free_space={"soft": "5GiB"},
+    )
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _pair(topology, "san-a") == (5 * (1 << 30), 5 * (1 << 30))
+
+
+def test_oversized_deprecated_floor_warns_and_does_not_raise(tmp_path: Path) -> None:
+    """Section 5.3.1's one deliberate non-promotion: ``soft_s < C_s`` is checked on
+    the written value, so a ``min_free_bytes`` above a storage's capacity warns
+    (a permanent unfixable shortfall, as built) instead of refusing to start --
+    and the warning offers only remedies that work: the fold is a ``max()``, so
+    a smaller ``free_space.soft`` cannot lower it."""
+    config = make_config(tmp_path, snapshot_reserve={"min_free_bytes": 100 * (1 << 40)})
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    matching = [w for w in topology.warnings if "exceeds its capacity" in w]
+    assert len(matching) == 2
+    assert all("lowered or removed" in w and "smaller" not in w for w in matching)
+
+
+def _sources(topology: Any, storage_id: str) -> tuple[str, str]:
+    storage = next(s for g in topology.groups for s in g.storages if s.id == storage_id)
+    return storage.free_space_soft_source, storage.free_space_hard_source
+
+
+def test_free_space_provenance_names_the_level_each_half_came_from(tmp_path: Path) -> None:
+    """Section 3.5: ``verify-storages`` shows the resolved pair *with the level
+    each came from* -- global, per-storage literal, pattern, percent-converted,
+    folded -- because one line of config can mean a different number per LUN."""
+    config = make_config(
+        tmp_path,
+        free_space={"soft": "10%"},
+        groups=[
+            {
+                "name": "g1",
+                "storages": [
+                    {"id": "san-a", "free_space": {"soft": "2GiB", "hard": "1GiB"}},
+                    {"id": "/san-b/", "free_space": {"soft": "20%"}},
+                ],
+            }
+        ],
+    )
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _sources(topology, "san-a") == ("storage entry", "storage entry")
+    assert _sources(topology, "san-b") == (
+        "pattern /san-b/, 20% of 5.00 TiB",
+        "= soft (no dip)",
+    )
+
+
+def test_free_space_provenance_inherits_global_percent_and_reports_the_fold(
+    tmp_path: Path,
+) -> None:
+    config = make_config(
+        tmp_path,
+        snapshot_reserve={"min_free_bytes": 2 << 40},
+        groups=[
+            {
+                "name": "g1",
+                "storages": [
+                    {"id": "san-a"},
+                    {"id": "san-b", "free_space": {"soft": "5%"}},
+                ],
+            }
+        ],
+        free_space={"soft": "10%", "hard": "1GiB"},
+    )
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    # 10% of 10 TiB = 1 TiB < the 2 TiB deprecated floor: folded.
+    assert _sources(topology, "san-a") == (
+        "folded from snapshot_reserve.min_free_bytes",
+        "global",
+    )
+    assert _sources(topology, "san-b")[0] == "folded from snapshot_reserve.min_free_bytes"
+
+
+def test_free_space_provenance_global_percent_without_a_fold(tmp_path: Path) -> None:
+    config = make_config(tmp_path, free_space={"soft": "10%"})
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _sources(topology, "san-a") == ("global, 10% of 10.00 TiB", "= soft (no dip)")
+
+
 # --------------------------------------------------------------------- cooldowns
 
 

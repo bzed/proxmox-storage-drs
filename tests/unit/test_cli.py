@@ -824,6 +824,38 @@ def test_verify_storages_json_output(
     assert san_b["implied_wipe_seconds"] is None
 
 
+def test_verify_storages_shows_where_each_free_space_half_came_from(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Section 3.5 / AH-04: the resolved pair is printed with its provenance,
+    in both renderers."""
+    base = _sample_topology()
+    group = base.groups[0]
+    storages = tuple(
+        dataclasses.replace(
+            storage,
+            free_space_soft_source="global, 10% of 10.00 TiB",
+            free_space_hard_source="= soft (no dip)",
+        )
+        for storage in group.storages
+    )
+    topology = dataclasses.replace(
+        base, groups=(dataclasses.replace(group, storages=storages),) + base.groups[1:]
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", _fake_build_topology(topology))
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "verify-storages"]) == 0
+    out = capsys.readouterr().out
+    assert "(global, 10% of 10.00 TiB)" in out
+    assert "(= soft (no dip))" in out
+    assert cli.main(["-c", str(path), "--json", "verify-storages"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    san_a = next(s for s in payload["groups"][0]["storages"] if s["id"] == "san-a")
+    assert san_a["free_space_soft_source"] == "global, 10% of 10.00 TiB"
+    assert san_a["free_space_hard_source"] == "= soft (no dip)"
+
+
 def _two_group_topology() -> Topology:
     """`_sample_topology()`'s one group plus a second, empty one -- enough
     to prove `--group` actually restricts which groups a handler visits
