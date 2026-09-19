@@ -663,12 +663,37 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
        ``moves``) are supposed to partition the candidate set, never
        overlap.
     4. **The plan never worsens the reserve shortfall.** The payback
-       block's ``reserve_shortfall_bytes_after`` (the final ``Sigma r_s``,
-       section 9.5) must not exceed ``..._before``: the lexicographic
-       stage minimises ``Sigma r_s`` first (section 5.4), so a plan that
-       leaves it higher than it found it is a defect. Deliberately *not*
-       ``after == 0`` -- an oversized ``min_free_bytes`` or a group with no
-       feasible repair legitimately ends above zero.
+       block's ``reserve_shortfall_bytes_after`` (the final ``Sigma r_s``
+       over the executed plan, section 9.5) must not exceed
+       ``..._before``. Deliberately *not* ``after == 0`` -- an oversized
+       ``min_free_bytes`` or a group with no feasible repair legitimately
+       ends above zero. Why "never raised" holds depends on the backend
+       and on ``hard`` (REVIEW.md AI-01):
+
+       * **cbc / cpsat**: the lexicographic solve (section 5.3's slack
+         ``r_s``, section 5.5's two-stage backends) minimises ``Sigma r_s``
+         alone in stage 1, so the *solver's endpoint* is never above the
+         current assignment's.
+       * **heuristic**: no such stage. ``_descend()`` optimises the whole
+         section 5.4 objective, where the shortfall enters only as
+         ``objective.reserve_violation_penalty`` times TiB short -- the
+         configured value, unfloored (section 5.3's V-01 as-built note),
+         so a balance-improving move that raises the shortfall can be
+         accepted.
+       * **what holds for every backend when ``hard = soft``** (the two
+         older bundles): ``schedule.order_moves()`` schedules a move
+         only if its target clears ``hard`` on arrival, so the *executed*
+         plan cannot raise ``Sigma r_s`` whatever the solver produced --
+         and the executed plan is what this check reads.
+       * **``hard < soft``** (a deliberate dip, section 5.3.1): that
+         scheduler guarantee no longer covers the endpoint, and a dropped
+         (rejected/deferred/deadlocked) move can leave a MILP endpoint
+         higher than the solver's. A violation here is a real signal, not
+         noise -- the heuristic trading reserve for balance is a known,
+         documented limitation, not a bug in this check -- but it is the
+         one configuration where it can fire without a regression.
+         ``bzed-dev-cluster-free-space`` is the committed bundle in this
+         configuration; every backend the narrow sweep runs passes.
     """
     import yaml
 
@@ -713,7 +738,8 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
                 violations.append(
                     f"{bundle.name} [{result.variant}]: group {group_report['name']!r} "
                     f"plan raises the reserve shortfall from {before} to {after} bytes "
-                    "-- the lexicographic stage minimises it first (section 5.4)"
+                    "-- see check 4's docstring: expected never to happen with hard = soft; "
+                    "with hard < soft the heuristic's unfloored penalty (V-01) can do it"
                 )
     return violations
 

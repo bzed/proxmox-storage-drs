@@ -753,11 +753,23 @@ move may drive it to. Inactive for any storage whose `saturation_load` is
 
 ### `migration.assume_thick_provisioning`
 
-Boolean, default `true`.
+Boolean, only `true` (the default) is accepted. **Kept so a config that
+spells it out still loads; `false` is refused at startup.**
 
-Cost and reserve arithmetic use each disk's *provisioned* size rather than
-its currently allocated size. Set `false` only for genuinely thin-provisioned
-storage, and note that allocation can *grow* during a move even then.
+This tool never considers over-provisioning. Every disk counts at its
+*provisioned* size — in the reserve arithmetic, the free-space requirement,
+the transient check and the cost model — on a thin-provisioned storage (Ceph
+RBD, LVM-thin, ZFS) exactly as on a thick one. Thin provisioning is what lets
+a pool hold more provisioned bytes than it has; here it is deliberately never
+counted on, because a move that only fits *if the disks stay thin* is one a
+growing guest can turn into a full pool.
+
+The consequence to plan for: on a thin pool the tool's idea of "used" is the
+sum of the disks' sizes plus foreign volumes, which can be several times what
+the pool reports as allocated. A `free_space.soft` of `"90%"` on a pool with
+plenty of *actually* free space can therefore show a large shortfall in
+`plan`/`explain`, and the engine will migrate disks off it. That is the
+intended behaviour, not a miscalculation.
 
 ### `migration.tiny_disk_bytes`
 

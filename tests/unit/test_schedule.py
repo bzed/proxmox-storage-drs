@@ -15,6 +15,7 @@ import dataclasses
 
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.heuristic import run_heuristic
+from proxmox_storage_drs.reserve import compute_reserve_status
 from proxmox_storage_drs.schedule import order_moves, transient_invariant_ok
 from proxmox_storage_drs.topology import Disk, Group, Storage
 
@@ -356,3 +357,64 @@ def test_tiny_disk_bytes_ranks_a_zero_cost_move_first_regardless_of_its_own_redu
 
     with_exemption = order_moves(group, target, loads, objective, tiny_disk_bytes=2 * 1024 * 1024)
     assert with_exemption.order[0].disk_key == "301:efidisk0"  # zero cost wins outright
+
+
+# ----------------------------------------------------- the shortfall never rises (AI-01)
+
+
+def _shortfall_tib_bytes(group: Group, assignment: dict[str, str]) -> int:
+    return sum(
+        compute_reserve_status(
+            storage, group.disks, storage_of=lambda d: assignment.get(d.key, d.current_storage)
+        ).shortfall_bytes
+        for storage in group.storages
+    )
+
+
+def _one_move_that_would_leave_san_b_slightly_short(
+    hard_tib: float,
+) -> tuple[Group, dict[str, str]]:
+    """san-b is compliant now (10 TiB free against a 9.001 TiB requirement) and
+    would be ~1 GiB short once a 1 TiB disk lands on it. The target assignment
+    is written by hand -- it is *any* assignment whose endpoint is slightly
+    worse than the current one, whichever backend produced it."""
+    group = Group(
+        name="g",
+        storages=(
+            make_storage("san-a", capacity_tib=10.0),
+            make_storage(
+                "san-b",
+                capacity_tib=10.0,
+                free_space_soft_bytes=round(9.001 * TIB),
+                free_space_hard_bytes=round(hard_tib * TIB),
+            ),
+        ),
+        disks=(make_disk("1:scsi0", 1.0, "san-a"), make_disk("2:scsi0", 1.0, "san-a")),
+    )
+    return group, {"1:scsi0": "san-b", "2:scsi0": "san-a"}
+
+
+def test_hard_equal_soft_never_lets_the_executed_plan_raise_the_shortfall() -> None:
+    """The guarantee the corpus's check 4 actually rests on when ``hard = soft``
+    (REVIEW.md AI-01): a move is scheduled only if its *target* clears ``hard``
+    on arrival, so a target assignment that would raise ``sum(r_s)`` -- from any
+    backend -- is stopped here, and ``final_assignment`` (what really runs)
+    keeps the current shortfall."""
+    group, target = _one_move_that_would_leave_san_b_slightly_short(hard_tib=9.001)
+    result = order_moves(group, target, {"1:scsi0": 4.0, "2:scsi0": 4.0}, DEFAULT_OBJECTIVE)
+    assert result.deadlocked == ("1:scsi0",)
+    assert result.order == ()
+    assert _shortfall_tib_bytes(group, result.final_assignment) == _shortfall_tib_bytes(group, {})
+
+
+def test_hard_below_soft_permits_a_plan_that_ends_below_soft() -> None:
+    """The other side of the same rule, by design (section 5.3.1): ``hard`` is
+    the transient floor, so with ``hard < soft`` the scheduler no longer
+    protects the endpoint -- that is the solver's job, and it is exactly the
+    configuration in which check 4 can fire on a backend whose objective can
+    trade reserve for balance."""
+    group, target = _one_move_that_would_leave_san_b_slightly_short(hard_tib=0.0)
+    result = order_moves(group, target, {"1:scsi0": 4.0, "2:scsi0": 4.0}, DEFAULT_OBJECTIVE)
+    assert result.deadlocked == ()
+    assert [m.disk_key for m in result.order] == ["1:scsi0"]
+    assert _shortfall_tib_bytes(group, result.final_assignment) > _shortfall_tib_bytes(group, {})

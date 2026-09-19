@@ -887,6 +887,21 @@ def _check_window(config: Config, errors: list[str]) -> None:
         )
 
 
+def _check_thick_provisioning(config: Config, errors: list[str]) -> None:
+    """``migration.assume_thick_provisioning`` survives only so an existing
+    config that spells it out still loads. Over-provisioning is never
+    modelled (section 5.1): every disk counts at its provisioned size, on a
+    thin-provisioned storage too, so ``false`` promises a mode that does not
+    exist and is refused rather than silently ignored."""
+    if not config.migration.assume_thick_provisioning:
+        errors.append(
+            "migration.assume_thick_provisioning: false is not supported -- this tool never "
+            "considers over-provisioning: every disk counts at its provisioned size, on "
+            "thin-provisioned storage (Ceph RBD, LVM-thin, ZFS) as much as on thick. Remove "
+            "the key, or set it to true"
+        )
+
+
 def _check_metrics(config: Config, errors: list[str]) -> None:
     # Label names non-empty (schema covers empty-string) and pairwise distinct:
     # a duplicate silently collapses series into one.
@@ -1038,6 +1053,7 @@ def _validate_semantics(
     _check_storage_patterns_compile(config, errors)
     _check_group_size(config, errors)
     _check_window(config, errors)
+    _check_thick_provisioning(config, errors)
     _check_metrics(config, errors)
     _check_forecast_window(config, errors)
     _check_saturation_load(config, warnings)

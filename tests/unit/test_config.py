@@ -321,6 +321,26 @@ def test_cluster_label_key_is_rejected_by_schema(tmp_path: Path) -> None:
         config.load_config(str(path), env={})
 
 
+def test_assume_thick_provisioning_false_is_refused_not_ignored(tmp_path: Path) -> None:
+    """Over-provisioning is never modelled: the key is kept only so a config
+    that spells it out still loads, and ``false`` names a mode that does not
+    exist -- refused loudly, naming the setting, rather than silently doing
+    nothing."""
+    data = minimal_config_dict()
+    data["migration"] = {"assume_thick_provisioning": False}
+    with pytest.raises(ConfigError, match="assume_thick_provisioning: false is not supported"):
+        config.load_config(str(write_config(tmp_path, data)), env={})
+
+
+def test_assume_thick_provisioning_true_or_absent_loads(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    absent = config.load_config(str(write_config(tmp_path, data)), env={})
+    data["migration"] = {"assume_thick_provisioning": True}
+    explicit = config.load_config(str(write_config(tmp_path, data, "b.yaml")), env={})
+    assert absent.config.migration.assume_thick_provisioning is True
+    assert explicit.config.migration.assume_thick_provisioning is True
+
+
 def test_rate_window_too_short_is_rejected(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["metrics"] = {"rate_window": "1m", "pvestatd_push_interval": "60s"}

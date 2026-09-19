@@ -196,6 +196,11 @@ These come out of the plan and out of the fact that this tool moves live product
 6. **Never auto-delete a volume.** Orphans are reported, never cleaned up automatically.
 7. When the plan and the code disagree, **the plan is right and the code is a bug** — unless
    the plan is wrong, in which case fix the plan *in the same commit*.
+8. **Never consider over-provisioning.** Every disk counts at its *provisioned* size, on
+   thin-provisioned storage (Ceph RBD, LVM-thin, ZFS) exactly as on thick — never at its allocated
+   size, and never "it will probably stay thin". A pool's own `used` figure is a display value, not
+   a model input. Do not add an allocated-size mode or a knob for one; `migration.
+   assume_thick_provisioning: false` is refused on purpose. (Plan §5.1.)
 
 Details: [`.agents/domain-invariants.md`](.agents/domain-invariants.md).
 

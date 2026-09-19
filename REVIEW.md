@@ -7014,14 +7014,248 @@ exactly as strong". The reviewer is also right that nothing caught it: the only 
 - **The provenance strings are free text.** They are display-only by construction (nothing reads
   them), which is why they are plain `str` rather than an enum; if a machine consumer of
   `verify-storages --json` ever appears, that should become a structured field first.
-- **`validate_corpus.py`'s `check_invariants()` now asserts the `Σ r_s` invariant** — but as
-  `after ≤ before`, not the `= 0` this section first proposed and §16.6 first named: an oversized
-  deprecated `min_free_bytes`, or a group with no feasible repair, legitimately ends above zero, so
-  `= 0` would false-positive on exactly the configs AH-01 concerns. The lexicographic stage
-  minimises `Σ r_s` first, so "never raised" is what actually holds.
+- **`validate_corpus.py`'s `check_invariants()` now asserts the `Σ r_s` invariant** — as
+  `after ≤ before`, not the `= 0` this section first proposed: an oversized deprecated
+  `min_free_bytes`, or a group with no feasible repair, legitimately ends above zero. *Why* it
+  holds is backend- and `hard`-dependent, and this bullet originally gave one reason for all of
+  it; see §52 (AI-01) for the corrected account — the MILP stage-1 minimum for cbc/cpsat's
+  endpoint, and the scheduler's arrival check at `hard = soft` for the executed plan of every
+  backend, the heuristic included.
 
 ---
 
+## 51. Twenty-sixth-pass review — the fixed phase 13 implementation
+
+Reviewed the branch tip `37a0788` ("corpus: assert the plan never raises the reserve shortfall"),
+two commits past the implementation commit `ba1f0eb` this series reviewed in §49: `d6317ed`
+("fix: phase 13 review findings AH-01..AH-08", which also added §50, the fixer's own resolution
+record) and the follow-up `37a0788` (which amended §50.1's third bullet). The method is the one
+§45/§47/§49 established: verify each resolution against the tree rather than trusting §50's
+account, re-derive the arithmetic independently, and read the two new commits' own additions with
+the same scrutiny the implementation got — a fix commit is an implementation commit.
+
+The eight AH resolutions all hold as §50 records them, and the two new commits add no defect of
+their own beyond one: the corpus check `37a0788` added justifies its invariant with a mechanism
+that is real for two of the three backends it sweeps and absent from the third. It is a
+documentation-accuracy finding, not a behavioural one — the committed bundles cannot trip it.
+
+### 51.1 Verification run
+
+- `make check` at branch tip (`37a0788`): green end to end — fmt-check (black + isort), lint,
+  typecheck, **997 passed, 1 warning**, **96.29% line coverage**, `generate_expected.py --check`
+  OK, `validate_corpus.py --check` OK, and all three PDF stamps matching their Markdown.
+- **AH-01's fix verified live, six cases.** A scratchpad harness drove `build_topology()` through
+  the resolver directly: `min_free_bytes: 1 TiB` alone → `(soft, hard) = (1 TiB, 1 TiB)` with the
+  sources `("folded from snapshot_reserve.min_free_bytes", "= soft (no dip)")`; a written `hard`
+  stays as written under the fold; a written `hard` above a written `soft` still raises; an
+  oversized floor warns once with "lowered or removed" (no "overridden"); and the two replay
+  tests (`test_replay.py:105/116`) drive the same path end to end through a captured bundle and
+  through a pre-`free_space` bundle. All six pass.
+- **§50's "two of the four fail on the old resolver" claim reproduced exactly.** The `ba1f0eb`
+  tree was extracted to a scratchpad copy and `d6317ed`'s four new `build_topology()` tests were
+  run against it: two fail (the folded-floor pair and the warning string), two pass — the split
+  §50 reports, confirmed rather than trusted.
+- **AH-02**: all four passages rewritten as claimed — §7.3's fc-tier1 sentence (now "As built
+  (AH-02)", recording the new fields, `repair_exempt: true`, and the unchanged payback numbers),
+  §9.5's "As built (phase 13)", §14.8's history-not-gap framing, §16.6's closed-`Σ r_s`-half
+  bullets; §5.3.1 gained the null-hard-after-fold paragraph; the PDF stamp matches the Markdown
+  in the same commit.
+- **AH-03**: §14.8 and §12's row now say no `requires_format_eligibility` marker was recorded
+  because the format rule landed in the same commit as the fixture — the string exists only in
+  the plan and this file, and the one-move figures stay where AG-01 derived them.
+- **AH-04**: `_source_suffix()` (`cli.py:3310`) renders the provenance in human output and
+  `free_space_soft_source`/`free_space_hard_source` (`cli.py:3386-3387`) in `--json`; the manual's
+  legend table documents both; `test_topology.py:410/435/461` and the CLI test cover both
+  renderers.
+- **AH-05**: the stale "as built … until it lands" note is gone from
+  `.agents/domain-invariants.md`; the surrounding §2/§2a text stands.
+- **AH-06's refutation is sound.** `tests/corpus/README.md` restricts bundle repair to collector
+  bugs with one rebuild path; rewriting captured configs to a newer shape is not that, and it
+  would erase the one bundle that proves the pre-`free_space` replay path works. The concern's
+  true half — no end-to-end fold coverage — is closed by the two replay tests above, and §12's
+  row now says the corpus configs are "left as captured".
+- **AH-07**: the warning names "lowered or removed" only;
+  `test_oversized_deprecated_floor_warns_and_does_not_raise` (`test_topology.py:392`) pins both
+  the warn-not-raise and the string.
+- **AH-08 verified wider than the finding asked.** The manpage's CONFIGURATION section now names
+  every top-level schema key — including `schema_version` and `solver`, and the fix also caught
+  `load` → `load_weights`, a key that never existed. An independent reimplementation of
+  `test_manpage_names_every_top_level_schema_key` (schema `properties` vs the manpage's bold
+  list) reports `missing: []`.
+- **`37a0788`'s own addition verified.** `check_invariants()` check 4 asserts
+  `reserve_shortfall_bytes_after <= reserve_shortfall_bytes_before` per group per variant
+  (`validate_corpus.py:710-717`), deliberately not `= 0`; both committed bundles pass it; the
+  unit tests for the check pass. The `≤` choice is correct — an oversized deprecated
+  `min_free_bytes` or a group with no feasible repair legitimately ends above zero, and `= 0`
+  would false-positive on exactly the configs AH-01 concerns.
+
+### 51.2 Findings summary
+
+| ID | Severity | Location | Summary |
+|----|----------|----------|---------|
+| AI-01 | Low | `tests/corpus/validate_corpus.py:665-671` (docstring), `:716` (violation message) | Check 4's justification names a mechanism the heuristic backend does not have. "The lexicographic stage minimises `Σ r_s` first (section 5.4)" is true of both MILP backends (`optimize.py`'s two-stage solve, stage 1 = `Σ r_s` alone) but `run_variant_matrix()` always sweeps the heuristic too, and the heuristic has no lexicographic stage: `_repair()` enforces a strict group-total decrease, then `_descend()` optimises the full §5.4 objective in which the shortfall enters only as `reserve_penalty_term = configured P × shortfall_tib` — and §5.3's V-01 note records that this `P` is unfloored, not provably dominant. What actually holds `after ≤ before` for the committed bundles is `order_moves()`'s transient check (`schedule.py:238`) with `hard = soft` (corpus configs carry `min_free_bytes: 0`, no `free_space` block): every arrival storage's endpoint satisfies soft, lost-disk storages can only improve, untouched ones are unchanged. For a hypothetical `hard < soft` config on the heuristic backend, `_descend()` could legitimately accept a shortfall-raising move the hard floor permits, and the check would flag a legal plan — a latent false positive, no live failure. The citation is also the wrong section: the lexicographic stage is §5.3/§5.5's solve, §5.4 is the objective |
+
+### 51.3 AI-01 — check 4's justification does not cover the heuristic backend it sweeps
+
+**Severity:** Low
+**Where:** `tests/corpus/validate_corpus.py:665-671` (check 4's docstring), `:716` (the violation
+message), and the same reasoning in REVIEW.md §50.1's third bullet; the plan's §16.6 and §9.5
+passages state the invariant without the lexicographic claim and are accurate as written.
+
+**Analysis.** The check itself is sound for what it asserts on the committed corpus — this is a
+finding about the *reason given*, not the assertion. Three mechanisms are conflated:
+
+1. **The MILP backends (cbc, cpsat).** Here the justification is exact: `optimize.py`'s
+   lexicographic solve minimises `Σ r_s` alone in stage 1 and fixes it as a constraint in stage 2,
+   so the final assignment's shortfall is the proven minimum over all feasible assignments —
+   never above the current one's, which is one of the candidates. "Never raised" is a theorem
+   here.
+2. **The heuristic backend.** `run_variant_matrix()` sweeps it in every mode (narrow mode is
+   hardcoded `["heuristic", "cbc"]`, full mode adds cpsat), so every corpus run applies check 4
+   to heuristic plans. The heuristic has no lexicographic stage: `_repair()`
+   (`heuristic.py:509-573`) enforces a strict group-total shortfall decrease per step, and
+   `_descend()` (`heuristic.py:685-777`) then optimises the full §5.4 objective, in which the
+   shortfall appears only as `reserve_penalty_term = objective.reserve_violation_penalty *
+   reserve_shortfall_tib` (`heuristic.py:364`) — the configured `P`, which §5.3's V-01 as-built
+   note (plan lines 1487-1493) records is unfloored and not provably dominant. A
+   balance-improving move that raises the shortfall can therefore be net-improving on the
+   heuristic's single objective, and `_descend()` accepts it.
+3. **What actually holds for the committed bundles.** Both corpus configs carry
+   `snapshot_reserve.min_free_bytes: 0` and no `free_space` block, so `hard_s = soft_s` for
+   every storage. `order_moves()`'s transient check (`schedule.py:238`) then guarantees the
+   scheduled endpoint: a move is only accepted into the order if the arrival storage clears
+   `hard = soft` at its endpoint, a storage that only loses disks can only improve, and an
+   untouched storage is unchanged — so the executed plan's `Σ r_s` never exceeds the current
+   assignment's, and the `after` sum is taken over exactly that executed assignment
+   (`payback.executed_assignment`, the one the outcome trigger scores). The check passes on the
+   committed corpus because of this mechanism, not the one the docstring names.
+
+The corner where the named mechanism matters: a config with `hard < soft` (a deliberate dip
+permitted by §5.3.1) on the heuristic backend. There `_descend()` could accept a
+shortfall-raising move the hard floor permits, the plan would be legal, and check 4 would flag it
+— a false positive that would send a future operator hunting a defect that is not there. No such
+config is committed, so nothing is tripped today.
+
+The citation is also wrong as a citation: the lexicographic stage is specified in §5.3 (the
+constraint set, whose slack `r_s` it minimises) and §5.5 (the solver backends that implement the
+two-stage solve); §5.4 is the objective — the very section whose single-stage `P`-weighted form
+is the alternative the lexicographic solve exists to avoid.
+
+**Recommendation.** Reword the docstring and the violation message to name the mechanisms that
+actually hold, per backend: the MILP's stage-1 minimum for cbc/cpsat, and — for the heuristic —
+the scheduler's transient check at `hard = soft`, with the `hard < soft` corner named as the one
+configuration where the heuristic's unfloored `P` could let a legal plan raise the shortfall and
+the check would flag it. Alternatively, scope the check's justification to the MILP variants and
+note the heuristic's guarantee is the transient check's, not the objective's. Either way §50.1's
+third bullet inherits the fix. No code change is required: the assertion itself is correct on
+every committed bundle, and the latent false positive only fires on a config shape the corpus
+does not carry.
+
+### 51.4 What this pass confirms
+
+- **All eight AH resolutions hold as §50 records them.** Each was verified against the tree, not
+  the record: the resolver fix reproduced live in six cases, the "two of four fail on the old
+  resolver" split reproduced exactly against the extracted `ba1f0eb` tree, and the four plan
+  passages, the provenance renderers, the warning string, the manpage list and the two replay
+  tests all match §50's account.
+- **AH-06's refutation is sound, and the narrower remedy is the right one.** A committed bundle is
+  captured data with one sanctioned repair path (collector bugs); rewriting its config to a newer
+  shape is not that, and it would delete the compatibility evidence the deprecated-key path
+  exists to keep. The fold's missing end-to-end coverage is closed without touching captured
+  data.
+- **AH-08's fix is wider than the finding asked** — the manpage now names every top-level schema
+  key, and the fix caught a pre-existing wrong key (`load` → `load_weights`) the finding never
+  mentioned.
+- **`37a0788`'s `≤`-not-`==` choice is correct.** `= 0` would false-positive on exactly the
+  oversized-`min_free_bytes` / no-feasible-repair configs AH-01 concerns; `after ≤ before` is the
+  invariant that actually holds, and both committed bundles pass it.
+- **`make check` is green at tip** with the coverage floor cleared by 11 points (96.29% vs the
+  85% floor), and the three PDF stamps match their Markdown.
+
+### 51.5 Assessment
+
+The fixes have converged. Every finding §49 raised is resolved or refuted with the resolution
+verified against the tree, the one behavioural defect (AH-01) is fixed with regression tests that
+provably fail on the old resolver, and the branch's process discipline held: the plan passages,
+the manual, the manpage and the PDF stamps all moved in the same commits as the code they
+describe. The one finding this pass adds (AI-01) is a documentation-accuracy nit inside the fix
+commit's own addition — the corpus check's justification names the MILP's lexicographic stage
+where the heuristic's actual guarantee is the scheduler's transient check — with no behavioural
+effect on any committed bundle and a latent false positive only reachable by a config shape the
+corpus does not carry. It does not block the merge: fix it in the same breath as the next
+doc-only commit, or wave it as Info. The branch is otherwise merge-ready.
+
+---
+
+
+## 52. Resolution of twenty-sixth-pass finding (AI-01)
+
+Fixed, and slightly wider than the finding: the reviewer's premise is right and one of their three
+mechanisms is incomplete in a way that strengthens the finding. Each claim was checked against the
+code before anything was reworded, and the central one was demonstrated rather than read.
+
+**Verification.**
+
+- *The heuristic has no lexicographic stage* — confirmed: `_descend()` accepts any single move,
+  swap or VM co-relocation that lowers `evaluate_assignment(...).total`, and the shortfall enters
+  that total only as `reserve_violation_penalty × TiB short` (`heuristic.py:364`), the configured
+  value, unfloored — §5.3's V-01 as-built note says so in as many words.
+- *…so a balance-improving move can raise the shortfall* — **demonstrated**, not just read. Two
+  10 TiB storages, `san-b` requiring 9.001 TiB free (compliant now, 1 GiB short once a 1 TiB disk
+  lands), two 1 TiB disks on `san-a`, and the *default* `reserve_violation_penalty` of 1000:
+  `run_heuristic()` moves one disk and takes the group from 0 to **1.024 GiB** short, for balance.
+  A penalty of 1000 per TiB is not dominant below a few GiB, which is exactly V-01's "silently
+  tradeable below roughly 25 GiB".
+- *At `hard = soft` the scheduler stops it* — confirmed on the same group: `order_moves()`
+  reports `1:scsi0` deadlocked, schedules nothing, and `final_assignment` keeps a shortfall of 0.
+- *At `hard < soft` it does not* — confirmed: with `hard = 0` the move is scheduled and the
+  executed shortfall is 1.024 GiB, which check 4 would flag.
+- *The citation was wrong* — the two-stage solve is specified in §5.3's slack discussion and
+  implemented per §5.5's backends; §5.4 is the objective. Corrected.
+
+**The part the finding did not say.** Mechanism 3 (the transient check guarantees the executed
+plan at `hard = soft`) is stated for the heuristic's benefit, but it is also what protects the
+*MILP* backends' executed plan, not only their endpoint: a rejected, deferred or deadlocked move is
+dropped after the solver, so a MILP endpoint that was never above the current shortfall can still
+execute as a plan that is. At `hard = soft` the arrival check closes that; at `hard < soft` nothing
+does. So the honest scope of "never raised" is: solver **endpoint** for cbc/cpsat always; **executed
+plan** for every backend when `hard = soft`; neither guaranteed when `hard < soft`.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AI-01 | Resolved, wider | `check_invariants()`' docstring now states the per-backend and per-`hard` account above instead of one lexicographic claim, cites §5.3/§5.5, and says a violation at `hard < soft` is a real signal (the heuristic trading reserve for balance is a documented limitation, not noise) rather than a false positive. The violation message no longer asserts a mechanism. Two `test_schedule.py` tests pin the guarantee the corpus actually relies on — at `hard = soft` a target assignment that would raise `Σ r_s` is dropped whatever backend produced it, and at `hard < soft` it is permitted by design — using a hand-written target assignment, so neither asserts the heuristic's misbehaviour. §50.1's third bullet points here. |
+
+**New evidence the reviewer could not have had.** The corpus now carries a bundle in exactly the
+configuration AI-01 worries about: `bzed-dev-cluster-free-space` has `hard` 10% against `soft`
+70–85% on every storage. Both variants the narrow sweep runs — heuristic and cbc — take the group
+from 1903 to 545 GiB of shortfall, the proven minimum (an independent CP-SAT model of stage 1 gives
+545 GiB to the byte), so check 4 does not fire there. That is one real cluster, not a proof; the
+probe above is why the check's wording now says it can.
+
+**Deliberately not done.** The finding's root cause — the heuristic's unfloored penalty — is
+V-01's known limitation and unchanged. Making `_descend()` refuse any move that raises `Σ r_s`
+would turn "never raised" into a theorem for the heuristic's endpoint too, and is consistent with
+AGENTS §6 point 2, but it changes solver behaviour and belongs to its own change with its own
+fixture; it is offered, not slipped into a documentation fix.
+
+### 52.1 Related change, not a review finding: over-provisioning is never considered
+
+Requested alongside this pass. Every disk already counted at its provisioned size in the model, but
+the rule was implicit and one knob contradicted it. Changed: plan §5.1 states the rule; §13's
+"Thin provisioning" row, which described an allocated-size mode that was never implemented
+(`migration.assume_thick_provisioning` had no consumer in `src/` beyond `config.py` and the
+collector), now says there is none; `false` is refused at startup naming the setting, `true`/absent
+load unchanged so no existing config breaks; AGENTS §6 point 8, `.agents/domain-invariants.md` §2b,
+the manual entry and `config/drs.example.yaml` say the same, with the consequence spelled out (on a
+thin pool a `free_space.soft` can show a shortfall the pool's own numbers do not).
+
+**One deviation found and recorded, not fixed:** `execute.py`'s live pre-move re-check reads PVE's
+`used` (allocated bytes), so on a thin pool it is weaker than the plan's provisioned-size check.
+§9.2 step 2 now says so. The fix is a design question — a live *provisioned* figure has to avoid
+double-counting the in-flight mirror's own target volume, which RBD lists at full size on creation —
+so it is left as a separate task rather than guessed at in the execution path.
+
+---
 
 ## Appendix A — Independent verification of the §14 worked example
 

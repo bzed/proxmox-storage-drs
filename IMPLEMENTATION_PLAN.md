@@ -1157,6 +1157,16 @@ four groups is four small problems, not one large one.
 | `hard_s` | transient free-space floor for `s`, in bytes, `≤ soft_s` (§5.3.1, §8.1) |
 | `N_s` | saturation load of `s`, in in-flight I/O requests; optional, §7.3 only — not part of the MILP |
 
+**Provisioned size, never allocated size — on every storage type.** `z_d` is what the volume was
+*provisioned* at, and `Σ_d z_d·x_{d,s} + Uˢᵉˣᵗ` is what a storage is counted as holding, including on
+thin-provisioned storage (Ceph RBD, LVM-thin, ZFS), where the pool may report far less allocated. This
+tool never counts on over-provisioning: a plan that fits only while the disks stay thin is one a
+growing guest can turn into a full pool, and nothing here can bound that growth. So (C4)/(C5), the
+free-space requirement (§5.3.1), §8.1's transient predicate and the cost model all read the same
+provisioned sums, and `used` from `GET .../status` is a display figure, never a model input (with one
+as-built exception, named in §9.2). The consequence is deliberate: on a thin pool a `free_space.soft`
+can show a shortfall the pool's own numbers do not.
+
 #### 5.1.1 Computing `Uˢᵉˣᵗ`
 
 ```
@@ -2294,7 +2304,15 @@ Before **every** move, re-read the live state rather than trusting the plan:
    — the VM may have been touched by an operator, or live-migrated to another node by the PVE 9.2
    Dynamic Load Balancer (§1), changing `{node}`;
 2. re-fetch `/nodes/{node}/storage/{target}/status` and re-check the transient invariant against
-   *actual* current free space;
+   *actual* current free space. **Known deviation from §5.1's provisioned-size rule (as built):**
+   `execute.py` reads PVE's `used` — allocated bytes — for this re-check, while the plan it is
+   guarding was computed from provisioned sums. On a thick pool the two agree; on a thin pool
+   (Ceph RBD, LVM-thin, ZFS) `used` is far lower, so the live re-check is *weaker* than the plan's
+   own transient check and can only ever confirm it, never catch a pool that other provisioning has
+   filled *in provisioned terms* since planning. The rule says the re-check should count provisioned
+   space too; how to obtain a live provisioned figure without double-counting the in-flight mirror's
+   own target volume (a new RBD image is listed at full size the moment it is created) is the open
+   design question, so this is recorded here rather than papered over;
 3. confirm the VM is still running and untagged for exclusion;
 4. confirm `config.lock` is empty — if not, wait per §9.3 rather than failing;
 5. confirm no snapshot has appeared for the VM since planning (§3.7); if one has, drop the move and
@@ -2925,7 +2943,7 @@ engine underneath was still being built.
 | VM is `lock`ed (backup, snapshot, migrate, …) | Pinned at planning time, waited for at execution time up to `execution.locks.wait_timeout`; the lock value set is treated as open-ended and never whitelisted (§9.3) |
 | Source space not reclaimed after a successful move | `saferemove` zeroes the old volume at ~10 MiB/s; the move stays in the `draining` state and keeps charging the source until the volume is observed gone (§8.2, §9.3) |
 | Next move blocked by the previous move's wipe | Completion requires task OK **and** source volume absent **and** lock clear; `cooldown_per_storage` validated against the wipe time (§9.3) |
-| Thin provisioning | `assume_thick_provisioning: false` uses allocated size from `/content`; note allocation can *grow* during a move |
+| Thin provisioning | **Never considered** (§5.1): every disk counts at its provisioned size, so a thin pool's "used" is `Σ z_d + Uˢᵉˣᵗ`, which can be several times what the pool reports allocated. `migration.assume_thick_provisioning` survives only as an accepted-`true`, refused-`false` key; there is no allocated-size mode |
 | Foreign volumes on a storage | Counted via `count_foreign_volumes`; otherwise the reserve silently overstates free space |
 | Orphaned target volume after a failure | Detected and reported, never auto-deleted (§9.3) |
 | Storage already violating the reserve | Soft slack `r_s` keeps the model feasible; violation bypasses gates and is scheduled first |

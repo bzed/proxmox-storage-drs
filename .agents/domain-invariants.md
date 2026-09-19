@@ -58,6 +58,20 @@ written values *first* (`hard ≤ soft`, `soft < C_s`), then fold — checking a
 let a written `hard > soft` hide behind the deprecated key and blow up the moment the operator
 deletes it, which is exactly what the deprecation warning asks them to do.
 
+## 2b. Provisioned size, never allocated — over-provisioning is never considered (§5.1)
+
+`z_d` is the disk's *provisioned* size and a storage is counted as holding `Σ z_d·x_{d,s} + Uˢᵉˣᵗ`,
+on thin-provisioned pools (Ceph RBD, LVM-thin, ZFS) exactly as on thick ones. The pool's own `used`
+(from `GET .../status`) is thinner and is **display-only**: feeding it into the reserve, the
+free-space requirement or the transient check would let a plan "fit" only while the disks stay thin,
+which nothing bounds. Consequence to expect, not to fix: on a thin pool a `free_space.soft` can show
+a shortfall the pool's numbers do not. Do not add an allocated-size mode; the
+`assume_thick_provisioning: false` setting is refused for exactly that reason.
+
+**Known deviation (as built):** `execute.py`'s live pre-move re-check (`_live_transient_check()` and
+the launch check) reads PVE's `used`, so on a thin pool it is weaker than the plan's own check —
+see plan §9.2 step 2. New code must not copy that pattern.
+
 ## 3. The invariant holds *during* moves (§8.1)
 
 While a move is in flight the volume occupies **both** storages. The target must satisfy
