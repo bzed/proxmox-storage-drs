@@ -92,23 +92,69 @@ itself never divides, to stay well-defined when `total_cost_load_seconds`
 is `0`.
 
 Section 7's payback test weighs a move's cost against the *balance*
-benefit it buys. That framing has an edge it does not name: a move
-resolving an active (C4)/(C5) violation is not optional the way a
-balance-driven move is, and its "benefit" under the section 7.2 formula
-can easily be zero or even structurally zero — moving the only loaded disk
-in a two-storage group between the two storages changes which one carries
-it without changing `E` at all, no matter how urgently the move is needed
-for capacity reasons. Rejecting that move on economic grounds would
-contradict section 13's own "the reserve is never traded against
-balance," which `gates.py` already treats as absolute for the drift/
-imbalance gates. `evaluate_plan_payback()` applies the identical rule
-here: **a plan containing any move with `resolves_reserve_violation=True`
-always passes the aggregate ratio test**, regardless of the computed
-`ratio`. The hard per-move `max_single_move_duration` rule is not
-exempted this way — section 7.3 lists it as applying "regardless of the
-aggregate test" precisely because it is an operational limit (a mirror
-that takes that long has other costs an economic ratio does not capture),
-not an economic one.
+benefit it buys. That framing has an edge it does not name: a plan
+resolving an active (C4)/(C5) violation, or section 5.3.1's configured
+free-space requirement, is not optional the way a balance-driven move is,
+and its "benefit" under the section 7.2 formula can easily be zero or even
+structurally zero — moving the only loaded disk in a two-storage group
+between the two storages changes which one carries it without changing
+`E` at all, no matter how urgently the move is needed for capacity
+reasons. Rejecting that move on economic grounds would contradict section
+13's own "the reserve is never traded against balance," which `gates.py`
+already treats as absolute for the drift/imbalance gates.
+`evaluate_plan_payback()` applies the identical rule, but as an
+**outcome** trigger, not a per-move flag: it takes two extra parameters,
+`current_shortfall_bytes` and `final_shortfall_bytes` — `Σ r_s`
+(`reserve.total_shortfall_bytes()`) on the group's current assignment and
+on the plan's *executed* endpoint respectively — and `repair_exempt =
+final_shortfall_bytes < current_shortfall_bytes` always passes the
+aggregate ratio test when true, regardless of the computed `ratio`. The
+hard per-move `max_single_move_duration` rule is not exempted this way —
+section 7.3 lists it as applying "regardless of the aggregate test"
+precisely because it is an operational limit (a mirror that takes that
+long has other costs an economic ratio does not capture), not an economic
+one.
+
+**This replaced a per-move flag** (`ScheduledMove.resolves_reserve_violation`,
+still there but narrowed to section 8.2's own priority-1 scheduling
+signal — "this move's source was violating when scheduled first" — never
+read by payback anymore). The flag fired whenever *any* move's source was
+violating at scheduling time, which is provably a superset of the outcome
+trigger (`Σ r_s` can only fall if some storage's `used`/`Z_s` falls, which
+needs a disk to leave a storage that was therefore violating when it
+left — so every outcome-exempt plan was already flag-exempt, never the
+reverse): a plan that moves a disk off a violating storage but leaves the
+group no less short is flag-exempt but not outcome-exempt. The two extra
+parameters are computed once, in `cli.py`'s `_plan_group()` — the
+function's sole production caller — from objects it already has in hand:
+`current_shortfall_bytes` is `reserve.total_shortfall_bytes()` over the
+current assignment (`group.disks`' own `current_storage`);
+`final_shortfall_bytes` is the same sum over `payback.
+executed_assignment()`'s result, `schedule_result.final_assignment` with
+every disk a hard per-move rule excluded (`exceeds_max_duration` or
+`saturation_deferred`, both already known from `move_costs` by then) held
+back at its current storage — "what the plan will really run," not merely
+what got scheduled, so a repair a hard rule then blocks is correctly
+*not* exempt.
+
+**The revert test, `payback.repair_markers()`**, is the per-move report a
+caller shows an operator ("which move carried the repair"): a move is
+`repair: true` iff holding its own disk back on its current storage —
+against that same `executed_assignment()` result — would strictly raise
+`Σ r_s`. This is deliberately a *different* question from the trigger:
+the trigger asks whether the plan as a whole reduced `Σ r_s`; the marker
+asks, move by move, which ones the plan's own repair actually depends on.
+The two can disagree in either direction — a redundant-repair plan (two
+moves off a violating storage, either alone sufficient) repairs with no
+move individually marked, since holding *either one back alone* still
+leaves the other to do the job — and the marker also catches an
+*indirect* repair: a move whose own source never violated anything, but
+which empties the destination another repair needs (section 14.8's
+`free-space-repair.yaml`, `roomy`'s own move, is exactly this case). Both
+`executed_assignment()` and `repair_markers()` take the same `Group` and
+assignment shape `reserve.py`'s functions already use, so the revert test
+is two extra `total_shortfall_bytes()` calls per move, not a second
+implementation of (C5)'s arithmetic.
 
 `test_plan_json_output` and
 `test_plan_json_output_accepts_payback_when_saferemove_is_off` in
@@ -116,7 +162,10 @@ not an economic one.
 same reserve-driven, zero-benefit move is accepted when its duration is
 within the limit and rejected (correctly, via the hard rule, not the
 economic one) when a slow `saferemove` wipe pushes it over
-`max_single_move_duration`.
+`max_single_move_duration` — and, because that hard rule then excludes the
+move from `executed_assignment()`, the plan is *not* `repair_exempt`
+either in that second case, even though the plan's aspirational target
+would have repaired the violation.
 
 ## The section 7.3 saturation guard: `compute_move_cost()`'s optional `target`
 

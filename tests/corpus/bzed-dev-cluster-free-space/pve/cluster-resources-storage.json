@@ -1,0 +1,92 @@
+[
+  {
+    "node": "node-345988ce",
+    "status": "available",
+    "storage": "stor-30d346d4"
+  },
+  {
+    "node": "node-722c4e62",
+    "status": "available",
+    "storage": "stor-30d346d4"
+  },
+  {
+    "node": "node-d8d4d911",
+    "status": "available",
+    "storage": "stor-30d346d4"
+  },
+  {
+    "node": "node-345988ce",
+    "status": "available",
+    "storage": "stor-5a8798d1"
+  },
+  {
+    "node": "node-722c4e62",
+    "status": "available",
+    "storage": "stor-5a8798d1"
+  },
+  {
+    "node": "node-d8d4d911",
+    "status": "available",
+    "storage": "stor-5a8798d1"
+  },
+  {
+    "node": "node-345988ce",
+    "status": "available",
+    "storage": "stor-5c5a9627"
+  },
+  {
+    "node": "node-722c4e62",
+    "status": "available",
+    "storage": "stor-5c5a9627"
+  },
+  {
+    "node": "node-d8d4d911",
+    "status": "available",
+    "storage": "stor-5c5a9627"
+  },
+  {
+    "node": "node-345988ce",
+    "status": "available",
+    "storage": "stor-a2b6edcf"
+  },
+  {
+    "node": "node-722c4e62",
+    "status": "available",
+    "storage": "stor-a2b6edcf"
+  },
+  {
+    "node": "node-d8d4d911",
+    "status": "available",
+    "storage": "stor-a2b6edcf"
+  },
+  {
+    "node": "node-345988ce",
+    "status": "available",
+    "storage": "stor-be415023"
+  },
+  {
+    "node": "node-722c4e62",
+    "status": "available",
+    "storage": "stor-be415023"
+  },
+  {
+    "node": "node-d8d4d911",
+    "status": "available",
+    "storage": "stor-be415023"
+  },
+  {
+    "node": "node-345988ce",
+    "status": "available",
+    "storage": "stor-c210ac69"
+  },
+  {
+    "node": "node-722c4e62",
+    "status": "available",
+    "storage": "stor-c210ac69"
+  },
+  {
+    "node": "node-d8d4d911",
+    "status": "available",
+    "storage": "stor-c210ac69"
+  }
+]

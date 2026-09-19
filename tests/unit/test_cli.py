@@ -353,6 +353,10 @@ def _sample_topology() -> Topology:
             foreign_used_bytes=0,
             saferemove=True,
             saferemove_throughput_bytes_per_sec=10 * (1 << 20),
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         ),
         Storage(
             id="san-b",
@@ -364,6 +368,10 @@ def _sample_topology() -> Topology:
             foreign_used_bytes=0,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         ),
     )
     group = Group(name="fc-tier1", storages=storages, disks=disks)
@@ -620,6 +628,10 @@ def _no_reserve_violation_topology() -> Topology:
             foreign_used_bytes=0,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         )
         for sid in ("san-a", "san-b")
     )
@@ -748,7 +760,7 @@ def test_plan_passes_active_storage_cooldowns_to_the_heuristic(
 
     def spy(*args: object, **kwargs: object) -> object:
         captured["cooldown_storages"] = kwargs.get(
-            "cooldown_storages", args[5] if len(args) > 5 else frozenset()
+            "cooldown_storages", args[4] if len(args) > 4 else frozenset()
         )
         return real_run_heuristic(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -810,6 +822,38 @@ def test_verify_storages_json_output(
     assert san_a["implied_wipe_seconds"] == pytest.approx(3 * (1 << 40) / (10 * (1 << 20)))
     san_b = next(s for s in payload["groups"][0]["storages"] if s["id"] == "san-b")
     assert san_b["implied_wipe_seconds"] is None
+
+
+def test_verify_storages_shows_where_each_free_space_half_came_from(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Section 3.5 / AH-04: the resolved pair is printed with its provenance,
+    in both renderers."""
+    base = _sample_topology()
+    group = base.groups[0]
+    storages = tuple(
+        dataclasses.replace(
+            storage,
+            free_space_soft_source="global, 10% of 10.00 TiB",
+            free_space_hard_source="= soft (no dip)",
+        )
+        for storage in group.storages
+    )
+    topology = dataclasses.replace(
+        base, groups=(dataclasses.replace(group, storages=storages),) + base.groups[1:]
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_pve_client", lambda cfg: FAKE_CLIENT)
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", _fake_build_topology(topology))
+    path = write_config(tmp_path)
+    assert cli.main(["-c", str(path), "verify-storages"]) == 0
+    out = capsys.readouterr().out
+    assert "(global, 10% of 10.00 TiB)" in out
+    assert "(= soft (no dip))" in out
+    assert cli.main(["-c", str(path), "--json", "verify-storages"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    san_a = next(s for s in payload["groups"][0]["storages"] if s["id"] == "san-a")
+    assert san_a["free_space_soft_source"] == "global, 10% of 10.00 TiB"
+    assert san_a["free_space_hard_source"] == "= soft (no dip)"
 
 
 def _two_group_topology() -> Topology:
@@ -1006,6 +1050,10 @@ def _repairable_sample_topology() -> Topology:
             foreign_used_bytes=s.foreign_used_bytes,
             saferemove=s.saferemove,
             saferemove_throughput_bytes_per_sec=s.saferemove_throughput_bytes_per_sec,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         )
         for s in group.storages
     )
@@ -1054,7 +1102,10 @@ def test_plan_json_output(
     assert move["disk_key"] == "101:scsi0"
     assert move["from_storage"] == "san-a"
     assert move["to_storage"] == "san-b"
-    assert move["resolves_reserve_violation"] is True
+    # Rejected by the hard duration rule below -- never part of "what will
+    # really run" (section 7.3), so the revert test scores it False: the
+    # executed assignment already holds it back at its current storage.
+    assert move["repair"] is False
     assert move["duration_mirror_seconds"] > 0
     assert move["load_per_tib"] > 0
     assert group_payload["deadlocked"] == []
@@ -1067,7 +1118,14 @@ def test_plan_json_output(
     assert move["duration_wipe_seconds"] > 0
     assert move["exceeds_max_duration"] is True
     payback = group_payload["payback"]
-    assert payback["aggregate_ok"] is True  # exempted -- resolves a reserve violation
+    assert payback["aggregate_ok"] is True  # accepted on economics alone here
+    # Not repair_exempt: the only move is excluded from the executed
+    # assignment (the hard duration rule), so nothing actually repairs
+    # san-a's violation in what will really run -- current and final
+    # shortfall are therefore equal, not strictly reduced.
+    assert payback["repair_exempt"] is False
+    assert payback["reserve_shortfall_bytes_before"] > 0
+    assert payback["reserve_shortfall_bytes_after"] == payback["reserve_shortfall_bytes_before"]
     assert payback["rejected_moves"] == ["101:scsi0"]
     assert payback["accepted"] is False  # but still blocked by the hard duration rule
 
@@ -1100,6 +1158,10 @@ def test_plan_json_output_accepts_payback_when_saferemove_is_off(
             foreign_used_bytes=s.foreign_used_bytes,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         )
         for s in group.storages
     )
@@ -1163,6 +1225,10 @@ def test_plan_json_output_defers_a_move_via_the_saturation_guard(
             foreign_used_bytes=s.foreign_used_bytes,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         )
         for s in group.storages
     )
@@ -1204,6 +1270,10 @@ def test_apply_excludes_a_saturation_deferred_move_from_execution(
             foreign_used_bytes=s.foreign_used_bytes,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         )
         for s in group.storages
     )
@@ -1476,7 +1546,7 @@ def test_render_plan_payback_lines_separates_economic_and_duration_failures() ->
             duration_wipe_seconds=0.0,
             cost_load_seconds=100.0,
             exceeds_max_duration=bool(rejected_moves),
-            resolves_reserve_violation=resolves,
+            repair=resolves,
         )
         return PaybackResult(
             move_costs=(move_cost,),
@@ -1596,6 +1666,10 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
             foreign_used_bytes=0,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         ),
         Storage(
             id="san-b",
@@ -1607,6 +1681,10 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
             foreign_used_bytes=0,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         ),
     )
     group = Group(name="fc-tier1", storages=storages, disks=disks)
@@ -1629,17 +1707,16 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
     path = write_config(tmp_path)
     resolved = load_config(str(path))
     objective = resolved.config.objective
-    min_free_bytes = resolved.config.snapshot_reserve.min_free_bytes
     u_star = group_average_utilization(group, load_by_key)
     b_bar = group_average_fill(group)
 
     initial_breakdown = evaluate_assignment(
-        group, seed_assignment(group), load_by_key, objective, min_free_bytes, u_star, b_bar
+        group, seed_assignment(group), load_by_key, objective, u_star, b_bar
     )
     # The heuristic's aspirational target: both disks move to san-b.
     target_assignment = {"101:scsi0": "san-b", "102:scsi0": "san-b"}
     target_breakdown = evaluate_assignment(
-        group, target_assignment, load_by_key, objective, min_free_bytes, u_star, b_bar
+        group, target_assignment, load_by_key, objective, u_star, b_bar
     )
     heuristic_result = HeuristicResult(
         assignment=target_assignment,
@@ -1667,7 +1744,7 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
     monkeypatch.setattr("proxmox_storage_drs.cli.order_moves", lambda *a, **k: schedule_result)
 
     final_breakdown = evaluate_assignment(
-        group, final_assignment, load_by_key, objective, min_free_bytes, u_star, b_bar
+        group, final_assignment, load_by_key, objective, u_star, b_bar
     )
     expected_after_spread = cli._spread_fraction(
         final_breakdown.utilization, group_load.average_utilization
@@ -1745,6 +1822,10 @@ def _balanced_non_violating_topology() -> Topology:
             foreign_used_bytes=0,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         ),
         Storage(
             id="san-b",
@@ -1756,6 +1837,10 @@ def _balanced_non_violating_topology() -> Topology:
             foreign_used_bytes=0,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         ),
     )
     return Topology(groups=(Group(name="fc-tier1", storages=storages, disks=disks),), warnings=())
@@ -1890,6 +1975,10 @@ def _balanced_apply_topology() -> Topology:
             foreign_used_bytes=0,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         )
         for sid in ("san-a", "san-b")
     )
@@ -1938,7 +2027,6 @@ def test_apply_auto_mode_honours_a_configured_concurrency_above_the_default(
         schedule_result: object,
         migration: object,
         execution: object,
-        min_free_bytes: object,
         mode: object,
         exclude: object,
         confirm: object = None,
@@ -2046,7 +2134,6 @@ def test_apply_records_balance_and_cooldowns_after_an_executed_move(
         schedule_result: object,
         migration: object,
         execution: object,
-        min_free_bytes: object,
         mode: object,
         exclude: object = None,
         confirm: object = None,
@@ -2117,7 +2204,6 @@ def test_apply_writes_inflight_upid_to_disk_synchronously_during_a_move(
         schedule_result: object,
         migration: object,
         execution: object,
-        min_free_bytes: object,
         mode: object,
         exclude: object = None,
         confirm: object = None,
@@ -2180,7 +2266,6 @@ def test_apply_stops_the_whole_run_when_the_operator_quits(
         schedule_result: object,
         migration: object,
         execution: object,
-        min_free_bytes: object,
         mode: object,
         exclude: object = None,
         confirm: object = None,
@@ -2289,7 +2374,6 @@ def test_apply_exits_1_when_a_move_fails(
         schedule_result: object,
         migration: object,
         execution: object,
-        min_free_bytes: object,
         mode: object,
         exclude: object = None,
         confirm: object = None,
@@ -2562,6 +2646,10 @@ def _fragmented_group() -> Group:
             foreign_used_bytes=0,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         )
         for sid in ("san-a", "san-b")
     )
@@ -2797,7 +2885,6 @@ def test_render_explain_json_includes_objective_pins_fragmentation_and_pinned_lo
                 group,
                 group_plan,
                 warn_fraction=0.25,
-                min_free_bytes=0,
                 objective=resolved.config.objective,
                 tiny_disk_bytes=resolved.config.migration.tiny_disk_bytes,
             )
@@ -2868,7 +2955,6 @@ def test_render_group_explain_json_includes_rejected_alternative_when_act_but_no
                 group,
                 group_plan,
                 warn_fraction=0.25,
-                min_free_bytes=0,
                 objective=resolved.config.objective,
                 tiny_disk_bytes=resolved.config.migration.tiny_disk_bytes,
             )
@@ -2897,7 +2983,6 @@ def test_render_group_explain_json_omits_rejected_alternative_when_gate_did_not_
                 group,
                 group_plan,
                 warn_fraction=0.25,
-                min_free_bytes=0,
                 objective=resolved.config.objective,
                 tiny_disk_bytes=resolved.config.migration.tiny_disk_bytes,
             )
@@ -2928,7 +3013,6 @@ def test_render_group_explain_json_omits_rejected_alternative_once_a_move_is_sch
                 group,
                 group_plan,
                 warn_fraction=0.25,
-                min_free_bytes=0,
                 objective=resolved.config.objective,
                 tiny_disk_bytes=resolved.config.migration.tiny_disk_bytes,
             )
@@ -3028,7 +3112,6 @@ def test_run_auto_group_refuses_outside_every_configured_time_window(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         cli._InflightStateBox(empty_state()),
         group,
         group_plan,
@@ -3065,7 +3148,6 @@ def test_run_auto_group_allows_execution_inside_a_configured_window(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         cli._InflightStateBox(empty_state()),
         group,
         group_plan,
@@ -3093,7 +3175,6 @@ def test_run_auto_group_no_time_windows_configured_means_unrestricted(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         cli._InflightStateBox(empty_state()),
         group,
         group_plan,
@@ -3132,7 +3213,6 @@ def test_run_auto_group_replans_and_succeeds_on_the_second_attempt(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         cli._InflightStateBox(empty_state()),
         group,
         group_plan,
@@ -3202,7 +3282,6 @@ def test_run_auto_group_replans_when_the_mismatch_is_not_the_last_outcome(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         cli._InflightStateBox(empty_state()),
         group,
         group_plan,
@@ -3258,7 +3337,6 @@ def test_run_auto_group_records_each_attempts_cooldown_before_replanning(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         box,
         group,
         group_plan,
@@ -3300,7 +3378,6 @@ def test_run_auto_group_stops_cleanly_when_a_replan_concludes_no_action_needed(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         cli._InflightStateBox(empty_state()),
         group,
         group_plan,
@@ -3338,7 +3415,6 @@ def test_run_auto_group_stops_after_exhausting_max_replans_per_run(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         cli._InflightStateBox(empty_state()),
         group,
         group_plan,
@@ -3377,7 +3453,6 @@ def test_run_auto_group_stops_when_the_group_vanishes_after_replanning(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         cli._InflightStateBox(empty_state()),
         group,
         group_plan,
@@ -3406,7 +3481,6 @@ def test_run_auto_group_decrements_the_shared_migrations_budget(
         "fake-client",  # type: ignore[arg-type]
         resolved,
         "fake-prom",  # type: ignore[arg-type]
-        0,
         cli._InflightStateBox(empty_state()),
         group,
         group_plan,
@@ -3449,7 +3523,6 @@ def test_apply_auto_mode_shares_max_migrations_per_run_across_groups(
         schedule_result: object,
         migration: object,
         execution: object,
-        min_free_bytes: object,
         mode: object,
         exclude: object,
         confirm: object = None,
@@ -3511,6 +3584,10 @@ def _one_disk_group() -> Group:
             foreign_used_bytes=0,
             saferemove=False,
             saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
         )
         for sid in ("san-a", "san-b")
     )
@@ -3543,7 +3620,7 @@ def _fake_breakdown(
     u_star = group_average_utilization(group, loads)
     b_bar = group_average_fill(group)
     return evaluate_assignment(
-        group, seed_assignment(group), loads, resolved.config.objective, 0, u_star, b_bar
+        group, seed_assignment(group), loads, resolved.config.objective, u_star, b_bar
     )
 
 
@@ -3569,7 +3646,6 @@ def test_solve_group_uses_the_milp_result_when_available(
         group: object,
         load_by_key: object,
         objective: object,
-        min_free_bytes: object,
         backend: str,
         time_limit_seconds: object,
         mip_gap: object,
@@ -3586,7 +3662,7 @@ def test_solve_group_uses_the_milp_result_when_available(
     monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", fake_solve)
     monkeypatch.setattr("proxmox_storage_drs.cli.run_heuristic", fail_heuristic)
 
-    outcome = cli._solve_group(group, loads, resolved, 0, frozenset())
+    outcome = cli._solve_group(group, loads, resolved, frozenset())
 
     assert calls == ["cpsat"]
     assert outcome.backend == "cpsat"
@@ -3603,12 +3679,12 @@ def test_solve_group_auto_cascades_cpsat_then_cbc_then_heuristic(
     calls: list[str] = []
 
     def fake_solve(*args: object, **kwargs: object) -> None:
-        calls.append(args[4])  # type: ignore[arg-type]
+        calls.append(args[3])  # type: ignore[arg-type]
         return None
 
     monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", fake_solve)
 
-    outcome = cli._solve_group(group, loads, resolved, 0, frozenset())
+    outcome = cli._solve_group(group, loads, resolved, frozenset())
 
     assert calls == ["cpsat", "cbc"]
     assert outcome.backend == "heuristic"
@@ -3627,7 +3703,7 @@ def test_solve_group_never_calls_optimize_when_backend_is_heuristic(
 
     monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", fail_solve)
 
-    outcome = cli._solve_group(group, {"101:scsi0": 1.0}, resolved, 0, frozenset())
+    outcome = cli._solve_group(group, {"101:scsi0": 1.0}, resolved, frozenset())
     assert outcome.backend == "heuristic"
 
 
@@ -3641,7 +3717,7 @@ def test_solve_group_warns_when_an_explicit_backend_falls_back(
     monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", lambda *a, **k: None)
 
     with caplog.at_level(logging.WARNING):
-        outcome = cli._solve_group(group, {"101:scsi0": 1.0}, resolved, 0, frozenset())
+        outcome = cli._solve_group(group, {"101:scsi0": 1.0}, resolved, frozenset())
 
     assert outcome.backend == "heuristic"
     assert any("falling back to the heuristic" in r.message for r in caplog.records)
@@ -4138,6 +4214,6 @@ def test_solve_group_tells_optimize_whether_it_is_probing(
     for backend, expected in (("auto", True), ("cpsat", False), ("cbc", False)):
         seen.clear()
         resolved = _resolved_config(tmp_path, solver={"backend": backend})
-        cli._solve_group(group, loads, resolved, 0, frozenset())
+        cli._solve_group(group, loads, resolved, frozenset())
         assert seen, f"optimize.solve() was never called for backend {backend!r}"
         assert all(probing is expected for probing in seen), backend

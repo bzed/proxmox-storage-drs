@@ -1,0 +1,19 @@
+{
+  "label": "instance",
+  "result": [
+    "efidisk0",
+    "ide0",
+    "ide2",
+    "sata0",
+    "scsi0",
+    "scsi1",
+    "scsi2",
+    "scsi3",
+    "scsi4",
+    "scsi5",
+    "scsi6",
+    "scsi7",
+    "scsi8",
+    "scsi9"
+  ]
+}

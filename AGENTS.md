@@ -181,12 +181,26 @@ These come out of the plan and out of the fact that this tool moves live product
    execution mode is a defect, no matter how convenient.
 2. **The snapshot reserve is never traded for balance.** Lexicographic solve is the default;
    the big-M penalty is the fallback and its `P` is *computed*, never taken from config as-is.
-3. **The transient invariant holds during moves, not just before and after.**
-4. **A finished task is not a finished move** — the source volume must be observed gone and
+   The configured free-space requirement (`free_space.soft`, plan §5.3.1) enters the *same*
+   slack and the same lexicographic stage, so it is exactly as non-negotiable.
+3. **Three floors, one fixed precedence: `f_s·Z_s` → `hard_s` → `soft_s`.** The snapshot term
+   `f_s·Z_s` wins outright — it is the first argument of a `max()` and no config key can lower
+   it. `hard_s` is the floor every *instant* must clear, and it is what binds during a move
+   (§8.1). `soft_s` is the plan *endpoint* requirement only (C5), and may be dipped below in
+   flight. `hard_s ≤ soft_s` is a validation error if violated, and the default `hard: null`
+   means `hard_s = soft_s` — no dip at all. Never write a check that compares against `soft_s`
+   during execution or against `hard_s` at the endpoint.
+4. **The transient invariant holds during moves, not just before and after.**
+5. **A finished task is not a finished move** — the source volume must be observed gone and
    the VM config unlocked. See plan §9.3.
-5. **Never auto-delete a volume.** Orphans are reported, never cleaned up automatically.
-6. When the plan and the code disagree, **the plan is right and the code is a bug** — unless
+6. **Never auto-delete a volume.** Orphans are reported, never cleaned up automatically.
+7. When the plan and the code disagree, **the plan is right and the code is a bug** — unless
    the plan is wrong, in which case fix the plan *in the same commit*.
+8. **Never consider over-provisioning.** Every disk counts at its *provisioned* size, on
+   thin-provisioned storage (Ceph RBD, LVM-thin, ZFS) exactly as on thick — never at its allocated
+   size, and never "it will probably stay thin". A pool's own `used` figure is a display value, not
+   a model input. Do not add an allocated-size mode or a knob for one; `migration.
+   assume_thick_provisioning: false` is refused on purpose. (Plan §5.1.)
 
 Details: [`.agents/domain-invariants.md`](.agents/domain-invariants.md).
 
@@ -315,7 +329,8 @@ Written for an operator with a cluster to run and no interest in the solver's va
 cover installation and requirements, mapping the metric names to their own Prometheus, the
 verification commands, a first dry run and how to read the plan it prints, the three execution
 modes, exit codes, troubleshooting, and the safety properties they are entitled to rely on
-(dry-run default, the reserve is never traded, nothing is ever auto-deleted).
+(dry-run default, the reserve is never traded — nor is the free space they configured — nothing
+is ever auto-deleted).
 
 **Every configuration option is documented in full**: type, unit, default, what it interacts with,
 what happens if it is set too high and too low. A knob that exists in the schema or in

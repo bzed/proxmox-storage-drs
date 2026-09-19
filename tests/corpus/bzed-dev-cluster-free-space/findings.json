@@ -1,0 +1,158 @@
+{
+  "verify_metrics": {
+    "coverage_by_disk": {
+      "163216:efidisk0": 1.0,
+      "163216:ide2": 1.0,
+      "163216:pflash0": 1.0,
+      "163216:scsi0": 1.0,
+      "240169:efidisk0": 1.0,
+      "240169:ide2": 1.0,
+      "240169:pflash0": 1.0,
+      "240169:scsi0": 1.0,
+      "317511:ide2": 1.0,
+      "317511:scsi0": 1.0,
+      "365149:ide2": 1.0,
+      "365149:scsi0": 1.0,
+      "365149:scsi1": 1.0,
+      "366117:ide2": 1.0,
+      "366117:scsi0": 1.0,
+      "443669:efidisk0": 1.0,
+      "443669:ide2": 1.0,
+      "443669:pflash0": 1.0,
+      "443669:scsi0": 1.0,
+      "443669:scsi1": 1.0,
+      "443669:scsi2": 1.0,
+      "443669:scsi3": 1.0,
+      "457823:efidisk0": 1.0,
+      "457823:ide0": 1.0,
+      "457823:ide2": 1.0,
+      "457823:pflash0": 1.0,
+      "457823:scsi0": 1.0,
+      "494807:efidisk0": 1.0,
+      "494807:ide2": 1.0,
+      "494807:pflash0": 1.0,
+      "494807:sata0": 1.0,
+      "494807:scsi0": 1.0,
+      "534304:ide2": 1.0,
+      "534304:scsi0": 1.0,
+      "534304:scsi1": 1.0,
+      "644488:efidisk0": 1.0,
+      "644488:ide2": 1.0,
+      "644488:pflash0": 1.0,
+      "644488:scsi0": 1.0,
+      "725058:ide2": 1.0,
+      "725058:scsi0": 1.0,
+      "725058:scsi1": 1.0,
+      "747564:ide2": 1.0,
+      "747564:scsi0": 1.0,
+      "747564:scsi1": 1.0,
+      "75052:ide2": 1.0,
+      "75052:scsi0": 1.0,
+      "75052:scsi1": 1.0,
+      "75052:scsi2": 1.0,
+      "752636:ide2": 1.0,
+      "752636:scsi0": 1.0,
+      "752636:scsi1": 1.0,
+      "752636:scsi2": 1.0,
+      "843425:ide2": 1.0,
+      "843425:scsi0": 1.0,
+      "843425:scsi1": 1.0,
+      "843425:scsi2": 1.0,
+      "843425:scsi3": 1.0,
+      "843425:scsi4": 1.0,
+      "843425:scsi5": 1.0,
+      "843425:scsi6": 1.0,
+      "843425:scsi7": 1.0,
+      "843425:scsi8": 1.0,
+      "843425:scsi9": 1.0
+    },
+    "findings": [
+      {
+        "level": "info",
+        "message": "metrics.read_ops = 'rd_operations' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.write_ops = 'wr_operations' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.read_bytes = 'rd_bytes' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.write_bytes = 'wr_bytes' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.read_time_ns = 'rd_total_time_ns' exists"
+      },
+      {
+        "level": "info",
+        "message": "metrics.write_time_ns = 'wr_total_time_ns' exists"
+      },
+      {
+        "level": "info",
+        "message": "rd_operations: sample series labels {'vmid': '366117', 'instance': 'ide2', 'nodename': 'node-722c4e62'}"
+      },
+      {
+        "level": "info",
+        "message": "wr_operations: sample series labels {'instance': 'ide2', 'nodename': 'node-722c4e62', 'vmid': '366117'}"
+      },
+      {
+        "level": "info",
+        "message": "rd_bytes: sample series labels {'vmid': '366117', 'instance': 'ide2', 'nodename': 'node-722c4e62'}"
+      },
+      {
+        "level": "info",
+        "message": "wr_bytes: sample series labels {'nodename': 'node-722c4e62', 'vmid': '366117', 'instance': 'ide2'}"
+      },
+      {
+        "level": "info",
+        "message": "rd_total_time_ns: sample series labels {'nodename': 'node-722c4e62', 'vmid': '366117', 'instance': 'ide2'}"
+      },
+      {
+        "level": "info",
+        "message": "wr_total_time_ns: sample series labels {'instance': 'ide2', 'nodename': 'node-722c4e62', 'vmid': '366117'}"
+      },
+      {
+        "level": "warning",
+        "message": "metrics.labels.device is 'instance', which collides with Prometheus's own scrape-target label of the same name -- confirm this is really the per-disk device tag and not the scrape target"
+      }
+    ],
+    "observed_spacing_seconds": 60,
+    "ok": true,
+    "sample_series": {
+      "rd_bytes": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "366117"
+      },
+      "rd_operations": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "366117"
+      },
+      "rd_total_time_ns": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "366117"
+      },
+      "wr_bytes": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "366117"
+      },
+      "wr_operations": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "366117"
+      },
+      "wr_total_time_ns": {
+        "instance": "ide2",
+        "nodename": "node-722c4e62",
+        "vmid": "366117"
+      }
+    }
+  }
+}

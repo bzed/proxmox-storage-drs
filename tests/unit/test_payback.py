@@ -20,10 +20,12 @@ from proxmox_storage_drs.payback import (
     compute_move_cost,
     compute_wipe_duration_seconds,
     evaluate_plan_payback,
+    executed_assignment,
     mirror_duration_seconds,
+    repair_markers,
 )
 from proxmox_storage_drs.schedule import ScheduledMove
-from proxmox_storage_drs.topology import Storage
+from proxmox_storage_drs.topology import Disk, Group, Storage
 
 TIB = 1 << 40
 MIB = 1 << 20
@@ -54,6 +56,10 @@ def no_saferemove_storage(id_: str) -> Storage:
         foreign_used_bytes=0,
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
 
 
@@ -123,7 +129,7 @@ def test_section_14_5_two_move_plan_is_accepted_at_ratio_7344() -> None:
     )
     assert benefit == pytest.approx(192527280.0, rel=1e-4)  # plan: "~1.93e8"
 
-    result = evaluate_plan_payback(costs, benefit, SECTION_14_5_MIGRATION.payback_ratio)
+    result = evaluate_plan_payback(costs, benefit, SECTION_14_5_MIGRATION.payback_ratio, 0, 0)
 
     assert result.total_cost_load_seconds == pytest.approx(26214.4, abs=0.1)
     assert result.ratio == pytest.approx(7344.0, abs=1.0)
@@ -147,7 +153,7 @@ def test_section_14_5_archive_disk_fails_payback_at_ratio_7_5() -> None:
     benefit = compute_benefit_load_seconds(1.0, 0.01, 0.0, 0.5, 0.0, 0.0, 31_536_000.0)
     assert benefit == pytest.approx(315360.0)
 
-    result = evaluate_plan_payback([cost], benefit, SECTION_14_5_MIGRATION.payback_ratio)
+    result = evaluate_plan_payback([cost], benefit, SECTION_14_5_MIGRATION.payback_ratio, 0, 0)
 
     assert result.ratio == pytest.approx(7.5, abs=0.05)
     assert not result.aggregate_ok
@@ -168,6 +174,10 @@ def test_saferemove_wipe_is_included_when_enabled() -> None:
         foreign_used_bytes=0,
         saferemove=True,
         saferemove_throughput_bytes_per_sec=10 * MIB,  # PVE's LVM default
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
     m = move("101:scsi0", "san-a", "san-b", 1.5)
     migration = MigrationConfig(
@@ -201,6 +211,10 @@ def test_account_saferemove_wipe_false_disables_the_term_even_if_enabled_on_the_
         foreign_used_bytes=0,
         saferemove=True,
         saferemove_throughput_bytes_per_sec=10 * MIB,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
     m = move("101:scsi0", "san-a", "san-b", 1.5)
     migration = MigrationConfig(
@@ -229,6 +243,10 @@ def test_saferemove_on_but_throughput_unknown_skips_the_wipe_term() -> None:
         foreign_used_bytes=0,
         saferemove=True,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
     m = move("101:scsi0", "san-a", "san-b", 1.5)
     migration = MigrationConfig(bwlimit_bytes_per_sec=200 * MIB, account_saferemove_wipe=True)
@@ -261,7 +279,13 @@ def test_move_exceeding_max_single_move_duration_is_flagged_and_rejects_the_plan
     # Even a huge, generously-profitable benefit cannot rescue a plan with
     # a hard-rejected move -- "report, never force" (section 8.3's phrase,
     # applied here to section 7.3's own hard per-move rule).
-    result = evaluate_plan_payback([cost], benefit_load_seconds=1e12, payback_ratio=10.0)
+    result = evaluate_plan_payback(
+        [cost],
+        benefit_load_seconds=1e12,
+        payback_ratio=10.0,
+        current_shortfall_bytes=0,
+        final_shortfall_bytes=0,
+    )
     assert result.aggregate_ok  # the aggregate ratio alone would pass
     assert result.rejected_moves == ("101:scsi0",)
     assert not result.accepted
@@ -278,6 +302,10 @@ def test_move_cost_duration_seconds_is_mirror_plus_wipe() -> None:
         foreign_used_bytes=0,
         saferemove=True,
         saferemove_throughput_bytes_per_sec=10 * MIB,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
     m = move("101:scsi0", "san-a", "san-b", 1.5)
     migration = MigrationConfig(
@@ -306,43 +334,71 @@ def test_move_within_max_single_move_duration_is_not_flagged() -> None:
 
 
 def test_zero_cost_plan_has_infinite_ratio_and_is_accepted_if_benefit_is_nonnegative() -> None:
-    result = evaluate_plan_payback([], benefit_load_seconds=0.0, payback_ratio=10.0)
+    result = evaluate_plan_payback(
+        [],
+        benefit_load_seconds=0.0,
+        payback_ratio=10.0,
+        current_shortfall_bytes=0,
+        final_shortfall_bytes=0,
+    )
     assert result.total_cost_load_seconds == 0.0
     assert result.ratio == float("inf")
     assert result.aggregate_ok  # 0 >= 10*0
     assert result.accepted
 
 
-def test_reserve_resolving_move_always_passes_the_aggregate_test() -> None:
+def test_repair_outcome_trigger_exempts_a_plan_that_reduces_the_shortfall() -> None:
     """Section 13's "reserve is never traded against balance" applied to
-    payback too: a move that resolves a (C4)/(C5) violation is not
-    optional the way a balance-driven move is, so a plan containing one
-    always passes the aggregate ratio test -- even with zero benefit and a
-    real cost, which is exactly the common case (moving the only loaded
-    disk between two storages relocates the imbalance but does not reduce
-    it)."""
+    payback too: section 7.3's outcome trigger -- the plan's *final*
+    Sum r_s strictly below its *current* one -- is not optional the way a
+    balance-driven move is, so a plan whose shortfall it reduces always
+    passes the aggregate ratio test, even with zero benefit and a real
+    cost (the common case: moving the only loaded disk between two
+    storages relocates the imbalance but does not reduce it). The trigger
+    is the plan's OUTCOME (both shortfall sums are the caller's own, not
+    derived from any one move's flag) -- see
+    ``test_no_shortfall_reduction_gets_no_exemption`` for the converse."""
     source = no_saferemove_storage("san-a")
-    vmid, device = "101:scsi0".split(":")
-    reserve_move = ScheduledMove(
-        disk_key="101:scsi0",
-        vmid=int(vmid),
-        device=device,
-        from_storage="san-a",
-        to_storage="san-b",
-        size_bytes=round(3.0 * TIB),
-        imbalance_reduction=0.0,
-        resolves_reserve_violation=True,
-    )
+    reserve_move = move("101:scsi0", "san-a", "san-b", 3.0)
     cost = compute_move_cost(reserve_move, source, SECTION_14_5_MIGRATION)
 
-    result = evaluate_plan_payback([cost], benefit_load_seconds=0.0, payback_ratio=10.0)
+    result = evaluate_plan_payback(
+        [cost],
+        benefit_load_seconds=0.0,
+        payback_ratio=10.0,
+        current_shortfall_bytes=round(1.0 * TIB),
+        final_shortfall_bytes=0,
+    )
 
     assert result.total_cost_load_seconds > 0  # a real cost, not a free move
+    assert result.repair_exempt
     assert result.aggregate_ok
     assert result.accepted
 
 
-def test_reserve_resolving_move_still_blocked_by_the_hard_duration_rule() -> None:
+def test_no_shortfall_reduction_gets_no_exemption() -> None:
+    """The converse of the outcome trigger: a plan whose final shortfall is
+    not strictly below its current one (nothing repaired) gets no
+    exemption, so a plan with poor economics and no cost-blocking issue
+    still correctly fails on its own merits."""
+    source = no_saferemove_storage("san-a")
+    m = move("101:scsi0", "san-a", "san-b", 3.0)
+    cost = compute_move_cost(m, source, SECTION_14_5_MIGRATION)
+
+    result = evaluate_plan_payback(
+        [cost],
+        benefit_load_seconds=0.0,
+        payback_ratio=10.0,
+        current_shortfall_bytes=round(1.0 * TIB),
+        final_shortfall_bytes=round(1.0 * TIB),
+    )
+
+    assert not result.repair_exempt
+    assert not result.aggregate_ok  # 0 >= 10 * cost is false
+    assert not result.accepted
+
+
+def test_repair_exempt_plan_still_blocked_by_the_hard_duration_rule() -> None:
     """The exemption above is from the *economic* test only -- the hard
     per-move duration rule is operational, not economic, and section 7.3
     lists it as applying "regardless of the aggregate test"."""
@@ -356,18 +412,12 @@ def test_reserve_resolving_move_still_blocked_by_the_hard_duration_rule() -> Non
         foreign_used_bytes=0,
         saferemove=True,
         saferemove_throughput_bytes_per_sec=10 * MIB,  # slow wipe
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
-    vmid, device = "101:scsi0".split(":")
-    reserve_move = ScheduledMove(
-        disk_key="101:scsi0",
-        vmid=int(vmid),
-        device=device,
-        from_storage="san-a",
-        to_storage="san-b",
-        size_bytes=round(3.0 * TIB),
-        imbalance_reduction=0.0,
-        resolves_reserve_violation=True,
-    )
+    reserve_move = move("101:scsi0", "san-a", "san-b", 3.0)
     migration = MigrationConfig(
         bwlimit_bytes_per_sec=200 * MIB,
         account_saferemove_wipe=True,
@@ -376,8 +426,15 @@ def test_reserve_resolving_move_still_blocked_by_the_hard_duration_rule() -> Non
     cost = compute_move_cost(reserve_move, source, migration)
     assert cost.exceeds_max_duration
 
-    result = evaluate_plan_payback([cost], benefit_load_seconds=0.0, payback_ratio=10.0)
+    result = evaluate_plan_payback(
+        [cost],
+        benefit_load_seconds=0.0,
+        payback_ratio=10.0,
+        current_shortfall_bytes=round(1.0 * TIB),
+        final_shortfall_bytes=0,
+    )
 
+    assert result.repair_exempt
     assert result.aggregate_ok  # the economic test is exempted
     assert not result.accepted  # but the hard duration rule still blocks it
     assert result.rejected_moves == ("101:scsi0",)
@@ -407,6 +464,10 @@ def saturating_storage(id_: str, saturation_load: float | None) -> Storage:
         foreign_used_bytes=0,
         saferemove=False,
         saferemove_throughput_bytes_per_sec=None,
+        free_space_soft_bytes=0,
+        free_space_hard_bytes=0,
+        storage_type="dir",
+        allowed_formats=frozenset({"raw", "qcow2"}),
     )
 
 
@@ -509,7 +570,11 @@ def test_evaluate_plan_payback_reports_deferred_moves_separately_from_rejected()
     assert not normal_cost.saturation_deferred
 
     result = evaluate_plan_payback(
-        [deferred_cost, normal_cost], benefit_load_seconds=1e9, payback_ratio=10.0
+        [deferred_cost, normal_cost],
+        benefit_load_seconds=1e9,
+        payback_ratio=10.0,
+        current_shortfall_bytes=0,
+        final_shortfall_bytes=0,
     )
     assert result.deferred_moves == ("101:scsi0",)
     assert result.rejected_moves == ()  # a defer is not a hard-duration rejection
@@ -535,7 +600,7 @@ def test_negative_benefit_is_never_accepted() -> None:
     migration = MigrationConfig(bwlimit_bytes_per_sec=200 * MIB)
     cost = compute_move_cost(m, source, migration)
 
-    result = evaluate_plan_payback([cost], benefit, migration.payback_ratio)
+    result = evaluate_plan_payback([cost], benefit, migration.payback_ratio, 0, 0)
     assert not result.aggregate_ok
     assert not result.accepted
 
@@ -639,8 +704,148 @@ def test_all_tiny_disk_plan_accepts_on_affinity_benefit_alone() -> None:
     )
     assert benefit > 0
 
-    result = evaluate_plan_payback(costs, benefit, migration.payback_ratio)
+    result = evaluate_plan_payback(costs, benefit, migration.payback_ratio, 0, 0)
     assert result.total_cost_load_seconds == 0.0
     assert result.ratio == float("inf")
     assert result.aggregate_ok
     assert result.accepted
+
+
+# ------------------------------------------------ section 7.3 revert test (5.3.1)
+
+
+def _revert_test_group() -> Group:
+    """Storage `a`: 6 TiB disk on a 10 TiB storage, `reserve_factor=2.0` --
+    required 2*6=12, used 6, total 18 > 10: violates by 8 TiB. `b` is empty,
+    20 TiB. The only sensible target assignment moves the disk to `b`."""
+    storages = (
+        Storage(
+            id="a",
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=10 * TIB,
+            used_bytes=0,
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
+        ),
+        Storage(
+            id="b",
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            saturation_load=None,
+            capacity_bytes=20 * TIB,
+            used_bytes=0,
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
+        ),
+    )
+    disks = (
+        Disk(
+            key="101:scsi0",
+            vmid=101,
+            device="scsi0",
+            vm_name="vm101",
+            node="pve01",
+            size_bytes=6 * TIB,
+            current_storage="a",
+            format="raw",
+            pinned_reason=None,
+        ),
+    )
+    return Group(name="g", storages=storages, disks=disks)
+
+
+def test_executed_assignment_holds_an_excluded_disk_at_its_current_storage() -> None:
+    group = _revert_test_group()
+    final_assignment = {"101:scsi0": "b"}
+
+    kept = executed_assignment(group, final_assignment, excluded_disk_keys=frozenset())
+    assert kept == {"101:scsi0": "b"}
+
+    held_back = executed_assignment(
+        group, final_assignment, excluded_disk_keys=frozenset({"101:scsi0"})
+    )
+    assert held_back == {"101:scsi0": "a"}  # refused/deferred: never really applied
+
+
+def test_repair_markers_marks_a_move_that_carries_the_only_repair() -> None:
+    """The direct case: the sole move IS what repairs `a`'s violation, so
+    holding it back (via ``executed_assignment``) must strictly raise the
+    plan's own Sum r_s -- section 7.3's revert test."""
+    group = _revert_test_group()
+    final_assignment = {"101:scsi0": "b"}
+    move_ = move("101:scsi0", "a", "b", 6.0)
+
+    markers = repair_markers(group, [move_], final_assignment)
+    assert markers == {"101:scsi0": True}
+
+
+def test_repair_markers_marks_false_when_reverting_changes_nothing() -> None:
+    """A move whose disk never carried the group's own violation (nothing
+    here needed it) scores False -- reverting it does not raise Sum r_s
+    because there is nothing to raise: the storage it would return to was
+    never short in the first place."""
+    group = Group(
+        name="g",
+        storages=(
+            Storage(
+                id="a",
+                capability_weight=1.0,
+                reserve_factor=2.0,
+                saturation_load=None,
+                capacity_bytes=10 * TIB,
+                used_bytes=0,
+                foreign_used_bytes=0,
+                saferemove=False,
+                saferemove_throughput_bytes_per_sec=None,
+                free_space_soft_bytes=0,
+                free_space_hard_bytes=0,
+                storage_type="dir",
+                allowed_formats=frozenset({"raw", "qcow2"}),
+            ),
+            Storage(
+                id="b",
+                capability_weight=1.0,
+                reserve_factor=2.0,
+                saturation_load=None,
+                capacity_bytes=20 * TIB,
+                used_bytes=0,
+                foreign_used_bytes=0,
+                saferemove=False,
+                saferemove_throughput_bytes_per_sec=None,
+                free_space_soft_bytes=0,
+                free_space_hard_bytes=0,
+                storage_type="dir",
+                allowed_formats=frozenset({"raw", "qcow2"}),
+            ),
+        ),
+        disks=(
+            Disk(
+                key="101:scsi0",
+                vmid=101,
+                device="scsi0",
+                vm_name="vm101",
+                node="pve01",
+                size_bytes=1 * TIB,  # small: neither storage ever violates
+                current_storage="a",
+                format="raw",
+                pinned_reason=None,
+            ),
+        ),
+    )
+    final_assignment = {"101:scsi0": "b"}
+    move_ = move("101:scsi0", "a", "b", 1.0)
+
+    markers = repair_markers(group, [move_], final_assignment)
+    assert markers == {"101:scsi0": False}

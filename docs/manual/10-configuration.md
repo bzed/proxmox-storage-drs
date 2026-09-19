@@ -470,6 +470,22 @@ Weight or `null`, default `null` (inherits `snapshot_reserve.factor`).
 Per-storage override of the group-wide snapshot reserve factor, for a
 storage whose snapshot behaviour genuinely differs from its peers.
 
+### `groups[].storages[].free_space.soft` / `groups[].storages[].free_space.hard`
+
+Size, byte-unit string, percentage string (`"N%"`), or `null` — each
+independently. `null` here means *inherit the global `free_space.soft`/
+`.hard` value below* (§`free_space` — the same per-storage-null-means
+-inherit rule `reserve_factor` above already has). One member of a
+`/…/`-matched family can still be pinned to a different requirement than
+its peers, the same way a literal entry already overrides a pattern's
+`reserve_factor`.
+
+A percentage is resolved against **this storage's own capacity**, even
+when it comes from a pattern entry matching several differently-sized
+storages — `"10%"` demands different byte counts on a 20 TiB and a 2 TiB
+LUN, which is the point: "a tenth of the LUN free" is one policy applied
+per storage, not one number shared across the family.
+
 ### `groups[].storages[].saturation_load`
 
 Positive number or `null`, default `null`.
@@ -503,12 +519,18 @@ against balance (`IMPLEMENTATION_PLAN.md` section 5.3, (C5)).
 
 ### `snapshot_reserve.min_free_bytes`
 
-Size, default `0`.
+Size, default `0`. **Deprecated syntax for `free_space.soft` below.**
 
 An absolute floor, applied as `reserve = max(factor * largest_disk,
 min_free_bytes)`. Matters when a storage's largest disk is small: with
 `factor: 2.0` and a 10 GiB largest disk, the snapshot term alone would
-reserve only 20 GiB on a 20 TiB LUN.
+reserve only 20 GiB on a 20 TiB LUN — exactly what `free_space.soft` now
+expresses, with per-storage and percentage forms this scalar never had.
+Still accepted, and still works: if set alongside `free_space.soft` it is
+folded in as a floor on top of the resolved value (the larger of the two
+applies on every storage, never a "last one wins" substitution — a config
+warning names both keys when this happens), so upgrading is never a silent
+weakening. New configs should use `free_space.soft` instead.
 
 ### `snapshot_reserve.count_foreign_volumes`
 
@@ -518,6 +540,53 @@ Count volumes DRS does not manage (templates, ISOs, backups, other groups'
 disks, orphans) against a storage's used capacity. Strongly recommended:
 turning this off understates real usage and silently erodes the reserve it
 is meant to guarantee.
+
+## `free_space` — keep N bytes (or N%) free on top of the snapshot reserve
+
+The Storage-DRS mandate (`IMPLEMENTATION_PLAN.md` section 5.3.1): an admin
+places a new VM on a storage this tool does not manage the free space of by
+snapshot behaviour alone, and the engine migrates data off it until the
+configured free space is free again — bypassing the drift/imbalance gates
+and the payback economics for exactly this reason, the same way a snapshot
+-reserve violation already does. `soft` and `hard` here are the *global*
+defaults; `groups[].storages[].free_space.soft`/`.hard` above override them
+per storage or per `/…/`-matched pattern, most specific wins.
+
+### `free_space.soft`
+
+Size, byte-unit string, or percentage string (`"N%"`, `0 <= N < 100`),
+default `0`.
+
+The **plan-endpoint** requirement: the number of bytes that must be free on
+a storage once the plan has fully run. `R_s = max(factor * largest_disk,
+soft)` — the *larger* of the snapshot term and this floor wins, on every
+storage, always; neither term can erode the other. The default `0` changes
+nothing for a config that sets no knob in this block at all: the resulting
+model is identical to the pre-`free_space` snapshot-only floor. A storage
+that ends the plan below its `soft` requirement is in violation exactly
+like a snapshot-reserve breach, and the engine migrates disks off it until
+the requirement is met or reports the residual shortfall as unfixable
+(section 9.5) — it does not guarantee the requirement is *achievable*, only
+that it is pursued unconditionally.
+
+### `free_space.hard`
+
+Size, byte-unit string, percentage string, or `null`, default `null` (=
+`soft`: no dip at all).
+
+The **transient** floor: how far a storage may dip below `soft` while a
+disk is landing on it mid-migration (section 8.1) — a mirror target is
+fully allocated before its source releases anything, so a plan that lands
+a disk on a storage that is *heading toward* `soft` needs room to pass
+through it without ever crossing `hard`. The default `null` keeps the
+transient invariant exactly as strong as it was before `free_space`
+existed: no dip below `soft` at all. Set it strictly below `soft` only when
+you have deliberately decided to trade a bounded, planned dip for it — a
+transient dip can only ever land on a storage the *finished* plan leaves
+compliant, never used to permanently weaken the requirement. `hard` above
+`soft` is a config error: a floor stronger than the requirement it is
+supposed to relax would make every plan for an already-compliant storage
+infeasible.
 
 ## `gates` — deciding whether to act at all
 
@@ -684,11 +753,23 @@ move may drive it to. Inactive for any storage whose `saturation_load` is
 
 ### `migration.assume_thick_provisioning`
 
-Boolean, default `true`.
+Boolean, only `true` (the default) is accepted. **Kept so a config that
+spells it out still loads; `false` is refused at startup.**
 
-Cost and reserve arithmetic use each disk's *provisioned* size rather than
-its currently allocated size. Set `false` only for genuinely thin-provisioned
-storage, and note that allocation can *grow* during a move even then.
+This tool never considers over-provisioning. Every disk counts at its
+*provisioned* size — in the reserve arithmetic, the free-space requirement,
+the transient check and the cost model — on a thin-provisioned storage (Ceph
+RBD, LVM-thin, ZFS) exactly as on a thick one. Thin provisioning is what lets
+a pool hold more provisioned bytes than it has; here it is deliberately never
+counted on, because a move that only fits *if the disks stay thin* is one a
+growing guest can turn into a full pool.
+
+The consequence to plan for: on a thin pool the tool's idea of "used" is the
+sum of the disks' sizes plus foreign volumes, which can be several times what
+the pool reports as allocated. A `free_space.soft` of `"90%"` on a pool with
+plenty of *actually* free space can therefore show a large shortfall in
+`plan`/`explain`, and the engine will migrate disks off it. That is the
+intended behaviour, not a miscalculation.
 
 ### `migration.tiny_disk_bytes`
 

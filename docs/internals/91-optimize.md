@@ -78,8 +78,12 @@ Every coefficient is folded and rounded exactly as section 5.5 specifies:
   zero and CP-SAT would silently stop caring about disk size when
   choosing what to move.
 - Every size-valued quantity (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`,
-  `Uˢᵉˣᵗ`, `min_free_bytes`) is a whole-MiB integer (`_mib()`), already
-  exact, needing no scale of its own.
+  `Uˢᵉˣᵗ`, `soft_s`/`hard_s`) is a whole-MiB integer (`_mib()`), already
+  exact, needing no scale of its own. `soft_s` is `storage.
+  free_space_soft_bytes` — resolved once per storage by `topology.py`
+  (`60-topology.md`), never a scalar threaded in from config; `r[s.id] >=
+  _mib(s.free_space_soft_bytes)` is the model's other one-sided bound on
+  `R_s`, alongside the `reserve_factor·Z_s` one below.
 - `_RESERVE_FACTOR_SCALE` is this module's own addition, not named in the
   plan: (C5)'s `R_s ≥ f_s·Z_s` multiplies a *variable* (`Z_s`) by
   `reserve_factor`, which section 5.5's "fold constants into a
@@ -258,11 +262,21 @@ the identical input. Replicating the exemption exactly would need a
 second, repair-only relaxation of the same constraint or a restructured
 two-phase solve — a real, separately-scoped piece of work.
 
+**(C2) format-compatibility eligibility is implemented**, in the same
+place and the same way as the cooldown fix just above: `_fixed_zero_pairs()`
+is the one generator both `_cpsat_feasibility_constraints()` and
+`_cbc_feasibility_constraints()` call to decide which `(disk, storage)`
+pairs get `x_{d,s}=0`, yielding a pair whenever the storage is in
+`cooldown_storages` **or** `topology.storage_accepts_format(s, d.format)`
+is false — one shared function rather than the cooldown check and the
+format check duplicated inline in each backend (which is what pushed
+`_cpsat_feasibility_constraints()` over this project's own complexity
+limit the first time both were written inline; factoring the *decision*
+out, not just the loop, is what brought it back under). A disk already
+resident on a storage is never fixed away from it by either rule.
+
 ## Deliberately not implemented in this pass
 
-- **(C2) format-compatibility eligibility** — the same gap `heuristic.py`
-  already documents (`topology.Storage` does not expose storage
-  type/format).
 - **A live cluster's numpy/pandas footprint.** `ortools` pulls in numpy
   (and numpy pulls in nothing further this project cares about) purely as
   its own transitive dependency; nothing in this project imports numpy

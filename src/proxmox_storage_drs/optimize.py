@@ -69,9 +69,16 @@ occasion to reach for it.
   slack is genuinely 0 with the cooldown storage excluded, so `plan`
   reports an accurate, if pessimistic-relative-to-the-heuristic,
   shortfall rather than a wrong one).
-- **(C2) format-compatibility eligibility** -- the same gap
-  `heuristic.py` already documents (`topology.Storage` does not expose
-  storage type/format).
+**(C2) format-compatibility eligibility is implemented** (section 12's
+phase 13): both `_cpsat_feasibility_constraints()` and
+`_cbc_feasibility_constraints()` fix `x_{d,s} = 0` for every ``(d, s)``
+pair where `topology.storage_accepts_format(s, d.format)` is false, in the
+same loop and alongside the same fix the storage-cooldown exclusion above
+already applies -- a disk already resident on an ineligible storage is
+never fixed there by this rule (only (C2)'s own pin at topology build time
+puts it there), but is never proposed as a target for any *other* disk
+either.
+
 - **The plan's post-solve floating-point/scaled-objective agreement
   assertion** ("assert... recomputed in floating point agrees with the
   solver's value... a cheap guard against a scaling mistake") is not a
@@ -96,7 +103,7 @@ from __future__ import annotations
 import logging
 import warnings
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.heuristic import (
@@ -108,13 +115,13 @@ from proxmox_storage_drs.heuristic import (
     group_average_utilization,
     seed_assignment,
 )
-from proxmox_storage_drs.topology import Disk, Group
+from proxmox_storage_drs.topology import Disk, Group, Storage, storage_accepts_format
 
 logger = logging.getLogger(__name__)
 
 # Section 5.5's two scales: K for load-valued variables/constants, W for
 # every objective weight. Size-valued quantities (Z_s, R_s, r_s, z_d, C_s,
-# Uˢᵉˣᵗ, min_free_bytes) need no scale of their own -- they are rounded to
+# Uˢᵉˣᵗ, soft_s/hard_s) need no scale of their own -- they are rounded to
 # whole MiB, already integral. `_RESERVE_FACTOR_SCALE` is this module's
 # own addition, not named in the plan: `reserve_factor` (`f_s`) multiplies
 # a *variable* (`Z_s`), not a constant, in (C5), so it cannot be folded
@@ -131,7 +138,7 @@ _BYTES_PER_TIB = 1 << 40
 def _mib(size_bytes: int) -> int:
     """Round to whole MiB -- section 5.5's size unit for every MILP variable
     and constant (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`, `Uˢᵉˣᵗ`,
-    `min_free_bytes`)."""
+    `soft_s`/`hard_s`)."""
     return round(size_bytes / _BYTES_PER_MIB)
 
 
@@ -162,6 +169,25 @@ def _relevant_vmids(
     every disk instead (section 5.3's own text on that flag)."""
     disks = group.disks if objective.affinity_counts_pinned_disks else movable
     return sorted({d.vmid for d in disks})
+
+
+def _fixed_zero_pairs(
+    movable: tuple[Disk, ...], storages: tuple[Storage, ...], cooldown_storages: frozenset[str]
+) -> Iterable[tuple[Disk, Storage]]:
+    """Every ``(disk, storage)`` pair a destination-only rule forbids --
+    section 6's cooldown ("accepts no new incoming moves") or section 5.3
+    (C2)'s format rule ("s cannot hold the disk's format") -- fixed
+    ``x_{d,s}=0`` for by both MILP backends, in both lexicographic stages.
+    A disk already resident on a storage is never fixed away from it by
+    either rule, so both are skipped once ``s.id == d.current_storage``.
+    Shared so neither backend's own feasibility-constraint function carries
+    both rules' branching inline (AGENTS.md section 5)."""
+    for d in movable:
+        for s in storages:
+            if s.id == d.current_storage:
+                continue
+            if s.id in cooldown_storages or not storage_accepts_format(s, d.format):
+                yield d, s
 
 
 def _pinned_of_vmid(group: Group, vmid: int, objective: ObjectiveConfig) -> tuple[Disk, ...]:
@@ -244,7 +270,6 @@ def solve(
     group: Group,
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     backend: str,
     time_limit_seconds: float,
     mip_gap: float,
@@ -278,7 +303,6 @@ def solve(
         initial,
         load_by_key,
         objective,
-        min_free_bytes,
         average_utilization,
         average_fill,
         tiny_disk_bytes,
@@ -303,7 +327,6 @@ def solve(
         movable,
         load_by_key,
         objective,
-        min_free_bytes,
         time_limit_seconds,
         mip_gap,
         cooldown_storages,
@@ -319,7 +342,6 @@ def solve(
         assignment,
         load_by_key,
         objective,
-        min_free_bytes,
         average_utilization,
         average_fill,
         tiny_disk_bytes,
@@ -381,11 +403,10 @@ def _cpsat_feasibility_constraints(
     vmids: list[int],
     pinned_by_storage: dict[str, tuple[Disk, ...]],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     size_bound: int,
     cooldown_storages: frozenset[str] = frozenset(),
 ) -> tuple[dict[Any, Any], dict[Any, Any], dict[Any, Any], dict[Any, Any]]:
-    """(C1)/(C3)/(C4)/(C5) -- identical in both lexicographic stages, so
+    """(C1)/(C2)/(C3)/(C4)/(C5) -- identical in both lexicographic stages, so
     built once per stage by both `_solve_cpsat()` calls to `build()`
     rather than duplicated inline (keeping that function's own branching
     within this project's complexity limit)."""
@@ -402,16 +423,8 @@ def _cpsat_feasibility_constraints(
     for d in movable:
         model.Add(sum(x[d.key, s.id] for s in group.storages) == 1)
         model.AddHint(x[d.key, d.current_storage], 1)
-        for s in group.storages:
-            if s.id in cooldown_storages and s.id != d.current_storage:
-                # Section 6: "a storage involved in a migration within
-                # cooldown_per_storage accepts no new incoming moves" --
-                # excludes a cooldown storage as a *destination* only,
-                # exactly like `heuristic._descend()`'s own
-                # `target.id in cooldown_storages` check. A disk already
-                # resident there (`d.current_storage == s.id`) is left
-                # free to stay -- the cooldown never blocks that.
-                model.Add(x[d.key, s.id] == 0)
+    for d, s in _fixed_zero_pairs(movable, group.storages, cooldown_storages):
+        model.Add(x[d.key, s.id] == 0)
 
     for v in vmids:
         movable_of_v = [d for d in movable if d.vmid == v]
@@ -437,7 +450,7 @@ def _cpsat_feasibility_constraints(
     for s in group.storages:
         reserve_factor_scaled = round(s.reserve_factor * _RESERVE_FACTOR_SCALE)
         model.Add(_RESERVE_FACTOR_SCALE * r[s.id] >= reserve_factor_scaled * z[s.id])
-        model.Add(r[s.id] >= _mib(min_free_bytes))
+        model.Add(r[s.id] >= _mib(s.free_space_soft_bytes))
         pinned_used = sum(_mib(d.size_bytes) for d in pinned_by_storage[s.id])
         foreign_mib = _mib(s.foreign_used_bytes)
         model.Add(
@@ -708,7 +721,6 @@ def _solve_cpsat(
     movable: tuple[Disk, ...],
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     time_limit_seconds: float,
     mip_gap: float,
     cooldown_storages: frozenset[str] = frozenset(),
@@ -740,7 +752,6 @@ def _solve_cpsat(
             vmids,
             pinned_by_storage,
             objective,
-            min_free_bytes,
             size_bound,
             cooldown_storages,
         )
@@ -818,10 +829,9 @@ def _cbc_feasibility_constraints(
     vmids: list[int],
     pinned_by_storage: dict[str, tuple[Disk, ...]],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     cooldown_storages: frozenset[str] = frozenset(),
 ) -> tuple[dict[Any, Any], dict[Any, Any], dict[Any, Any], dict[Any, Any]]:
-    """(C1)/(C3)/(C4)/(C5), continuous -- "direct transcription" per the
+    """(C1)/(C2)/(C3)/(C4)/(C5), continuous -- "direct transcription" per the
     plan's own words for this backend, no scaling needed. Factored out for
     the same reason as `_cpsat_feasibility_constraints()`."""
     x = {
@@ -840,12 +850,8 @@ def _cbc_feasibility_constraints(
 
     for d in movable:
         prob += pulp.lpSum(x[d.key, s.id] for s in group.storages) == 1
-        for s in group.storages:
-            if s.id in cooldown_storages and s.id != d.current_storage:
-                # See `_cpsat_feasibility_constraints()`'s identical
-                # comment -- a cooldown storage is excluded as a
-                # *destination* only, never for a disk already there.
-                prob += x[d.key, s.id] == 0
+    for d, s in _fixed_zero_pairs(movable, group.storages, cooldown_storages):
+        prob += x[d.key, s.id] == 0
 
     for v in vmids:
         movable_of_v = [d for d in movable if d.vmid == v]
@@ -868,7 +874,7 @@ def _cbc_feasibility_constraints(
 
     for s in group.storages:
         prob += r[s.id] >= s.reserve_factor * z[s.id]
-        prob += r[s.id] >= min_free_bytes / _BYTES_PER_MIB
+        prob += r[s.id] >= s.free_space_soft_bytes / _BYTES_PER_MIB
         pinned_used = sum(d.size_bytes for d in pinned_by_storage[s.id]) / _BYTES_PER_MIB
         foreign_mib = s.foreign_used_bytes / _BYTES_PER_MIB
         prob += (
@@ -1015,7 +1021,6 @@ def _solve_cbc(
     movable: tuple[Disk, ...],
     load_by_key: Mapping[str, float],
     objective: ObjectiveConfig,
-    min_free_bytes: int,
     time_limit_seconds: float,
     mip_gap: float,
     cooldown_storages: frozenset[str] = frozenset(),
@@ -1057,7 +1062,6 @@ def _solve_cbc(
         vmids,
         pinned_by_storage,
         objective,
-        min_free_bytes,
         cooldown_storages,
     )
     prob1 += pulp.lpSum(slack1.values())
@@ -1078,7 +1082,6 @@ def _solve_cbc(
         vmids,
         pinned_by_storage,
         objective,
-        min_free_bytes,
         cooldown_storages,
     )
     # A small tolerance: CBC's own reported stage-1 slack already carries

@@ -321,6 +321,26 @@ def test_cluster_label_key_is_rejected_by_schema(tmp_path: Path) -> None:
         config.load_config(str(path), env={})
 
 
+def test_assume_thick_provisioning_false_is_refused_not_ignored(tmp_path: Path) -> None:
+    """Over-provisioning is never modelled: the key is kept only so a config
+    that spells it out still loads, and ``false`` names a mode that does not
+    exist -- refused loudly, naming the setting, rather than silently doing
+    nothing."""
+    data = minimal_config_dict()
+    data["migration"] = {"assume_thick_provisioning": False}
+    with pytest.raises(ConfigError, match="assume_thick_provisioning: false is not supported"):
+        config.load_config(str(write_config(tmp_path, data)), env={})
+
+
+def test_assume_thick_provisioning_true_or_absent_loads(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    absent = config.load_config(str(write_config(tmp_path, data)), env={})
+    data["migration"] = {"assume_thick_provisioning": True}
+    explicit = config.load_config(str(write_config(tmp_path, data, "b.yaml")), env={})
+    assert absent.config.migration.assume_thick_provisioning is True
+    assert explicit.config.migration.assume_thick_provisioning is True
+
+
 def test_rate_window_too_short_is_rejected(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["metrics"] = {"rate_window": "1m", "pvestatd_push_interval": "60s"}
@@ -471,6 +491,107 @@ def test_capacity_spread_threshold_zero_is_a_structural_error(tmp_path: Path) ->
     path = write_config(tmp_path, data)
     with pytest.raises(ConfigError, match="capacity_spread_threshold"):
         config.load_config(str(path), env={})
+
+
+# --------------------------------------------------------------- free_space
+
+
+def test_free_space_defaults_to_an_absolute_zero_soft_and_a_null_hard(tmp_path: Path) -> None:
+    path = write_config(tmp_path, minimal_config_dict())
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.free_space.soft == config.FreeSpaceValue(absolute_bytes=0)
+    assert resolved.config.free_space.hard is None
+
+
+def test_free_space_soft_accepts_an_absolute_byte_count(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["free_space"] = {"soft": 1073741824}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.free_space.soft == config.FreeSpaceValue(absolute_bytes=1073741824)
+
+
+def test_free_space_soft_accepts_a_byte_unit_string(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["free_space"] = {"soft": "10GiB"}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.free_space.soft == config.FreeSpaceValue(absolute_bytes=10 * (1 << 30))
+
+
+def test_free_space_soft_accepts_a_percentage(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["free_space"] = {"soft": "10%"}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.free_space.soft == config.FreeSpaceValue(percent=10.0)
+
+
+def test_free_space_hard_null_stays_none(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["free_space"] = {"soft": "5%", "hard": None}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert resolved.config.free_space.hard is None
+
+
+def test_free_space_soft_percentage_of_100_is_rejected(tmp_path: Path) -> None:
+    """Section 5.3.1's grammar: ``0 <= N < 100`` -- rejected at parse time,
+    not left to the ``soft_s < C_s`` semantic check once the cluster is
+    known (config.py's own docstring on ``_parse_free_space_value``)."""
+    data = minimal_config_dict()
+    data["free_space"] = {"soft": "100%"}
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match="free_space.soft"):
+        config.load_config(str(path), env={})
+
+
+def test_free_space_soft_percentage_above_100_is_rejected(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["free_space"] = {"soft": "150%"}
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match="free_space.soft"):
+        config.load_config(str(path), env={})
+
+
+def test_free_space_deprecation_warning_fires_only_with_both_keys_written(
+    tmp_path: Path,
+) -> None:
+    data = minimal_config_dict()
+    data["snapshot_reserve"] = {"min_free_bytes": "1GiB"}
+    data["free_space"] = {"soft": "2GiB"}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert any("min_free_bytes" in w and "free_space" in w for w in resolved.warnings)
+
+
+def test_free_space_deprecation_warning_silent_with_only_min_free_bytes(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["snapshot_reserve"] = {"min_free_bytes": "1GiB"}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert not any("min_free_bytes" in w and "deprecated" in w for w in resolved.warnings)
+
+
+def test_free_space_deprecation_warning_silent_with_only_free_space(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["free_space"] = {"soft": "2GiB"}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert not any("min_free_bytes" in w and "deprecated" in w for w in resolved.warnings)
+
+
+def test_free_space_deprecation_warning_fires_for_a_per_storage_only_override(
+    tmp_path: Path,
+) -> None:
+    """``_free_space_written()``'s other branch: no top-level ``free_space``
+    block at all, but a ``groups[].storages[].free_space`` entry counts too."""
+    data = minimal_config_dict()
+    data["snapshot_reserve"] = {"min_free_bytes": "1GiB"}
+    data["groups"][0]["storages"][0]["free_space"] = {"soft": "2GiB"}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert any("min_free_bytes" in w and "free_space" in w for w in resolved.warnings)
 
 
 def test_multiple_errors_are_all_reported(tmp_path: Path) -> None:

@@ -21,6 +21,10 @@ Walk this list. It is short on purpose.
 - [ ] The safety invariants in [`domain-invariants.md`](domain-invariants.md) still hold —
       in particular: dry-run default, reserve never traded, invariant checked during moves,
       no auto-delete.
+- [ ] Free-space floors used in the right order (`domain-invariants.md` §2a): the snapshot term
+      `f_s·Z_s` is inside a `max()` and nothing lowers it; execution-time and transient checks
+      compare against **`hard_s`**; endpoint/(C5) checks compare against **`soft_s`**. A check
+      that swaps the two either fills a LUN or refuses every plan.
 - [ ] Any claim about Proxmox behaviour in the diff is either verified against the source /
       the operator, or explicitly labelled unverified.
 

@@ -196,6 +196,20 @@ def test_help_covers_every_subcommand_option() -> None:
 
 
 @needs_full_checkout
+def test_manpage_names_every_top_level_schema_key() -> None:
+    """`.agents/documentation.md` gives the manpage's CONFIGURATION section the
+    file's top-level keys; a new block (REVIEW.md AH-08: ``free_space``) must
+    not be able to skip it."""
+    text = _manpage_source_text()
+    section = text[text.index("# CONFIGURATION") :]
+    section = section[: section.index("\n# ", 1)] if "\n# " in section[1:] else section
+    missing = [
+        key for key in _load_schema()["properties"] if not re.search(rf"\*\*{key}\*\*", section)
+    ]
+    assert not missing, f"top-level schema keys missing from {MANPAGE_SRC.name}: {missing}"
+
+
+@needs_full_checkout
 def test_manpage_names_every_subcommand() -> None:
     text = _manpage_source_text()
     missing = [name for name in cli._SUBCOMMANDS if f"**{name}**" not in text]

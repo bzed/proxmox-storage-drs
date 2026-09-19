@@ -176,9 +176,13 @@ multiplier.
 
 ## `verify-storages`
 
-Reports `saferemove` and the wipe time it implies for the largest disk on
-each storage, and warns when your configured cooldown or move-duration
-limits are shorter than that implied wipe — the condition
+Reports the resolved `free_space.soft`/`.hard` bytes for each storage,
+each with the level it came from (`IMPLEMENTATION_PLAN.md` section 5.3.1) —
+the derivation an operator cannot otherwise predict, once inheritance,
+`/…/` patterns, percentages and the deprecated
+`snapshot_reserve.min_free_bytes` fold are all in play — plus `saferemove`
+and the wipe time it implies for the largest disk on each storage, warning
+when your configured cooldown or move-duration limits are shorter than that implied wipe — the condition
 `IMPLEMENTATION_PLAN.md` section 9.3 describes as "the next run plans onto a
 storage that is still draining". Section 14's fixture has `saferemove` off
 everywhere (stated explicitly there, so its payback arithmetic is
@@ -190,14 +194,39 @@ warning looks like:
 $ pve-storage-drs -c /etc/pve/drs.yaml verify-storages
 Group fc-tier1
   san-a  saferemove=off
+    free_space: soft=0 B (global)  hard=0 B (= soft (no dip))
     saferemove is off or throughput unknown; no wipe-time check
   san-b  saferemove=on
+    free_space: soft=0 B (global)  hard=0 B (= soft (no dip))
     implied wipe time for the largest disk (1.00 TiB): 1.2d
     ⚠ gates.cooldown_per_storage (1.0h) is shorter than the implied wipe time -- the next run may plan onto a still-draining storage
     ⚠ migration.max_single_move_duration (6.0h) is shorter than the implied wipe time -- a move of the largest disk would be rejected outright
   san-c  saferemove=off
+    free_space: soft=0 B (global)  hard=0 B (= soft (no dip))
     saferemove is off or throughput unknown; no wipe-time check
 ```
+
+`free_space.soft`/`.hard` read `0 B` here because the fixture sets no
+`free_space` knob at all — the pre-section-5.3.1 default, unchanged. A
+config with a non-zero `free_space.soft` (or the deprecated
+`snapshot_reserve.min_free_bytes`, folded in) shows the resolved byte
+count here, the same value `plan`/`explain`/`show-load` all enforce.
+
+The parenthesis after each value says where it came from, which is the part
+you cannot read off the config file when one line can mean a different number
+per LUN:
+
+| Shown | Meaning |
+|---|---|
+| `global` | inherited from the top-level `free_space` block |
+| `storage entry` | written on this storage's own `groups[].storages[]` entry |
+| `pattern /re/` | supplied by the `/…/` pattern entry that matched this storage |
+| `…, 10% of 30.00 TiB` | appended when the value was a percentage: the capacity it was converted against |
+| `folded from snapshot_reserve.min_free_bytes` | (soft only) the deprecated key was larger than the value written, so it raised the floor |
+| `= soft (no dip)` | (hard only) `hard` is null, so it equals the resolved soft — including a folded one |
+
+`--json` carries the same strings as `free_space_soft_source` and
+`free_space_hard_source` beside the two byte counts.
 
 Storage types without `saferemove` at all (Ceph RBD, ZFS) always report
 `saferemove=off` and skip the check — there is nothing to wipe.

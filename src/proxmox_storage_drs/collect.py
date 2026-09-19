@@ -1527,9 +1527,21 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
     anonymization as a pattern (its text names real storages), so the
     bundle carries the literal, anonymized ids it matched instead, with
     each storage's already-resolved (pattern-default-or-literal-override)
-    ``capability_weight``/``reserve_factor``/``saturation_load`` -- exactly
-    what a replay needs, and none of what would let it re-test the
-    expansion itself, a gap named here rather than discovered later."""
+    ``capability_weight``/``reserve_factor``/``saturation_load``/
+    ``free_space`` -- exactly what a replay needs, and none of what would
+    let it re-test the expansion itself, a gap named here rather than
+    discovered later.
+
+    ``free_space.soft``/``.hard`` are written as ``s.free_space_soft_bytes``/
+    ``s.free_space_hard_bytes`` -- section 5.3.1's fully-resolved per
+    -storage pair (inheritance, percent conversion and the deprecated
+    ``snapshot_reserve.min_free_bytes`` fold all already applied), plain
+    absolute byte counts rather than the operator's original percentage or
+    pattern-level setting, the same "resolved, not re-derivable" choice
+    already made for ``reserve_factor`` here. A replayed bundle therefore
+    carries the pair directly and needs no ``min_free_bytes`` at all --
+    see ``snapshot_reserve`` below, which drops that scalar for the same
+    reason."""
     groups = []
     for group in topology.groups:
         groups.append(
@@ -1540,6 +1552,10 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
                         "id": mapper.storage(s.id),
                         "capability_weight": s.capability_weight,
                         "reserve_factor": s.reserve_factor,
+                        "free_space": {
+                            "soft": s.free_space_soft_bytes,
+                            "hard": s.free_space_hard_bytes,
+                        },
                         **(
                             {"saturation_load": s.saturation_load}
                             if s.saturation_load is not None
@@ -1591,7 +1607,6 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
         "groups": groups,
         "snapshot_reserve": {
             "factor": config.snapshot_reserve.factor,
-            "min_free_bytes": config.snapshot_reserve.min_free_bytes,
             "count_foreign_volumes": config.snapshot_reserve.count_foreign_volumes,
         },
         "gates": {

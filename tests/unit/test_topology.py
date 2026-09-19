@@ -24,6 +24,7 @@ from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.topology import (
     Disk,
     Topology,
+    _allowed_formats,
     _default_format,
     _parse_pve_config_size_bytes,
     _pin_reason,
@@ -283,6 +284,184 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
     # Capacity/used from the authoritative status call.
     assert storages_by_id["san-a"].capacity_bytes == 10 * (1 << 40)
     assert storages_by_id["san-a"].used_bytes == 3 * (1 << 40)
+
+
+# --------------------------------------------------------------------- free space
+
+
+def _one_vm_two_storage_cluster() -> PveClient:
+    vm_resources = [_vm(301, "node1")]
+    vm_configs = {301: {"name": "vm301", "scsi0": "san-a:vm-301-disk-0,size=10G"}}
+    return build_fake_client(
+        vm_resources,
+        vm_configs,
+        {301: []},
+        {"san-a": [_content("san-a", 301, "disk-0", 10 * (1 << 30))], "san-b": []},
+    )
+
+
+def test_build_topology_rejects_a_hard_floor_above_its_resolved_soft(tmp_path: Path) -> None:
+    """Section 5.3.1: ``hard_s > soft_s`` is a validation error -- a floor
+    above the requirement would make every plan for a compliant storage
+    infeasible. san-a's capacity is 10 TiB (STORAGE_STATUS); a 2 GiB hard
+    floor above a 1 GiB soft one triggers it regardless."""
+    config = make_config(
+        tmp_path,
+        groups=[
+            {
+                "name": "g1",
+                "storages": [
+                    {
+                        "id": "san-a",
+                        "free_space": {"soft": "1GiB", "hard": "2GiB"},
+                    },
+                    {"id": "san-b"},
+                ],
+            }
+        ],
+    )
+    client = _one_vm_two_storage_cluster()
+    with pytest.raises(TopologyError, match="free_space.hard.*exceeds.*free_space.soft"):
+        build_topology(client, config)
+
+
+def test_build_topology_rejects_a_soft_floor_not_below_capacity(tmp_path: Path) -> None:
+    """Section 5.3.1: ``soft_s >= C_s`` is a validation error -- a
+    requirement no disk could ever leave room for. san-a's capacity is
+    10 TiB (STORAGE_STATUS)."""
+    config = make_config(
+        tmp_path,
+        groups=[
+            {
+                "name": "g1",
+                "storages": [
+                    {"id": "san-a", "free_space": {"soft": "20TiB"}},
+                    {"id": "san-b"},
+                ],
+            }
+        ],
+    )
+    client = _one_vm_two_storage_cluster()
+    with pytest.raises(TopologyError, match="free_space.soft resolves to"):
+        build_topology(client, config)
+
+
+def _pair(topology: Any, storage_id: str) -> tuple[int, int]:
+    storage = next(s for g in topology.groups for s in g.storages if s.id == storage_id)
+    return storage.free_space_soft_bytes, storage.free_space_hard_bytes
+
+
+def test_deprecated_min_free_bytes_alone_folds_into_both_soft_and_hard(tmp_path: Path) -> None:
+    """AH-01: a config carrying only ``snapshot_reserve.min_free_bytes`` has
+    ``hard: null``, which section 5.3.1 defines as ``hard_s = soft_s`` -- the
+    *folded* soft -- so section 8.1's transient charge keeps the floor the
+    built ``max(f*max(Z,z), min_free_bytes)`` check charged."""
+    floor = 1 << 40
+    config = make_config(tmp_path, snapshot_reserve={"min_free_bytes": floor})
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _pair(topology, "san-a") == (floor, floor)
+    assert _pair(topology, "san-b") == (floor, floor)
+
+
+def test_written_hard_stays_as_written_under_the_deprecated_fold(tmp_path: Path) -> None:
+    """Section 5.3.1: an operator who sets ``hard`` below the folded floor is
+    using the new knob for the dip it exists to allow -- the fold raises soft
+    only, and a written hard is neither raised nor rejected."""
+    floor = 1 << 40
+    config = make_config(
+        tmp_path,
+        snapshot_reserve={"min_free_bytes": floor},
+        free_space={"soft": "100GiB", "hard": "10GiB"},
+    )
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _pair(topology, "san-a") == (floor, 10 * (1 << 30))
+
+
+def test_global_hard_null_follows_the_folded_soft_when_soft_is_written(tmp_path: Path) -> None:
+    """Both keys set, ``hard`` left null: hard tracks whichever of the written
+    soft and the deprecated floor won the ``max()``."""
+    config = make_config(
+        tmp_path,
+        snapshot_reserve={"min_free_bytes": 1 << 30},
+        free_space={"soft": "5GiB"},
+    )
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _pair(topology, "san-a") == (5 * (1 << 30), 5 * (1 << 30))
+
+
+def test_oversized_deprecated_floor_warns_and_does_not_raise(tmp_path: Path) -> None:
+    """Section 5.3.1's one deliberate non-promotion: ``soft_s < C_s`` is checked on
+    the written value, so a ``min_free_bytes`` above a storage's capacity warns
+    (a permanent unfixable shortfall, as built) instead of refusing to start --
+    and the warning offers only remedies that work: the fold is a ``max()``, so
+    a smaller ``free_space.soft`` cannot lower it."""
+    config = make_config(tmp_path, snapshot_reserve={"min_free_bytes": 100 * (1 << 40)})
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    matching = [w for w in topology.warnings if "exceeds its capacity" in w]
+    assert len(matching) == 2
+    assert all("lowered or removed" in w and "smaller" not in w for w in matching)
+
+
+def _sources(topology: Any, storage_id: str) -> tuple[str, str]:
+    storage = next(s for g in topology.groups for s in g.storages if s.id == storage_id)
+    return storage.free_space_soft_source, storage.free_space_hard_source
+
+
+def test_free_space_provenance_names_the_level_each_half_came_from(tmp_path: Path) -> None:
+    """Section 3.5: ``verify-storages`` shows the resolved pair *with the level
+    each came from* -- global, per-storage literal, pattern, percent-converted,
+    folded -- because one line of config can mean a different number per LUN."""
+    config = make_config(
+        tmp_path,
+        free_space={"soft": "10%"},
+        groups=[
+            {
+                "name": "g1",
+                "storages": [
+                    {"id": "san-a", "free_space": {"soft": "2GiB", "hard": "1GiB"}},
+                    {"id": "/san-b/", "free_space": {"soft": "20%"}},
+                ],
+            }
+        ],
+    )
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _sources(topology, "san-a") == ("storage entry", "storage entry")
+    assert _sources(topology, "san-b") == (
+        "pattern /san-b/, 20% of 5.00 TiB",
+        "= soft (no dip)",
+    )
+
+
+def test_free_space_provenance_inherits_global_percent_and_reports_the_fold(
+    tmp_path: Path,
+) -> None:
+    config = make_config(
+        tmp_path,
+        snapshot_reserve={"min_free_bytes": 2 << 40},
+        groups=[
+            {
+                "name": "g1",
+                "storages": [
+                    {"id": "san-a"},
+                    {"id": "san-b", "free_space": {"soft": "5%"}},
+                ],
+            }
+        ],
+        free_space={"soft": "10%", "hard": "1GiB"},
+    )
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    # 10% of 10 TiB = 1 TiB < the 2 TiB deprecated floor: folded.
+    assert _sources(topology, "san-a") == (
+        "folded from snapshot_reserve.min_free_bytes",
+        "global",
+    )
+    assert _sources(topology, "san-b")[0] == "folded from snapshot_reserve.min_free_bytes"
+
+
+def test_free_space_provenance_global_percent_without_a_fold(tmp_path: Path) -> None:
+    config = make_config(tmp_path, free_space={"soft": "10%"})
+    topology = build_topology(_one_vm_two_storage_cluster(), config)
+    assert _sources(topology, "san-a") == ("global, 10% of 10.00 TiB", "= soft (no dip)")
 
 
 # --------------------------------------------------------------------- cooldowns
@@ -800,6 +979,33 @@ def test_split_tags(raw: str, expected: set[str]) -> None:
 )
 def test_default_format(storage_type: str, expected: str) -> None:
     assert _default_format(storage_type) == expected
+
+
+@pytest.mark.parametrize(
+    "storage_type,expected",
+    [
+        # Ordinary (non-thin) lvm is the one block-backed type current PVE
+        # versions also accept qcow2 on (PVE 9.2's snapshot-on-plain-LVM
+        # feature formats the LV itself as a qcow2 image) -- confirmed
+        # against real dogfooding-cluster data (tests/corpus/local).
+        ("lvm", frozenset({"raw", "qcow2"})),
+        # lvmthin's snapshots are native LVM-thin COW, never qcow2-on-the-LV
+        # -- it stays raw-only, unlike plain lvm above.
+        ("lvmthin", frozenset({"raw"})),
+        ("zfspool", frozenset({"raw"})),
+        ("rbd", frozenset({"raw"})),
+        ("iscsi", frozenset({"raw"})),
+        ("iscsidirect", frozenset({"raw"})),
+        ("dir", frozenset({"raw", "qcow2", "vmdk"})),
+        ("nfs", frozenset({"raw", "qcow2", "vmdk"})),
+        ("cifs", frozenset({"raw", "qcow2", "vmdk"})),
+        ("cephfs", frozenset({"raw", "qcow2"})),
+        ("pbs", frozenset()),
+        ("unknown-type", frozenset({"raw"})),
+    ],
+)
+def test_allowed_formats(storage_type: str, expected: frozenset[str]) -> None:
+    assert _allowed_formats(storage_type) == expected
 
 
 def test_pin_reason_priority_order() -> None:

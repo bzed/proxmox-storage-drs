@@ -119,11 +119,58 @@ class LoadWeights:
 
 
 @dataclass(frozen=True, slots=True)
+class FreeSpaceValue:
+    """One parsed-but-unresolved ``free_space.soft``/``.hard`` entry
+    (section 5.3.1's grammar): either an absolute byte count or a
+    percentage of the storage's own capacity. Exactly one field is set.
+    Percent resolution needs ``C_s``, which is only known once the cluster
+    inventory is loaded (topology.py, after pattern expansion) -- this type
+    is what a resolved-later value looks like before that point, the same
+    role a ``/…/`` pattern plays for storage ids.
+    """
+
+    absolute_bytes: int | None = None
+    percent: float | None = None  # 0 <= percent < 100, section 5.3.1's grammar
+
+
+@dataclass(frozen=True, slots=True)
 class StorageConfig:
     id: str
     capability_weight: float = 1.0
     reserve_factor: float | None = None
     saturation_load: float | None = None
+    # None means inherit the group's free_space.soft/.hard -- the same
+    # per-storage-null-means-inherit rule reserve_factor already has
+    # (section 5.3.1).
+    free_space_soft: FreeSpaceValue | None = None
+    free_space_hard: FreeSpaceValue | None = None
+
+
+def _parse_free_space_value(raw: Any, *, where: str) -> FreeSpaceValue | None:
+    """Parse one ``free_space.soft``/``.hard`` entry (section 5.3.1's
+    grammar). ``None`` (written or absent) is returned as ``None`` --
+    callers decide what that means at their level: the global default (an
+    absolute 0 for ``soft``, "= soft" for ``hard``) or per-storage
+    inheritance.
+
+    A string ending in ``%`` is a percentage, ``0 <= N < 100`` -- rejected
+    here, at parse time, rather than left to the ``soft_s < C_s`` check
+    once the cluster is known: ``100%`` is a typo, not a policy, and the
+    grammar itself is where it belongs. Anything else goes through the same
+    unit parser as ``migration.bwlimit_bytes_per_sec``.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip().endswith("%"):
+        text = raw.strip()[:-1]
+        try:
+            percent = float(text)
+        except ValueError as exc:
+            raise ConfigError(f"{where}: {raw!r} is not a valid percentage") from exc
+        if not (0 <= percent < 100):
+            raise ConfigError(f"{where}: {raw!r} must be at least 0% and strictly below 100%")
+        return FreeSpaceValue(percent=percent)
+    return FreeSpaceValue(absolute_bytes=parse_size_bytes(raw))
 
 
 def is_storage_pattern(storage_id: str) -> bool:
@@ -154,6 +201,18 @@ class SnapshotReserveConfig:
     factor: float = 2.0
     min_free_bytes: int = 0
     count_foreign_volumes: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class FreeSpaceConfig:
+    """Section 5.3.1's global ``free_space`` block. ``soft`` defaults to an
+    absolute 0 -- no requirement beyond the snapshot reserve, the
+    pre-section-5.3.1 behaviour. ``hard`` defaults to ``None``, meaning
+    ``hard_s = soft_s`` for every storage that does not override it: no
+    transient dip below ``soft`` at all, the conservative reading."""
+
+    soft: FreeSpaceValue = field(default_factory=lambda: FreeSpaceValue(absolute_bytes=0))
+    hard: FreeSpaceValue | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +367,7 @@ class Config:
     load_weights: LoadWeights
     groups: tuple[GroupConfig, ...]
     snapshot_reserve: SnapshotReserveConfig
+    free_space: FreeSpaceConfig
     gates: GatesConfig
     migration: MigrationConfig
     objective: ObjectiveConfig
@@ -407,7 +467,9 @@ def load_config(
 
     _validate_schema(raw)
     config = _build_config(raw, environ)
-    warnings = _validate_semantics(config, require_connection=require_connection)
+    warnings = _validate_semantics(
+        config, require_connection=require_connection, free_space_written=_free_space_written(raw)
+    )
 
     return ResolvedConfig(config=config, path=path, sha256=sha256, warnings=tuple(warnings))
 
@@ -526,6 +588,14 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
                     capability_weight=s.get("capability_weight", 1.0),
                     reserve_factor=s.get("reserve_factor"),
                     saturation_load=s.get("saturation_load"),
+                    free_space_soft=_parse_free_space_value(
+                        s.get("free_space", {}).get("soft"),
+                        where=f"groups[{g['name']!r}].storages[{s['id']!r}].free_space.soft",
+                    ),
+                    free_space_hard=_parse_free_space_value(
+                        s.get("free_space", {}).get("hard"),
+                        where=f"groups[{g['name']!r}].storages[{s['id']!r}].free_space.hard",
+                    ),
                 )
                 for s in g.get("storages", [])
             ),
@@ -538,6 +608,13 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         factor=sr_raw.get("factor", 2.0),
         min_free_bytes=parse_size_bytes(sr_raw.get("min_free_bytes", 0)),
         count_foreign_volumes=sr_raw.get("count_foreign_volumes", True),
+    )
+
+    fs_raw = raw.get("free_space", {})
+    free_space = FreeSpaceConfig(
+        soft=_parse_free_space_value(fs_raw.get("soft"), where="free_space.soft")
+        or FreeSpaceValue(absolute_bytes=0),
+        hard=_parse_free_space_value(fs_raw.get("hard"), where="free_space.hard"),
     )
 
     gates_raw = raw.get("gates", {})
@@ -675,6 +752,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         load_weights=load_weights,
         groups=groups,
         snapshot_reserve=snapshot_reserve,
+        free_space=free_space,
         gates=gates,
         migration=migration,
         objective=objective,
@@ -689,6 +767,41 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
 
 
 # ------------------------------------------------------------ semantic rules
+
+
+def _free_space_written(raw: dict[str, Any]) -> bool:
+    """Whether the operator wrote a ``free_space`` block anywhere -- the
+    top-level knob or any ``groups[].storages[].free_space`` entry. Used
+    only to decide whether the deprecation warning below fires: folding
+    ``snapshot_reserve.min_free_bytes`` in as a per-storage floor (section
+    5.3.1) is silent and correct with no ``free_space`` written at all
+    (the deprecated key alone still works), so the warning is reserved for
+    the case both keys actually say something.
+    """
+    if "free_space" in raw:
+        return True
+    return any("free_space" in s for g in raw.get("groups", []) for s in g.get("storages", []))
+
+
+def _check_free_space_deprecation(
+    config: Config, warnings: list[str], *, free_space_written: bool
+) -> None:
+    """Resolution rule, section 11.1 (warn and continue): both
+    ``snapshot_reserve.min_free_bytes`` and ``free_space.soft`` express the
+    same quantity -- a minimum-free floor -- so ``topology.py`` folds them
+    with ``max()`` per storage rather than picking a "winner": a winner rule
+    could silently lower a configured floor on upgrade, which ``max()``
+    never can.
+    """
+    if config.snapshot_reserve.min_free_bytes > 0 and free_space_written:
+        warnings.append(
+            "both snapshot_reserve.min_free_bytes and free_space are configured -- "
+            "snapshot_reserve.min_free_bytes is deprecated syntax for free_space.soft "
+            "and is folded in as a lower bound on every storage's resolved free_space.soft "
+            "(the larger of the two applies), never as a substitute for it; migrate the "
+            "value into free_space.soft and remove snapshot_reserve.min_free_bytes once "
+            "its floor is reflected there"
+        )
 
 
 def _check_schema_version(config: Config, errors: list[str]) -> None:
@@ -771,6 +884,21 @@ def _check_window(config: Config, errors: list[str]) -> None:
             "window.upper_quantile "
             f"({config.window.upper_quantile}) must be >= window.quantile "
             f"({config.window.quantile})"
+        )
+
+
+def _check_thick_provisioning(config: Config, errors: list[str]) -> None:
+    """``migration.assume_thick_provisioning`` survives only so an existing
+    config that spells it out still loads. Over-provisioning is never
+    modelled (section 5.1): every disk counts at its provisioned size, on a
+    thin-provisioned storage too, so ``false`` promises a mode that does not
+    exist and is refused rather than silently ignored."""
+    if not config.migration.assume_thick_provisioning:
+        errors.append(
+            "migration.assume_thick_provisioning: false is not supported -- this tool never "
+            "considers over-provisioning: every disk counts at its provisioned size, on "
+            "thin-provisioned storage (Ceph RBD, LVM-thin, ZFS) as much as on thick. Remove "
+            "the key, or set it to true"
         )
 
 
@@ -907,7 +1035,9 @@ def _check_connection_config(config: Config, errors: list[str]) -> None:
         errors.append("prometheus.url is required")
 
 
-def _validate_semantics(config: Config, *, require_connection: bool = True) -> list[str]:
+def _validate_semantics(
+    config: Config, *, require_connection: bool = True, free_space_written: bool = False
+) -> list[str]:
     """Section 11.1 rules that jsonschema cannot express (cross-field, or need
     a value computed from two independently-optional settings). Returns
     non-fatal warnings; raises :class:`ConfigError` (with every error found,
@@ -923,6 +1053,7 @@ def _validate_semantics(config: Config, *, require_connection: bool = True) -> l
     _check_storage_patterns_compile(config, errors)
     _check_group_size(config, errors)
     _check_window(config, errors)
+    _check_thick_provisioning(config, errors)
     _check_metrics(config, errors)
     _check_forecast_window(config, errors)
     _check_saturation_load(config, warnings)
@@ -930,6 +1061,7 @@ def _validate_semantics(config: Config, *, require_connection: bool = True) -> l
     _check_objective_weights(config, warnings)
     _check_time_windows(config, errors)
     _check_support(config, errors)
+    _check_free_space_deprecation(config, warnings, free_space_written=free_space_written)
 
     if errors:
         raise ConfigError("config validation failed:\n  " + "\n  ".join(errors))

@@ -199,14 +199,15 @@ default path. It is validated in full at startup; every violation is a fatal err
 naming the setting, because a misconfigured balancer that moves production disks is worse than one
 that refuses to start.
 
-Top-level keys: **proxmox** (API connection and credentials), **prometheus** (URL and auth),
-**metrics** (metric and label name mapping), **window** (how much history to consider),
+Top-level keys: **schema_version**, **proxmox** (API connection and credentials), **prometheus**
+(URL and auth), **free_space** (the free space every storage must keep, absolute or as a
+percentage of its own capacity), **metrics** (metric and label name mapping), **window** (how much
+history to consider), **load_weights** (the weighting of I/O time, operations and bytes),
 **groups** (the storage groups, which are what a disk may not leave), **snapshot_reserve**,
-**load** (the weighting of I/O time, operations and bytes), **objective** (the solver's trade-off
-weights), **gates** (drift and imbalance thresholds, cooldowns), **migration** (bandwidth, cost and
-payback), **execution** (mode, concurrency, time windows, locking), **exclude**, **report**,
-**state**, **forecast** and **support** (the anonymization salt and defaults for
-**collect-testdata**).
+**gates** (drift and imbalance thresholds, cooldowns), **migration** (bandwidth, cost and payback),
+**objective** (the solver's trade-off weights), **solver** (backend and iteration budget),
+**execution** (mode, concurrency, time windows, locking), **exclude**, **report**, **state**,
+**forecast** and **support** (the anonymization salt and defaults for **collect-testdata**).
 
 Every option is documented individually, with its unit, its default and what happens at either
 extreme, in the manual listed under **SEE ALSO**. That document, not this page, is authoritative
