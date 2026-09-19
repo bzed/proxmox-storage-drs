@@ -13,6 +13,7 @@ agree with the plan's own arithmetic, not merely with each other.
 from __future__ import annotations
 
 import dataclasses
+from typing import Callable
 
 import pytest
 
@@ -547,34 +548,67 @@ def test_pinned_disks_count_toward_fragmentation_by_default() -> None:
 
 
 def test_a_pinned_disk_anchors_its_movable_sibling_under_the_default() -> None:
-    """The reason (C3)'s default is True. A VM whose pinned disk sits on
-    san-a and whose movable disk sits on san-b can be reunited -- by moving
-    the movable one to san-a, which is entirely reachable this run. Under
-    `affinity_counts_pinned_disks=False` that repair is not merely
-    unrewarded, it is *penalized*: the debt is 0 while the movable disk is
-    alone in `D^mov` and becomes 1 the moment it joins the pinned one.
+    """The reason (C3)'s default is True, in the two shapes the plan's
+    section 3.6 works through. A VM with a pinned disk on san-a:
+
+    - one movable disk on san-b: under `affinity_counts_pinned_disks=False`
+      the debt is 0 wherever that disk goes, so reuniting the VM is
+      *unrewarded*; under the default it is 1 -> 0.
+    - two movable disks on san-b: under False, moving one to san-a to
+      rejoin the pinned disk raises the debt 0 -> 1 -- the tool *charges*
+      kappa for a step towards reassembling the VM; under the default that
+      step is neutral and moving both is a gain.
+
     Found replaying a real bundle (VM 717219, whose two pinned disks shared
     a storage its movable efidisk0 was then sent away from)."""
-    disks = (
-        make_disk("101:scsi0", 1.0, 0.0, "san-a", pinned="snapshots present (2)"),
-        make_disk("101:scsi1", 1.0, 0.0, "san-b"),
+    storages = (make_storage("san-a"), make_storage("san-b"))
+    movable_only = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=False)
+
+    def debt_of(group: Group) -> Callable[[ObjectiveConfig, dict[str, str]], float]:
+        loads = {d.key: 0.0 for d in group.disks}
+
+        def debt(objective: ObjectiveConfig, assignment: dict[str, str]) -> float:
+            breakdown = evaluate_assignment(group, assignment, loads, objective, 0.0, 0.0)
+            return breakdown.affinity_debt
+
+        return debt
+
+    # One movable disk.
+    one = Group(
+        name="g",
+        storages=storages,
+        disks=(
+            make_disk("101:scsi0", 1.0, 0.0, "san-a", pinned="snapshots present (2)"),
+            make_disk("101:scsi1", 1.0, 0.0, "san-b"),
+        ),
     )
-    group = Group(name="g", storages=(make_storage("san-a"), make_storage("san-b")), disks=disks)
-    loads = {"101:scsi0": 0.0, "101:scsi1": 0.0}
-    split = seed_assignment(group)
+    debt = debt_of(one)
+    split = seed_assignment(one)
     reunited = dict(split) | {"101:scsi1": "san-a"}
-
-    def debt(objective: ObjectiveConfig, assignment: dict[str, str]) -> float:
-        return evaluate_assignment(group, assignment, loads, objective, 0.0, 0.0).affinity_debt
-
-    # Default: reuniting the VM is an improvement, as it should be.
     assert debt(DEFAULT_OBJECTIVE, split) == pytest.approx(1.0)
     assert debt(DEFAULT_OBJECTIVE, reunited) == pytest.approx(0.0)
+    assert debt(movable_only, split) == pytest.approx(0.0)  # unrewarded ...
+    assert debt(movable_only, reunited) == pytest.approx(0.0)  # ... either way
 
-    # Opted out: the same repair looks like a regression.
-    movable_only = dataclasses.replace(DEFAULT_OBJECTIVE, affinity_counts_pinned_disks=False)
-    assert debt(movable_only, split) == pytest.approx(0.0)
-    assert debt(movable_only, reunited) == pytest.approx(0.0)
+    # Two movable disks.
+    two = Group(
+        name="g",
+        storages=storages,
+        disks=(
+            make_disk("101:scsi0", 1.0, 0.0, "san-a", pinned="snapshots present (2)"),
+            make_disk("101:scsi1", 1.0, 0.0, "san-b"),
+            make_disk("101:scsi2", 1.0, 0.0, "san-b"),
+        ),
+    )
+    debt = debt_of(two)
+    start = seed_assignment(two)
+    half = dict(start) | {"101:scsi1": "san-a"}
+    whole = dict(half) | {"101:scsi2": "san-a"}
+    assert debt(movable_only, start) == pytest.approx(0.0)
+    assert debt(movable_only, half) == pytest.approx(1.0)  # charged for rejoining
+    assert debt(DEFAULT_OBJECTIVE, start) == pytest.approx(1.0)
+    assert debt(DEFAULT_OBJECTIVE, half) == pytest.approx(1.0)  # neutral
+    assert debt(DEFAULT_OBJECTIVE, whole) == pytest.approx(0.0)  # gain
 
 
 # -------------------------------------------------------------------------- swaps

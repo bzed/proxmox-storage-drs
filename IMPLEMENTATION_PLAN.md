@@ -910,12 +910,15 @@ bundle that found this, VM 717219 had two pinned disks together on one storage a
 `efidisk0` on another; the plan sent the `efidisk0` to a *third* storage, because with the pinned
 pair excluded the VM's counted footprint was one disk and every target scored identically.
 
-*Worse, the exclusion inverts the sign.* Take a VM with a pinned disk on `a` and one movable disk on
-`b`. Under `D^mov` its debt is 0 (one counted disk, one storage) and moving the movable disk to `a`
-— reuniting the VM — raises the debt to 0 as well, but *any* move it makes is equally weightless, so
-repair is unrewarded; and for a VM with two movable disks on `b`, moving one to `a` to rejoin the
-pinned disk raises the counted debt from 0 to 1. The tool charges `κ` for reassembling a VM. Under
-all of `D` the same repair correctly reduces the debt from 1 to 0.
+*Worse, the exclusion can invert the sign.* Take a VM with a pinned disk on `a`.
+
+- **One movable disk, on `b`.** Under `D^mov` the debt is 0 wherever that disk goes — one counted
+  disk, one storage — so moving it to `a` to reunite the VM scores exactly the same as leaving it or
+  sending it to a third storage: repair is *unrewarded*. Under all of `D` the debt is 1 until it
+  joins `a`, then 0.
+- **Two movable disks, both on `b`.** Under `D^mov` the debt is 0; moving one of them to `a` to rejoin
+  the pinned disk raises it to 1. The tool *charges* `κ` for taking a step towards reassembling the
+  VM. Under all of `D` that step is neutral (1 → 1), and moving both is a gain (1 → 0).
 
 The original worry does have a real residue: `κ` now charges a VM for a split it cannot fully undo,
 so a VM with pinned disks on two different storages carries a permanent debt floor. That floor is a
