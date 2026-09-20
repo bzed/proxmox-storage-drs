@@ -255,8 +255,10 @@ and in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**, and prefer an API token over a 
   run it from cron, on exactly one host -- */var/lib/pve-storage-drs/state.json* is node-local.)
 
 1
-: The run failed: configuration invalid, Prometheus or the Proxmox VE API unreachable, a migration
-  failed, or the solver produced nothing usable.
+: The run failed: configuration invalid, Prometheus or the Proxmox VE API unreachable or failing
+  mid-run (for any group, in the first plan or in a re-plan -- **apply** stops at once and visits no
+  later group), a migration failed, or the solver produced nothing usable. A run that bails out
+  because *execution.max_replans_per_run* was exhausted is not a failure and exits 0.
 
 2
 : Usage error on the command line.

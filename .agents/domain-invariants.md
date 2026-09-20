@@ -76,7 +76,7 @@ pool and could only ever confirm it. Under concurrency the in-flight moves' own 
 out of that sum (at most one volume per move: not in the launch-time listing, same VM, and the moved disk's
 listed size or its config `size=` — the two sizes `move_disk` allocates a target at) because each is already charged as a `z_m`; the match is narrow on purpose — keeping a volume
 too many only tightens the check, dropping one too many would weaken it. A live read that errors, or a
-listed volume with no size, refuses the move (`replan_needed`); it never falls back to `used` and never
+listed volume with no size, refuses the move and fails the run (an error, not a mismatch re-planning can cure); it never falls back to `used` and never
 passes on a partial figure. The moving disk's charge is its listed size, or the larger of listed and config
 `size=` only when the move changes storage type or converts qcow2 to raw (`_move_charge_bytes()`). `show-load` prints the provisioned figure and the pool's own alongside.
 

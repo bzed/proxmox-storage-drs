@@ -2407,7 +2407,9 @@ Before **every** move, re-read the live state rather than trusting the plan:
    own bytes (AJ-03). A listing entry without
    `size` counts at its `approximate-size`; one with neither makes the figure unknowable, and the move is
    refused. Any failure to read either endpoint refuses the move too: the check never passes on a partial
-   figure. Both refusals are `replan_needed`.
+   figure. Those two refusals are *errors*, not mismatches — see "Errors are not mismatches" below: they fail
+   the run rather than re-plan. A target that is simply too full for the move is the ordinary mismatch, and
+   is `replan_needed`.
 
    **No double counting under concurrency.** With `max_concurrent_migrations > 1` the invariant sums a
    charge `z_m` for every move of this run already in flight onto the same target (§8.1), so those
@@ -2458,9 +2460,29 @@ be allowed to loop:
    ordering. The gates may well conclude no further action is needed, which is a correct outcome.
 4. Cap re-plans at `execution.max_replans_per_run` (default 3). On exceeding it, stop and report —
    a cluster churning faster than the engine can plan is a condition for a human to look at, not to
-   iterate against.
+   iterate against. This is a *bail-out*, not a failure: the run exits `0`, the report and the
+   `run_summary` say why it stopped, and the next run starts from freshly observed state. External
+   changes — a VM moved, a snapshot or a new disk appearing, another tool filling the target — are exactly
+   what this loop is for, so a run is only given up on when they keep breaking every plan it makes.
 5. In `auto` mode, a re-plan inherits the remaining time window; if too little remains for the
    cheapest queued move, stop cleanly rather than starting one that cannot finish.
+
+**Errors are not mismatches.** A mismatch is the cluster differing from the plan, and a re-plan can cure
+it. An *error* is the tool failing to observe the cluster at all, and re-planning would only run into the
+same wall — a plan built from data that could not be read is not a better plan. Errors therefore **fail the
+whole run**: it stops at once (no later group is planned or executed), exits `1`, and reports what it could
+not read; moves already completed stay recorded in `state.json` and in the report. The errors are:
+
+- the PVE API failing while the executor re-reads the VM's config or the target storage's status or
+  content before a move, or the target listing a volume whose size cannot be established (steps 1 and 2
+  of the pre-move re-reads above) — the move outcome is `failed`, marked `abort_run`, never `replan_needed`;
+- a metrics (Prometheus) error while computing a group's load, whether in the first plan or in a re-plan
+  (re-plan protocol step 3) — a re-plan whose load model is unavailable is not "the gates concluded no action is needed";
+  it is a failed run.
+
+`plan` and `explain` are read-only and continue through the remaining groups so the report is as complete
+as possible, but they too exit `1` when any group's load could not be computed. Every other PVE API error
+raised during a run already propagates and exits `1`.
 
 ### 9.3 Locks, and why a completed move is not a finished move
 
@@ -3058,6 +3080,9 @@ engine underneath was still being built.
 | VM live-migrated between nodes mid-plan | Re-fetch node before each move (§9.2); mismatch → abort move, re-plan |
 | Disk has an existing snapshot chain | Pinned, load and bytes still counted, reported at WARN every run with the pinned load/bytes per VM (§3.7). `move_disk delete=1` is rejected by PVE on such volumes and would not carry the snapshots anyway |
 | Snapshot created between planning and execution | Re-checked immediately before every move (§9.2 step 5); the move is dropped and the plan re-planned |
+| Target storage filled, or a disk created or moved onto it, by another user or tool after planning | The live provisioned re-check (§9.2 step 2) refuses the move; the run re-plans from fresh state, up to `execution.max_replans_per_run`, then bails out (exit `0`, next run starts fresh) — §9.2 re-plan protocol |
+| PVE API error while re-reading the VM or the target before a move, or an unsized volume on the target | Not a mismatch: the run fails (exit `1`), no further group is visited — §9.2 "Errors are not mismatches" |
+| Prometheus error while computing a group's load, in the first plan or a re-plan | The run fails (exit `1`); `plan`/`explain` report every group they can and exit `1` — §9.2 "Errors are not mismatches" |
 | VM has `efidisk0` / `tpmstate0` | Ordinary movable disks on PVE 9.2 (verified on a live cluster). Below `migration.tiny_disk_bytes` they move free of `β`, `γ` and the payback test, so `κ` reunites them with their VM (§3.6, §5.4, §7.3). Do not assume `drive-mirror` semantics for `tpmstate0`; §8.1's both-storages invariant holds either way (§3.6) |
 | VM has disks on `ide`/`sata`/`virtio`, not just `scsi` | Full bus regex in §3.5; enumerating only `scsi*` silently mis-accounts capacity |
 | `unused{N}` volumes | Movable with `ℓ_d = 0`, so the solver relocates them only to repair a reserve violation — the intended policy |

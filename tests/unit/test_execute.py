@@ -633,14 +633,21 @@ def test_preflight_device_removed_from_config_triggers_replan() -> None:
     assert "no longer present" in result.outcomes[0].detail
 
 
-def test_preflight_vm_config_fetch_error_triggers_replan() -> None:
+def test_preflight_vm_config_fetch_error_fails_the_run() -> None:
+    """An API error re-reading the VM is not a mismatch re-planning can cure:
+    the move is refused as a `failed` `abort_run` outcome, and the whole run
+    ends (`ExecutionResult.aborted`), not re-plans."""
+
     def raise_error(**kwargs: object) -> dict[str, object]:
         raise PveApiError("connection refused")
 
-    client, _api = client_with({"nodes/pve01/qemu/101/config": raise_error})
+    client, api = client_with({"nodes/pve01/qemu/101/config": raise_error})
     result = run(client, default_group(), (make_move(),))
-    assert result.outcomes[0].status == "replan_needed"
-    assert "connection refused" in result.outcomes[0].detail
+    outcome = result.outcomes[0]
+    assert (outcome.status, outcome.always_stop, outcome.abort_run) == ("failed", True, True)
+    assert "connection refused" in outcome.detail
+    assert result.aborted and result.stopped_early
+    assert not any(c[1].endswith("/move_disk") for c in api.calls)
 
 
 def test_preflight_tagged_for_exclusion_since_planning_triggers_replan() -> None:
@@ -721,7 +728,10 @@ def test_live_transient_check_refuses_a_thin_pool_whose_used_is_small() -> None:
         }
     )
     result = run(client, default_group(), (make_move(),))
+    # A target that is merely too full is a mismatch re-planning can cure --
+    # unlike an unreadable one, it does not abort the run.
     assert result.outcomes[0].status == "replan_needed"
+    assert not result.outcomes[0].abort_run and not result.aborted
     assert "provisioned 7.90 TiB of 8.00 TiB" in result.outcomes[0].detail
     assert not any(c[1].endswith("/move_disk") for c in api.calls)
 
@@ -868,12 +878,14 @@ def test_live_transient_check_counts_approximate_size_when_size_is_missing() -> 
 def test_live_transient_check_refuses_when_a_listed_volume_has_no_size() -> None:
     """Fails safe: a volume with neither `size` nor `approximate-size` makes
     the provisioned total unknowable, so the move is refused (naming the
-    volume) rather than checked against a figure that silently omits it."""
+    volume) rather than checked against a figure that silently omits it. A
+    persistent unsized volume is not cured by re-planning, so it fails the run."""
     client, api = client_with(
         {"nodes/pve01/storage/san-b/content": [{"volid": "san-b:vm-900-disk-0", "vmid": 900}]}
     )
     result = run(client, default_group(), (make_move(),))
-    assert result.outcomes[0].status == "replan_needed"
+    assert result.outcomes[0].status == "failed"
+    assert result.outcomes[0].abort_run and result.aborted
     assert "san-b:vm-900-disk-0" in result.outcomes[0].detail
     assert "no size" in result.outcomes[0].detail
     assert not any(c[1].endswith("/move_disk") for c in api.calls)
@@ -881,16 +893,18 @@ def test_live_transient_check_refuses_when_a_listed_volume_has_no_size() -> None
 
 @pytest.mark.parametrize("failing", ["status", "content"])
 def test_live_transient_check_fails_safe_when_the_live_read_errors(failing: str) -> None:
-    """A PVE API error while re-reading the target refuses the move
-    (`replan_needed`) -- never lets it through unchecked, and never
-    crashes the run with the exception."""
+    """A PVE API error while re-reading the target refuses the move and fails
+    the run (`failed`, `abort_run`) -- never lets it through unchecked, never
+    crashes with the exception, and never re-plans against a target it cannot
+    read."""
 
     def raise_error(**kwargs: object) -> object:
         raise PveApiError("boom")
 
     client, api = client_with({f"nodes/pve01/storage/san-b/{failing}": raise_error})
     result = run(client, default_group(), (make_move(),))
-    assert result.outcomes[0].status == "replan_needed"
+    assert result.outcomes[0].status == "failed"
+    assert result.outcomes[0].abort_run and result.aborted
     assert "could not re-read 'san-b'" in result.outcomes[0].detail
     assert not any(c[1].endswith("/move_disk") for c in api.calls)
 
@@ -2162,6 +2176,22 @@ def test_concurrent_preflight_mismatch_replans_and_stops() -> None:
     assert "no longer found" in result.outcomes[0].detail
     assert result.stopped_early is True
     assert not any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
+
+
+def test_concurrent_target_read_error_fails_the_run_without_launching_anything() -> None:
+    """The concurrent executor's `_launch_decision()` treats an unreadable
+    target exactly like the sequential one: a `failed` `abort_run` outcome,
+    not `replan_needed`, and nothing is launched."""
+
+    def raise_error(**kwargs: object) -> object:
+        raise PveApiError("boom")
+
+    client, api = concurrent_client_with({"nodes/pve01/storage/san-c/status": raise_error})
+    execution = ExecutionConfig(max_concurrent_migrations=2)
+    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    assert result.outcomes[0].status == "failed"
+    assert result.outcomes[0].abort_run and result.aborted
+    assert not any(c[1].endswith("/move_disk") for c in api.calls)
 
 
 def test_concurrent_replan_mismatch_can_land_before_a_still_inflight_moves_outcome() -> None:

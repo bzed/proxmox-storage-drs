@@ -1059,11 +1059,20 @@ Integer `>= 0`, default `3`.
 
 A cap on how many times one run may abandon its current plan and re-plan
 from newly observed state — a mismatch between the plan and reality (a VM
-live-migrated mid-plan, a lock appeared) is normal, but a
+live-migrated mid-plan, a lock appeared, a disk created or moved by someone
+else, another tool filling the target) is normal, but a
 cluster churning faster than the engine can plan is a condition for a human,
 not for indefinite retrying. `auto` mode only — `confirm`/`dry-run` report a
 mismatch (`replan_needed`) and stop that group's own run for the operator to
 re-run by hand, rather than re-planning automatically.
+
+When the cap is reached the run bails out and exits `0`; the next run starts
+from freshly observed state. Set too low, ordinary churn ends runs early
+and moves wait for the next one; set too high, a cluster that keeps
+changing under the tool keeps it planning instead of waiting. `0` disables
+re-planning: the first mismatch ends the run. Only a *mismatch* re-plans —
+an error reading PVE or Prometheus fails the run outright and never counts
+against this cap (see `28-apply.md`, "When something cannot be read").
 
 ### `execution.abort_on_failure`
 

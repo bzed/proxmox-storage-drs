@@ -72,9 +72,13 @@ three things `dry-run`/`confirm` do not do at all
   ordering) from freshly observed cluster state and tries again, up to
   `execution.max_replans_per_run` times. The gate may well conclude no
   further action is needed on the re-plan — a normal, quiet outcome, not
-  a failure. Exceeding the cap does end the run, with a message naming
-  the setting: "a cluster churning faster than the engine can plan is a
-  condition for a human to look at, not to iterate against."
+  a failure. Exceeding the cap ends the run with a message naming the
+  setting, and the run still exits `0`: too many outside changes (VMs
+  moved, disks created, another tool filling a target) to plan against is
+  a reason to try again later, not a failure of the tool, and the next
+  run starts from freshly observed state. A re-plan that cannot be
+  computed because Prometheus cannot be read is different — see "When
+  something cannot be read" below.
   Cross-referencing the report's `outcomes[]` shows the whole story for
   a re-planned group: the mismatch that triggered each re-plan, and
   whatever the next attempt then did.
@@ -151,12 +155,15 @@ of the moving disk exist). That last re-check reads the target's volume
 listing afresh and counts every volume at its *provisioned* size, exactly
 as planning did — not the pool's own allocated figure, which on a
 thin-provisioned pool is much lower and would let a move through onto a
-pool that other provisioning has since filled. If the target cannot be read
-at that moment, or lists a volume with no size at all, the move is refused
-too rather than checked against a partial figure. Any of these stops the
-group's run with `replan_needed`. In `dry-run`/`confirm`, that is the end
-of it — the operator re-runs `apply` by hand once ready; see "Reading
-`auto` mode" below for what `auto` itself does about it automatically.
+pool that other provisioning has since filled. A mismatch — the VM moved,
+a snapshot appeared, the target no longer has room — stops the group's run
+with `replan_needed`. In `dry-run`/`confirm`, that is the end of it — the
+operator re-runs `apply` by hand once ready; see "Reading `auto` mode" below
+for what `auto` itself does about it automatically.
+
+If a check cannot be *made* at all — the PVE API errors while re-reading the
+VM or the target, or the target lists a volume with no size — the move is
+refused and the whole run fails; see "When something cannot be read".
 
 A VM config lock (`backup`, `snapshot`, `migrate`, or any other value —
 this set is never whitelisted, see `docs/internals/92-execute.md`) makes
@@ -180,6 +187,25 @@ With `execution.abort_on_failure: true` (the default), the whole run
 stops there; with it `false`, `apply` continues with the plan's remaining
 moves. The lock-timeout-`abort` case above is the one exception that
 always stops the run regardless of this setting.
+
+## When something cannot be read
+
+A mismatch between the plan and the cluster is something `apply` can plan
+around; a *failure to look* is not. These end the whole run at once — no
+later group is planned or executed — and `apply` exits `1`:
+
+- the PVE API errors while `apply` re-reads a VM or the target storage just
+  before a move (or the target lists a volume with no size);
+- Prometheus cannot be read while computing a group's load — in the first
+  plan, or in an `auto` re-plan. (A re-plan that cannot be computed is a
+  failed run, not "no further action needed".)
+
+Moves that already completed stay recorded in `state.json` and in the
+report, and the report says what could not be read. Planning around data it
+could not observe would be a worse plan, not a better one, so the tool does
+not try: fix the connection and run it again. `plan` and `explain`, which
+change nothing, still report every group they can — and also exit `1` when
+any group's load could not be computed.
 
 ## `state.json`: what a real run actually changes
 
@@ -238,7 +264,10 @@ with one addition per group: `"execution"`, either `null` (never reached
 — a `load_error`, `NO ACTION`, or a group the run never got to because an
 earlier one stopped it, e.g. an operator's `[q]uit`) or an object with
 `stopped_early`, `stop_reason` (`null` unless the run stopped for this
-group specifically) and `outcomes[]` — one entry per move actually
+group specifically), `aborted` (`true` when this group's execution hit
+one of the failures above and the run ended because of it),
+`replans_exhausted` (`true` when `execution.max_replans_per_run` ran out —
+the run bailed out and exits `0`) and `outcomes[]` — one entry per move actually
 attempted, each with `disk_key`, `from_storage`, `to_storage`, `status`
 (`would_move`/`moved`/`skipped`/`failed`/`draining`/`replan_needed`),
 `detail`, `upid` (`null` unless `move_disk` was actually issued for this
