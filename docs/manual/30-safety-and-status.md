@@ -31,7 +31,8 @@ These hold regardless of `execution.mode`, and are not configurable away
 `IMPLEMENTATION_PLAN.md` section 12 lays out thirteen phases, all thirteen
 now implemented, including phase 10 (`collect-testdata`, `--replay` and the
 real-cluster test corpus of section 16), phase 11 (the section 2.3
-logging policy — see [`35-logging.md`](35-logging.md)), phase 12 (the
+logging policy — see [`35-logging.md`](35-logging.md); the status file a monitoring check reads is
+[`36-monitoring.md`](36-monitoring.md)), phase 12 (the
 capacity-spread objective and gate, section 5.3 (C7)/5.4's `δ` term) and
 phase 13 (per-storage free-space requirements, section 5.3.1). Dogfooding against a
 production cluster continues, and `REVIEW.md` tracks findings from that to

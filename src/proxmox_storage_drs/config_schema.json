@@ -298,6 +298,14 @@
         "max_series_points": { "type": "integer", "exclusiveMinimum": 0 },
         "capture_range": { "type": "string", "minLength": 1 }
       }
+    },
+    "monitoring": {
+      "type": "object",
+      "$comment": "Section 2.4. status_file is the path apply writes its check_statusfile-format status report to; null (the default) writes none.",
+      "additionalProperties": false,
+      "properties": {
+        "status_file": { "type": ["string", "null"], "minLength": 1 }
+      }
     }
   }
 }

@@ -189,6 +189,9 @@ class ExecutionResult:
     stop_reason: str | None
     abort_reason: str | None = None
     replans_exhausted: bool = False
+    # How many times the re-plan loop re-planned this group; only ever
+    # non-zero from `cli._run_auto_group()`. Reported in the status file.
+    replans: int = 0
 
     @property
     def aborted(self) -> bool:
