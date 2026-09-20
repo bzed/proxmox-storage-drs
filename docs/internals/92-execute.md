@@ -87,6 +87,20 @@ Two properties keep the listing figure safe to trust:
   place the `size` → `approximate-size` order lives, shared by the planner's
   disk and foreign-volume sums and this check.
 
+**`Z_b` is a planning-time figure, on purpose.** Of the three inputs the
+formula takes from the world, `used_b` and `C_b` are read fresh; `Z_b`, the
+largest managed disk resident on the target, is not. It comes from
+`execute_plan()`'s `largest_by_storage`, which starts as the model's
+`largest_disk_bytes()` and is raised only by this run's own completed moves.
+The listing cannot replace it: `Z_b` is defined over *managed* disks
+(section 5.3's (C4)), and a listing entry does not say whether a volume
+belongs to a managed disk. The residual: a managed disk that something else
+lands on the target between planning and the move appears in `used_b` at its
+full provisioned size, but does not raise `Z_b`, so only the reserve
+multiplier's growth on the new largest disk, `f_b·(Z_live − Z_model)`, goes
+uncounted — never the disk's own bytes. That is narrower than the staleness
+the check had before it read the listing, and it is a bound, not a bug.
+
 **No double counting under concurrency.** With
 `execution.max_concurrent_migrations` above `1` the invariant carries one
 charge `z_m` per move of this run already in flight onto the same target,

@@ -2398,7 +2398,13 @@ Before **every** move, re-read the live state rather than trusting the plan:
    provisioned terms* since planning. The live `used_b` is instead
    `Σ size(vol) : vol ∈ GET /nodes/{node}/storage/{target}/content` — the same quantity
    `schedule.transient_invariant_ok()` sums from the model (`Σ z_d + Uˢᵉˣᵗ`), read fresh — while `C_b`
-   still comes from `/status`'s `total`, since the LUN may have been resized. A listing entry without
+   still comes from `/status`'s `total`, since the LUN may have been resized. The third model input,
+   `Z_b`, is **not** re-read: it stays the planning-time largest managed disk on the target, raised only by
+   this run's own completed moves, because a listing entry cannot say whether a volume belongs to a managed
+   disk (§5.3 (C4) defines `Z_b` over managed disks). A managed disk that something else lands on the target
+   after planning is therefore counted in full in `used_b` but does not raise `Z_b`, so only the reserve
+   multiplier's growth on the new largest disk, `f_b·(Z_live − Z_model)`, goes uncounted — never the disk's
+   own bytes (AJ-03). A listing entry without
    `size` counts at its `approximate-size`; one with neither makes the figure unknowable, and the move is
    refused. Any failure to read either endpoint refuses the move too: the check never passes on a partial
    figure. Both refusals are `replan_needed`.
