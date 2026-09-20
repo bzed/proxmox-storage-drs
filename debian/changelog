@@ -1,3 +1,118 @@
+pve-storage-drs (0.1.7) trixie; urgency=medium
+
+  * free space (IMPLEMENTATION_PLAN.md section 5.3.1, phase 13): the global
+    `snapshot_reserve.min_free_bytes` floor is replaced by a per-storage
+    free-space requirement, `free_space.soft` (the plan endpoint) and
+    `free_space.hard` (the floor every intermediate state must clear during
+    a move; null means `hard = soft`, so no dip). Each is an absolute size or
+    a percentage of the storage's own capacity, settable globally, per storage
+    or per `/regex/` pattern; the larger of it and `factor x largest disk`
+    always wins, and neither is ever traded for balance. A storage below its
+    requirement is repaired like a snapshot-reserve violation: the section 6
+    gate fires, and section 7.3 exempts a plan that lowers the total shortfall
+    from the payback test (`repair_exempt`, plus per-move revert-test markers;
+    `plan`/`apply --json` gained `reserve_shortfall_bytes_before/_after`).
+    `min_free_bytes` still loads, as deprecated syntax folded into
+    `free_space.soft` per storage with a warning; a config without either
+    behaves exactly as before. `verify-storages` prints the resolved soft/hard
+    pair and the level each came from. (C2) format eligibility (block- versus
+    file-backed storage) is now enforced by both MILP backends and the
+    heuristic through one shared function, and plain non-thin LVM accepts
+    qcow2 as well as raw, matching PVE 9.2's snapshots on plain LVM. Review
+    passes 20-26 (REVIEW.md AC-01..AC-13, AD-01..AD-06, AE-01..AE-07,
+    AF-01..AF-05, AG-01..AG-08, AH-01..AH-08, AI-01) are resolved; AH-01
+    was a real bug (a global `hard: null` dropped the deprecated floor from
+    the transient charge), AH-06 is refuted as a remedy and AF-06 is recorded
+    only. A real-cluster bundle, `bzed-dev-cluster-free-space`, joins the
+    regression corpus, whose invariant check now also asserts a plan never
+    raises the reserve shortfall.
+  * payback/objective: VM affinity is valued (REVIEW.md AB-01..AB-05,
+    AB-07). Section 7.2's benefit gains `kappa x dA`, so a plan whose whole
+    value is reuniting split VMs is no longer structurally worth zero; the
+    objective's `kappa` term is weighted per VM by its I/O (`w_v`, section
+    5.4); and disks below the new `migration.tiny_disk_bytes` (default
+    64 MiB) move free of the move-count and byte-volume terms and the payback
+    test so they can follow their VM, while every hard per-move rule still
+    applies. New acceptance fixture `affinity-repair` (section 14.7). AB-06
+    (the 0.1.6 entry crediting 0.1.4 with the capacity-spread term, which
+    shipped in 0.1.5) is acknowledged; a released entry is not rewritten.
+  * BEHAVIOUR CHANGE: `objective.affinity_counts_pinned_disks` now defaults
+    to true. An immovable disk anchors its VM's co-location instead of being
+    ignored, which reveals reachable repairs the old default hid and stops the
+    tool charging `kappa` for reuniting a VM with its own pinned disk. Set it
+    to false explicitly to keep the previous behaviour.
+  * payback: a negative `saferemove_throughput` is a rate, not a negative
+    duration. PVE hands the value to `cstream -t`, where the sign only selects
+    the enforcement mode (a negative number is a per-syscall ceiling), so
+    `-1073741824` is 1 GiB/s. The tool divided by the signed value: a move's
+    duration collapsed towards zero, the section 7.3 per-move duration limit
+    could not fire for a disk of any size, and `verify-storages` reported
+    negative wipe times and never warned. The magnitude is now taken in the one
+    place the formula lives; `verify-storages --json` still echoes PVE's
+    signed value verbatim.
+  * execute: closed the `move_disk` task-lock race after a `saferemove` wipe.
+    A move is not "moved" before a fourth condition, `min_wipe_seconds`
+    (computed from the storage's `saferemove_throughput` and the disk's size),
+    has elapsed; for the residual case the new
+    `execution.locks.task_retry_limit`/`task_retry_backoff` retry a task that
+    fails with PVE's exact "can't lock file ... got timeout" message, in both
+    the sequential and the concurrent executor.
+  * execute/cli: PVE API and metrics errors now fail the run instead of being
+    treated as plan/cluster mismatches. An API error re-reading the VM or the
+    target storage before a move, or an unsized volume on the target, is a
+    `failed` outcome that ends the whole run with exit 1 (no later group is
+    visited); a Prometheus error fails `apply` at the first group and makes
+    `plan`/`explain` exit 1 while still reporting every group they can. A
+    Prometheus error during an `auto` re-plan used to be reported as "no
+    further action needed" and ended the run with exit 0; it now fails the
+    run. Only genuine mismatches (a VM moved, a snapshot appeared, another tool
+    filled the target) re-plan, bounded by `execution.max_replans_per_run`;
+    exhausting it is a bail-out that exits 0 and the next run starts fresh.
+    `apply --json` gained `aborted` and `replans_exhausted` per group.
+  * monitoring: new `monitoring.status_file` (default null: write nothing).
+    When set, `apply` rewrites it after every run that produced a result --
+    dry runs and no-op runs included -- in the format of the `check_statusfile`
+    plugin from monitoring-plugins-contrib: line 1 `OK`/`WARNING`/`CRITICAL`,
+    a summary with perfdata, then detail lines, written atomically with mode
+    0644 and verified against the real plugin. `CRITICAL` for a non-zero exit
+    or a crash; `WARNING` for a bail-out after too many re-plans, an orphaned
+    volume, a source still draining, or a group still short of its reserve
+    after the plan. Not written by `plan`/`explain`/`show-load`/`--replay` or
+    by a run that exited because another instance held the lock; a write
+    failure is logged (`status_file_write_failed`) and never changes the exit
+    code. New manual page 36-monitoring.md.
+  * over-provisioning is never considered: every disk counts at its
+    provisioned size on thin storage (Ceph RBD, LVM-thin, ZFS) exactly as on
+    thick, never at its allocated size, and a pool's own `used` is display-only.
+    `migration.assume_thick_provisioning: false` is now refused at startup
+    (`true` or absent is unchanged). The executor's live pre-move check, which
+    read PVE's allocated `used` and was therefore weaker than the plan on a thin
+    pool, now sums the provisioned size of the target's live content listing,
+    leaving out the in-flight mirror targets already charged as moves and
+    charging `max(listed, config size=)` for a move between storage types.
+    `show-load`/`explain` print `provisioned X/C` (with the pool's allocated
+    figure when it differs) and `--json` gains `provisioned_used_bytes`.
+  * forecast/metrics: the section 10.2 backtest gate fetched only the
+    forecaster's own minimum history, so it could never run and silently fell
+    back to the quantile model; it now fetches twice the lookback when a model
+    is actually backtested. PromQL durations are rendered fixed-point (a 14-day
+    lookback was sent as `1.2096e+06s`, which Prometheus rejects), and the live
+    plan/apply range fetch is chunked into day-sized requests like
+    `collect-testdata`, so a wide range no longer exceeds a backend's
+    max-points-per-series limit.
+  * documentation: every shipped artefact must now stand without
+    IMPLEMENTATION_PLAN.md (AGENTS.md section 8.0) and the manual, internals
+    and manpage were swept for it; `.agents/domain-invariants.md` states the
+    three free-space floors and their precedence; the manual, manpage, example
+    configuration and internals moved with every change above, and the plan
+    and internals PDFs were regenerated. REVIEW.md passes 27 (AJ-01..AJ-03:
+    AJ-03 fixed, AJ-02 accepted, AJ-01 refuted -- all the commits it named were
+    made on branches) is resolved.
+  * tests: fixed flaky vmid substring checks in the cross-metric and coverage
+    scrub tests; 1067 tests, 96.4% coverage.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Sun, 20 Sep 2026 22:56:26 +0200
+
 pve-storage-drs (0.1.6) trixie; urgency=medium
 
   * optimize: fixed a real solver-correctness bug in the CP-SAT backend's
