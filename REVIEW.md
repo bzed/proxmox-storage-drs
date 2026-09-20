@@ -7304,6 +7304,213 @@ other-sized volume still is) and
 
 ---
 
+## 53. Twenty-seventh-pass review — the changes since the AB review as a whole
+
+Reviewed everything after the nineteenth-pass merge `8734554` — 27 commits at HEAD (`4617a86`):
+five main-line commits between the AB merge and the free-space branch (`37c30b8` the negative-
+`saferemove_throughput` rate fix, `a73adeb` the `affinity_counts_pinned_disks` default flip,
+`8cec34e` the zero-cost-branch documentation, `6eac7e7`/`08fbcdb` the AGENTS §8.0 policy and its
+sweep), the free-space plan redesign and its AC/AD/AE/AF/AG fix rounds (§§39-48), phase 13's
+implementation with the AH/AI fixes and the corpus work (§§49-52), the `fix/live-recheck-provisioned`
+branch, `1b7f1d8`'s affinity sign-inversion correction, and `3e11de7`'s test-flake fix. The pass was
+tasked with the range *as a whole*: verify that the review chain in between — passes 20 through 26 —
+really does cover the new implementation plan, and review whatever it does not.
+
+The chain itself verifies: every pass from the twentieth to the twenty-sixth has its findings recorded
+and resolved, and the load-bearing resolutions hold at HEAD under independent re-derivation (53.1).
+What the chain does not cover is the window between the AB merge and the twentieth pass: five
+substantive commits landed straight on `main` with no branch and no review pass, and §39's premise
+that `9b44ba9` was "the first new plan material since the nineteenth pass" is false against three of
+them (AJ-01). Two smaller findings: §52.2's resolution is self-recorded with no later verification
+pass, against this file's own §46/§48.1 convention (AJ-02), and the live re-check's `Z_b` term kept
+the planning-time staleness §52.2 closed for `used` but not for the reserve multiplier's largest disk
+(AJ-03).
+
+### 53.1 Verification run
+
+- `make check` at HEAD (`4617a86`): green end to end — fmt-check, lint, typecheck, **1027 passed,
+  1 warning** (the same benign statsmodels `ConvergenceWarning` noted since the eleventh pass),
+  **96.33% line coverage**, `generate_expected.py --check` OK, `validate_corpus.py --check` OK,
+  docs-check OK.
+- **AH-01/AH-07's fix holds at HEAD**: `topology._resolve_free_space()` settles a null global `hard`
+  *after* the fold, from the folded `soft_s` (`topology.py:359-364`), with `hard ≤ soft` and
+  `soft < C_s` validated against the written values before it (`:332-343`) and the oversized
+  deprecated floor warning offering "lowered or removed" only (`:347-353`).
+- **AG-04's sequencing holds**: `cli.py`'s plan builder takes the trigger's two `Σ r_s` sums over
+  `executed_assignment()` — `final_assignment` with every `exceeds_max_duration`/`saturation_deferred`
+  move held back at its current storage (`cli.py:2431-2444`) — and the execution gate filters exactly
+  the same set (`set(rejected_moves) | set(deferred_moves)`, `cli.py:2741`), so the exemption's move
+  set is precisely what runs.
+- **The exemption surface is complete and the flag is demoted as specified**: `repair_exempt` plus
+  `reserve_shortfall_bytes_before`/`_after` in `--json` and the `overridden:` note in human output;
+  `resolves_reserve_violation` survives as a §8.2 priority-1 scheduling signal only, never read by
+  payback; the revert-test markers are computed on the executed assignment; `payback.py`'s docstring
+  carries the strict-subset proof; (C2) format eligibility is the one `storage_accepts_format()`
+  shared by both MILP backends and the heuristic.
+- **The three sweep greps re-run at HEAD**: `git grep -l resolves_reserve_violation` → 9 files,
+  `evaluate_plan_payback` → 10, `min_free_bytes` → 21 — all consistent with the *implemented* state
+  (the scalar and the flag are gone from the swept production modules, the corpus expected files
+  record the new fields, the new corpus bundle carries the resolved pair). The phase-13 row's
+  recorded lists were pre-implementation snapshots; the divergence is the implementation having
+  happened, not a missed file.
+- **`fc-tier1`'s payback numbers are byte-stable across the whole range**: `total_cost_load_seconds:
+  26214.4`, `benefit_load_seconds: 192529137.63`, `ratio: 7344.4`, `accepted: true` — the only
+  additions are `repair_exempt: true` and the `repair_markers`, exactly as §50/AH-02 record.
+- **The `bzed-dev-cluster-free-space` bundle matches §52's account**: both narrow-sweep variants
+  take the group from 2 042 971 193 956 to 585 092 814 762 bytes of shortfall (≈1903 → 545 GiB),
+  `check_invariants()`' check 4 passes, and the bundle's `config.yaml` carries the resolved
+  per-storage pair with `hard < soft` — the configuration AI-01's wording now names.
+- **The live-recheck branch read in full against §52.2's record, and it matches**: provisioned
+  `used_b` summed from the target's live content listing (`content_item_size()`, the one
+  size→approximate-size order), `total` from `/status`, no `max(provisioned, used)` floor, the
+  mirror-target exclusion deliberately narrow (`_is_mirror_target`: not in the launch-time listing,
+  same VM, one of the two sizes `move_disk` allocates at, one volume per move), `_move_charge_bytes()`
+  charging `max(listed, config size=)` only cross-type or qcow2→raw, unsized volumes and API errors
+  refusing via `replan_needed`, and both the sequential and concurrent launch paths updated with the
+  baseline listing recorded on `_InflightMove`.
+- Version hygiene: 0.1.6 agrees across `debian/changelog`, `pyproject.toml` and `__init__.py`, with
+  the annotated `debian/0.1.6` tag in place.
+- `3e11de7`'s flake fix is correct: `\b777\b` does not match `node-a5ccb777` (b→7 is word-character
+  to word-character, so no boundary) while still matching `"777"` and `777:scsi0` — the word-boundary
+  form detects the leak the substring form false-failed on.
+
+### 53.2 Findings summary
+
+| ID | Severity | Location | Summary |
+|----|----------|----------|---------|
+| AJ-01 | Medium | git history `8734554..08fbcdb`, §39's premise | Five substantive commits landed straight on `main` within hours of the AB merge — `37c30b8` (17 files: a payback correctness fix, plan §3.5/§7.1/§9.3, docs, tests), `a73adeb` (19 files: a shipped **default flip** of `affinity_counts_pinned_disks`, plan §5.3 (C3), fixtures, oracle), `8cec34e` (plan §7.3 +29 lines), `6eac7e7`/`08fbcdb` (the AGENTS §8.0 policy and its 23-file sweep) — no branch, no review pass, against AGENTS §4's branch-first rule *as re-hardened by `e4240fa` two ranges earlier*; and §39 opens by calling `9b44ba9` "the first new plan material since the nineteenth pass", which three of the five predate and contradict. AA-07's "acknowledged, no action" precedent explicitly rested on the rule postdating its range — not true here. The gap was real, not theoretical: `1b7f1d8` (a day later, on a proper branch) had to correct an error in `a73adeb`'s own §3.6 paragraph and anchor test — the exact catch a pass exists for |
+| AJ-02 | Low | REVIEW.md §52.1/§52.2 | The live-recheck range's resolution record is self-authored with no subsequent verification pass — the convention §§46 and §48.1 established ("a later pass should re-check it the way §45 re-checked §44") after two same-person fix rounds, and the largest `execute.py` change since phase 7 (287 lines in the execution path, operator-directed design decisions in §52.2's bullet list) is the one range that did not get one. This pass's verification run (53.1) discharges it for record-versus-code consistency; the structural point stands: a fix series that ends a review series leaves its self-recorded resolutions unverified until someone happens to review the range wholesale |
+| AJ-03 | Info | `execute.py` `_live_transient_check()`, plan §9.2 step 2 | The live re-check re-reads `used` and `total` fresh but keeps the *model's* `Z_b` for the `f·max(Z_b, z_m)` term (`largest_by_storage`, built once from `largest_disk_bytes(group.disks, …)` at execution start and updated only by this run's own completed moves). A managed disk provisioned onto the target between planning and execution by anything else is counted in full in the live provisioned sum — but not in the reserve multiplier's largest-disk term, so only `f·(Z_true − Z_model)` of the charge is missed. Strictly narrower than the staleness the same check had before §52.2 (which read a planning-irrelevant `used` outright), and undocumented as a residual: §9.2 step 2 and `92-execute.md` say the usage and capacity are re-read live, never that `Z_b` is a model snapshot |
+
+### 53.3 AJ-01 — five substantive commits straight to `main`, and §39's premise papers over them
+
+**Severity:** Medium
+**Where:** git history `8734554..08fbcdb` (linear, no merges); REVIEW.md §39's opening sentence.
+
+The graph is unambiguous: the first-parent chain from the AB merge (`8734554`, Sep 18 01:49) to the
+free-space branch point (`08fbcdb`, Sep 18 15:53) is five direct commits — 56 minutes to 14 hours
+after the merge — each substantive by any reading of §4's carve-out (which admits only single-line,
+single-file, zero-behaviour corrections):
+
+- `37c30b8` fixes a real correctness bug (a negative `saferemove_throughput` collapsed
+  `duration_d` toward zero — a hypothetical 100 TiB move passed a 6 h limit) and changes plan
+  §3.5/§7.1/§9.3, three docs pages, `payback.py`, `topology.py` and three test modules.
+- `a73adeb` flips a shipped default (`affinity_counts_pinned_disks: false → true`) — a
+  user-visible behaviour change on any config that does not pin the flag — and carries a 50-line
+  plan change (§5.3 (C3)), fixture re-pinning, an oracle change and four test modules.
+- `8cec34e` adds §7.3's zero-cost-branch material to the plan (29 lines) plus a docstring and tests.
+- `6eac7e7`/`08fbcdb` write the AGENTS §8.0 self-containment policy and sweep 23 files for it.
+
+None is reviewed by any pass: §37's range ends at the AB fixes, §39 reviews `9b44ba9` as "the first
+new plan material since the nineteenth pass" — false, as three of the five changed the plan first —
+and §§41-52 review the fix rounds and the phase 13 branch that follow. The false premise is the
+T-03/V-01 family (a confident claim about coverage that is not true), and it matters beyond
+bookkeeping: `a73adeb`'s own §3.6 paragraph blurred the two cases of the sign inversion its commit
+message described, and `1b7f1d8` — landed the next day, on a branch, with a corrected paragraph and
+a test asserting the 0→1 charge the old test only described — is precisely the catch a review pass
+exists to make. The commits themselves are individually well-tested, self-documented and
+`make check`-green at HEAD; the defect is that nothing in this file's record examines them the way
+everything around them is examined.
+
+AA-07's resolution cannot be cited here: it acknowledged its eight main-direct commits because "the
+branch-first rule (`e4240fa`) postdates every commit in the range it is being judged against". These
+five *follow* `e4240fa`, follow AA-07's own recording of the pattern, and follow the nineteenth
+pass's note that the rule "is being followed, not just written down".
+
+**Recommendation.** History is not rewritten; the record is extended instead — this section is that
+extension, and §39's premise is corrected by it rather than by editing §39. Two forward actions:
+(a) a short retrospective pass over the five commits (they are small; the one defect any reviewer
+found in them, `1b7f1d8`'s target, was already self-corrected, so this is verification, not
+discovery); and (b) the operator decides, once, whether AGENTS §4's branch-first rule binds
+dogfooding fixes committed by hand — AA-07 deferred to the operator's direction, and this range
+shows the deferral being relied on again, which is a policy question the file should answer either
+way rather than leave to repetition.
+
+### 53.4 AJ-02 — §52.2's resolution had no verification pass until this one
+
+**Severity:** Low
+**Where:** REVIEW.md §52.1, §52.2.
+
+This file's own convention, set after §46 and §48's same-person fix rounds, is that a self-authored
+resolution record is explicitly flagged for re-checking ("a later pass should re-check it the way
+§45 re-checked §44"; §48.1 repeats the caveat and names three things to verify). §52 — the AI-01
+resolution, the over-provisioning rule (§52.1) and the live-recheck redesign (§52.2) — carries no
+such flag and got no such pass before the series went quiet: it is the last word on the largest
+`execute.py` change since phase 7, one that embeds operator-directed design decisions (no
+`max(provisioned, used)` floor; the strict unsized-volume refusal; the mirror-target identification
+rule) that had never existed before and had exactly one author's reading behind them.
+
+The substance has now been checked: 53.1 reads the branch's full diff against §52.2's record and
+finds them in agreement, decision by decision. The residual is structural, not material — every fix
+series that ends a review series leaves this shape unless the last resolution explicitly says "not
+yet independently verified", and both §46 and §48.1 demonstrate the flag costs one sentence.
+**Recommendation:** carry the §48.1-style caveat on any self-authored resolution that closes a
+series, naming what a later pass should re-check; this pass discharges it for §52.1/§52.2.
+
+### 53.5 AJ-03 — the live re-check's `Z_b` is a planning-time snapshot (Info)
+
+**Severity:** Info
+**Where:** `src/proxmox_storage_drs/execute.py` (`_live_transient_check`, `largest_by_storage`),
+`IMPLEMENTATION_PLAN.md` §9.2 step 2, `docs/internals/92-execute.md`.
+
+§52.2 made the live check's `used` the provisioned sum of the target's current listing and its
+`total` a fresh `/status` read; the third model input, `existing_largest_bytes`, is still
+`largest_disk_bytes(group.disks, s.id)` — the planning-time model's largest *managed* disk, updated
+within the run only by `_post_move_bookkeeping()` as this run's own moves complete. A managed disk
+landed on the target by anything else between planning and execution appears in the live sum at its
+full provisioned size, so the charge is under-counted only by `f·(Z_live − Z_model)` — the
+reserve-multiplier growth on the new largest — never by the disk's own bytes. The direction is
+marginally weaker than a fully-fresh derivation and strictly stronger than the pre-§52.2 check
+(which was stale in `used` as well); recomputing `Z` from the listing is not actually available
+(the listing cannot distinguish managed disks from foreign volumes, and (C4)'s `Z_s` is defined over
+managed disks). What is missing is the sentence: §9.2 step 2 and `92-execute.md` describe the two
+quantities that are re-read live and say nothing about the third being a model snapshot.
+**Recommendation:** one clause in each of the two documents, naming `Z_b` as planning-time within
+the live check and why (the listing cannot identify managed disks), so the residual is a documented
+bound rather than an archaeology find. No code change.
+
+### 53.6 What this pass confirms
+
+- **The review chain in between does handle the new implementation plan, end to end.** Passes 20-26
+  cover the redesign (§39), each fix round (§§41/43/45), the accumulated branch (§47), the
+  implementation (§49), its fixes (§51) and the final wording (§52) — every finding has a recorded
+  resolution, and the load-bearing ones re-verify at HEAD: the null-hard-after-fold resolver, the
+  validate-as-written-then-fold order, the per-storage fold, the outcome trigger with its AG-04 move
+  set, the revert-test markers, the (C2) one-function rule, the exemption's JSON surface, and the
+  corpus invariant's per-backend justification.
+- **The one behavioural defect of the whole range (AH-01) is fixed and pinned**: the fix is in the
+  resolver, two of its four regression tests provably failed on the pre-fix code, and the end-to-end
+  replay coverage the finding asked for exists (`test_replay.py`'s two fold-path tests) without
+  touching captured bundles — AH-06's refutation was the right call and holds.
+- **The free-space corpus bundle is what §52 says it is**: a real cluster in the `hard < soft`
+  configuration, reduced to the proven stage-1 minimum by both swept backends, green under every
+  corpus check — the first committed evidence for the mandate on live data.
+- **`fc-tier1` survived the entire range byte-for-byte on every payback number** — the outcome
+  trigger, the markers and the exemption surfaces were added around its recorded values without
+  disturbing them, which is what §§40/44/48 promised and what a fixture is for.
+- **The live-recheck branch is the range's best engineering**: it closes a real weakness (the
+  executor's check was weaker than the plan's on thin pools) in the conservative direction
+  everywhere a choice existed — provisioned not allocated, refuse not skip, exclude-one-volume not
+  exclude-by-heuristic, `replan_needed` not abort — and its tests cover the double-counting corners
+  the design's own docstrings worry about.
+
+### 53.7 Assessment
+
+The range as a whole is strong: a specification reworked through five review rounds until it was
+internally consistent, implemented faithfully, corrected on the one High finding with regression
+tests that provably bite, extended with the over-provisioning rule and a live re-check that make
+plan and executor agree on what a byte is, and documented in the same commits throughout. The
+review series did its job on everything it looked at. The three findings here are about what it did
+not look at: a five-commit window on `main` that no pass covers while §39's premise asserts the
+window was empty (AJ-01 — the only one that matters, and it matters as process and as a false
+coverage claim, not as shipped behaviour), a self-verified resolution at the end of the series
+(AJ-02, now discharged by this pass), and one undocumented residual in the newest code (AJ-03, one
+sentence). Nothing blocks the tree; `make check` is green and every prior finding's fix holds.
+Close AJ-01 by recording the operator's decision on hand-committed dogfooding fixes and, if the
+operator wants the record complete, giving the five commits their retrospective hour.
+
+---
+
 ## Appendix A — Independent verification of the §14 worked example
 
 All values re-derived by hand from §14.1's input.
