@@ -346,6 +346,18 @@ built code as well as in the specification. Two are fixed wider than the finding
 a second instance of the same stale attribution one paragraph further down, and AG-04's fix
 covers the saturation deferral alongside the duration rejection.
 
+A **twenty-seventh pass** (section 53) reviews the 27 commits since the nineteenth-pass merge as
+a whole and verifies that passes 20-26 really cover them: they do, and every load-bearing
+resolution re-verifies at HEAD (`make check` green, 1027 passed, 96.33% coverage). Three findings
+(AJ-01..AJ-03): the headline (Medium) says five substantive commits landed straight on `main`
+with no branch and no review; one Low says the live re-check's resolution (§52) was self-recorded
+with no verification pass; one Info says the live re-check's `Z_b` is a planning-time snapshot no
+document states. **Section 54** records the resolution: AJ-03 is fixed (one clause each in plan
+§9.2 step 2 and `92-execute.md`), AJ-02 is accepted and discharged by §53.1 itself, and AJ-01's
+central claim is **refuted** — the reflog shows all five commits were made on branches, and the
+graph only looked linear because two of them were merged as fast-forwards, which is a smaller,
+real deviation from AGENTS §4's `--no-ff` rule and is recorded as such.
+
 ---
 
 ## 0. Overall assessment
@@ -7508,6 +7520,119 @@ coverage claim, not as shipped behaviour), a self-verified resolution at the end
 sentence). Nothing blocks the tree; `make check` is green and every prior finding's fix holds.
 Close AJ-01 by recording the operator's decision on hand-committed dogfooding fixes and, if the
 operator wants the record complete, giving the five commits their retrospective hour.
+
+---
+
+## 54. Resolution of twenty-seventh-pass findings (AJ-01..AJ-03)
+
+One fixed, one accepted and already discharged, one **refuted in its central claim** with a smaller
+residual accepted. Each was checked against the repository before anything was written; AJ-01 was
+checked against the reflog, which is where the disagreement is.
+
+### 54.1 AJ-01 — refuted as stated; three residuals accepted
+
+**What the finding says.** Five substantive commits (`37c30b8`, `a73adeb`, `8cec34e`, `6eac7e7`,
+`08fbcdb`) "landed straight on `main`" with "no branch", the first-parent chain from `8734554` to
+`08fbcdb` being "five direct commits".
+
+**What the repository says.**
+
+- The first-parent chain `8734554..08fbcdb` is **two** commits (`git log --first-parent
+  8734554..08fbcdb`), not five. `37c30b8`, `a73adeb` and `8cec34e` are not on it: their parent chain
+  runs `8734554 → 37c30b8 → a73adeb → 8cec34e`, a side line that `main` reaches only through
+  `0351be6`, the merge commit whose subject is `Merge branch 'fix/negative-saferemove-throughput'`
+  and whose sibling `8660dec` is `Merge branch 'main' into fix/negative-saferemove-throughput` — a
+  branch that had to exist to be merged into.
+- The reflog says the same, per commit. `37c30b8`/`a73adeb`/`8cec34e` were committed on
+  `fix/negative-saferemove-throughput`, created from `8734554` at 02:39 on 18 September (`checkout:
+  moving from main to fix/negative-saferemove-throughput`) — six minutes before the first of them —
+  and merged `--no-ff` on 19 September. `6eac7e7`/`08fbcdb` were committed on
+  `docs/self-contained-documentation`, created at 13:13, and merged into `main` at 15:53:29 as
+  `merge docs/self-contained-documentation: Fast-forward`.
+- So AGENTS §4's branch-first rule was followed for **all five**, one day after the review it is
+  said to have been ignored in. `1b7f1d8`, which the finding presents as a later, separate branch
+  that repaired `a73adeb`, is on the *same* branch as `a73adeb`: the fix landed where the error
+  was, before the merge, which is the branch workflow working as intended.
+
+**Why the finding got it wrong, and what is right in it.**
+
+1. **A fast-forward merge hides a branch, and AGENTS §4 says not to use one.** "Merge with `--no-ff`
+   so the branch's shape survives in history" exists so that exactly this inference cannot be
+   made from the graph. `docs/self-contained-documentation` was merged fast-forward, so `6eac7e7` and
+   `08fbcdb` look like direct commits on `main` — which is what the reviewer concluded. That is a
+   real deviation, two commits wide, both documentation-only; it is the whole of what is true in
+   "no branch" and it is the cause of the misreading. **Accepted; not fixable in place** (history is
+   not rewritten). The rule is already written down (AGENTS §4, `.agents/git-workflow.md`); the
+   record here is the correction.
+2. **No review pass covered the five.** True, and accepted as the finding's real substance. The
+   twentieth pass's header summary (the paragraph near the top of this file; it is not in §39
+   itself, which the finding cites) calls `9b44ba9` "the first new plan material since the
+   nineteenth pass". That is inaccurate: `37c30b8`, `a73adeb` and `8cec34e` changed plan §3.5/§7.1/
+   §9.3, §5.3 (C3) and §7.3 before it. This section is the correction; that sentence is a
+   reviewer's text and is left as written.
+3. **Whether the branch-first rule binds a human committing dogfooding fixes by hand** — the
+   finding's second forward action, framed as an open policy question deferred to the operator — is
+   answered by AGENTS.md's own first paragraph, which says the file configures "any agent (Claude
+   Code, Codex, Aider, a human)", and by §4, which says "just fix this one thing" is not an
+   exception. Nothing further to decide; and the five commits show the rule being followed by
+   hand, since the dogfooding fix in question was branched.
+
+**Retrospective pass over the five commits (the finding's first forward action): not done here.**
+The finding itself calls it "verification, not discovery" and notes the one defect anyone has found
+in the range (`1b7f1d8`'s target) was self-corrected before merge. `make check` is green at `HEAD`
+and every one of the five is covered by tests and by the passes that followed on the code they
+touch. It is offered, not slipped in: it is a review, not a fix, and belongs to whoever runs the
+next pass.
+
+### 54.2 AJ-02 — accepted; already discharged
+
+Right that §52 closed the series with a self-authored resolution and no "what a later pass should
+re-check", which §46 and §48.1 had established as this file's convention. §53.1 reads the
+live-recheck branch against §52.2's record decision by decision and finds them in agreement, so
+the finding's own material remedy is complete. The structural remedy — carry the caveat on any
+self-authored resolution that closes a series — is applied to this section: §54.4.
+
+### 54.3 AJ-03 — fixed
+
+Verified against `execute.py`: `largest_by_storage` is built once at the start of `execute_plan()`
+from `largest_disk_bytes(group.disks, s.id)` (`execute.py:1206`, `:1848`) and passed to
+`_live_transient_check()` as `existing_largest_bytes`; the only later writes are
+`_post_move_bookkeeping()` for this run's own completed moves (`:1065`). `used_b` and `C_b` are read
+fresh; `Z_b` is not, so the residual is exactly the reserve multiplier's growth, `f_b·(Z_live −
+Z_model)`, as the finding says.
+
+One correction to the finding's premise: `92-execute.md` did already say, in the concurrency
+paragraph, that the check "takes `Z_b` from this run's own (C4) `largest_by_storage` tracking", so
+"says nothing about the third being a model snapshot" overstates it. What was missing is what the
+finding actually asks for — that it is deliberate, why, and what the residual is. Now stated in
+both places: plan §9.2 step 2 (a sentence after the `C_b` clause) and a new paragraph in
+`docs/internals/92-execute.md`'s live-check section. No code change. The PDFs and their stamps were
+rebuilt in the same commit.
+
+| ID | Status | How resolved |
+|----|--------|--------------|
+| AJ-01 | **Refuted as stated**; residuals accepted | All five commits were made on branches (reflog; `0351be6`/`8660dec` in history). Real residuals: two documentation-only commits were merged fast-forward against AGENTS §4's `--no-ff` rule, which is what made the graph misleading; no pass reviewed the five (retrospective offered, not done); and the twentieth pass's "first new plan material" sentence is corrected here. The policy question is answered by AGENTS.md's opening paragraph and §4. |
+| AJ-02 | Accepted, discharged | §53.1 is the verification pass; the §48.1-style caveat is carried in §54.4. |
+| AJ-03 | Resolved | One clause in plan §9.2 step 2 and one paragraph in `92-execute.md`; no code change. |
+
+### 54.4 What a later pass should re-check
+
+As with §46, §48 and §50, **this resolution was written by the same session that verified the
+findings** — the caveat applies. Specifically:
+
+- **AJ-01's refutation rests on the reflog, which is local to one clone.** The three-commit branch
+  is independently visible in history (`0351be6`, `8660dec`, the parent chain). The two-commit
+  docs branch is **not**: it was fast-forwarded, so its existence is recorded only in the reflog
+  (`checkout: moving from main to docs/self-contained-documentation`, `merge
+  docs/self-contained-documentation: Fast-forward`). A reviewer on another clone cannot reproduce
+  that half, and should treat it as the operator's word until a fresh clone shows otherwise.
+- **The AJ-03 clause says a listing entry cannot say whether a volume belongs to a managed disk.**
+  That is about what a `/content` entry contains, and is the reviewer's argument, checked against
+  (C4)'s definition but not against PVE. A listing entry does carry a `vmid`, so recovering `Z_b`
+  for the sub-case "a disk of an already-managed VM was moved onto the target by someone else" may
+  be possible; a disk of a VM created after planning is not. Whether that is worth building is a
+  design question this section does not answer.
+- **The retrospective pass over `37c30b8`..`08fbcdb` is still open** if the operator wants it.
 
 ---
 
