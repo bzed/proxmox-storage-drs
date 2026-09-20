@@ -28,7 +28,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from proxmox_storage_drs import __version__, collect, optimize, replay
@@ -1879,6 +1879,8 @@ def _render_execution_json(result: ExecutionResult | None) -> dict[str, object] 
     return {
         "stopped_early": result.stopped_early,
         "stop_reason": result.stop_reason,
+        "aborted": result.aborted,
+        "replans_exhausted": result.replans_exhausted,
         "outcomes": [
             {
                 "disk_key": outcome.disk_key,
@@ -2543,7 +2545,10 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                 resolved.config.migration.payback_ratio,
             )
         )
-    return 0
+    # A group whose load model could not be computed (a Prometheus error) is
+    # a failed plan, not a quiet one: exit 1 so a wrapper script or a
+    # monitoring check cannot mistake "could not look" for "nothing to do".
+    return 1 if load_errors else 0
 
 
 def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
@@ -2598,7 +2603,7 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
                 topology, group_plans, resolved, node_selector, verbose=args.verbose > 0
             )
         )
-    return 0
+    return 1 if any(gp.load_error is not None for gp in group_plans.values()) else 0
 
 
 def _confirm_move_interactively(move: ScheduledMove) -> str:
@@ -2875,6 +2880,8 @@ def _run_auto_group(
     all_outcomes: list[MoveOutcome] = []
     stopped_early = False
     stop_reason: str | None = None
+    abort_reason: str | None = None
+    replans_exhausted = False
 
     while True:
         assert (
@@ -2950,6 +2957,12 @@ def _run_auto_group(
         # not only last. `"replan_needed"` is only ever produced at launch
         # time, never by polling an in-flight move, so this cannot fire
         # for an outcome that was actually a clean completion.
+        if result.aborted:
+            # A check the executor could not make (a PVE API error while
+            # re-reading the VM or the target) -- re-planning would run
+            # into the same wall, so this ends the whole run, whatever
+            # `replan_needed` outcomes accompany it.
+            break
         needs_replan = any(o.status == "replan_needed" for o in result.outcomes)
         if not needs_replan:
             break
@@ -2961,6 +2974,7 @@ def _run_auto_group(
                 f"execution.max_replans_per_run ({execution.max_replans_per_run}) exceeded "
                 f"(last mismatch: {stop_reason})"
             )
+            replans_exhausted = True
             break
         replans_left -= 1
 
@@ -2986,23 +3000,40 @@ def _run_auto_group(
             fresh_now,
             node_selector,
         )
+        if new_plan.load_error is not None:
+            # A metrics error is not "no further action is needed": the
+            # re-plan could not be computed at all, and treating that as a
+            # clean stop would let a Prometheus outage end a run with exit
+            # 0 (section 9.2, "Errors are not mismatches").
+            abort_reason = f"load model unavailable while re-planning: {new_plan.load_error}"
+            stopped_early = True
+            stop_reason = abort_reason
+            break
         if (
-            new_plan.load_error is not None
-            or new_plan.decision is None
+            new_plan.decision is None
             or not new_plan.decision.act
             or new_plan.schedule_result is None
         ):
-            # Re-planning concluded no further action is needed, or hit a
-            # load error -- "the gates may well conclude no further
-            # action is needed, which is a correct outcome" (section
-            # 9.2 step 3), not a failure to report as one.
+            # Re-planning concluded no further action is needed -- "the
+            # gates may well conclude no further action is needed, which
+            # is a correct outcome" (section 9.2 step 3), not a failure to
+            # report as one.
             stopped_early = False
             stop_reason = None
             break
         group = fresh_group
         group_plan = new_plan
 
-    return ExecutionResult(tuple(all_outcomes), stopped_early, stop_reason), migrations_budget
+    return (
+        ExecutionResult(
+            tuple(all_outcomes),
+            stopped_early,
+            stop_reason,
+            abort_reason=abort_reason,
+            replans_exhausted=replans_exhausted,
+        ),
+        migrations_budget,
+    )
 
 
 def _record_executed_moves(
@@ -3178,8 +3209,11 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                 node_selector,
             )
             if group_plan.load_error is not None:
+                # A metrics error fails the whole run: no later group is
+                # planned or executed on a cluster the tool cannot fully
+                # observe (moves already completed stay recorded).
                 load_errors[group.name] = group_plan.load_error
-                continue
+                break
             assert group_plan.group_load is not None and group_plan.decision is not None
             group_loads[group.name] = group_plan.group_load
             gate_decisions[group.name] = group_plan.decision
@@ -3263,10 +3297,12 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                 )
                 state_box.value = state
 
-            if result.stop_reason == "operator quit":
+            if result.stop_reason == "operator quit" or result.aborted:
                 # A human asked to stop the whole apply run, not just this
                 # group -- section 9.1's `[q]uit` is an operator decision,
-                # not a per-group one.
+                # not a per-group one. An `aborted` result (an API or
+                # metrics error the executor could not plan around) ends the
+                # whole run the same way: no later group starts.
                 break
     finally:
         # `state_box.value`, not the plain `state` variable: if an
@@ -3313,12 +3349,24 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
             )
         )
 
+    return _apply_exit_code(execution_results, load_errors)
+
+
+def _apply_exit_code(
+    execution_results: Mapping[str, ExecutionResult], load_errors: Mapping[str, str]
+) -> int:
+    """``apply``'s exit status: ``1`` for a failed move, an aborted group
+    (a PVE or metrics error the run could not plan around) or a group whose
+    load could not be computed; ``0`` otherwise -- including a run that
+    bailed out after exhausting ``execution.max_replans_per_run``, which is
+    external churn to retry later, not a failure (section 9.2)."""
     any_failure = any(
         outcome.status == "failed"
         for result in execution_results.values()
         for outcome in result.outcomes
     )
-    return 1 if any_failure else 0
+    aborted = any(result.aborted for result in execution_results.values())
+    return 1 if (any_failure or aborted or load_errors) else 0
 
 
 def _source_suffix(source: str) -> str:

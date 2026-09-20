@@ -1946,7 +1946,9 @@ def test_plan_reports_a_metrics_error_per_group(
 
     monkeypatch.setattr("proxmox_storage_drs.cli.compute_group_load", raise_metrics_error)
     path = write_config(tmp_path)
-    assert cli.main(["-c", str(path), "plan"]) == 0
+    # A group whose load could not be computed is a failed plan (exit 1), not
+    # a quiet one -- but the report still says which group and why.
+    assert cli.main(["-c", str(path), "plan"]) == 1
     out = capsys.readouterr().out
     assert "plan unavailable: connection refused" in out
 
@@ -2350,7 +2352,7 @@ def test_apply_exits_quietly_when_state_json_is_already_locked(
         release_lock(handle)
 
 
-def test_apply_reports_a_metrics_error_and_a_no_action_group_without_executing(
+def test_apply_stops_and_exits_1_on_a_metrics_error_without_visiting_later_groups(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from proxmox_storage_drs.exceptions import MetricsError
@@ -2386,10 +2388,13 @@ def test_apply_reports_a_metrics_error_and_a_no_action_group_without_executing(
 
     monkeypatch.setattr("proxmox_storage_drs.cli.compute_group_load", per_group_load)
     path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
-    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 1
     out = capsys.readouterr().out
     assert "fc-tier1 — plan unavailable: connection refused" in out
-    assert "fc-tier2 → NO ACTION" in out
+    # The first group's metrics error ends the run: fc-tier2, planned after
+    # it, is never reached (a cluster the tool cannot fully observe is not
+    # one it plans further groups on).
+    assert "fc-tier2 → NO ACTION" not in out
 
 
 def test_apply_json_output_includes_the_execution_key(
@@ -2402,6 +2407,46 @@ def test_apply_json_output_includes_the_execution_key(
     group_out = next(g for g in payload["groups"] if g["name"] == "fc-tier1")
     assert group_out["execution"]["stopped_early"] is False
     assert group_out["execution"]["outcomes"][0]["status"] == "would_move"
+
+
+def test_apply_stops_visiting_groups_after_an_aborting_outcome(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PVE API error the executor cannot plan around fails the *whole* run:
+    the second group is never executed (it would run against a cluster the
+    tool has just failed to read), and the exit code is 1."""
+    from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
+
+    base = _balanced_apply_topology()
+    first = base.groups[0]
+    second = Group(name="fc-tier2", storages=first.storages, disks=first.disks)
+    _patch_plan_deps(
+        monkeypatch, Topology(groups=(first, second), warnings=()), _balanced_apply_group_load()
+    )
+    executed: list[str] = []
+
+    def fake_execute_plan(client: object, group: Group, *args: object, **kwargs: object) -> object:
+        executed.append(group.name)
+        return ExecutionResult(
+            outcomes=(
+                MoveOutcome(
+                    "101:scsi0",
+                    "san-a",
+                    "san-b",
+                    "failed",
+                    "could not re-read 'san-b'",
+                    always_stop=True,
+                    abort_run=True,
+                ),
+            ),
+            stopped_early=True,
+            stop_reason="101:scsi0 failed: could not re-read 'san-b'",
+        )
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.execute_plan", fake_execute_plan)
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 1
+    assert executed == [first.name]
 
 
 def test_apply_exits_1_when_a_move_fails(
@@ -3429,6 +3474,7 @@ def test_run_auto_group_stops_cleanly_when_a_replan_concludes_no_action_needed(
     assert [o.status for o in result.outcomes] == ["replan_needed"]
     assert result.stopped_early is False
     assert result.stop_reason is None
+    assert not result.aborted and not result.replans_exhausted
 
 
 def test_run_auto_group_stops_after_exhausting_max_replans_per_run(
@@ -3469,6 +3515,93 @@ def test_run_auto_group_stops_after_exhausting_max_replans_per_run(
     assert result.stop_reason is not None
     assert "max_replans_per_run" in result.stop_reason
     assert "exceeded" in result.stop_reason
+    # Bailing out after too much external churn is a warning, not a failure:
+    # the next run starts from fresh state.
+    assert result.replans_exhausted is True
+    assert result.aborted is False
+
+
+def test_run_auto_group_fails_the_run_when_a_replan_cannot_load_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Prometheus error while re-planning is *not* "the gates concluded no
+    action is needed" -- it aborts the run (non-zero), instead of ending it
+    quietly as if the re-plan had succeeded."""
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    resolved = _resolved_config(tmp_path)
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._apply_payback_gate",
+        lambda *a, **k: ExecutionResult((_replan_needed_outcome(move),), True, "no longer matches"),
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.build_topology",
+        lambda *a, **k: Topology(groups=(group,), warnings=()),
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._plan_group",
+        lambda *a, **k: cli._GroupPlan(load_error="connection refused"),
+    )
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        cli._InflightStateBox(empty_state()),
+        group,
+        group_plan,
+        None,
+    )
+    assert result.aborted is True
+    assert result.abort_reason is not None and "connection refused" in result.abort_reason
+    assert result.stopped_early is True
+    assert result.stop_reason == result.abort_reason
+    assert result.replans_exhausted is False
+
+
+def test_run_auto_group_does_not_replan_after_an_aborting_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An `abort_run` outcome (a PVE API error the executor could not plan
+    around) ends the run even when a `replan_needed` outcome sits beside it:
+    re-planning against the same unreadable cluster cannot help."""
+    from proxmox_storage_drs.execute import ExecutionResult, MoveOutcome
+
+    resolved = _resolved_config(tmp_path)
+    group = _one_disk_group()
+    move = _one_move(group)
+    group_plan = _make_group_plan(group, resolved, (move,))
+    aborting = MoveOutcome(
+        move.disk_key,
+        move.from_storage,
+        move.to_storage,
+        "failed",
+        "could not re-read 'san-b'",
+        always_stop=True,
+        abort_run=True,
+    )
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._apply_payback_gate",
+        lambda *a, **k: ExecutionResult((_replan_needed_outcome(move), aborting), True, "x"),
+    )
+
+    def must_not_replan(*a: object, **k: object) -> None:
+        raise AssertionError("an aborted run must not re-plan")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.build_topology", must_not_replan)
+    result, _budget = cli._run_auto_group(
+        "fake-client",  # type: ignore[arg-type]
+        resolved,
+        "fake-prom",  # type: ignore[arg-type]
+        cli._InflightStateBox(empty_state()),
+        group,
+        group_plan,
+        None,
+    )
+    assert result.aborted is True
 
 
 def test_run_auto_group_stops_when_the_group_vanishes_after_replanning(

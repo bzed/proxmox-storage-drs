@@ -23,7 +23,7 @@ These hold regardless of `execution.mode`, and are not configurable away
 | Code | Meaning |
 |---|---|
 | `0` | Success. A run that stopped at a gate, found nothing worth moving, or (for `verify-metrics`) found no error-level finding. |
-| `1` | The run failed: invalid configuration, an unreachable Prometheus or PVE API, a failed check, or a command not yet implemented in this build (see below). |
+| `1` | The run failed: invalid configuration, an unreachable Prometheus or PVE API (including one that fails mid-run, for any group, in the first plan or in a re-plan), a failed move, a failed check, or a command not yet implemented in this build (see below). A run that *bails out* because `execution.max_replans_per_run` was exhausted is not a failure and exits `0`. |
 | `2` | Usage error on the command line. |
 
 ## What this build actually implements

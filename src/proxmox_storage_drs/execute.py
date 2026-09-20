@@ -48,7 +48,12 @@ A move never gets a second chance to "fix" the plan around it: any
 pre-flight mismatch, or a live transient-invariant check that no longer
 holds, stops the run with ``status="replan_needed"`` rather than adjusting
 anything (section 9.2's re-plan protocol: "abandon the remaining moves...
-do not attempt to patch it"). **This module does not itself re-invoke the
+do not attempt to patch it"). The one exception is a check the executor
+could not *make* -- the PVE API erroring while it re-reads the VM or the
+target, or a target volume of unknowable size: that is not a mismatch
+re-planning can cure, so it is a ``"failed"`` outcome with ``abort_run`` set
+and the whole run ends non-zero (:func:`_pre_move_refusal`). **This module
+does not itself re-invoke the
 whole pipeline** (gates/solve/payback/order) the way section 9.2's re-plan
 protocol's steps 3-5 describe -- that needs `cli.py`-level orchestration
 across multiple `execute_plan()` calls, which is a real, separately-scoped
@@ -129,7 +134,16 @@ class MoveOutcome:
     excludes that source as both source and target for every later move
     in the *same* run, per section 9.3), or ``"replan_needed"`` (a
     pre-flight or live transient-invariant mismatch -- the plan no longer
-    matches reality).
+    matches reality, and re-planning from fresh state can fix it).
+
+    ``abort_run`` marks a ``"failed"`` outcome that is *not* a `move_disk`
+    task failure but a check the executor could not make before starting
+    the move -- the PVE API errored while re-reading the VM or the target
+    storage, or the target's listing holds a volume whose size cannot be
+    established (section 9.2, "Errors are not mismatches"). Re-planning
+    cannot repair those (a plan built on the same unreadable data would be
+    refused again), so the whole run ends, every remaining group included,
+    and exits non-zero; it is always set together with ``always_stop``.
 
     ``always_stop`` is set for a lock timeout with
     ``execution.locks.on_timeout: abort`` -- the manual's own words for that
@@ -151,6 +165,7 @@ class MoveOutcome:
     upid: str | None = None
     orphaned_volumes: tuple[str, ...] = ()
     always_stop: bool = False
+    abort_run: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,11 +174,27 @@ class ExecutionResult:
     any reason the remaining moves were never attempted -- an operator
     quitting confirm mode is not a failure, a `replan_needed` or (with
     ``execution.abort_on_failure``) a genuine failure both are; the
-    distinction is in ``outcomes``, not in this flag."""
+    distinction is in ``outcomes``, not in this flag.
+
+    ``abort_reason`` is set by the re-plan loop when a re-plan could not
+    even be computed (the load model was unavailable, a Prometheus error);
+    together with any outcome's ``abort_run`` it makes :attr:`aborted` true,
+    which tells ``apply`` to stop visiting further groups and exit non-zero.
+    ``replans_exhausted`` is set when ``execution.max_replans_per_run`` ran
+    out: the run bails out and the next one starts from fresh state -- a
+    warning, not a failure (section 9.2's re-plan protocol)."""
 
     outcomes: tuple[MoveOutcome, ...]
     stopped_early: bool
     stop_reason: str | None
+    abort_reason: str | None = None
+    replans_exhausted: bool = False
+
+    @property
+    def aborted(self) -> bool:
+        """Whether this group's execution failed in a way that must end the
+        whole run (every later group included) with a non-zero exit."""
+        return self.abort_reason is not None or any(o.abort_run for o in self.outcomes)
 
 
 ConfirmCallback = Callable[[ScheduledMove], str]  # returns "y" | "n" | "a" | "q"
@@ -188,6 +219,9 @@ class _PreflightResult:
     node: str | None = None
     lock: str | None = None
     volid: str | None = None
+    # `mismatch` is set because the PVE API errored while re-reading the VM,
+    # not because the cluster differs from the plan -- see `_pre_move_refusal`.
+    fatal: bool = False
     # The disk line's own `size=` in the VM config, in bytes: what PVE
     # allocates the mirror target at for a move between different storage
     # types or from thin to thick, where the target is not a copy of the
@@ -240,7 +274,9 @@ def _preflight(
     try:
         config = client.vm_config(node, disk.vmid)
     except PveApiError as exc:
-        return _PreflightResult(f"could not re-fetch VM {disk.vmid}'s config on {node!r}: {exc}")
+        return _PreflightResult(
+            f"could not re-fetch VM {disk.vmid}'s config on {node!r}: {exc}", fatal=True
+        )
 
     value = config.get(move.device)
     if not isinstance(value, str):
@@ -365,7 +401,7 @@ def _log_task_lock_retry(
 class _LiveCheck:
     """:func:`_live_transient_check`'s result: ``refusal`` is ``None`` when
     the move may start, else the operator-facing reason it may not (the
-    ``replan_needed`` outcome's ``detail``). ``listed_volids`` is every
+    refusal outcome's ``detail``). ``listed_volids`` is every
     volume the target's content listing showed at that instant -- the
     concurrent executor records it on the move it then launches, as the
     baseline :func:`_inflight_target_volids` needs to recognise that move's
@@ -373,6 +409,8 @@ class _LiveCheck:
 
     refusal: str | None
     listed_volids: frozenset[str] = frozenset()
+    # The refusal is an unreadable target, not a full one: see `_pre_move_refusal`.
+    fatal: bool = False
 
 
 def _is_mirror_target(item: Mapping[str, Any], im: _InflightMove, taken: set[str]) -> bool:
@@ -473,6 +511,31 @@ def _move_charge_bytes(
     return disk.size_bytes
 
 
+def _pre_move_refusal(move: ScheduledMove, detail: str, *, fatal: bool) -> MoveOutcome:
+    """The outcome for a move the executor declined to start.
+
+    Two different things can make it decline, and they need different
+    responses (section 9.2, "Errors are not mismatches"). When the cluster
+    simply no longer matches the plan -- the VM moved, a snapshot appeared,
+    the target filled up -- the outcome is ``"replan_needed"``: the run
+    re-plans from fresh state, bounded by ``execution.max_replans_per_run``.
+    When the check itself could not be made (the PVE API errored, or the
+    target lists a volume of unknowable size) re-planning would only run
+    into the same wall, so the outcome is a ``"failed"`` ``abort_run`` one
+    and the whole run ends non-zero."""
+    if fatal:
+        return MoveOutcome(
+            move.disk_key,
+            move.from_storage,
+            move.to_storage,
+            "failed",
+            detail,
+            always_stop=True,
+            abort_run=True,
+        )
+    return MoveOutcome(move.disk_key, move.from_storage, move.to_storage, "replan_needed", detail)
+
+
 def _live_transient_check(
     client: PveClient,
     node: str,
@@ -505,10 +568,13 @@ def _live_transient_check(
     them as a ``z_m`` already.
 
     Fails safe: an API error, or a listed volume with no size to count,
-    refuses the move (``replan_needed``) rather than checking against a
-    partial figure. The floor stays ``target.free_space_hard_bytes`` --
-    section 5.3.1's ``hard_b``, resolved once at run start; only the usage
-    and capacity are re-read live."""
+    refuses the move rather than checking against a partial figure -- and
+    ``fatal`` is set on that refusal, so the run ends non-zero instead of
+    re-planning (see :func:`_pre_move_refusal`). A target that is merely
+    too full is not fatal: that refusal is ``replan_needed``. The floor
+    stays ``target.free_space_hard_bytes`` -- section 5.3.1's ``hard_b``,
+    resolved once at run start; only the usage and capacity are re-read
+    live."""
     try:
         status = client.storage_status(node, target.id)
         content = client.storage_content(node, target.id)
@@ -521,7 +587,8 @@ def _live_transient_check(
         )
         return _LiveCheck(
             f"could not re-read {target.id!r}'s live state ({exc}); not starting a move "
-            "onto it without that"
+            "onto it without that",
+            fatal=True,
         )
     listed = frozenset(str(i["volid"]) for i in content if "volid" in i)
     live_used, unsized_volid = _provisioned_used_bytes(
@@ -532,6 +599,7 @@ def _live_transient_check(
             f"{target.id!r} lists {unsized_volid!r} with no size, so its provisioned use "
             "cannot be established just before starting; not moving onto it blind",
             listed,
+            fatal=True,
         )
     live_total = int(status["total"])
     charges = [
@@ -836,7 +904,7 @@ def _execute_one_move(
 
     preflight = _preflight(client, disk, move, exclude)
     if preflight.mismatch is not None:
-        return outcome("replan_needed", preflight.mismatch)
+        return _pre_move_refusal(move, preflight.mismatch, fatal=preflight.fatal)
     assert (
         preflight.node is not None and preflight.volid is not None
     )  # guaranteed when mismatch is None
@@ -878,7 +946,7 @@ def _execute_one_move(
         largest_by_storage[move.to_storage],
     )
     if live.refusal is not None:
-        return outcome("replan_needed", live.refusal)
+        return _pre_move_refusal(move, live.refusal, fatal=live.fatal)
 
     source = storages_by_id[move.from_storage]
     task_retries_used = 0
@@ -1614,13 +1682,7 @@ def _launch_decision(
 
     preflight = _preflight(client, disk, candidate, exclude)
     if preflight.mismatch is not None:
-        outcome = MoveOutcome(
-            candidate.disk_key,
-            candidate.from_storage,
-            candidate.to_storage,
-            "replan_needed",
-            preflight.mismatch,
-        )
+        outcome = _pre_move_refusal(candidate, preflight.mismatch, fatal=preflight.fatal)
         return _LaunchDecision("resolved", outcome=outcome)
     assert (
         preflight.node is not None and preflight.volid is not None
@@ -1643,13 +1705,7 @@ def _launch_decision(
         _inflight_onto(inflight, target.id),
     )
     if live.refusal is not None:
-        outcome = MoveOutcome(
-            candidate.disk_key,
-            candidate.from_storage,
-            candidate.to_storage,
-            "replan_needed",
-            live.refusal,
-        )
+        outcome = _pre_move_refusal(candidate, live.refusal, fatal=live.fatal)
         return _LaunchDecision("resolved", outcome=outcome)
 
     return _LaunchDecision("launch", preflight=preflight, target_baseline_volids=live.listed_volids)

@@ -79,9 +79,10 @@ Two properties keep the listing figure safe to trust:
   volume with neither `size` nor `approximate-size` (its size then cannot be
   established, and planning's habit of skipping such a foreign volume with a
   warning is not available to a check that decides whether to touch the
-  storage *now*), refuses the move as `"replan_needed"` with the reason in
-  the outcome's detail — never a pass on a partial figure, never an
-  exception that crashes the run. `approximate-size` counts at its value,
+  storage *now*), refuses the move — and, because that is an error and not
+  a mismatch, as a `"failed"` outcome with `abort_run` set (see "Errors are
+  not mismatches" below) with the reason in the outcome's detail: never a
+  pass on a partial figure, never an exception that crashes the run. `approximate-size` counts at its value,
   the same fallback tier planning uses (`topology.content_item_size()`).
 - **One rule for the sizes.** `topology.content_item_size()` is the single
   place the `size` → `approximate-size` order lives, shared by the planner's
@@ -492,11 +493,32 @@ was `"replan_needed"`, re-fetches topology fresh
 (`build_topology()` — not just re-running `_plan_group()` on the same
 `Group` object, since whatever triggered the mismatch can mean the
 group's own membership changed) and calls `_plan_group()` again before
-retrying. A re-plan that concludes `NO ACTION` (or hits a load error) ends
-the loop quietly, not as a failure — section 9.2's own words, "the gates
-may well conclude no further action is needed." Exceeding the replan cap
-rewrites the final `stop_reason` to name the setting explicitly, rather
-than reporting the *symptom* (the last mismatch) as if it were the cause.
+retrying. A re-plan that concludes `NO ACTION` ends the loop quietly, not
+as a failure — section 9.2's own words, "the gates may well conclude no
+further action is needed." A re-plan that hits a load (Prometheus) error
+is *not* that: it sets `ExecutionResult.abort_reason` and the run fails.
+Exceeding the replan cap rewrites the final `stop_reason` to name the
+setting explicitly, rather than reporting the *symptom* (the last mismatch)
+as if it were the cause, and sets `ExecutionResult.replans_exhausted` — a
+bail-out that exits `0`, not a failure.
+
+### Errors are not mismatches
+
+`"replan_needed"` means the cluster differs from the plan, and a re-plan
+can cure that. An *error* — the PVE API failing while `_preflight()`
+re-reads the VM's config or `_live_transient_check()` re-reads the target,
+or an unsized volume on the target — means the executor could not observe
+the cluster at all, and a re-plan would run into the same wall.
+`_pre_move_refusal()` is the one place that decides which it is: a
+`fatal` refusal becomes `MoveOutcome("failed", ..., always_stop=True,
+abort_run=True)`, otherwise `"replan_needed"`. `ExecutionResult.aborted`
+is true when any outcome carries `abort_run` or the re-plan loop set
+`abort_reason`; `_run_auto_group()` never re-plans an aborted result, and
+`_handle_apply()` stops visiting groups and returns `1`. The same holds in
+`_handle_apply()` for a group whose load could not be computed in the first
+place (`_GroupPlan.load_error`): it breaks out of the group loop. `plan`
+and `explain` keep going so the report is as complete as possible, then
+return `1`.
 
 One deliberate simplification: everything the human/JSON report shows for
 a group (`gate_decisions[name]`, `schedule_results[name]`, etc.) still
