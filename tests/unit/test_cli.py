@@ -4393,3 +4393,223 @@ def test_solve_group_tells_optimize_whether_it_is_probing(
         cli._solve_group(group, loads, resolved, frozenset())
         assert seen, f"optimize.solve() was never called for backend {backend!r}"
         assert all(probing is expected for probing in seen), backend
+
+
+# ------------------------------------------- monitoring status file (section 2.4)
+
+CHECK_STATUSFILE = "/usr/lib/nagios/plugins/check_statusfile"
+
+
+def _check_statusfile(path: Path) -> tuple[int, str] | None:
+    """Run the real ``check_statusfile`` plugin on ``path`` when it is
+    installed (monitoring-plugins-contrib); ``None`` when it is not."""
+    import os
+    import subprocess
+
+    if not os.access(CHECK_STATUSFILE, os.X_OK):
+        return None
+    done = subprocess.run(
+        [CHECK_STATUSFILE, str(path)], capture_output=True, text=True, check=False
+    )
+    return done.returncode, done.stdout
+
+
+def _monitored_config(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
+    status = tmp_path / "out" / "drs.status"
+    path = write_config(
+        tmp_path,
+        state={"path": str(tmp_path / "state.json")},
+        monitoring={"status_file": str(status)},
+        **overrides,
+    )
+    return path, status
+
+
+def test_apply_dry_run_leaves_an_ok_status_file_the_plugin_accepts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    path, status = _monitored_config(tmp_path)
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    text = status.read_text(encoding="utf-8")
+    assert text.splitlines()[0] == "OK"
+    assert "dry-run" in text.splitlines()[1]
+    plugin = _check_statusfile(status)
+    if plugin is not None:
+        assert plugin[0] == 0
+        assert plugin[1].splitlines()[0].startswith("apply (dry-run) completed")
+
+
+def test_apply_writes_no_status_file_unless_one_is_configured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["drs.yaml", "state.json"]
+
+
+def test_a_metrics_error_leaves_a_critical_status_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.exceptions import MetricsError
+
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+
+    def refuse(*_a: object, **_k: object) -> None:
+        raise MetricsError("connection refused")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_group_load", refuse)
+    path, status = _monitored_config(tmp_path)
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 1
+    lines = status.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "CRITICAL"
+    assert "load model unavailable: connection refused" in lines[1]
+    plugin = _check_statusfile(status)
+    if plugin is not None:
+        assert plugin[0] == 2
+
+
+def test_a_failed_move_leaves_a_critical_status_file_naming_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.execute_plan",
+        lambda *a, **k: ExecutionResult(
+            (
+                MoveOutcome(
+                    "101:scsi0",
+                    "san-a",
+                    "san-b",
+                    "failed",
+                    "mirror error",
+                    upid="UPID:x",
+                    orphaned_volumes=("san-b:vm-101-disk-0",),
+                ),
+            ),
+            True,
+            "101:scsi0 failed: mirror error",
+        ),
+    )
+    path, status = _monitored_config(tmp_path)
+    assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 1
+    text = status.read_text(encoding="utf-8")
+    assert text.splitlines()[0] == "CRITICAL"
+    assert "101:scsi0 san-a -> san-b failed: mirror error" in text.splitlines()[1]
+    assert "moves_failed=1" in text
+    # the orphan is reported (never deleted) as a warning line
+    assert "san-b:vm-101-disk-0" in text and "NOT deleted" in text
+
+
+def test_bailing_out_after_too_many_replans_is_a_warning_not_a_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.execute import ExecutionResult
+
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._run_auto_group",
+        lambda *a, **k: (
+            ExecutionResult(
+                (),
+                True,
+                "execution.max_replans_per_run (3) exceeded (last mismatch: VM 101 moved)",
+                replans_exhausted=True,
+                replans=3,
+            ),
+            None,
+        ),
+    )
+    path, status = _monitored_config(tmp_path)
+    assert cli.main(["-c", str(path), "--mode", "auto", "apply"]) == 0
+    text = status.read_text(encoding="utf-8")
+    assert text.splitlines()[0] == "WARNING"
+    assert "max_replans_per_run (3) exceeded" in text.splitlines()[1]
+    assert "replans=3" in text
+    plugin = _check_statusfile(status)
+    if plugin is not None:
+        assert plugin[0] == 1
+
+
+def test_a_group_still_short_of_its_reserve_after_the_plan_is_a_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_sample_topology()`'s san-a violates its reserve and cannot be repaired
+    (`test_plan_reports_a_deadlock_when_even_the_best_target_still_violates`),
+    so a quiet dry-run over it still leaves the shortfall for a human."""
+    _patch_plan_deps(monkeypatch, _sample_topology(), _sample_group_load())
+    path, status = _monitored_config(tmp_path)
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    text = status.read_text(encoding="utf-8")
+    assert text.splitlines()[0] == "WARNING"
+    assert "short of its snapshot reserve / free-space requirement" in text
+
+
+def test_another_instance_holding_the_lock_leaves_the_status_file_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proxmox_storage_drs.state import acquire_lock, release_lock
+
+    path, status = _monitored_config(tmp_path)
+    status.parent.mkdir()
+    status.write_text("OK\nthe last real run | x=1\n", encoding="utf-8")
+    handle = acquire_lock(str(tmp_path / "state.json"))
+    assert handle is not None
+    try:
+        assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    finally:
+        release_lock(handle)
+    assert status.read_text(encoding="utf-8") == "OK\nthe last real run | x=1\n"
+
+
+def test_plan_never_writes_the_status_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the scheduled command reports: an operator running `plan` by hand
+    must not overwrite the timer's last result."""
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    path, status = _monitored_config(tmp_path)
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    assert not status.exists()
+
+
+def test_a_status_file_that_cannot_be_written_does_not_change_the_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    path = write_config(
+        tmp_path,
+        state={"path": str(tmp_path / "state.json")},
+        monitoring={"status_file": str(blocker / "drs.status")},
+    )
+    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
+    assert "could not write status file" in capsys.readouterr().err
+
+
+def test_a_crash_leaves_a_critical_status_file_and_still_raises(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bug must not leave the previous run's OK in place."""
+
+    def crash(*_a: object, **_k: object) -> int:
+        raise RuntimeError("a bug")
+
+    monkeypatch.setitem(cli._COMMAND_HANDLERS, "apply", crash)
+    path, status = _monitored_config(tmp_path)
+    with pytest.raises(RuntimeError, match="a bug"):
+        cli.main(["-c", str(path), "--mode", "dry-run", "apply"])
+    text = status.read_text(encoding="utf-8")
+    assert text.splitlines()[0] == "CRITICAL"
+    assert "unexpected RuntimeError: a bug" in text
+
+
+def test_replay_never_writes_the_status_file(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path, monitoring={"status_file": str(tmp_path / "s")})
+    args = argparse.Namespace(command="apply", replay="/some/bundle")
+    cli._publish_status_file(resolved, args, "dry-run", 0, 0.0)
+    assert not (tmp_path / "s").exists()

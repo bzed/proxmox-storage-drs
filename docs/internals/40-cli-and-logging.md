@@ -3,8 +3,9 @@
 **What does this page answer?** How does `cli.py` turn `argv` into a
 dispatched command, what exactly does overriding `--mode` log, and why does
 structured logging go to stderr instead of the stdout the plan originally
-specified? Describes `proxmox_storage_drs/cli.py` and
-`proxmox_storage_drs/logging_setup.py`.
+specified, and how does an unattended `apply` tell a monitoring system what it
+did? Describes `proxmox_storage_drs/cli.py`,
+`proxmox_storage_drs/logging_setup.py` and `proxmox_storage_drs/statusfile.py`.
 
 ## One parser, global options first
 
@@ -189,3 +190,54 @@ man-db): it walks up from `cli.py`'s own file location looking for
 `man/pve-storage-drs.1.md` in a source tree, and only if that also fails
 prints a short message naming the real installed-package path and the
 in-tree file — a local, actionable path, never a bare URL.
+
+## The monitoring status file: `statusfile.py`
+
+`monitoring.status_file` (section 2.4) makes `apply` leave a report a
+Nagios-style check can read. The module is deliberately two pure halves and one
+side effect, so the policy is testable without a cluster:
+
+- `build_run_status(RunReport) -> RunStatus` is the level policy. `RunReport` is
+  the run reduced to what the policy needs (mode, exit code, counters, and two
+  lists of single-sentence strings: `errors` and `warnings`); `cli._RunStats` is
+  where those accumulate while the run goes, filled by
+  `_accumulate_move_stats()`/`_record_outcome_for_status()` (failed moves,
+  `draining` sources, orphaned volumes, an exhausted re-plan cap,
+  `ExecutionResult.abort_reason`), by `_handle_apply()` (a group's load error, a
+  group still short of its reserve after its plan — `_GroupPlan.shortfall_bytes`)
+  and by the exception handler in `_run_handler()`. A non-zero exit code is
+  `CRITICAL`; otherwise any warning is `WARNING`; otherwise `OK`. `UNKNOWN` is
+  never produced — it is what the plugin says about a missing or malformed
+  file.
+- `render_status(RunStatus) -> str` is the file's exact text: the level word,
+  then the summary followed by `| label=value` perfdata, then the detail lines
+  (the headline already carries the first problem, so the details list the
+  rest), one line each. Every message is passed through `_one_line()` because a
+  newline inside one would become a line of its own in the plugin's output and
+  could push the summary off line 2.
+- `write_status_file()` is the only function that touches the filesystem: a
+  temporary file in the same directory, `fchmod` to `0644` (the monitoring user
+  is not the user `apply` runs as, and `mkstemp` creates `0600`), `fsync`,
+  `os.replace`. It creates the directory like `state.save_state_atomic()` does
+  and raises `StatusFileError` on any `OSError`.
+
+**The format is the plugin's, not ours.** `check_statusfile` is a short Python
+script: line 1 must be exactly `OK`/`WARNING`/`CRITICAL`/`UNKNOWN`; every later
+line is printed verbatim and there must be at least one; the file's mtime, not
+its content, decides staleness. Those three facts fix the design: the level
+words are constants, the summary is never empty (otherwise "Found no output" →
+`UNKNOWN`), and the file is written on every run (including dry runs and runs
+that did nothing) so that mtime means "the timer is still firing".
+`tests/unit/test_statusfile.py` and the CLI tests run the real plugin over the
+output whenever it is installed rather than asserting our own reading of it.
+
+**When it is written** is `cli._publish_status_file()`, called from `main()`
+after `_log_run_summary()`: only for `apply`, not under `--replay`, not when
+`_RunStats.lock_held` says another instance held the lock (no result was
+produced), and only when a path is configured. It is also called from
+`_run_handler()`'s bug branch *before* the exception is re-raised, so a crash
+leaves `CRITICAL`, not the previous run's `OK`. A `StatusFileError` is logged
+(`status_file_write_failed`) and swallowed: a monitoring file must not change
+what a run did or its exit code, and a file that stops updating turns
+`WARNING` by age anyway.
+

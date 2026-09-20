@@ -361,6 +361,16 @@ class SupportConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MonitoringConfig:
+    """Section 2.4. ``status_file`` is where ``apply`` leaves a one-run status
+    report in the format the ``check_statusfile`` monitoring plugin reads
+    (first line ``OK``/``WARNING``/``CRITICAL``/``UNKNOWN``, then the plugin
+    output); ``None`` (the default) writes nothing."""
+
+    status_file: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     schema_version: int
     proxmox: ProxmoxConfig
@@ -381,6 +391,7 @@ class Config:
     state: StateConfig
     forecast: ForecastConfig
     support: SupportConfig
+    monitoring: MonitoringConfig = MonitoringConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -746,6 +757,8 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         capture_range=support_raw.get("capture_range", "auto"),
     )
 
+    monitoring = MonitoringConfig(status_file=raw.get("monitoring", {}).get("status_file"))
+
     return Config(
         schema_version=raw.get("schema_version", 1),
         proxmox=proxmox,
@@ -766,6 +779,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         state=state,
         forecast=forecast,
         support=support,
+        monitoring=monitoring,
     )
 
 

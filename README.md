@@ -210,6 +210,13 @@ is the only record of what happened to your cluster. Two options suppress it and
 in a timer unit: `--quiet` and `--log-level error`. See
 [`docs/manual/35-logging.md`](docs/manual/35-logging.md).
 
+To have your monitoring system watch an unattended run, set `monitoring.status_file`: `apply` then
+leaves a status report in the format of the `check_statusfile` Nagios plugin
+(`monitoring-plugins-contrib`) after **every** run — `OK`, `WARNING` (it gave up after too many outside
+changes, or a group is still short of its reserve) or `CRITICAL` (a move failed, or PVE or Prometheus
+could not be read) — and its modification time tells the plugin the timer is still firing. See
+[`docs/manual/36-monitoring.md`](docs/manual/36-monitoring.md).
+
 ### Things worth knowing at this point
 
 - `--group NAME` (repeatable) restricts a `show-load`, `verify-storages`, `plan`, `explain` or

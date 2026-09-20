@@ -395,6 +395,7 @@ call site cannot silently add an unnameable member.
 | `apply_lock_held` | INFO | Another instance holds the lock; exit 0 quietly (section 11.2) | as built, correct |
 | `salt_rotated` | WARNING | `--new-salt` discarded an existing mapping (section 16.3) | as built, correct |
 | `command_failed` | ERROR | The run is exiting non-zero | built: printed once, per the format in use |
+| `status_file_write_failed` | ERROR | `monitoring.status_file` could not be written (section 2.4); the run and its exit code are unaffected | built |
 
 Three level corrections deserve their reasons stated, since each one is a judgement that could
 otherwise be quietly reverted:
@@ -452,6 +453,56 @@ which is why the policy drifted. These now exist, in `tests/unit/test_logging_se
 Section 2.1 assumes a systemd timer and `--quiet`'s help text names one, but `debian/` ships no
 unit. When it lands it must set `StandardError=journal`, rely on `auto` mode's mandatory `INFO`
 floor rather than passing `-v`, and must **not** pass `--quiet` — for the reason given above.
+
+### 2.4 Monitoring status file
+
+A timer-driven tool that fails quietly is worse than one that fails loudly, and the journal is not a
+monitoring system. `monitoring.status_file` (default `null`: write nothing) names a file that
+`apply` rewrites at the end of **every** run that produced a result, in the format of the
+`check_statusfile` plugin (`monitoring-plugins-contrib`, `/usr/lib/nagios/plugins/check_statusfile`) —
+so Nagios, Icinga, or anything that runs a Nagios plugin, can watch it with no code of ours on the
+monitoring side.
+
+**The format is the plugin's, read from its source rather than assumed:**
+
+- **Line 1** is exactly `OK`, `WARNING`, `CRITICAL` or `UNKNOWN` (case-sensitive; anything else is
+  reported `UNKNOWN`).
+- **Every later line** is the service output, printed verbatim; a file with nothing after line 1 is
+  reported `UNKNOWN` ("Found no output"). Nagios takes perfdata from the first output line, so the
+  summary (file line 2) ends with `| label=value ...`; the lines after it are detail.
+- **Freshness is the file's modification time**, not its content: older than the plugin's `--age`
+  (default 26 h) is reported `WARNING`. Hence *every* run rewrites it — including runs that moved
+  nothing and dry runs — so that a stale file means "the timer stopped" and never "it was a quiet
+  day". A run that could not read its configuration writes nothing and the file goes stale, which is
+  the right signal too.
+
+**Levels.** `CRITICAL` when the run exits non-zero: a failed move, or a PVE API or metrics error the
+run could not plan around (§9.2, "Errors are not mismatches"), or an unexpected crash (the handler
+re-raises, but only after the file says `CRITICAL` — a bug must not leave the previous run's `OK` in
+place). `WARNING` when the run exits `0` but left something for a human: it gave up after
+`execution.max_replans_per_run` re-plans (external churn — try again later); a failed move's orphaned
+volume was reported (never deleted, §9.4); a source storage had not released a volume after a move
+(`draining`, §9.3); or a group still breaches its snapshot reserve or free-space requirement once this
+run's plan has run (the tool never trades the reserve for balance, so it will not fix that by itself).
+Otherwise `OK`. `UNKNOWN` is never written by the tool. The summary line carries the first problem;
+detail lines list the rest, each on one line (newlines in messages are flattened, or the summary could
+be pushed off line 2), each line cut at 300 characters (monitoring systems truncate plugin output, and a
+PVE or Prometheus error can carry a whole request URL — the full text is in the run log), and capped at 20
+lines with an "and N more" line.
+
+**Mechanics.** Written to a temporary file in the same directory and renamed into place, so the
+plugin never reads half a report; mode `0644`, because the monitoring user is not the user `apply` runs
+as; the parent directory is created if missing. The content is counts, group and storage names and
+volume ids — no credentials. Only `apply` writes it (`plan` and friends are interactive and would
+overwrite the timer's last result), not `--replay`, and not a run that exited quietly because another
+instance held the lock (it produced no result; the file keeps the last real one). A failure to write it
+is logged (`status_file_write_failed`, ERROR) and changes neither the run nor its exit code — and a file
+that stops updating turns `WARNING` by age on its own.
+
+**Verified against the real plugin**, not a paraphrase of it: `tests/unit/test_statusfile.py` and the
+CLI tests run `check_statusfile` over what the tool writes whenever the plugin is installed (`OK` →
+exit 0, `WARNING` → 1, `CRITICAL` → 2, missing → 3, stale → 1) and over the two shapes the tool must
+never write (wrong-case level word, nothing after line 1).
 
 ---
 
@@ -3608,6 +3659,7 @@ bug waiting to happen; this table is the audit.
 | `support.bundle_dir` | §16.4, default output location for `collect-testdata` |
 | `support.max_series_points` | §16.2, hard refusal ceiling on the series capture |
 | `support.capture_range` | §16.2, `auto` for the maximum over every forecaster's `required_range()` |
+| `monitoring.status_file` | §2.4, where `apply` writes its `check_statusfile`-format status report; `null` writes none |
 
 ---
 

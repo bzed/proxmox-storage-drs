@@ -127,6 +127,12 @@ from proxmox_storage_drs.state import (
     with_recorded_cooldown,
     without_inflight_upid,
 )
+from proxmox_storage_drs.statusfile import (
+    RunReport,
+    StatusFileError,
+    build_run_status,
+    write_status_file,
+)
 from proxmox_storage_drs.timewindow import current_deadline
 from proxmox_storage_drs.topology import Disk, Group, Storage, Topology, build_topology
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds, parse_duration_seconds
@@ -336,6 +342,15 @@ class _RunStats:
     moves_succeeded: int = 0
     moves_failed: int = 0
     bytes_moved: int = 0
+    replans: int = 0
+    # What the monitoring status file (section 2.4) reports: reasons the run
+    # failed, and things a human should look at that did not fail it.
+    errors: list[str] = dataclasses.field(default_factory=list)
+    warnings: list[str] = dataclasses.field(default_factory=list)
+    # Set by `_handle_apply()` when another instance held the lock and this
+    # run exited quietly without doing anything -- it must not overwrite the
+    # status file with a result it never produced.
+    lock_held: bool = False
 
 
 def _run_stats(args: argparse.Namespace) -> _RunStats:
@@ -358,8 +373,10 @@ def _accumulate_move_stats(args: argparse.Namespace, group: Group, result: Execu
     """
     stats = _run_stats(args)
     stats.groups += 1
+    stats.replans += result.replans
     size_by_key = {d.key: d.size_bytes for d in group.disks}
     for outcome in result.outcomes:
+        _record_outcome_for_status(stats, group, outcome)
         if outcome.upid is None:
             continue
         stats.moves_issued += 1
@@ -368,6 +385,29 @@ def _accumulate_move_stats(args: argparse.Namespace, group: Group, result: Execu
             stats.bytes_moved += size_by_key.get(outcome.disk_key, 0)
         elif outcome.status == "failed":
             stats.moves_failed += 1
+    if result.abort_reason is not None:
+        stats.errors.append(f"group {group.name}: {result.abort_reason}")
+    if result.replans_exhausted and result.stop_reason is not None:
+        # External churn the run gave up on: try again later, not a failure.
+        stats.warnings.append(f"group {group.name}: {result.stop_reason}")
+
+
+def _record_outcome_for_status(stats: _RunStats, group: Group, outcome: MoveOutcome) -> None:
+    """Fold one move outcome into the status file's error/warning lists (the
+    numeric counters stay in :func:`_accumulate_move_stats`)."""
+    move = f"{outcome.disk_key} {outcome.from_storage} -> {outcome.to_storage}"
+    if outcome.status == "failed":
+        stats.errors.append(f"group {group.name}: {move} failed: {outcome.detail}")
+    elif outcome.status == "draining":
+        stats.warnings.append(
+            f"group {group.name}: {move}: source storage had not released the volume "
+            "yet (still wiping?); it is excluded for the rest of the run"
+        )
+    if outcome.orphaned_volumes:
+        stats.warnings.append(
+            f"group {group.name}: {move}: volume(s) left on the target and NOT deleted: "
+            + ", ".join(outcome.orphaned_volumes)
+        )
 
 
 def _start_logging_and_announce_run(
@@ -456,6 +496,48 @@ def _log_run_summary(
             "bytes_moved": stats.bytes_moved,
         },
     )
+
+
+def _publish_status_file(
+    resolved: ResolvedConfig,
+    args: argparse.Namespace,
+    effective_mode: str,
+    exit_code: int,
+    started_at: float,
+) -> None:
+    """Section 2.4: leave ``monitoring.status_file``'s ``check_statusfile``
+    report for this ``apply`` run. Every mode writes it, dry-run included, so
+    that a stale file means "the timer stopped", never "nothing happened".
+
+    Skipped for other commands (``plan`` and friends are interactive and would
+    overwrite the scheduled run's result), for ``--replay`` (not a real run),
+    and when another instance held the lock (this run produced no result --
+    the file keeps the last real one). A write failure is logged, never
+    raised: it must not change what the run did or its exit code, and a file
+    that stops updating turns WARNING on its own once it is older than the
+    plugin's ``--age``.
+    """
+    path = resolved.config.monitoring.status_file
+    stats = _run_stats(args)
+    if path is None or args.command != "apply" or args.replay or stats.lock_held:
+        return
+    report = RunReport(
+        mode=effective_mode,
+        exit_code=exit_code,
+        finished_at=datetime.now(timezone.utc),
+        duration_seconds=time.monotonic() - started_at,
+        groups=stats.groups,
+        moves_succeeded=stats.moves_succeeded,
+        moves_failed=stats.moves_failed,
+        bytes_moved=stats.bytes_moved,
+        replans=stats.replans,
+        errors=tuple(stats.errors),
+        warnings=tuple(stats.warnings),
+    )
+    try:
+        write_status_file(path, build_run_status(report))
+    except StatusFileError as exc:
+        logger.error(str(exc), extra={"event": "status_file_write_failed", "path": path})
 
 
 # ------------------------------------------------------------- mode override
@@ -2043,6 +2125,10 @@ class _GroupPlan:
     schedule_result: ScheduleResult | None = None
     final_breakdown: ObjectiveBreakdown | None = None
     payback_result: PaybackResult | None = None
+    # Sum of every storage's reserve/free-space shortfall (`r_s`) once this
+    # run's plan has run -- or as things stand now when the gate decided not to
+    # act. Only the monitoring status file reads it (section 2.4).
+    shortfall_bytes: int = 0
 
 
 def _saturation_forecast_inputs(
@@ -2360,7 +2446,11 @@ def _plan_group(
     )
     _log_gate_decision(group, decision, resolved.config.gates)
     if not decision.act:
-        return _GroupPlan(group_load=group_load, decision=decision)
+        return _GroupPlan(
+            group_load=group_load,
+            decision=decision,
+            shortfall_bytes=total_shortfall_bytes(group.storages, group.disks),
+        )
 
     cooldown_storages = frozenset(
         active_storage_cooldowns(
@@ -2460,6 +2550,7 @@ def _plan_group(
         schedule_result=schedule_result,
         final_breakdown=final_breakdown,
         payback_result=payback_result,
+        shortfall_bytes=final_shortfall_bytes,
     )
 
 
@@ -3031,6 +3122,7 @@ def _run_auto_group(
             stop_reason,
             abort_reason=abort_reason,
             replans_exhausted=replans_exhausted,
+            replans=execution.max_replans_per_run - replans_left,
         ),
         migrations_budget,
     )
@@ -3159,6 +3251,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
             "state.json is already locked by another running instance; exiting quietly",
             extra={"event": "apply_lock_held", "path": resolved.config.state.path},
         )
+        _run_stats(args).lock_held = True
         return 0
 
     # Section 13's own in-flight box: `execute.execute_plan()`'s
@@ -3213,10 +3306,14 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                 # planned or executed on a cluster the tool cannot fully
                 # observe (moves already completed stay recorded).
                 load_errors[group.name] = group_plan.load_error
+                _run_stats(args).errors.append(
+                    f"group {group.name}: load model unavailable: {group_plan.load_error}"
+                )
                 break
             assert group_plan.group_load is not None and group_plan.decision is not None
             group_loads[group.name] = group_plan.group_load
             gate_decisions[group.name] = group_plan.decision
+            _note_shortfall_for_status(args, group, group_plan)
             if not group_plan.decision.act:
                 continue
             assert (
@@ -3350,6 +3447,19 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
         )
 
     return _apply_exit_code(execution_results, load_errors)
+
+
+def _note_shortfall_for_status(
+    args: argparse.Namespace, group: Group, group_plan: _GroupPlan
+) -> None:
+    """A group that still breaches its reserve or free-space requirement once
+    this run's plan has run needs a human (the tool never trades the reserve
+    for balance, so it will not fix this by itself): a status-file warning."""
+    if group_plan.shortfall_bytes > 0:
+        _run_stats(args).warnings.append(
+            f"group {group.name}: {format_bytes(group_plan.shortfall_bytes)} short of its "
+            "snapshot reserve / free-space requirement after this run's plan"
+        )
 
 
 def _apply_exit_code(
@@ -3624,6 +3734,34 @@ def _replay_config_path(args: argparse.Namespace) -> tuple[str | None, bool]:
     return args.config, True
 
 
+def _run_handler(
+    resolved: ResolvedConfig,
+    args: argparse.Namespace,
+    effective_mode: str,
+    log_format: str,
+    started_at: float,
+) -> int:
+    """Run the command's handler and turn its outcome into an exit code: a
+    ``DrsError`` is an operational failure (logged, exit ``1``); anything else
+    is a bug and is re-raised -- after the monitoring status file has been told
+    (section 2.4), so a crash cannot leave the previous run's ``OK`` in place."""
+    handler = _COMMAND_HANDLERS[args.command]
+    try:
+        return handler(resolved, args, effective_mode)
+    except DrsError as exc:
+        logger.error(str(exc), extra={"event": "command_failed", "command": args.command})
+        if log_format == "json":
+            # In text format the record above *is* this line; printing both
+            # would report one failure twice on one stream (section 2.3).
+            print(f"pve-storage-drs: {exc}", file=sys.stderr)
+        _run_stats(args).errors.append(str(exc))
+        return 1
+    except Exception as exc:
+        _run_stats(args).errors.append(f"unexpected {type(exc).__name__}: {exc}")
+        _publish_status_file(resolved, args, effective_mode, 1, started_at)
+        raise
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -3677,17 +3815,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         effective_mode = apply_mode_override(configured_mode, args.mode)
 
     args.run_stats = _RunStats()
-    handler = _COMMAND_HANDLERS[args.command]
-    try:
-        exit_code = handler(resolved, args, effective_mode)
-    except DrsError as exc:
-        logger.error(str(exc), extra={"event": "command_failed", "command": args.command})
-        if log_format == "json":
-            # In text format the record above *is* this line; printing both
-            # would report one failure twice on one stream (section 2.3).
-            print(f"pve-storage-drs: {exc}", file=sys.stderr)
-        exit_code = 1
+    exit_code = _run_handler(resolved, args, effective_mode, log_format, started_at)
     _log_run_summary(args, effective_mode, exit_code, started_at)
+    _publish_status_file(resolved, args, effective_mode, exit_code, started_at)
     return exit_code
 
 

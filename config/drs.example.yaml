@@ -445,3 +445,20 @@ support:
   # supported config could need, not just the one active here. A duration
   # (e.g. "14d") overrides it; --range on the command line overrides both.
   capture_range: auto
+
+monitoring:
+  # Where `apply` leaves a one-run status report for monitoring. null (the
+  # default) writes nothing. The format is that of the `check_statusfile`
+  # plugin from monitoring-plugins-contrib -- line 1 is OK, WARNING or
+  # CRITICAL, then the output -- so a check like
+  #     /usr/lib/nagios/plugins/check_statusfile /var/lib/pve-storage-drs/status
+  # is all a monitoring system needs. The file is rewritten by EVERY apply run,
+  # including dry runs and runs that moved nothing, because its modification
+  # time is what tells the plugin the timer is still firing (default: WARNING
+  # after 26 h; `check_statusfile -a 2h` for a shorter timer). CRITICAL: the run
+  # failed (a failed move, or PVE/Prometheus could not be read). WARNING: it
+  # gave up after too many outside changes, left an orphaned volume, or a group
+  # is still short of its reserve or free-space requirement. Nothing is
+  # written when the configuration cannot be read (the file then goes stale).
+  # Mode 0644, written atomically; the directory is created if missing.
+  status_file: null

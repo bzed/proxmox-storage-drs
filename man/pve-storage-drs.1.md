@@ -207,7 +207,8 @@ history to consider), **load_weights** (the weighting of I/O time, operations an
 **gates** (drift and imbalance thresholds, cooldowns), **migration** (bandwidth, cost and payback),
 **objective** (the solver's trade-off weights), **solver** (backend and iteration budget),
 **execution** (mode, concurrency, time windows, locking), **exclude**, **report**, **state**,
-**forecast** and **support** (the anonymization salt and defaults for **collect-testdata**).
+**forecast**, **support** (the anonymization salt and defaults for **collect-testdata**) and
+**monitoring** (the status file **apply** leaves for a Nagios-style **check_statusfile** check).
 
 Every option is documented individually, with its unit, its default and what happens at either
 extreme, in the manual listed under **SEE ALSO**. That document, not this page, is authoritative
@@ -239,6 +240,12 @@ and in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**, and prefer an API token over a 
 : The operator manual and the internals guide, as uncompressed Markdown, one file per topic --
   readable with **less**(1) on a node with no GUI. Typeset PDFs of both, and of the specification
   (*IMPLEMENTATION_PLAN.md*), sit beside them in */usr/share/doc/pve-storage-drs/*.
+
+*monitoring.status_file* (unset by default)
+: The status report **apply** rewrites at the end of every run, in the format the **check_statusfile**
+  plugin (*monitoring-plugins-contrib*) reads: line 1 is *OK*, *WARNING* or *CRITICAL*, then the
+  output. Its modification time is its freshness, so it is rewritten even by a run that moved nothing.
+  See *docs/manual/36-monitoring.md*.
 
 */var/lib/pve-storage-drs/anonymization-salt*
 : **collect-testdata**'s pseudonym key, generated on first use, mode 0600. Never written into a

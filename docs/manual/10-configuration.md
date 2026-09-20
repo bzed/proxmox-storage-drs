@@ -1379,3 +1379,28 @@ currently
 — so a bundle can reproduce a forecaster the capturing operator never
 configured. An explicit duration (e.g. `14d`) overrides that; `--range` on
 the command line overrides both.
+
+## `monitoring` — telling your monitoring system what the last run did
+
+### `monitoring.status_file`
+
+String (a file path) or `null`, default `null`.
+
+Where `apply` leaves its status report. `null` writes nothing. Set, the file is
+rewritten at the end of **every** `apply` run that produced a result — `dry-run`
+included, and runs that moved nothing included — in the format the
+`check_statusfile` plugin (Debian package `monitoring-plugins-contrib`) reads, so
+a plain `check_statusfile <path>` check is all a Nagios-style monitoring system
+needs. See [`36-monitoring.md`](36-monitoring.md) for the format, what makes a run
+`OK`, `WARNING` or `CRITICAL`, and how to wire the check up.
+
+Choose a path the user `apply` runs as can write and the monitoring user can
+read (the file is mode `0644`; the parent directory is created if it is missing).
+`/var/lib/pve-storage-drs/status` beside `state.json` is the natural place.
+
+It interacts with the plugin's `--age`: the file's modification time is what says
+the timer is still firing, so a timer that runs every 15 minutes wants a check like
+`check_statusfile -a 1h`, while the plugin's default of 26 hours suits a daily one.
+Set too generous an age and a stopped timer goes unnoticed for that long; too tight
+and one slow run turns the check `WARNING`. A write failure is logged
+(`status_file_write_failed`) and never changes the run or its exit code.
