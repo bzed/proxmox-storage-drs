@@ -283,11 +283,11 @@ def _preflight(
 
     value = config.get(move.device)
     if not isinstance(value, str):
-        return _PreflightResult(f"{move.disk_key} is no longer present in the VM's config")
+        return _PreflightResult(f"{disk.display_id} is no longer present in the VM's config")
     storage_id, volume_name, params = parse_disk_spec(value)
     if storage_id != move.from_storage:
         return _PreflightResult(
-            f"{move.disk_key} is now on {storage_id!r}, not the planned {move.from_storage!r}"
+            f"{disk.display_id} is now on {storage_id!r}, not the planned {move.from_storage!r}"
         )
 
     if resource.get("status") != "running":
@@ -309,7 +309,7 @@ def _preflight(
     pending_reason = pending_disk_reasons(pending).get(move.device)
     if pending_reason is not None:
         return _PreflightResult(
-            f"{move.disk_key} now has a {pending_reason} that did not exist when this plan was "
+            f"{disk.display_id} now has a {pending_reason} that did not exist when this plan was "
             "built -- PVE does not reconcile a disk's pending entry when it is moved, so it "
             "would be left referring to pre-move state"
         )
@@ -1142,7 +1142,7 @@ def _post_move_bookkeeping(
     if result.status == "replan_needed":
         return result.detail
     if result.status == "failed" and (result.always_stop or execution.abort_on_failure):
-        return f"{move.disk_key} failed: {result.detail}"
+        return f"{disk.display_id} failed: {result.detail}"
     if result.status == "skipped" and result.always_stop:
         # The post-lock-wait deadline re-check (REVIEW.md T-06) -- the
         # same "stop cleanly" policy `_auto_budget_stop_outcome()` already

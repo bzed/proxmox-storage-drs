@@ -20,10 +20,10 @@ accepting the rest:
 $ pve-storage-drs -c /etc/pve/drs.yaml --mode confirm apply
 Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the normal drift/imbalance thresholds -- a capacity shortfall is never delayed by them
   solver: heuristic
-  102:scsi0  san-a → san-c  1.50 TiB  [y]es/[n]o skip/[a]ll remaining/[q]uit? n
-  1. 102:scsi0      san-a → san-c     1.50 TiB   ~2.2h   Δimbalance -4.53   ℓ/z 1.67  → skipped: operator declined
-  101:scsi1  san-a → san-b  1.00 TiB  [y]es/[n]o skip/[a]ll remaining/[q]uit? a
-  2. 101:scsi1      san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00  → moved: task UPID:... completed OK, source released
+  db01(102):scsi0  san-a → san-c  1.50 TiB  [y]es/[n]o skip/[a]ll remaining/[q]uit? n
+  1. db01(102):scsi0            san-a → san-c     1.50 TiB   ~2.2h   Δimbalance -4.53   ℓ/z 1.67  → skipped: operator declined
+  web01(101):scsi1  san-a → san-b  1.00 TiB  [y]es/[n]o skip/[a]ll remaining/[q]uit? a
+  2. web01(101):scsi1           san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00  → moved: task UPID:... completed OK, source released
   after: san-a=5.50  san-b=1.70  san-c=0.20
   spread: 255.4% → 214.9%
   payback: benefit 3.02e+07 load·s vs cost 1.05e+04 load·s → ratio 2.88e+03 (need 10) ✓
@@ -268,7 +268,7 @@ group specifically), `aborted` (`true` when this group's execution hit
 one of the failures above and the run ended because of it),
 `replans_exhausted` (`true` when `execution.max_replans_per_run` ran out —
 the run bailed out and exits `0`) and `outcomes[]` — one entry per move actually
-attempted, each with `disk_key`, `from_storage`, `to_storage`, `status`
+attempted, each with `disk_key`, `vm_name`, `from_storage`, `to_storage`, `status`
 (`would_move`/`moved`/`skipped`/`failed`/`draining`/`replan_needed`),
 `detail`, `upid` (`null` unless `move_disk` was actually issued for this
 move — always `null` for `would_move`/`replan_needed`, and for `skipped`
