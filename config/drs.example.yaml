@@ -172,6 +172,13 @@ groups:
         # observed load; take it from the array's documented queue depth, or measure
         # the load at which latency starts climbing super-linearly.
         saturation_load: null
+        # Per-storage/per-pattern free_space.soft/hard override -- same shape as
+        # the top-level free_space: block below, most specific wins. See that
+        # section for the full semantics; not set here, so this entry inherits
+        # the global values.
+        # free_space:
+        #   soft: "15%"
+        #   hard: null
       - id: san-b
         capability_weight: 1.0
       - id: san-c
