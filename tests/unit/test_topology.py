@@ -275,7 +275,7 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
 
     # Ungrouped disk (108) never appears in any group, and is warned about.
     assert "108:scsi0" not in disks_by_key
-    assert any("108:scsi0" in w and "ungrouped" in w for w in topology.warnings)
+    assert any("vm108(108):scsi0" in w and "ungrouped" in w for w in topology.warnings)
 
     # Stopped VM (109, running_only defaults True) is never fetched or pinned.
     assert not any(k.startswith("109:") for k in disks_by_key)

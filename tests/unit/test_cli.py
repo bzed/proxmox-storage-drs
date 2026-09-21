@@ -439,7 +439,7 @@ def test_show_load_human_output(
     assert cli.main(["-c", str(path), "show-load"]) == 0
     out = capsys.readouterr().out
     assert "Group fc-tier1" in out
-    assert "101:scsi0" in out
+    assert "web01(101):scsi0" in out
     assert "[pinned: locked: backup]" in out
     assert "reserve short by" in out or "reserve OK" in out
     assert "ungrouped" in out
@@ -452,7 +452,7 @@ def test_show_load_human_output(
     # san-b: nothing provisioned, nothing allocated -- they agree, no note.
     assert "san-b  provisioned 0 B/8.00 TiB  " in out
     assert "ℓ 3.00" in out  # 101:scsi0's DiskLoad
-    assert "102:scsi0: sample coverage 40%" in out  # the flagged disk
+    assert "db01(102):scsi0: sample coverage 40%" in out  # the flagged disk
     # san-a's reserve is violated in this fixture (see the json test's own
     # comment) -- the gate must show the reserve override, not imbalance.
     assert "Group fc-tier1 → ACT: reserve violated on san-a" in out
@@ -1116,7 +1116,7 @@ def test_plan_human_output_acts_via_reserve_override_and_shows_the_one_possible_
     assert cli.main(["-c", str(path), "plan"]) == 0
     out = capsys.readouterr().out
     assert "Group fc-tier1 → ACT: reserve violated on san-a" in out
-    assert "101:scsi0" in out
+    assert "web01(101):scsi0" in out
     assert "san-a → san-b" in out
     assert "102:scsi0" not in out  # pinned -- never proposed as a move
     assert "payback" in out.lower()  # the phase-5-not-implemented caveat
@@ -1332,7 +1332,7 @@ def test_apply_excludes_a_saturation_deferred_move_from_execution(
     path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
     assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
     out = capsys.readouterr().out
-    assert "101:scsi0" in out
+    assert "web01(101):scsi0" in out
     assert "skipped: deferred: would push a target storage's I/O over migration." in out
     assert "would_move" not in out  # the only move in this plan was deferred, never executed
 
@@ -1547,7 +1547,7 @@ def test_plan_human_output_shows_the_payback_verdict(
     # should (REVIEW.md R-05 -- these are reported separately, not conflated).
     assert "this plan's balance benefit does not outweigh its migration cost" not in out
     assert "blocked by the hard per-move duration rule" in out
-    assert "101:scsi0" in out
+    assert "web01(101):scsi0" in out
 
 
 def test_load_per_tib_is_zero_not_a_division_error_for_a_zero_size_disk() -> None:
@@ -1598,31 +1598,39 @@ def test_render_plan_payback_lines_separates_economic_and_duration_failures() ->
             aggregate_ok=aggregate_ok,
         )
 
+    vm_name_by_key = {"101:scsi0": "vm1"}
+
     # Economic failure only: no move exceeds the duration rule.
     economic = make_result(aggregate_ok=False, rejected_moves=())
-    lines = cli._render_plan_payback_lines(economic, payback_ratio=10.0)
+    lines = cli._render_plan_payback_lines(
+        economic, payback_ratio=10.0, vm_name_by_key=vm_name_by_key
+    )
     text = "\n".join(lines)
     assert "does not outweigh its migration cost" in text
     assert "hard per-move duration rule" not in text
 
     # Hard-duration failure only: passes economically (e.g. reserve-exempt).
     duration = make_result(aggregate_ok=True, rejected_moves=("101:scsi0",), resolves=True)
-    lines = cli._render_plan_payback_lines(duration, payback_ratio=10.0)
+    lines = cli._render_plan_payback_lines(
+        duration, payback_ratio=10.0, vm_name_by_key=vm_name_by_key
+    )
     text = "\n".join(lines)
     assert "does not outweigh its migration cost" not in text
     assert "hard per-move duration rule" in text
-    assert "101:scsi0" in text
+    assert "vm1(101):scsi0" in text
 
     # Both failures at once: both lines present.
     both = make_result(aggregate_ok=False, rejected_moves=("101:scsi0",))
-    lines = cli._render_plan_payback_lines(both, payback_ratio=10.0)
+    lines = cli._render_plan_payback_lines(both, payback_ratio=10.0, vm_name_by_key=vm_name_by_key)
     text = "\n".join(lines)
     assert "does not outweigh its migration cost" in text
     assert "hard per-move duration rule" in text
 
     # Fully accepted: neither warning line.
     accepted = make_result(aggregate_ok=True, rejected_moves=())
-    lines = cli._render_plan_payback_lines(accepted, payback_ratio=10.0)
+    lines = cli._render_plan_payback_lines(
+        accepted, payback_ratio=10.0, vm_name_by_key=vm_name_by_key
+    )
     assert len(lines) == 1
 
 
@@ -2114,7 +2122,7 @@ def test_apply_dry_run_reports_would_move_and_writes_no_state(
     path = write_config(tmp_path, state={"path": str(state_path)})
     assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
     out = capsys.readouterr().out
-    assert "101:scsi0" in out
+    assert "a(101):scsi0" in out
     assert "would_move" in out
     # Nothing was executed, so section 11.2's "updated only after a run
     # that executed at least one migration" must not have fired.
@@ -2140,7 +2148,7 @@ def test_apply_confirm_mode_prompts_and_honours_a_decline(
     path = write_config(tmp_path, state={"path": str(state_path)})
     assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
     assert len(prompts) == 1
-    assert "101:scsi0" in prompts[0]
+    assert "a(101):scsi0" in prompts[0]
     assert "san-a → san-b" in prompts[0]
     out = capsys.readouterr().out
     assert "skipped: operator declined" in out
@@ -2517,7 +2525,7 @@ def test_apply_refuses_a_move_rejected_by_the_hard_duration_rule(
     assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
     out = capsys.readouterr().out
     assert (
-        "101:scsi0" in out
+        "web01(101):scsi0" in out
         and "refused: would take longer than migration.max_single_move_duration allows" in out
     )
 
@@ -2551,7 +2559,7 @@ def test_apply_refuses_the_whole_plan_when_the_aggregate_payback_test_fails(
     )
     assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 0
     out = capsys.readouterr().out
-    assert "101:scsi0" in out
+    assert "a(101):scsi0" in out
     assert "refused: this plan's balance benefit does not outweigh its migration cost" in out
     # Refused, not failed -- state.json must be untouched, same as a
     # group the gate never acted on.
@@ -2901,9 +2909,9 @@ def test_render_group_explain_human_shows_pins_fragmentation_and_objective(
     assert "measured load:" in text
     assert "san-a" in text and "san-b" in text  # the group's own storages, not just pins
     assert "pinned (not movable this run):" in text
-    assert "101:scsi1" in text and "snapshots present (1)" in text
+    assert "web01(101):scsi1" in text and "snapshots present (1)" in text
     assert "clear snapshots to unblock" in text
-    assert "102:scsi0" in text and "locked: backup" in text
+    assert "db01(102):scsi0" in text and "locked: backup" in text
     assert "re-check next run once the lock releases" in text
     assert "cannot fully consolidate:" in text
     assert "101 (web01)" in text
@@ -3012,7 +3020,7 @@ def test_render_group_explain_human_shows_the_closest_alternative_when_act_but_n
     group_plan = _make_group_plan(group, resolved, moves=())
     text = "\n".join(cli._render_group_explain_human(group, group_plan, resolved))
     assert "no moves made: the objective is lowest at the current assignment" in text
-    assert "closest alternative: 101:scsi0 san-a → san-b" in text
+    assert "closest alternative: web01(101):scsi0 san-a → san-b" in text
     assert "rejected" in text
 
 
@@ -3136,10 +3144,10 @@ def test_explain_handler_human_output(
     assert cli.main(["-c", str(path), "explain"]) == 0
     out = capsys.readouterr().out
     assert "Group fc-tier1 → ACT: reserve violated on san-a" in out
-    assert "101:scsi0" in out
+    assert "web01(101):scsi0" in out
     assert "san-a → san-b" in out
     assert "pinned (not movable this run):" in out
-    assert "102:scsi0" in out and "locked: backup" in out
+    assert "db01(102):scsi0" in out and "locked: backup" in out
     assert "objective:" in out
     assert "measured load:" in out
     assert "data source:" not in out  # -v not passed
@@ -4498,7 +4506,7 @@ def test_a_failed_move_leaves_a_critical_status_file_naming_it(
     assert cli.main(["-c", str(path), "--mode", "confirm", "apply"]) == 1
     text = status.read_text(encoding="utf-8")
     assert text.splitlines()[0] == "CRITICAL"
-    assert "101:scsi0 san-a -> san-b failed: mirror error" in text.splitlines()[1]
+    assert "a(101):scsi0 san-a -> san-b failed: mirror error" in text.splitlines()[1]
     assert "moves_failed=1" in text
     # the orphan is reported (never deleted) as a warning line
     assert "san-b:vm-101-disk-0" in text and "NOT deleted" in text

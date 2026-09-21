@@ -36,6 +36,7 @@
                 "repair": false,
                 "size_bytes": 4194304,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "457823",
                 "vmid": 457823
               },
               {
@@ -51,6 +52,7 @@
                 "repair": false,
                 "size_bytes": 1048576,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "644488",
                 "vmid": 644488
               },
               {
@@ -66,6 +68,7 @@
                 "repair": true,
                 "size_bytes": 37580963840,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "494807",
                 "vmid": 494807
               },
               {
@@ -81,6 +84,7 @@
                 "repair": true,
                 "size_bytes": 64424509440,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "366117",
                 "vmid": 366117
               },
               {
@@ -96,6 +100,7 @@
                 "repair": true,
                 "size_bytes": 68719476736,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "644488",
                 "vmid": 644488
               },
               {
@@ -111,6 +116,7 @@
                 "repair": true,
                 "size_bytes": 64424509440,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "317511",
                 "vmid": 317511
               },
               {
@@ -126,6 +132,7 @@
                 "repair": true,
                 "size_bytes": 21474836480,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "240169",
                 "vmid": 240169
               },
               {
@@ -141,6 +148,7 @@
                 "repair": true,
                 "size_bytes": 214748364800,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -156,6 +164,7 @@
                 "repair": true,
                 "size_bytes": 161061273600,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -171,6 +180,7 @@
                 "repair": true,
                 "size_bytes": 161061273600,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -186,6 +196,7 @@
                 "repair": true,
                 "size_bytes": 107374182400,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -201,6 +212,7 @@
                 "repair": true,
                 "size_bytes": 214748364800,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -216,6 +228,7 @@
                 "repair": true,
                 "size_bytes": 64424509440,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "75052",
                 "vmid": 75052
               },
               {
@@ -231,6 +244,7 @@
                 "repair": true,
                 "size_bytes": 53687091200,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "75052",
                 "vmid": 75052
               },
               {
@@ -246,6 +260,7 @@
                 "repair": true,
                 "size_bytes": 107374182400,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "75052",
                 "vmid": 75052
               },
               {
@@ -261,6 +276,7 @@
                 "repair": true,
                 "size_bytes": 80530636800,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "747564",
                 "vmid": 747564
               },
               {
@@ -276,6 +292,7 @@
                 "repair": true,
                 "size_bytes": 53687091200,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "747564",
                 "vmid": 747564
               }
             ],
@@ -341,6 +358,7 @@
                 "repair": false,
                 "size_bytes": 4194304,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "457823",
                 "vmid": 457823
               },
               {
@@ -356,6 +374,7 @@
                 "repair": false,
                 "size_bytes": 1048576,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "644488",
                 "vmid": 644488
               },
               {
@@ -371,6 +390,7 @@
                 "repair": true,
                 "size_bytes": 68719476736,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "644488",
                 "vmid": 644488
               },
               {
@@ -386,6 +406,7 @@
                 "repair": true,
                 "size_bytes": 64424509440,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "317511",
                 "vmid": 317511
               },
               {
@@ -401,6 +422,7 @@
                 "repair": true,
                 "size_bytes": 322122547200,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -416,6 +438,7 @@
                 "repair": true,
                 "size_bytes": 214748364800,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -431,6 +454,7 @@
                 "repair": true,
                 "size_bytes": 107374182400,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -446,6 +470,7 @@
                 "repair": true,
                 "size_bytes": 161061273600,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -461,6 +486,7 @@
                 "repair": true,
                 "size_bytes": 107374182400,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "843425",
                 "vmid": 843425
               },
               {
@@ -476,6 +502,7 @@
                 "repair": true,
                 "size_bytes": 80530636800,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "747564",
                 "vmid": 747564
               },
               {
@@ -491,6 +518,7 @@
                 "repair": true,
                 "size_bytes": 53687091200,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "747564",
                 "vmid": 747564
               },
               {
@@ -506,6 +534,7 @@
                 "repair": true,
                 "size_bytes": 69793218560,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "365149",
                 "vmid": 365149
               },
               {
@@ -521,6 +550,7 @@
                 "repair": false,
                 "size_bytes": 1048576,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "163216",
                 "vmid": 163216
               },
               {
@@ -536,6 +566,7 @@
                 "repair": false,
                 "size_bytes": 26843545600,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "163216",
                 "vmid": 163216
               },
               {
@@ -551,6 +582,7 @@
                 "repair": true,
                 "size_bytes": 37580963840,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "365149",
                 "vmid": 365149
               },
               {
@@ -566,6 +598,7 @@
                 "repair": true,
                 "size_bytes": 107374182400,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "725058",
                 "vmid": 725058
               },
               {
@@ -581,6 +614,7 @@
                 "repair": true,
                 "size_bytes": 107374182400,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "75052",
                 "vmid": 75052
               },
               {
@@ -596,6 +630,7 @@
                 "repair": true,
                 "size_bytes": 161061273600,
                 "to_storage": "stor-c210ac69",
+                "vm_name": "725058",
                 "vmid": 725058
               },
               {
@@ -611,6 +646,7 @@
                 "repair": true,
                 "size_bytes": 64424509440,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "75052",
                 "vmid": 75052
               },
               {
@@ -626,6 +662,7 @@
                 "repair": true,
                 "size_bytes": 53687091200,
                 "to_storage": "stor-30d346d4",
+                "vm_name": "75052",
                 "vmid": 75052
               }
             ],

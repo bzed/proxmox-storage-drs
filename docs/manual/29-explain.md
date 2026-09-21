@@ -22,28 +22,28 @@ consolidate" case section 3.6 exists to name:
 $ pve-storage-drs -c /etc/pve/drs.yaml explain
 Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   solver: heuristic
-  1. 102:scsi0      san-a → san-b     1.50 TiB   ~2.2h   Δimbalance -4.00   ℓ/z 1.67
-  2. 101:scsi0      san-a → san-c     2.00 TiB   ~2.9h   Δimbalance -3.40   ℓ/z 1.50
-  3. 103:scsi0      san-b → san-a   512.00 GiB   ~43.7m   Δimbalance -0.80   ℓ/z 0.80
-  4. 105:scsi0      san-c → san-a   512.00 GiB   ~43.7m   Δimbalance -0.40   ℓ/z 0.40
+  1. db01(102):scsi0            san-a → san-b     1.50 TiB   ~2.2h   Δimbalance -4.00   ℓ/z 1.67
+  2. web01(101):scsi0           san-a → san-c     2.00 TiB   ~2.9h   Δimbalance -3.40   ℓ/z 1.50
+  3. mail01(103):scsi0          san-b → san-a   512.00 GiB   ~43.7m   Δimbalance -0.80   ℓ/z 0.80
+  4. cache01(105):scsi0         san-c → san-a   512.00 GiB   ~43.7m   Δimbalance -0.40   ℓ/z 0.40
   after: san-a=2.50  san-b=2.90  san-c=3.00
   spread: 257.1% → 17.9%
   payback: benefit 2.52e+08 load·s vs cost 4.72e+04 load·s → ratio 5.34e+03 (need 10) ✓
   objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 1.43 + spread 0.25 + reserve 0 = 3.5
   measured load:
   san-a  provisioned 5.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 1.50 TiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
-    101:scsi0        2.00 TiB  raw     ℓ 3.00
-    101:scsi1        1.00 TiB  raw     ℓ 1.00
-    102:scsi0        1.50 TiB  raw     ℓ 2.50
-    106:scsi0        1.00 TiB  raw     ℓ 0.90  [pinned: snapshots present (2)]
+    web01(101):scsi0             2.00 TiB  raw     ℓ 3.00
+    web01(101):scsi1             1.00 TiB  raw     ℓ 1.00
+    db01(102):scsi0              1.50 TiB  raw     ℓ 2.50
+    archive01(106):scsi0         1.00 TiB  raw     ℓ 0.90  [pinned: snapshots present (2)]
   san-b  provisioned 2.00 TiB/8.00 TiB  L=0.80 u=0.80  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
-    103:scsi0      512.00 GiB  raw     ℓ 0.40
-    104:scsi0        1.00 TiB  raw     ℓ 0.30
-    106:scsi1      512.00 GiB  raw     ℓ 0.10
+    mail01(103):scsi0          512.00 GiB  raw     ℓ 0.40
+    app01(104):scsi0             1.00 TiB  raw     ℓ 0.30
+    archive01(106):scsi1       512.00 GiB  raw     ℓ 0.10
   san-c  provisioned 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
-    105:scsi0      512.00 GiB  raw     ℓ 0.20
+    cache01(105):scsi0         512.00 GiB  raw     ℓ 0.20
   pinned (not movable this run):
-    106:scsi0        1.00 TiB  on san-a  ℓ 0.90  ℓ/z 0.90  -- snapshots present (2)  → clear snapshots to unblock
+    archive01(106):scsi0         1.00 TiB  on san-a  ℓ 0.90  ℓ/z 0.90  -- snapshots present (2)  → clear snapshots to unblock
   cannot fully consolidate:
     106 (archive01)  scsi0: snapshots present (2)
   pinned load 0.90 of 8.40 (10.7%, warn at 25%);  best achievable spread given pins: 17.9%
@@ -90,12 +90,12 @@ rejected it:
 ```
   objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + spread 0 + reserve 0 = 0.576
   no moves made: the objective is lowest at the current assignment
-  closest alternative: 110:scsi1 VM-krbd → VM
+  closest alternative: vm110(110):scsi1 VM-krbd → VM
     imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, spread 0→0, reserve 0→0
     total 0.576 → 0.8  (worse by 0.223 -- rejected)
 ```
 
-Read left to right: moving `110:scsi1` from `VM-krbd` to `VM` would cut
+Read left to right: moving `vm110(110):scsi1` from `VM-krbd` to `VM` would cut
 the imbalance term from `0.576` to `0.043` — a real improvement — but
 `110` is a two-disk VM with its other disk staying put, so the move splits
 it across two storages, and `objective.kappa_vm_affinity`'s fragmentation
@@ -147,7 +147,7 @@ instead reads `data source: {cluster="mycluster"}`.)
 ## `pinned (not movable this run):`
 
 Every disk section 5.3 (C2) excludes from this run's solve, in the same
-`vmid:device` order `show-load` lists disks, with its size, current
+`name(vmid):device` order `show-load` lists disks, with its size, current
 storage, measured load (`ℓ`) and `ℓ/z` ratio when one is available, and
 its exact reason — a real snapshot or an unreferenced companion volume
 (section 3.7), an unapplied pending config change (section 3.8), a config
@@ -204,13 +204,13 @@ found nothing to balance this run.
 own field list) plus `objective` (the six terms above, `null` when the
 gate said `NO ACTION`), `rejected_alternative` (`null` unless the
 "`no moves made`" case above applies, otherwise `disk_key`, `vmid`,
-`device`, `from_storage`, `to_storage`, `baseline` and `objective` — each
-the same six-term breakdown `objective` above serializes, for the
-current assignment and the candidate respectively — and `worse_by`, the
-difference between the two totals), `storages`/`disks` (the measured-load
-section above, identical shape to `show-load --json`'s own fields of the
-same name), `pinned_disks` (`disk_key`, `vmid`, `device`,
-`current_storage`, `size_bytes`, `load`, `load_per_tib`, `reason`,
+`vm_name`, `device`, `from_storage`, `to_storage`, `baseline` and
+`objective` — each the same six-term breakdown `objective` above
+serializes, for the current assignment and the candidate respectively —
+and `worse_by`, the difference between the two totals), `storages`/`disks`
+(the measured-load section above, identical shape to `show-load --json`'s
+own fields of the same name), `pinned_disks` (`disk_key`, `vmid`,
+`vm_name`, `device`, `current_storage`, `size_bytes`, `load`, `load_per_tib`, `reason`,
 `action_hint` — `null` for a standing policy exclusion, same rule as the
 human report's `→` line), `fragmentation` (a list of
 `{vmid, vm_name, blockers}`, each blocker an object with `device`,

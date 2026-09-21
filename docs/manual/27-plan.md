@@ -37,8 +37,8 @@ function:
 $ pve-storage-drs -c /etc/pve/drs.yaml plan
 Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the normal drift/imbalance thresholds -- a capacity shortfall is never delayed by them
   solver: heuristic
-  1. 102:scsi0      san-a → san-c     1.50 TiB   ~2.2h   Δimbalance -4.53   ℓ/z 1.67
-  2. 101:scsi1      san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00
+  1. db01(102):scsi0            san-a → san-c     1.50 TiB   ~2.2h   Δimbalance -4.53   ℓ/z 1.67
+  2. web01(101):scsi1           san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00
   after: san-a=3.00  san-b=1.70  san-c=2.70
   spread: 255.4% → 52.7%
   payback: benefit 1.93e+08 load·s vs cost 2.62e+04 load·s → ratio 7.34e+03 (need 10) ✓
@@ -67,8 +67,9 @@ Group fc-tier2 → NO ACTION: imbalance 0.0% is below gates.imbalance_threshold 
 
 ## Reading a move line
 
-`1. 102:scsi0  san-a → san-c  1.50 TiB  ~2.2h  Δimbalance -4.53  ℓ/z 1.67` —
-the disk, its current and target storage, its size, the estimated mirror
+`1. db01(102):scsi0  san-a → san-c  1.50 TiB  ~2.2h  Δimbalance -4.53  ℓ/z 1.67` —
+the disk (its VM's name, then its vmid in parentheses, then the device), its
+current and target storage, its size, the estimated mirror
 duration (`size / migration.bwlimit_bytes_per_sec`, plus a `+wipe <time>`
 suffix when `saferemove` on the source storage adds one — see the payback
 section below), this move's own effect on the group's imbalance metric at
@@ -222,8 +223,8 @@ and left for you to review, not silently adjusted. See
 `show-load`'s), `solver_backend`/`solver_status` (`null`/`null` when the
 gate said `NO ACTION`; otherwise `"heuristic"`/`null`, or `"cpsat"`/
 `"cbc"` with `"optimal"`/`"feasible"` -- the same information the human
-output's `solver:` line names), `moves[]` (`disk_key`, `vmid`, `device`, `from_storage`,
-`to_storage`, `size_bytes`, `imbalance_reduction`,
+output's `solver:` line names), `moves[]` (`disk_key`, `vmid`, `vm_name`, `device`,
+`from_storage`, `to_storage`, `size_bytes`, `imbalance_reduction`,
 `repair` (the section 7.3 revert-test marker — see "The `payback:` line"
 above), `load_per_tib`, `duration_mirror_seconds`,
 `duration_wipe_seconds`, `cost_load_seconds`, `exceeds_max_duration`),

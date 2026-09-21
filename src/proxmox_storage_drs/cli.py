@@ -134,7 +134,14 @@ from proxmox_storage_drs.statusfile import (
     write_status_file,
 )
 from proxmox_storage_drs.timewindow import current_deadline
-from proxmox_storage_drs.topology import Disk, Group, Storage, Topology, build_topology
+from proxmox_storage_drs.topology import (
+    Disk,
+    Group,
+    Storage,
+    Topology,
+    build_topology,
+    format_disk_id,
+)
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds, parse_duration_seconds
 
 # Explicitly named, not `__name__`: this module is `__main__` whenever it is
@@ -375,8 +382,9 @@ def _accumulate_move_stats(args: argparse.Namespace, group: Group, result: Execu
     stats.groups += 1
     stats.replans += result.replans
     size_by_key = {d.key: d.size_bytes for d in group.disks}
+    vm_name_by_key = _vm_name_map(group)
     for outcome in result.outcomes:
-        _record_outcome_for_status(stats, group, outcome)
+        _record_outcome_for_status(stats, group, outcome, vm_name_by_key)
         if outcome.upid is None:
             continue
         stats.moves_issued += 1
@@ -392,10 +400,13 @@ def _accumulate_move_stats(args: argparse.Namespace, group: Group, result: Execu
         stats.warnings.append(f"group {group.name}: {result.stop_reason}")
 
 
-def _record_outcome_for_status(stats: _RunStats, group: Group, outcome: MoveOutcome) -> None:
+def _record_outcome_for_status(
+    stats: _RunStats, group: Group, outcome: MoveOutcome, vm_name_by_key: dict[str, str]
+) -> None:
     """Fold one move outcome into the status file's error/warning lists (the
     numeric counters stay in :func:`_accumulate_move_stats`)."""
-    move = f"{outcome.disk_key} {outcome.from_storage} -> {outcome.to_storage}"
+    display_id = format_disk_id(outcome.disk_key, _vm_name_for(vm_name_by_key, outcome.disk_key))
+    move = f"{display_id} {outcome.from_storage} -> {outcome.to_storage}"
     if outcome.status == "failed":
         stats.errors.append(f"group {group.name}: {move} failed: {outcome.detail}")
     elif outcome.status == "draining":
@@ -769,6 +780,21 @@ def _handle_verify_metrics(resolved: ResolvedConfig, args: argparse.Namespace, m
     return 0 if report.ok else 1
 
 
+def _vm_name_map(group: Group) -> dict[str, str]:
+    """`Disk.key` -> `Disk.vm_name` for every disk in `group`, built once so
+    output that only carries a bare `disk_key` (a `ScheduledMove`,
+    `MoveOutcome`, `RejectedCandidate`, `DiskLoad`, ...) can still render
+    `format_disk_id`'s "name(vmid):device" form."""
+    return {d.key: d.vm_name for d in group.disks}
+
+
+def _vm_name_for(vm_name_by_key: dict[str, str], disk_key: str) -> str:
+    """`vm_name_by_key[disk_key]`, falling back to the bare vmid if the key
+    is somehow not one of `group`'s own disks (should not happen -- every
+    `disk_key` rendered here always originates from the same group)."""
+    return vm_name_by_key.get(disk_key, disk_key.partition(":")[0])
+
+
 def _render_storage_and_disk_load_lines(
     group: Group,
     group_load: GroupLoad | None,
@@ -781,6 +807,7 @@ def _render_storage_and_disk_load_lines(
     identical `GroupLoad`, just for a different purpose."""
     load_by_key = group_load.load_by_disk_key() if group_load else {}
     storage_loads = {s.storage_id: s for s in group_load.storages} if group_load else {}
+    vm_name_by_key = _vm_name_map(group)
     lines: list[str] = []
     for storage in group.storages:
         status = reserve_statuses[storage.id]
@@ -819,13 +846,16 @@ def _render_storage_and_disk_load_lines(
             load_suffix = f"  ℓ {load_by_key[disk.key]:.2f}" if disk.key in load_by_key else ""
             pin = f"  [pinned: {disk.pinned_reason}]" if disk.pinned_reason else ""
             lines.append(
-                f"    {disk.key:<14} {format_bytes(disk.size_bytes):>10}  "
+                f"    {disk.display_id:<28} {format_bytes(disk.size_bytes):>10}  "
                 f"{disk.format:<6}{load_suffix}{pin}"
             )
     if group_load is not None:
         for disk_load in group_load.disks:
             if disk_load.flagged_reason:
-                lines.append(f"  ⚠ {disk_load.disk_key}: {disk_load.flagged_reason}")
+                display = format_disk_id(
+                    disk_load.disk_key, _vm_name_for(vm_name_by_key, disk_load.disk_key)
+                )
+                lines.append(f"  ⚠ {display}: {disk_load.flagged_reason}")
         if group_load.no_series_matched:
             # REVIEW.md W-06/W-07: distinguish this from a genuinely idle
             # group -- every per-disk flag above is really one symptom of
@@ -1043,6 +1073,7 @@ def _render_plan_move_line(
     move: ScheduledMove,
     move_cost: MoveCost | None,
     load_by_key: dict[str, float],
+    vm_name: str,
     outcome: MoveOutcome | None = None,
 ) -> str:
     duration_str = "?"
@@ -1057,8 +1088,9 @@ def _render_plan_move_line(
             flag += "  ⚠ exceeds migration.max_single_move_duration"
     change = -move.imbalance_reduction
     load_per_tib = _load_per_tib(load_by_key, move.disk_key, move.size_bytes)
+    display_id = format_disk_id(move.disk_key, vm_name)
     line = (
-        f"  {index}. {move.disk_key:<14} {move.from_storage} → {move.to_storage}   "
+        f"  {index}. {display_id:<28} {move.from_storage} → {move.to_storage}   "
         f"{format_bytes(move.size_bytes):>10}   {duration_str}   "
         f"Δimbalance {change:+.2f}   ℓ/z {load_per_tib:.2f}{flag}"
     )
@@ -1070,7 +1102,9 @@ def _render_plan_move_line(
     return line
 
 
-def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: float) -> list[str]:
+def _render_plan_payback_lines(
+    payback_result: PaybackResult, payback_ratio: float, vm_name_by_key: dict[str, str]
+) -> list[str]:
     """The economic test (``aggregate_ok``) and the hard per-move duration
     rule (``rejected_moves``) are reported separately here, not folded into
     one "does not pass payback" warning -- they are different failures with
@@ -1104,12 +1138,20 @@ def _render_plan_payback_lines(payback_result: PaybackResult, payback_ratio: flo
     if payback_result.rejected_moves:
         lines.append(
             "  ⚠ blocked by the hard per-move duration rule (migration."
-            "max_single_move_duration): " + ", ".join(payback_result.rejected_moves)
+            "max_single_move_duration): "
+            + ", ".join(
+                format_disk_id(key, _vm_name_for(vm_name_by_key, key))
+                for key in payback_result.rejected_moves
+            )
         )
     if payback_result.deferred_moves:
         lines.append(
             "  ⚠ deferred: would push a target storage's I/O over migration."
-            "saturation_ceiling: " + ", ".join(payback_result.deferred_moves)
+            "saturation_ceiling: "
+            + ", ".join(
+                format_disk_id(key, _vm_name_for(vm_name_by_key, key))
+                for key in payback_result.deferred_moves
+            )
         )
     return lines
 
@@ -1180,11 +1222,17 @@ def _render_group_plan_human(
     outcomes_by_key = {
         o.disk_key: o for o in (execution_result.outcomes if execution_result is not None else ())
     }
+    vm_name_by_key = _vm_name_map(group)
     for i, move in enumerate(schedule_result.order, start=1):
         outcome = outcomes_by_key.get(move.disk_key)
         lines.append(
             _render_plan_move_line(
-                i, move, move_costs_by_key.get(move.disk_key), load_by_key, outcome
+                i,
+                move,
+                move_costs_by_key.get(move.disk_key),
+                load_by_key,
+                _vm_name_for(vm_name_by_key, move.disk_key),
+                outcome,
             )
         )
     if schedule_result.deadlocked_msg:
@@ -1205,7 +1253,7 @@ def _render_group_plan_human(
         lines.append(after_line)
         lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
         if payback_result is not None:
-            lines.extend(_render_plan_payback_lines(payback_result, payback_ratio))
+            lines.extend(_render_plan_payback_lines(payback_result, payback_ratio, vm_name_by_key))
     lines.append("")
     return lines
 
@@ -1296,6 +1344,7 @@ def _render_group_plan_json(
     move_costs_by_key = (
         {mc.disk_key: mc for mc in payback_result.move_costs} if payback_result else {}
     )
+    vm_name_by_key = _vm_name_map(group)
     moves_out = []
     if schedule_result is not None:
         for move in schedule_result.order:
@@ -1304,6 +1353,7 @@ def _render_group_plan_json(
                 {
                     "disk_key": move.disk_key,
                     "vmid": move.vmid,
+                    "vm_name": _vm_name_for(vm_name_by_key, move.disk_key),
                     "device": move.device,
                     "from_storage": move.from_storage,
                     "to_storage": move.to_storage,
@@ -1529,7 +1579,8 @@ def _render_pinned_lines(group: Group, load_by_key: dict[str, float]) -> list[st
         hint = _pin_action_hint(disk.pinned_reason)
         hint_str = f"  → {hint}" if hint else ""
         lines.append(
-            f"    {disk.key:<14} {format_bytes(disk.size_bytes):>10}  on {disk.current_storage}"
+            f"    {disk.display_id:<28} {format_bytes(disk.size_bytes):>10}  "
+            f"on {disk.current_storage}"
             f"{load_str}  ℓ/z {ratio:.2f}  -- {disk.pinned_reason}{hint_str}"
         )
     return lines
@@ -1625,9 +1676,12 @@ def _render_no_moves_lines(
         else "  no moves made: the objective is lowest at the current assignment"
     )
     b, c = candidate.baseline, candidate.breakdown
+    candidate_display_id = format_disk_id(
+        candidate.disk_key, _vm_name_for(_vm_name_map(group), candidate.disk_key)
+    )
     return [
         headline,
-        f"  closest alternative: {candidate.disk_key} {candidate.from_storage} → "
+        f"  closest alternative: {candidate_display_id} {candidate.from_storage} → "
         f"{candidate.to_storage}",
         "    "
         + ", ".join(
@@ -1873,6 +1927,7 @@ def _render_group_explain_json(
             out["rejected_alternative"] = {
                 "disk_key": candidate.disk_key,
                 "vmid": candidate.vmid,
+                "vm_name": _vm_name_for(_vm_name_map(group), candidate.disk_key),
                 "device": candidate.device,
                 "from_storage": candidate.from_storage,
                 "to_storage": candidate.to_storage,
@@ -1884,6 +1939,7 @@ def _render_group_explain_json(
         {
             "disk_key": d.key,
             "vmid": d.vmid,
+            "vm_name": d.vm_name,
             "device": d.device,
             "current_storage": d.current_storage,
             "size_bytes": d.size_bytes,
@@ -1951,7 +2007,9 @@ def _render_explain_json(
     return {"groups": groups_out, "warnings": list(topology.warnings), "query": query_out}
 
 
-def _render_execution_json(result: ExecutionResult | None) -> dict[str, object] | None:
+def _render_execution_json(
+    result: ExecutionResult | None, vm_name_by_key: dict[str, str]
+) -> dict[str, object] | None:
     """``None`` for a group ``apply`` never got as far as executing (a
     load error, or the gate said ``NO ACTION``) -- distinct from a group
     that executed and produced zero outcomes, which cannot happen in
@@ -1966,6 +2024,7 @@ def _render_execution_json(result: ExecutionResult | None) -> dict[str, object] 
         "outcomes": [
             {
                 "disk_key": outcome.disk_key,
+                "vm_name": _vm_name_for(vm_name_by_key, outcome.disk_key),
                 "from_storage": outcome.from_storage,
                 "to_storage": outcome.to_storage,
                 "status": outcome.status,
@@ -2004,7 +2063,9 @@ def _render_apply_json(
             final_breakdowns.get(group.name),
             load_errors.get(group.name),
         )
-        group_out["execution"] = _render_execution_json(execution_results.get(group.name))
+        group_out["execution"] = _render_execution_json(
+            execution_results.get(group.name), _vm_name_map(group)
+        )
         groups_out.append(group_out)
     return {"groups": groups_out, "warnings": list(topology.warnings)}
 
@@ -2697,24 +2758,34 @@ def _handle_explain(resolved: ResolvedConfig, args: argparse.Namespace, mode: st
     return 1 if any(gp.load_error is not None for gp in group_plans.values()) else 0
 
 
-def _confirm_move_interactively(move: ScheduledMove) -> str:
-    """The only ``input()`` call in this codebase -- ``execute.py``'s own
+def _make_confirm_move_interactively(group: Group) -> Callable[[ScheduledMove], str]:
+    """Builds ``execute.py``'s ``ConfirmCallback`` -- the only ``input()``
+    call in this codebase -- closing over ``group`` so the prompt can show
+    each move's VM name without widening the ``Callable[[ScheduledMove],
+    str]`` contract execute.py itself relies on. ``execute.py``'s own
     module docstring reserves interactive prompting for ``cli.py``, since
     it is the only module allowed to talk to the terminal (see this
-    module's own docstring). Loops on anything but ``y``/``n``/``a``/``q``
-    rather than handing ``execute_plan()`` a value its ``ConfirmCallback``
-    contract does not accept -- retrying badly-typed input is this
-    function's job, not a ``ValueError`` execute.py would have to raise
-    and this function would have to catch anyway."""
-    prompt = (
-        f"  {move.disk_key}  {move.from_storage} → {move.to_storage}  "
-        f"{format_bytes(move.size_bytes)}  [y]es/[n]o skip/[a]ll remaining/[q]uit? "
-    )
-    while True:
-        answer = input(prompt).strip().lower()
-        if answer in ("y", "n", "a", "q"):
-            return answer
-        print("  please answer y, n, a or q", file=sys.stderr)
+    module's own docstring)."""
+    vm_name_by_key = _vm_name_map(group)
+
+    def confirm(move: ScheduledMove) -> str:
+        """Loops on anything but ``y``/``n``/``a``/``q`` rather than
+        handing ``execute_plan()`` a value its ``ConfirmCallback`` contract
+        does not accept -- retrying badly-typed input is this function's
+        job, not a ``ValueError`` execute.py would have to raise and this
+        function would have to catch anyway."""
+        display_id = format_disk_id(move.disk_key, _vm_name_for(vm_name_by_key, move.disk_key))
+        prompt = (
+            f"  {display_id}  {move.from_storage} → {move.to_storage}  "
+            f"{format_bytes(move.size_bytes)}  [y]es/[n]o skip/[a]ll remaining/[q]uit? "
+        )
+        while True:
+            answer = input(prompt).strip().lower()
+            if answer in ("y", "n", "a", "q"):
+                return answer
+            print("  please answer y, n, a or q", file=sys.stderr)
+
+    return confirm
 
 
 @dataclasses.dataclass
@@ -3338,7 +3409,9 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                 # report already prints in full -- this is a preview, not
                 # a second copy of it.
                 for line in _render_plan_payback_lines(
-                    group_plan.payback_result, resolved.config.migration.payback_ratio
+                    group_plan.payback_result,
+                    resolved.config.migration.payback_ratio,
+                    _vm_name_map(group),
                 ):
                     print(line)
 
@@ -3356,7 +3429,9 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     on_inflight_finished=on_inflight_finished,
                 )
             else:
-                confirm_callback = _confirm_move_interactively if mode == "confirm" else None
+                confirm_callback = (
+                    _make_confirm_move_interactively(group) if mode == "confirm" else None
+                )
                 result = _apply_payback_gate(
                     client,
                     group,

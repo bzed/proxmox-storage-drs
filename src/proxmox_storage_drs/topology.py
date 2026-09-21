@@ -154,6 +154,17 @@ def _split_tags(raw: str) -> set[str]:
     return {tag.strip() for tag in normalized.split(";") if tag.strip()}
 
 
+def format_disk_id(disk_key: str, vm_name: str) -> str:
+    """Human-readable disk identifier for CLI/log output, built from a
+    `Disk.key`/`disk_key` string ("vmid:device") plus the VM's name:
+    "name(vmid):device", e.g. "puppet001(102):scsi0". Never used in place of
+    `disk_key` itself -- that stays the machine-readable identity/dict-key
+    everywhere (state.json, JSON output's `disk_key` field, solver/scheduler
+    internals); this is for display only."""
+    vmid, _, device = disk_key.partition(":")
+    return f"{vm_name}({vmid}):{device}"
+
+
 @dataclass(frozen=True, slots=True)
 class Disk:
     """One movable-or-pinned disk in `D` for its group. Section 5.1."""
@@ -167,6 +178,11 @@ class Disk:
     current_storage: str
     format: str
     pinned_reason: str | None  # None means movable (d in D^mov, section 5.3 (C3))
+
+    @property
+    def display_id(self) -> str:
+        """Human-readable form of `key` for output, e.g. "puppet001(101):scsi0"."""
+        return format_disk_id(self.key, self.vm_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -783,6 +799,7 @@ def content_item_size(item: Mapping[str, Any]) -> tuple[int, bool] | None:
 
 def _resolve_disk_size_and_format(
     key: str,
+    vm_name: str,
     volid: str,
     storage_id: str,
     params: dict[str, str],
@@ -826,14 +843,14 @@ def _resolve_disk_size_and_format(
         if exact:
             return listed_bytes, disk_format, None
         warning = (
-            f"{key}: {volid!r} has no exact size= in {storage_id!r}'s content listing; "
-            "using its approximate-size instead"
+            f"{format_disk_id(key, vm_name)}: {volid!r} has no exact size= in "
+            f"{storage_id!r}'s content listing; using its approximate-size instead"
         )
         return listed_bytes, disk_format, warning
     gap = "not found in" if content_item is None else "has no size= or approximate-size in"
     size_bytes = parse_pve_config_size_bytes(params.get("size", "")) or 0
     warning = (
-        f"{key}: {volid!r} {gap} {storage_id!r}'s content listing; "
+        f"{format_disk_id(key, vm_name)}: {volid!r} {gap} {storage_id!r}'s content listing; "
         "using the VM config's own size= instead, which can be stale if the volume was "
         "resized outside Proxmox"
     )
@@ -960,8 +977,8 @@ def _join_vm_disks(
             # Section 5.3 (C2): unmanaged, not in any D, reported for
             # visibility so an omission from `groups` is not silent.
             warnings.append(
-                f"{key} is on storage {storage_id!r}, which is not in any "
-                "configured group -- ungrouped, not managed"
+                f"{format_disk_id(key, vm_name)} is on storage {storage_id!r}, which is not in "
+                "any configured group -- ungrouped, not managed"
             )
             continue
 
@@ -969,7 +986,7 @@ def _join_vm_disks(
         referenced_volids[storage_id].add(volid)
         content_items = content_by_node.get((node, storage_id), data.content_by_id[storage_id])
         size_bytes, disk_format, size_warning = _resolve_disk_size_and_format(
-            key, volid, storage_id, params, content_items, data
+            key, vm_name, volid, storage_id, params, content_items, data
         )
         if size_warning:
             warnings.append(size_warning)

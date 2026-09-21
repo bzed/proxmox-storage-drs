@@ -15,14 +15,14 @@ section rather than invented for this page:
 $ pve-storage-drs -c /etc/pve/drs.yaml show-load
 Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the normal drift/imbalance thresholds -- a capacity shortfall is never delayed by them
   san-a  provisioned 4.50 TiB/8.00 TiB  L=6.50 u=6.50  ⚠ reserve short by 512.00 GiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
-    101:scsi0        2.00 TiB  raw     ℓ 3.00
-    101:scsi1        1.00 TiB  raw     ℓ 1.00
-    102:scsi0        1.50 TiB  raw     ℓ 2.50
+    web01(101):scsi0             2.00 TiB  raw     ℓ 3.00
+    web01(101):scsi1             1.00 TiB  raw     ℓ 1.00
+    db01(102):scsi0              1.50 TiB  raw     ℓ 2.50
   san-b  provisioned 1.50 TiB/8.00 TiB  L=0.70 u=0.70  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
-    103:scsi0      512.00 GiB  raw     ℓ 0.40
-    104:scsi0        1.00 TiB  raw     ℓ 0.30
+    mail01(103):scsi0          512.00 GiB  raw     ℓ 0.40
+    app01(104):scsi0             1.00 TiB  raw     ℓ 0.30
   san-c  provisioned 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
-    105:scsi0      512.00 GiB  raw     ℓ 0.20
+    cache01(105):scsi0         512.00 GiB  raw     ℓ 0.20
 ```
 
 `provisioned` on a storage's line is the sum of every disk's *provisioned*
