@@ -2,7 +2,7 @@ baf4f2bba97405d4467341a6fbcae70cf1acdf36222d0b46e03d02cf41c1eaa0  docs/manual/00
 d605d1560c7e7f77de2b218f80a32f36d595b3912c6425454d54fb8ba1b0ac66  docs/manual/05-metrics-pipeline.md
 851965f987f7b3af9c00902137d42a9e2ec66eb449e14c1bdce87edef38135cc  docs/manual/10-configuration.md
 e1aa841534fa8ed58911196e99db505fbe09466e08dce260881b290f8c9926d8  docs/manual/20-verifying-metrics.md
-249475d4539820374f8d57780cd7725dd174db7334e3a80793e952f7c85f22e4  docs/manual/25-show-load-and-verify-storages.md
+cf27d25ccc8c705eea3397ea1d84590324531b75e3129c4b9a54d83c9d978f28  docs/manual/25-show-load-and-verify-storages.md
 1a75170af58868c7323bd98829212f1622b2af9384b11f288ceb5530be8e91ed  docs/manual/26-collect-testdata-and-replay.md
 3585554e3102eb59f402cfe8ef67410c4099007a37c3400deb5b3f698a55f0bd  docs/manual/27-plan.md
 a94c0be9ef48908256e22a574ae6e60405d72c7318e950bcc69b87fdba0561f7  docs/manual/28-apply.md

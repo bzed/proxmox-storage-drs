@@ -1,0 +1,5 @@
+{
+  "efidisk0": "stor-5c5a9627:vm-644488-disk-0,size=528K",
+  "ide2": "none,media=cdrom",
+  "scsi0": "stor-5c5a9627:vm-644488-disk-1,size=64G"
+}

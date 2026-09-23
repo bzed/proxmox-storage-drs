@@ -97,7 +97,7 @@
       },
       {
         "level": "info",
-        "message": "wr_operations: sample series labels {'instance': 'ide2', 'nodename': 'node-722c4e62', 'vmid': '366117'}"
+        "message": "wr_operations: sample series labels {'nodename': 'node-722c4e62', 'vmid': '366117', 'instance': 'ide2'}"
       },
       {
         "level": "info",
@@ -105,15 +105,15 @@
       },
       {
         "level": "info",
-        "message": "wr_bytes: sample series labels {'nodename': 'node-722c4e62', 'vmid': '366117', 'instance': 'ide2'}"
+        "message": "wr_bytes: sample series labels {'instance': 'ide2', 'nodename': 'node-722c4e62', 'vmid': '366117'}"
       },
       {
         "level": "info",
-        "message": "rd_total_time_ns: sample series labels {'nodename': 'node-722c4e62', 'vmid': '366117', 'instance': 'ide2'}"
+        "message": "rd_total_time_ns: sample series labels {'vmid': '366117', 'instance': 'ide2', 'nodename': 'node-722c4e62'}"
       },
       {
         "level": "info",
-        "message": "wr_total_time_ns: sample series labels {'instance': 'ide2', 'nodename': 'node-722c4e62', 'vmid': '366117'}"
+        "message": "wr_total_time_ns: sample series labels {'vmid': '366117', 'instance': 'ide2', 'nodename': 'node-722c4e62'}"
       },
       {
         "level": "warning",

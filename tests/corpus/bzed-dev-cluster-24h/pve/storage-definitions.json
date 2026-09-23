@@ -1,37 +1,37 @@
 [
   {
-    "content": "backup",
+    "content": "images,rootdir",
     "shared": 1,
-    "storage": "stor-3a534dd6",
-    "type": "pbs"
+    "storage": "stor-30d346d4",
+    "type": "rbd"
   },
   {
-    "content": "iso,backup,images,vztmpl,snippets,rootdir",
-    "storage": "stor-5675eb7b",
+    "content": "images,iso,backup,rootdir,snippets,vztmpl",
+    "storage": "stor-5a8798d1",
     "type": "dir"
   },
   {
-    "content": "rootdir,images",
+    "content": "images,rootdir",
     "shared": 1,
-    "storage": "stor-593d0eeb",
+    "storage": "stor-5c5a9627",
     "type": "rbd"
   },
   {
     "content": "rootdir,images",
-    "shared": 1,
-    "storage": "stor-9034bbcd",
-    "type": "rbd"
-  },
-  {
-    "content": "rootdir,images",
-    "shared": 1,
-    "storage": "stor-b727a76b",
-    "type": "rbd"
-  },
-  {
-    "content": "rootdir,images",
-    "nodes": "node-eb330724,node-7439cb15,node-9bcf256f",
-    "storage": "stor-e9a2b886",
+    "nodes": "node-d8d4d911,node-345988ce,node-722c4e62",
+    "storage": "stor-a2b6edcf",
     "type": "zfspool"
+  },
+  {
+    "content": "backup",
+    "shared": 1,
+    "storage": "stor-be415023",
+    "type": "pbs"
+  },
+  {
+    "content": "rootdir,images",
+    "shared": 1,
+    "storage": "stor-c210ac69",
+    "type": "rbd"
   }
 ]

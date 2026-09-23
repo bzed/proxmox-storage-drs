@@ -260,6 +260,113 @@ def build_node_selector(node_label: str, node_names: Sequence[str]) -> str | Non
     return f'{node_label}=~"{alternation}"'
 
 
+def build_vmid_selector(vmid_label: str, vmids: Sequence[int]) -> str | None:
+    """:func:`build_node_selector`'s counterpart for the numeric vmid label:
+    ``<vmid_label>=~"100|101|..."`` from an explicit vmid list -- unlike a
+    node name, a vmid is already an exact integer with no regex
+    metacharacters to escape. ``None`` for an empty list, matching
+    :func:`build_node_selector`'s own "no restriction" convention -- a
+    caller that means "every vmid" passes ``vmids=()`` or omits the
+    selector entirely rather than getting a filter that matches nothing."""
+    if not vmids:
+        return None
+    alternation = "|".join(str(v) for v in sorted(set(vmids)))
+    return f'{vmid_label}=~"{alternation}"'
+
+
+def combine_selectors(*selectors: str | None) -> str | None:
+    """Joins already-built ``label=~"..."``-shaped selector fragments (e.g.
+    :func:`build_node_selector` and :func:`build_vmid_selector`'s own
+    output) into one PromQL vector-selector body with ``,`` -- PromQL's AND
+    between matchers inside one ``{...}`` block. Every ``None`` entry
+    (``resolve_node_selector()``'s or :func:`build_vmid_selector`'s own "no
+    restriction" value) is skipped; ``None`` is returned only when every
+    argument was, so a caller can splice this straight into
+    :func:`build_rate_promql`'s own ``selector`` parameter unchanged."""
+    parts = [s for s in selectors if s]
+    return ",".join(parts) if parts else None
+
+
+#: Maximum distinct vmids named in one query's :func:`build_vmid_selector`
+#: alternation -- keeps a single query's own cardinality (and therefore its
+#: evaluation cost on the Prometheus/VictoriaMetrics/gigapipe side) bounded
+#: regardless of how large one group or the whole cluster is.
+#: :func:`vmid_query_batches` is what splits a group's vmid list into
+#: batches this size; ``RANGE_QUERY_CHUNK_SECONDS`` above is this same idea
+#: along the *time* axis instead of the *series-count* axis -- the two are
+#: independent and compose (a wide time range for a large group is chunked
+#: both ways). Picked, not measured: no single number is "correct" for
+#: every backend, but confirmed live that scoping a query to one group's
+#: own few dozen VMs (instead of every VM in the cluster, section 3.4's
+#: original design -- see :func:`group_query_selectors`'s own docstring for
+#: why that changed) is what turns a "query timed out in expression
+#: evaluation" 500 into a normal response for a cluster with several
+#: hundred VMs spread across many groups.
+VMID_QUERY_BATCH_SIZE = 150
+
+
+def vmid_query_batches(
+    vmids: Sequence[int], batch_size: int = VMID_QUERY_BATCH_SIZE
+) -> list[tuple[int, ...]]:
+    """Splits ``vmids`` into fixed-size, sorted, deterministic batches --
+    the *only* place this project decides how a vmid list is partitioned
+    for querying, so both the live fetch path (``loadmodel.py``, and a
+    ``--replay`` run reconstructing the identical query text from a
+    bundle's own already-anonymized topology) and ``collect-testdata``'s
+    own capture (``collect.py``) partition an identical vmid set the same
+    way -- a replay run's independently-rebuilt batches must match exactly
+    what capture stored, or ``ReplayPrometheusClient`` finds nothing for
+    the query it asks. Sorted (not insertion order) so the result is a
+    pure function of the *set* of vmids, independent of what order the
+    caller happened to build ``group.disks`` in. Empty input returns an
+    empty list (zero batches, zero queries) rather than one empty-selector
+    batch -- an empty group is already handled earlier by every caller
+    (``compute_group_load``/``compute_disk_load_series``'s own "no disks"
+    early return) and should never reach here at all."""
+    ordered = sorted(set(vmids))
+    if not ordered:
+        return []
+    return [tuple(ordered[i : i + batch_size]) for i in range(0, len(ordered), batch_size)]
+
+
+def group_query_selectors(
+    vmid_label: str,
+    node_selector: str | None,
+    vmids: Sequence[int] | None,
+    batch_size: int = VMID_QUERY_BATCH_SIZE,
+) -> list[str | None]:
+    """The selector(s) a caller should issue one query per, for one group's
+    own raw-quantity/coverage queries (section 3.4): ``node_selector``
+    combined with a :func:`vmid_query_batches`-sized vmid batch built from
+    ``vmids`` (the group's own disks) -- section 3.4's original design
+    queried the whole cluster, unfiltered by vmid, on the theory that "a
+    single query covering everything is one call instead of one per group
+    and Python-side filtering by DiskKey is free" (REVIEW.md Q-02). That
+    assumption held for the deployments this project was designed against
+    (1-3 groups) but broke down against a real cluster with several
+    hundred VMs split across many groups: every group's plan re-issued the
+    *same* unfiltered, cluster-wide aggregation, and Prometheus/gigapipe's
+    own query evaluator timed out on it outright (not just "wasteful" --
+    the query never completed at all). Scoping to the group's own vmids
+    turns that same query into an aggregation over the dozens, not
+    hundreds, of disks the group actually has.
+
+    ``vmids=None`` (``verify-metrics``, which has no group to scope to at
+    all and is deliberately independent of the PVE API -- see
+    ``resolve_node_selector()``'s own docstring) returns
+    ``[node_selector]`` unchanged: one selector, one query, identical to
+    every query this project issued before this function existed. A
+    non-``None`` but empty ``vmids`` (an empty group) returns ``[]`` -- see
+    :func:`vmid_query_batches`'s own note on why that should never actually
+    happen."""
+    if vmids is None:
+        return [node_selector]
+    return [
+        combine_selectors(node_selector, build_vmid_selector(vmid_label, batch))
+        for batch in vmid_query_batches(vmids, batch_size)
+    ]
+
+
 def resolve_node_selector(
     metrics: MetricsConfig,
     node_names: Sequence[str] | None,
@@ -686,6 +793,7 @@ def compute_disk_coverage(
     selector: str | None = None,
     *,
     now: float | None = None,
+    vmids: Sequence[int] | None = None,
 ) -> dict[DiskKey, float]:
     """Section 3.3 step 5 / section 3.4's ``min_coverage`` rule: per-disk
     sample coverage over the decision window, as a fraction in ``[0, 1]``.
@@ -716,76 +824,80 @@ def compute_disk_coverage(
     ``config.metrics.step`` for that one run (a
     :class:`~proxmox_storage_drs.exceptions.RangeStepMismatch`, distinct
     from the plain-``BundleError`` case).
+
+    ``vmids`` (default ``None``): the group's own disk vmids to scope this
+    query to, via :func:`group_query_selectors` -- ``None`` (the default,
+    what ``verify-metrics`` passes, section 3.3 having no group to scope
+    to) keeps the original cluster-wide, unfiltered-by-vmid query;
+    ``loadmodel.compute_group_load()`` passes its own group's vmids
+    instead, batched to :data:`VMID_QUERY_BATCH_SIZE` (REVIEW.md Q-02's
+    "known limitation" upgraded to a real fix once it started timing out
+    outright against a several-hundred-VM cluster -- see
+    :func:`group_query_selectors`'s own docstring).
     """
-    metric_name = metrics.read_ops
-    expr = build_rate_promql(
-        metric_name,
-        metrics.labels.vmid,
-        metrics.labels.device,
-        metrics.rate_window_seconds,
-        selector=selector,
-    )
-    # Prometheus's query_range API takes absolute start/end (Unix time or
-    # RFC3339), never an offset relative to "now" -- anchoring to a concrete
-    # instant here is not optional. An unanchored negative value was
-    # rejected outright by a live server during development; see the git
-    # history for the fix. That instant defaults to the real wall clock
-    # (correct for the live gate/verify-metrics callers) but collect.py
-    # passes its own controlled capture instant instead, so a bundle's
-    # captured range does not depend on the real time collect-testdata
-    # happened to run at (section 16.1's determinism requirement).
     end = now if now is not None else time.time()
     start = end - window.lookback_seconds
-    # safe_range_step_seconds(): a no-op against a correctly-behaving
-    # backend, but works around a live-confirmed gigapipe bug where
-    # query_range on a rate()-based expression returns zero series
-    # whenever step >= rate_window -- exactly this project's own default
-    # (both 300s). decimate_to_configured_step() below recovers the
-    # expected_samples grid from whatever finer resolution this actually
-    # queried at, so the coverage fraction stays correct either way.
-    #
-    # The try/except is `--replay` backward compatibility, not part of the
-    # workaround itself: a *live* client never raises BundleError (only
-    # ReplayPrometheusClient does, when a requested (query, step) pair was
-    # never captured), so this is a no-op against a real cluster either
-    # way. A bundle captured *before* this function existed has real data
-    # at the plain `metrics.step` only -- collect.py now always captures
-    # at the safe step when one is needed, so this fallback exists solely
-    # to keep already-committed bundles (tests/corpus/bzed-dev-cluster-*)
-    # replaying exactly as they did before this change.
-    query_step = safe_range_step_seconds(metrics.step_seconds, metrics.rate_window_seconds)
-    try:
-        result = client.range_query(expr, start, end, query_step)
-    except RangeStepMismatch as exc:
-        # A --step override at capture time (recorded only in manifest.json's
-        # capture.step_seconds, never in config.yaml) left this bundle's
-        # range data at a step neither guess above derives from config
-        # alone -- use the one the bundle actually has.
-        query_step = exc.actual_step_seconds
-        result = client.range_query(expr, start, end, query_step)
-    except BundleError:
-        if query_step == metrics.step_seconds:
-            raise
-        query_step = metrics.step_seconds
-        result = client.range_query(expr, start, end, query_step)
-
     expected_samples = max(1, round(window.lookback_seconds / metrics.step_seconds) + 1)
     coverage: dict[DiskKey, float] = {}
-    for series in result:
-        labels = series.get("metric", {})
-        vmid_raw = labels.get(metrics.labels.vmid)
-        device = labels.get(metrics.labels.device)
-        if vmid_raw is None or not device:
-            continue
-        try:
-            key = DiskKey(vmid=int(vmid_raw), device=device)
-        except (TypeError, ValueError):
-            continue
-        values = decimate_to_configured_step(
-            series.get("values", []), metrics.step_seconds, query_step
+    for batch_selector in group_query_selectors(metrics.labels.vmid, selector, vmids):
+        expr = build_rate_promql(
+            metrics.read_ops,
+            metrics.labels.vmid,
+            metrics.labels.device,
+            metrics.rate_window_seconds,
+            selector=batch_selector,
         )
-        actual_samples = len(values)
-        coverage[key] = min(1.0, actual_samples / expected_samples)
+        # safe_range_step_seconds(): a no-op against a correctly-behaving
+        # backend, but works around a live-confirmed gigapipe bug where
+        # query_range on a rate()-based expression returns zero series
+        # whenever step >= rate_window -- exactly this project's own
+        # default (both 300s). decimate_to_configured_step() below
+        # recovers the expected_samples grid from whatever finer
+        # resolution this actually queried at, so the coverage fraction
+        # stays correct either way.
+        #
+        # The try/except is `--replay` backward compatibility, not part of
+        # the workaround itself: a *live* client never raises BundleError
+        # (only ReplayPrometheusClient does, when a requested (query,
+        # step) pair was never captured), so this is a no-op against a
+        # real cluster either way. A bundle captured *before* this
+        # function existed has real data at the plain `metrics.step` only
+        # -- collect.py now always captures at the safe step when one is
+        # needed, so this fallback exists solely to keep already-committed
+        # bundles (tests/corpus/bzed-dev-cluster-*) replaying exactly as
+        # they did before this change.
+        query_step = safe_range_step_seconds(metrics.step_seconds, metrics.rate_window_seconds)
+        try:
+            result = client.range_query(expr, start, end, query_step)
+        except RangeStepMismatch as exc:
+            # A --step override at capture time (recorded only in
+            # manifest.json's capture.step_seconds, never in config.yaml)
+            # left this bundle's range data at a step neither guess above
+            # derives from config alone -- use the one the bundle actually
+            # has.
+            query_step = exc.actual_step_seconds
+            result = client.range_query(expr, start, end, query_step)
+        except BundleError:
+            if query_step == metrics.step_seconds:
+                raise
+            query_step = metrics.step_seconds
+            result = client.range_query(expr, start, end, query_step)
+
+        for series in result:
+            labels = series.get("metric", {})
+            vmid_raw = labels.get(metrics.labels.vmid)
+            device = labels.get(metrics.labels.device)
+            if vmid_raw is None or not device:
+                continue
+            try:
+                key = DiskKey(vmid=int(vmid_raw), device=device)
+            except (TypeError, ValueError):
+                continue
+            values = decimate_to_configured_step(
+                series.get("values", []), metrics.step_seconds, query_step
+            )
+            actual_samples = len(values)
+            coverage[key] = min(1.0, actual_samples / expected_samples)
     return coverage
 
 

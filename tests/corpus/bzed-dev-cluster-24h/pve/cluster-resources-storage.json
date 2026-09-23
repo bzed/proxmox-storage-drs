@@ -1,92 +1,92 @@
 [
   {
-    "node": "node-7439cb15",
+    "node": "node-345988ce",
     "status": "available",
-    "storage": "stor-3a534dd6"
+    "storage": "stor-30d346d4"
   },
   {
-    "node": "node-9bcf256f",
+    "node": "node-722c4e62",
     "status": "available",
-    "storage": "stor-3a534dd6"
+    "storage": "stor-30d346d4"
   },
   {
-    "node": "node-eb330724",
+    "node": "node-d8d4d911",
     "status": "available",
-    "storage": "stor-3a534dd6"
+    "storage": "stor-30d346d4"
   },
   {
-    "node": "node-7439cb15",
+    "node": "node-345988ce",
     "status": "available",
-    "storage": "stor-5675eb7b"
+    "storage": "stor-5a8798d1"
   },
   {
-    "node": "node-9bcf256f",
+    "node": "node-722c4e62",
     "status": "available",
-    "storage": "stor-5675eb7b"
+    "storage": "stor-5a8798d1"
   },
   {
-    "node": "node-eb330724",
+    "node": "node-d8d4d911",
     "status": "available",
-    "storage": "stor-5675eb7b"
+    "storage": "stor-5a8798d1"
   },
   {
-    "node": "node-7439cb15",
+    "node": "node-345988ce",
     "status": "available",
-    "storage": "stor-593d0eeb"
+    "storage": "stor-5c5a9627"
   },
   {
-    "node": "node-9bcf256f",
+    "node": "node-722c4e62",
     "status": "available",
-    "storage": "stor-593d0eeb"
+    "storage": "stor-5c5a9627"
   },
   {
-    "node": "node-eb330724",
+    "node": "node-d8d4d911",
     "status": "available",
-    "storage": "stor-593d0eeb"
+    "storage": "stor-5c5a9627"
   },
   {
-    "node": "node-7439cb15",
+    "node": "node-345988ce",
     "status": "available",
-    "storage": "stor-9034bbcd"
+    "storage": "stor-a2b6edcf"
   },
   {
-    "node": "node-9bcf256f",
+    "node": "node-722c4e62",
     "status": "available",
-    "storage": "stor-9034bbcd"
+    "storage": "stor-a2b6edcf"
   },
   {
-    "node": "node-eb330724",
+    "node": "node-d8d4d911",
     "status": "available",
-    "storage": "stor-9034bbcd"
+    "storage": "stor-a2b6edcf"
   },
   {
-    "node": "node-7439cb15",
+    "node": "node-345988ce",
     "status": "available",
-    "storage": "stor-b727a76b"
+    "storage": "stor-be415023"
   },
   {
-    "node": "node-9bcf256f",
+    "node": "node-722c4e62",
     "status": "available",
-    "storage": "stor-b727a76b"
+    "storage": "stor-be415023"
   },
   {
-    "node": "node-eb330724",
+    "node": "node-d8d4d911",
     "status": "available",
-    "storage": "stor-b727a76b"
+    "storage": "stor-be415023"
   },
   {
-    "node": "node-7439cb15",
+    "node": "node-345988ce",
     "status": "available",
-    "storage": "stor-e9a2b886"
+    "storage": "stor-c210ac69"
   },
   {
-    "node": "node-9bcf256f",
+    "node": "node-722c4e62",
     "status": "available",
-    "storage": "stor-e9a2b886"
+    "storage": "stor-c210ac69"
   },
   {
-    "node": "node-eb330724",
+    "node": "node-d8d4d911",
     "status": "available",
-    "storage": "stor-e9a2b886"
+    "storage": "stor-c210ac69"
   }
 ]

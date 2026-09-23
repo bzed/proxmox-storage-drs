@@ -1,13 +1,13 @@
 submitted_by: Bernd Zeimetz <bernd@bzed.de>
-submitted_on: 2026-09-19
+submitted_on: 2026-09-23
 consent:
   redistribute_under: AGPL-3.0-or-later
   # False on purpose: the bundle was read by hand (config, manifest, findings, every
   # pve/ file type, a grep for real names/hosts/IPs -- clean) by the Claude Code session
-  # that collected it, at Bernd's request. The submitter has not opened it yet; flip this
-  # to true once he has.
+  # that (re)collected it, at Bernd's request. The submitter has not opened it yet; flip
+  # this to true once he has.
   reviewed_bundle_before_sending: false
-collected_with: pve-storage-drs 0.1.6
+collected_with: pve-storage-drs 0.1.7
 versions:
   pve: 9.2.11
   prometheus_backend: unverified   # the endpoint reports no version (manifest prometheus_version is empty)
@@ -25,13 +25,28 @@ what_this_reproduces: >
   percent-to-bytes conversion therefore all fed one resolution, and config.yaml records
   the *resolved* per-storage soft/hard pair in bytes, all three different. Because the
   provisioned sizes of the disks count as used space (section 5.1.1) and the requirements
-  are high, the big storage starts 1.86 TiB short: the plan is a repair, exempt from the
-  payback test (section 7.3), and hard < soft lets the scheduler order it without the
-  transient deadlock that hard = soft produces on the same data (verified against the
-  live cluster on 2026-09-19: the solver's endpoint matched an independent CP-SAT model
-  to the byte, 545 GiB total shortfall, and the executed plan reached it with hard 10%
-  where hard = soft dropped moves as deadlocked).
+  are high, the big storage starts short: the plan is a repair, exempt from the payback
+  test (section 7.3), and hard < soft lets the scheduler order it without the transient
+  deadlock that hard = soft produces on the same data. At original capture (2026-09-19),
+  verified against the live cluster: the solver's endpoint matched an independent CP-SAT
+  model to the byte, 545 GiB total shortfall, and the executed plan reached it with hard
+  10% where hard = soft dropped moves as deadlocked -- that specific cross-check was not
+  rerun for the 2026-09-23 recapture below, though the recaptured bundle's own
+  reserve_shortfall_bytes_before (~1.86 TiB) matches the original capture's almost
+  exactly, the cluster's real utilization having barely moved in four days.
 
   Captured with --range 24h --step 1h and window.lookback 24h under the default
   quantile forecaster: a 7-day capture of this cluster's metrics is now ~6x larger than
   the 4.4 MiB the older holt_winters bundle was, well over the 8 MiB ceiling.
+recaptures:
+  - date: 2026-09-23
+    why: >
+      Same root cause and fix as bzed-dev-cluster-24h.submission.yaml's own
+      2026-09-23 recapture entry: every group-scoped Prometheus query now
+      carries an additional vmid selector (REVIEW.md Q-02), which changes the
+      PromQL text this bundle's files are looked up by. Recaptured from the
+      same real dev cluster with the exact same `--range 24h --step 1h` this
+      submission always used. Unlike the other two bundles, this one already
+      post-dates metrics.safe_range_step_seconds() (0.1.6, this bundle's own
+      original `collected_with`), so the recapture's size did not move: still
+      ~8.0 MiB, under the documented ceiling.

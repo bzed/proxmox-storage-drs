@@ -1,0 +1,4 @@
+{
+  "ide2": "none,media=cdrom",
+  "scsi0": "stor-5c5a9627:vm-240169-disk-0,size=20G"
+}

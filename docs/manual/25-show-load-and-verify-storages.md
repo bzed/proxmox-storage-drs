@@ -183,14 +183,19 @@ mean fill is 0, the same two cases in which the gate itself never fires).
 
 **A config with several groups issues Prometheus queries per group.**
 Computing one group's load takes seven queries (six raw metrics plus one
-coverage check), unfiltered by group — the fastest correct way to get one
-group's numbers, but it means a config with `N` groups makes `7N` queries
-in total on every `show-load`, not 7, since each group's coverage and
-data-quality decisions are independent and so cannot share a single
-fetch. For the typical one-to-three-group deployment this is a handful of
-fast instant queries and not worth worrying about; an operator running
-many groups against an already-busy Prometheus should be aware of the
-multiplier.
+coverage check), each scoped to that group's own VMs — a config with `N`
+groups still makes `7N` queries in total on every `show-load`, not 7,
+since each group's coverage and data-quality decisions are independent
+and so cannot share a single fetch. For the typical one-to-three-group
+deployment this is a handful of fast instant queries and not worth
+worrying about; an operator running many groups against an already-busy
+Prometheus should be aware of the multiplier. Each of those queries only
+aggregates the VMs the calling group actually has (split into batches of
+`metrics.VMID_QUERY_BATCH_SIZE` VMs for a single very large group) rather
+than every VM in the cluster — on a cluster with hundreds of VMs, an
+earlier version of this tool aggregated the whole cluster on every one of
+those `7N` queries, which could make Prometheus itself time out the query
+outright rather than merely running slowly.
 
 ## `verify-storages`
 

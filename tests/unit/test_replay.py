@@ -25,6 +25,7 @@ from proxmox_storage_drs.metrics import (
     build_quantile_over_time_promql,
     build_rate_promql,
     compute_disk_coverage,
+    group_query_selectors,
     parse_disk_range_series,
     parse_disk_series,
     resolve_node_selector,
@@ -240,16 +241,29 @@ def _replay_rate_expr(bundle_dir: Path, resolved) -> str:  # type: ignore[no-unt
     """Reconstructs section 3.4's rate expression exactly as a real
     ``--replay`` command would: the node selector comes from
     ``ReplayPveClient.node_names()`` (the bundle's own, anonymized node
-    list), not from a hardcoded/unscoped selector -- matching what was
-    actually captured is the whole point of this helper."""
-    node_names = replay.ReplayPveClient(bundle_dir).node_names()
-    selector = resolve_node_selector(resolved.config.metrics, node_names)
+    list), not from a hardcoded/unscoped selector, and the vmid scoping
+    (REVIEW.md Q-02) comes from the bundle's own replayed topology --
+    ``loadmodel.py`` builds this same combined selector from ``group.disks``,
+    and every fixture bundle this helper is used against has exactly one
+    group/one disk, so it collapses to a single batch."""
+    client = replay.ReplayPveClient(bundle_dir)
+    node_names = client.node_names()
+    node_selector = resolve_node_selector(resolved.config.metrics, node_names)
+    # The bundle's own (anonymized) config, not `resolved` -- `resolved`
+    # names the real storages/groups, which a replayed (pseudonymous)
+    # PveClient cannot match (TopologyError). Only the metrics label/rate
+    # settings above come from `resolved`; those are pass-through, never
+    # anonymized.
+    topology = build_topology(client, _config_from_bundle(bundle_dir))
+    vmids = sorted({d.vmid for g in topology.groups for d in g.disks})
+    selectors = group_query_selectors(resolved.config.metrics.labels.vmid, node_selector, vmids)
+    assert len(selectors) == 1, "fixture bundle exceeds a single vmid query batch"
     return build_rate_promql(
         "blockstat_rd_total_time_ns",
         resolved.config.metrics.labels.vmid,
         resolved.config.metrics.labels.device,
         resolved.config.metrics.rate_window_seconds,
-        selector,
+        selectors[0],
     )
 
 
@@ -440,17 +454,25 @@ def test_compute_disk_coverage_replays_a_bundle_captured_with_a_step_override(
     prom_client = replay.ReplayPrometheusClient(PrometheusConfig(url="unused"), bundle_dir)
     end = manifest["capture"]["synthetic_now_epoch"]
     # loadmodel.py's real call (the one plan/show-load actually make) scopes
-    # this to the cluster's own nodes -- the *other*, selector-less capture
-    # of this same metric (verify_metrics()'s own findings.json driver) is a
-    # separate file at a different step and not what this test is after.
-    node_names = replay.ReplayPveClient(bundle_dir).node_names()
+    # this to the cluster's own nodes *and* (REVIEW.md Q-02) the group's own
+    # vmids -- the *other*, selector-less capture of this same metric
+    # (verify_metrics()'s own findings.json driver) is a separate file at a
+    # different step and not what this test is after.
+    replay_pve_client = replay.ReplayPveClient(bundle_dir)
+    node_names = replay_pve_client.node_names()
     node_selector = resolve_node_selector(resolved.config.metrics, node_names)
+    # The bundle's own (anonymized) config -- see _replay_rate_expr()'s own
+    # comment on why `resolved` itself cannot be used here.
+    topology = build_topology(replay_pve_client, _config_from_bundle(bundle_dir))
+    vmids = sorted({d.vmid for g in topology.groups for d in g.disks})
+    selectors = group_query_selectors(resolved.config.metrics.labels.vmid, node_selector, vmids)
+    assert len(selectors) == 1, "fixture bundle exceeds a single vmid query batch"
     rate_expr = build_rate_promql(
         "blockstat_rd_operations",
         resolved.config.metrics.labels.vmid,
         resolved.config.metrics.labels.device,
         resolved.config.metrics.rate_window_seconds,
-        selector=node_selector,
+        selector=selectors[0],
     )
     # Requesting the guessed (wrong) step directly proves the mismatch is
     # real and recoverable, not just that some unrelated path swallowed it.
@@ -469,5 +491,6 @@ def test_compute_disk_coverage_replays_a_bundle_captured_with_a_step_override(
         resolved.config.window,
         selector=node_selector,
         now=end,
+        vmids=vmids,
     )
     assert coverage == {}

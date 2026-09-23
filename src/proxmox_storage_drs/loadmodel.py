@@ -17,7 +17,7 @@ weights) is calibrated against it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from proxmox_storage_drs.config import LoadWeights, MetricsConfig, WindowConfig
 from proxmox_storage_drs.exceptions import BundleError, RangeStepMismatch
@@ -31,6 +31,7 @@ from proxmox_storage_drs.metrics import (
     build_rate_promql,
     compute_disk_coverage,
     decimate_to_configured_step,
+    group_query_selectors,
     parse_disk_range_series,
     parse_disk_series,
     raw_metric_name,
@@ -117,22 +118,24 @@ def _fetch_raw_quantity(
     window: WindowConfig,
     field: str,
     node_selector: str | None,
+    vmids: Sequence[int] | None = None,
 ) -> dict[DiskKey, float]:
     """One of the six section 3.4 raw quantities, quantile-reduced over the
-    decision window, for every disk Prometheus currently reports -- not
-    filtered to one group, since a single query covering everything is one
-    call instead of one per group and Python-side filtering by `DiskKey` is
-    free. ``node_selector`` (:func:`~proxmox_storage_drs.metrics.resolve_node_selector`)
-    is a *cluster*-wide restriction, not a per-group one, so this stays
-    correct even though it is not group-filtered."""
+    decision window. ``vmids`` (the calling group's own disk vmids --
+    ``compute_group_load()``'s own parameter of the same name) scopes this
+    to just that group via :func:`~proxmox_storage_drs.metrics.group_query_selectors`,
+    batched to that function's own vmid-count limit -- section 3.4's
+    original design queried the whole cluster unfiltered (a single query
+    covering everything is one call instead of one per group, and
+    Python-side filtering by `DiskKey` is free), which is still exactly
+    what ``vmids=None`` does, but that assumption stopped holding once a
+    real deployment's group count times its VM count made the unfiltered
+    aggregation itself time out (REVIEW.md Q-02, upgraded from "wasteful"
+    to "broken"; see ``group_query_selectors()``'s own docstring).
+    ``node_selector`` (:func:`~proxmox_storage_drs.metrics.resolve_node_selector`)
+    is combined with the vmid scoping, not replaced by it -- both still
+    apply."""
     metric_name = raw_metric_name(metrics, field)
-    rate_expr = build_rate_promql(
-        metric_name,
-        metrics.labels.vmid,
-        metrics.labels.device,
-        metrics.rate_window_seconds,
-        selector=node_selector,
-    )
     # safe_range_step_seconds(): see compute_disk_coverage()'s own use of
     # it (and the try/except below's rationale) in metrics.py. No
     # decimation needed here, unlike _fetch_raw_quantity_series() -- an
@@ -144,19 +147,29 @@ def _fetch_raw_quantity(
     # the reduced statistic (REVIEW.md Z-04), not a no-op the way the range
     # paths above are.
     query_step = safe_range_step_seconds(metrics.step_seconds, metrics.rate_window_seconds)
-    promql = build_quantile_over_time_promql(
-        rate_expr, window.quantile, window.lookback_seconds, query_step
-    )
-    try:
-        result = client.instant_query(promql)
-    except BundleError:
-        if query_step == metrics.step_seconds:
-            raise
-        promql = build_quantile_over_time_promql(
-            rate_expr, window.quantile, window.lookback_seconds, metrics.step_seconds
+    out: dict[DiskKey, float] = {}
+    for batch_selector in group_query_selectors(metrics.labels.vmid, node_selector, vmids):
+        rate_expr = build_rate_promql(
+            metric_name,
+            metrics.labels.vmid,
+            metrics.labels.device,
+            metrics.rate_window_seconds,
+            selector=batch_selector,
         )
-        result = client.instant_query(promql)
-    return parse_disk_series(result, metrics.labels.vmid, metrics.labels.device)
+        promql = build_quantile_over_time_promql(
+            rate_expr, window.quantile, window.lookback_seconds, query_step
+        )
+        try:
+            result = client.instant_query(promql)
+        except BundleError:
+            if query_step == metrics.step_seconds:
+                raise
+            promql = build_quantile_over_time_promql(
+                rate_expr, window.quantile, window.lookback_seconds, metrics.step_seconds
+            )
+            result = client.instant_query(promql)
+        out.update(parse_disk_series(result, metrics.labels.vmid, metrics.labels.device))
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,9 +189,10 @@ def _fetch_all_raw_quantities(
     metrics: MetricsConfig,
     window: WindowConfig,
     node_selector: str | None,
+    vmids: Sequence[int] | None = None,
 ) -> _RawQuantities:
     fetched = {
-        field: _fetch_raw_quantity(client, metrics, window, field, node_selector)
+        field: _fetch_raw_quantity(client, metrics, window, field, node_selector, vmids)
         for field in RAW_METRIC_FIELDS
     }
     return _RawQuantities(**fetched)
@@ -257,6 +271,7 @@ def _fetch_raw_quantity_series(
     end_epoch_seconds: float,
     step_seconds: float,
     node_selector: str | None,
+    vmids: Sequence[int] | None = None,
 ) -> dict[DiskKey, _RawTimeSeries]:
     """One of the six section 3.4 raw quantities as a raw time series over
     ``[start, end]`` at ``step`` -- section 10's own material for a
@@ -265,15 +280,13 @@ def _fetch_raw_quantity_series(
     decision statistic. The identical ``rate(...)`` expression
     :func:`_fetch_raw_quantity` builds, `query_range`'d instead of wrapped
     in `quantile_over_time` and `instant_query`'d -- not a second PromQL
-    formula, only a different query type against the same expression."""
+    formula, only a different query type against the same expression.
+    ``vmids``: see :func:`_fetch_raw_quantity`'s own parameter of the same
+    name and :func:`~proxmox_storage_drs.metrics.group_query_selectors` --
+    identical group/vmid scoping, applied here per vmid batch on top of the
+    existing per-time-chunk batching :func:`_issue_chunked_range_query`
+    already does; the two axes are independent and compose."""
     metric_name = raw_metric_name(metrics, field)
-    rate_expr = build_rate_promql(
-        metric_name,
-        metrics.labels.vmid,
-        metrics.labels.device,
-        metrics.rate_window_seconds,
-        selector=node_selector,
-    )
     # safe_range_step_seconds(): see compute_disk_coverage()'s own use of it
     # in metrics.py -- this is the forecaster's raw-series counterpart of
     # that same gigapipe-step-vs-range workaround. Decimation matters more
@@ -282,20 +295,30 @@ def _fetch_raw_quantity_series(
     # handing it a finer-than-configured grid would silently misalign the
     # season length, not just look "extra precise".
     query_step = safe_range_step_seconds(step_seconds, metrics.rate_window_seconds)
-    actual_step, result = _issue_chunked_range_query(
-        client, rate_expr, start_epoch_seconds, end_epoch_seconds, query_step, step_seconds
-    )
-    if actual_step < step_seconds:
-        result = [
-            {
-                **series,
-                "values": decimate_to_configured_step(
-                    series.get("values", []), step_seconds, actual_step
-                ),
-            }
-            for series in result
-        ]
-    return parse_disk_range_series(result, metrics.labels.vmid, metrics.labels.device)
+    out: dict[DiskKey, _RawTimeSeries] = {}
+    for batch_selector in group_query_selectors(metrics.labels.vmid, node_selector, vmids):
+        rate_expr = build_rate_promql(
+            metric_name,
+            metrics.labels.vmid,
+            metrics.labels.device,
+            metrics.rate_window_seconds,
+            selector=batch_selector,
+        )
+        actual_step, result = _issue_chunked_range_query(
+            client, rate_expr, start_epoch_seconds, end_epoch_seconds, query_step, step_seconds
+        )
+        if actual_step < step_seconds:
+            result = [
+                {
+                    **series,
+                    "values": decimate_to_configured_step(
+                        series.get("values", []), step_seconds, actual_step
+                    ),
+                }
+                for series in result
+            ]
+        out.update(parse_disk_range_series(result, metrics.labels.vmid, metrics.labels.device))
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +341,7 @@ def _fetch_all_raw_quantity_series(
     end_epoch_seconds: float,
     step_seconds: float,
     node_selector: str | None,
+    vmids: Sequence[int] | None = None,
 ) -> _RawSeriesQuantities:
     fetched = {
         field: _fetch_raw_quantity_series(
@@ -328,6 +352,7 @@ def _fetch_all_raw_quantity_series(
             end_epoch_seconds,
             step_seconds,
             node_selector,
+            vmids,
         )
         for field in RAW_METRIC_FIELDS
     }
@@ -446,6 +471,13 @@ def compute_group_load(
     (the default) applies no restriction, identical to this function's
     behaviour before the parameter existed.
 
+    Every query below is additionally scoped to ``group.disks``'s own
+    vmids (:func:`~proxmox_storage_drs.metrics.group_query_selectors`) --
+    section 3.4's original design queried the whole cluster unfiltered on
+    every call, which a multi-group config with a large cluster could
+    time out outright (REVIEW.md Q-02); each group now fetches only what
+    it needs.
+
     Coverage rejection excludes a disk's raw contribution from its group's
     normalization totals entirely, so one noisy or half-missing series
     cannot bias every other disk's normalized share -- the rejected disk's
@@ -462,8 +494,11 @@ def compute_group_load(
             group_name=group.name, idle=True, average_utilization=0.0, disks=(), storages=()
         )
 
-    coverage = compute_disk_coverage(client, metrics, window, selector=node_selector, now=now)
-    raw = _fetch_all_raw_quantities(client, metrics, window, node_selector)
+    vmids = sorted({d.vmid for d in group.disks})
+    coverage = compute_disk_coverage(
+        client, metrics, window, selector=node_selector, now=now, vmids=vmids
+    )
+    raw = _fetch_all_raw_quantities(client, metrics, window, node_selector, vmids)
     # REVIEW.md W-06/W-07: a resolved selector that matches zero series
     # anywhere looks identical, downstream, to a genuinely idle group --
     # every disk coverage-rejected, t_total == 0.0 -- unless it is told
@@ -581,7 +616,11 @@ def compute_disk_load_series(
     is: section 10.1 is explicit that a forecaster's own history
     requirement and the decision window are "genuinely different things."
     ``node_selector`` is :func:`compute_group_load`'s own parameter of the
-    same name and meaning.
+    same name and meaning; ``group.disks``'s own vmids scope every query
+    the same way :func:`compute_group_load` now does (REVIEW.md Q-02) --
+    the forecaster's own history fetch is the widest-range query this
+    module issues (up to 7 days for ``seasonal_naive``), so it is also the
+    one most likely to time out unscoped against a large cluster.
 
     Every disk in ``group`` gets an entry, even one with no samples at all
     (an empty series -- every :class:`~proxmox_storage_drs.forecast.Forecaster`
@@ -601,7 +640,10 @@ def compute_disk_load_series(
 
     end = now_epoch_seconds
     start = end - range_seconds
-    raw = _fetch_all_raw_quantity_series(client, metrics, start, end, step_seconds, node_selector)
+    vmids = sorted({d.vmid for d in group.disks})
+    raw = _fetch_all_raw_quantity_series(
+        client, metrics, start, end, step_seconds, node_selector, vmids
+    )
 
     timestamps: set[float] = set()
     for field_series in (

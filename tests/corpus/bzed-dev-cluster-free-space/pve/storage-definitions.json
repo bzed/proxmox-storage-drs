@@ -1,12 +1,12 @@
 [
   {
-    "content": "rootdir,images",
+    "content": "images,rootdir",
     "shared": 1,
     "storage": "stor-30d346d4",
     "type": "rbd"
   },
   {
-    "content": "snippets,rootdir,backup,vztmpl,images,iso",
+    "content": "snippets,rootdir,vztmpl,iso,images,backup",
     "storage": "stor-5a8798d1",
     "type": "dir"
   },
@@ -17,8 +17,8 @@
     "type": "rbd"
   },
   {
-    "content": "rootdir,images",
-    "nodes": "node-722c4e62,node-d8d4d911,node-345988ce",
+    "content": "images,rootdir",
+    "nodes": "node-d8d4d911,node-722c4e62,node-345988ce",
     "storage": "stor-a2b6edcf",
     "type": "zfspool"
   },
@@ -29,7 +29,7 @@
     "type": "pbs"
   },
   {
-    "content": "images,rootdir",
+    "content": "rootdir,images",
     "shared": 1,
     "storage": "stor-c210ac69",
     "type": "rbd"
