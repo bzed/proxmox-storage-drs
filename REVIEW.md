@@ -7636,6 +7636,56 @@ findings** — the caveat applies. Specifically:
 
 ---
 
+## 55. Ad hoc finding — S-04's documented repair-exemption residual has no regression test
+
+Surfaced while tracing the `Group` dataclass's call graph through both solver paths (via a
+`graphify` knowledge-graph pass over `src/`, `docs/` and `.agents/`, cross-checked by hand against
+`optimize.py`, `heuristic.py` and their tests) — not a systematic review pass, so this section
+carries no verification-run block, only the one finding.
+
+### 55.1 AK-01 — the MILP repair-exemption gap (S-04's documented residual) has no regression test
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/optimize.py:22-32` (module docstring), `docs/internals/91-optimize.md:249-263`,
+`tests/unit/test_heuristic.py:485` (`test_run_heuristic_repair_ignores_storage_cooldown`),
+`tests/unit/test_optimize.py` (no equivalent test)
+
+S-04 ("the MILP backends ignore `cooldown_storages`", §17.6) is fixed: both
+`_cpsat_feasibility_constraints()` and `_cbc_feasibility_constraints()` now hard-fix `x_{d,s}=0` for
+a cooldown storage in both lexicographic stages, and `test_optimize.py:592`
+(`test_solve_excludes_a_cooldown_storage_as_a_target_for_a_movable_disk`) /
+`test_optimize.py:616` (`test_solve_still_allows_a_disk_to_move_away_from_a_cooldown_storage`) cover
+the fix on both backends.
+
+That fix is deliberately narrower than the heuristic in one documented edge case:
+`heuristic._repair()` grants an exemption from `cooldown_storages` when the only viable target for a
+live (C4)/(C5) reserve violation is itself a cooldown storage (section 13's reserve-override
+principle — a repair move is never deferred for a cooldown), and this exemption is **not**
+replicated in either MILP backend. The exclusion is applied uniformly, including to stage 1's own
+reserve-shortfall minimization, so a group simultaneously mid-violation and mid-cooldown on its one
+viable target gets a genuinely-computed but more-pessimistic shortfall from CP-SAT/CBC than the
+heuristic would report for the identical input. Both `optimize.py`'s module docstring and
+`docs/internals/91-optimize.md:249-263` describe this precisely and call it "a real,
+separately-scoped piece of work," not a bug — the code and its documentation already agree with each
+other.
+
+What is missing is the test. `test_heuristic.py:485`'s
+`test_run_heuristic_repair_ignores_storage_cooldown()` is the regression test for the heuristic
+side of the exemption (a group where the one non-pinned disk's only viable repair target is a
+cooldown storage; asserts the heuristic repairs through it anyway). `test_optimize.py` has no
+equivalent asserting the MILP backends' *documented* more-conservative behaviour on the same
+scenario — nothing currently fails if a future change to `optimize.py` accidentally narrows or
+widens this residual in either direction, since no test pins it.
+
+**Recommendation:** add a backend-parametrized test to `test_optimize.py`, mirroring
+`test_run_heuristic_repair_ignores_storage_cooldown()`'s fixture, asserting CP-SAT/CBC do *not*
+repair through the cooldown storage in that scenario — pinning the documented divergence from the
+heuristic instead of relying on prose alone. This is a test-coverage gap, not a correctness defect.
+
+**Status:** Open.
+
+---
+
 ## Appendix A — Independent verification of the §14 worked example
 
 All values re-derived by hand from §14.1's input.

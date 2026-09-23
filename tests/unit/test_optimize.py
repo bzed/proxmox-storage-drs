@@ -637,6 +637,41 @@ def test_solve_still_allows_a_disk_to_move_away_from_a_cooldown_storage(backend:
     }
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_solve_does_not_repair_through_a_cooldown_storage_unlike_the_heuristic(
+    backend: str,
+) -> None:
+    """REVIEW.md AK-01: mirrors `test_heuristic.py`'s
+    `test_run_heuristic_repair_ignores_storage_cooldown` fixture exactly, but
+    asserts the opposite outcome. `heuristic._repair()` grants an exemption
+    from `cooldown_storages` to fix a live (C4)/(C5) violation (section 13's
+    reserve-override principle); neither MILP backend replicates that
+    exemption -- the cooldown exclusion is one feasibility constraint applied
+    uniformly to both lexicographic stages, including stage 1's own
+    reserve-shortfall minimization, so a cooldown storage stays unavailable
+    even when it is the only way to resolve a violation. This pins that
+    documented, deliberate divergence (`optimize.py`'s module docstring,
+    `docs/internals/91-optimize.md`'s "Not replicated" paragraph) so a future
+    change to either backend cannot narrow or widen it silently."""
+    disks = (
+        make_disk("101:scsi0", 3.0, 3.0, "san-a"),
+        make_disk("102:scsi0", 2.0, 0.0, "san-a", pinned="locked: backup"),
+    )
+    storages = (make_storage("san-a"), make_storage("san-b", capacity_tib=16.0))
+    group = Group(name="g", storages=storages, disks=disks)
+    loads = {"101:scsi0": 3.0, "102:scsi0": 0.0}
+
+    result = _solve(
+        group, loads, DEFAULT_OBJECTIVE, backend, cooldown_storages=frozenset({"san-b"})
+    )
+
+    # Unlike the heuristic (which repairs onto san-b despite the cooldown),
+    # both MILP backends leave the assignment untouched -- san-b is fixed to
+    # x=0 for every disk, so no feasible move can resolve san-a's violation.
+    assert result.assignment == {"101:scsi0": "san-a", "102:scsi0": "san-a"}
+    assert result.breakdown.reserve_statuses["san-a"].violated
+
+
 # ------------------------------------------------------- (C2) format eligibility
 
 
