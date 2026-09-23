@@ -21,62 +21,62 @@
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s])))[604800s:3600s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[604800s:276s])",
       "detail": null,
       "outcome": "ok"
     },
@@ -116,37 +116,37 @@
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
@@ -156,177 +156,182 @@
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-7439cb15|node-eb330724|node-9bcf256f\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "/api/v1/status/buildinfo {}",
       "detail": null,
       "outcome": "ok"
     },
@@ -336,62 +341,62 @@
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_bytes q=0.95 (group-448ef164)",
+      "description": "instant quantile_over_time read_bytes q=0.95 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_bytes q=0.99 (group-448ef164)",
+      "description": "instant quantile_over_time read_bytes q=0.99 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_ops q=0.95 (group-448ef164)",
+      "description": "instant quantile_over_time read_ops q=0.95 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_ops q=0.99 (group-448ef164)",
+      "description": "instant quantile_over_time read_ops q=0.99 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_time_ns q=0.95 (group-448ef164)",
+      "description": "instant quantile_over_time read_time_ns q=0.95 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time read_time_ns q=0.99 (group-448ef164)",
+      "description": "instant quantile_over_time read_time_ns q=0.99 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_bytes q=0.95 (group-448ef164)",
+      "description": "instant quantile_over_time write_bytes q=0.95 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_bytes q=0.99 (group-448ef164)",
+      "description": "instant quantile_over_time write_bytes q=0.99 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_ops q=0.95 (group-448ef164)",
+      "description": "instant quantile_over_time write_ops q=0.95 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_ops q=0.99 (group-448ef164)",
+      "description": "instant quantile_over_time write_ops q=0.99 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_time_ns q=0.95 (group-448ef164)",
+      "description": "instant quantile_over_time write_time_ns q=0.95 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "instant quantile_over_time write_time_ns q=0.99 (group-448ef164)",
+      "description": "instant quantile_over_time write_time_ns q=0.99 (group-21c7f3b3)",
       "detail": null,
       "outcome": "ok"
     },
@@ -416,272 +421,267 @@
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788553322,1788639722]",
+      "description": "range_query chunk [1789540320,1789626720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788553322,1788639722]",
+      "description": "range_query chunk [1789540320,1789626720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788553322,1788639722]",
+      "description": "range_query chunk [1789540320,1789626720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788553322,1788639722]",
+      "description": "range_query chunk [1789540320,1789626720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788553322,1788639722]",
+      "description": "range_query chunk [1789540320,1789626720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788553322,1788639722]",
+      "description": "range_query chunk [1789540320,1789626720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788639722,1788726122]",
+      "description": "range_query chunk [1789626720,1789713120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788639722,1788726122]",
+      "description": "range_query chunk [1789626720,1789713120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788639722,1788726122]",
+      "description": "range_query chunk [1789626720,1789713120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788639722,1788726122]",
+      "description": "range_query chunk [1789626720,1789713120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788639722,1788726122]",
+      "description": "range_query chunk [1789626720,1789713120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788639722,1788726122]",
+      "description": "range_query chunk [1789626720,1789713120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788726122,1788812522]",
+      "description": "range_query chunk [1789713120,1789799520]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788726122,1788812522]",
+      "description": "range_query chunk [1789713120,1789799520]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788726122,1788812522]",
+      "description": "range_query chunk [1789713120,1789799520]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788726122,1788812522]",
+      "description": "range_query chunk [1789713120,1789799520]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788726122,1788812522]",
+      "description": "range_query chunk [1789713120,1789799520]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788726122,1788812522]",
+      "description": "range_query chunk [1789713120,1789799520]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788812522,1788898922]",
+      "description": "range_query chunk [1789799520,1789885920]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788812522,1788898922]",
+      "description": "range_query chunk [1789799520,1789885920]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788812522,1788898922]",
+      "description": "range_query chunk [1789799520,1789885920]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788812522,1788898922]",
+      "description": "range_query chunk [1789799520,1789885920]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788812522,1788898922]",
+      "description": "range_query chunk [1789799520,1789885920]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788812522,1788898922]",
+      "description": "range_query chunk [1789799520,1789885920]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788898922,1788985322]",
+      "description": "range_query chunk [1789885920,1789972320]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788898922,1788985322]",
+      "description": "range_query chunk [1789885920,1789972320]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788898922,1788985322]",
+      "description": "range_query chunk [1789885920,1789972320]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788898922,1788985322]",
+      "description": "range_query chunk [1789885920,1789972320]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788898922,1788985322]",
+      "description": "range_query chunk [1789885920,1789972320]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788898922,1788985322]",
+      "description": "range_query chunk [1789885920,1789972320]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788985322,1789071722]",
+      "description": "range_query chunk [1789972320,1790058720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788985322,1789071722]",
+      "description": "range_query chunk [1789972320,1790058720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788985322,1789071722]",
+      "description": "range_query chunk [1789972320,1790058720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788985322,1789071722]",
+      "description": "range_query chunk [1789972320,1790058720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788985322,1789071722]",
+      "description": "range_query chunk [1789972320,1790058720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1788985322,1789071722]",
+      "description": "range_query chunk [1789972320,1790058720]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789071722,1789158122]",
+      "description": "range_query chunk [1790058720,1790145120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789071722,1789158122]",
+      "description": "range_query chunk [1790058720,1790145120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789071722,1789158122]",
+      "description": "range_query chunk [1790058720,1790145120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789071722,1789158122]",
+      "description": "range_query chunk [1790058720,1790145120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789071722,1789158122]",
+      "description": "range_query chunk [1790058720,1790145120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789071722,1789158122]",
+      "description": "range_query chunk [1790058720,1790145120]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-7439cb15,stor-593d0eeb)",
+      "description": "storage_content(node-345988ce,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-7439cb15,stor-593d0eeb)",
+      "description": "storage_content(node-345988ce,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-7439cb15,stor-9034bbcd)",
+      "description": "storage_content(node-345988ce,stor-5c5a9627)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-7439cb15,stor-9034bbcd)",
+      "description": "storage_content(node-345988ce,stor-5c5a9627)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-9bcf256f,stor-593d0eeb)",
+      "description": "storage_content(node-722c4e62,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-9bcf256f,stor-593d0eeb)",
+      "description": "storage_content(node-722c4e62,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-9bcf256f,stor-9034bbcd)",
+      "description": "storage_content(node-722c4e62,stor-5c5a9627)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-9bcf256f,stor-9034bbcd)",
+      "description": "storage_content(node-722c4e62,stor-5c5a9627)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-eb330724,stor-593d0eeb)",
+      "description": "storage_content(node-d8d4d911,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-eb330724,stor-593d0eeb)",
+      "description": "storage_content(node-d8d4d911,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_content(node-eb330724,stor-9034bbcd)",
-      "detail": null,
-      "outcome": "ok"
-    },
-    {
-      "description": "storage_content(node-eb330724,stor-9034bbcd)",
+      "description": "storage_content(node-d8d4d911,stor-5c5a9627)",
       "detail": null,
       "outcome": "ok"
     },
@@ -706,192 +706,342 @@
       "outcome": "ok"
     },
     {
-      "description": "storage_status(node-7439cb15,stor-593d0eeb)",
+      "description": "storage_status(node-345988ce,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_status(node-7439cb15,stor-9034bbcd)",
+      "description": "storage_status(node-345988ce,stor-5c5a9627)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_status(node-9bcf256f,stor-593d0eeb)",
+      "description": "storage_status(node-722c4e62,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_status(node-9bcf256f,stor-9034bbcd)",
+      "description": "storage_status(node-722c4e62,stor-5c5a9627)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_status(node-eb330724,stor-593d0eeb)",
+      "description": "storage_status(node-d8d4d911,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_status(node-eb330724,stor-593d0eeb)",
+      "description": "storage_status(node-d8d4d911,stor-30d346d4)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_status(node-eb330724,stor-9034bbcd)",
+      "description": "storage_status(node-d8d4d911,stor-5c5a9627)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "storage_status(node-eb330724,stor-9034bbcd)",
+      "description": "version",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(156937)",
+      "description": "vm_config(163216)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(156937)",
+      "description": "vm_config(163216)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(204608)",
+      "description": "vm_config(240169)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(204608)",
+      "description": "vm_config(240169)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(244122)",
+      "description": "vm_config(317511)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(244122)",
+      "description": "vm_config(317511)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(362759)",
+      "description": "vm_config(365149)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(362759)",
+      "description": "vm_config(365149)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(389722)",
+      "description": "vm_config(366117)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(389722)",
+      "description": "vm_config(366117)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(393932)",
+      "description": "vm_config(443669)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(393932)",
+      "description": "vm_config(443669)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(489208)",
+      "description": "vm_config(457823)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(489208)",
+      "description": "vm_config(457823)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(509010)",
+      "description": "vm_config(494807)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(509010)",
+      "description": "vm_config(494807)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(572614)",
+      "description": "vm_config(534304)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(572614)",
+      "description": "vm_config(534304)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(589980)",
+      "description": "vm_config(644488)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(589980)",
+      "description": "vm_config(644488)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(60204)",
+      "description": "vm_config(725058)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(60204)",
+      "description": "vm_config(725058)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(612603)",
+      "description": "vm_config(747564)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(612603)",
+      "description": "vm_config(747564)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(738059)",
+      "description": "vm_config(75052)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(738059)",
+      "description": "vm_config(75052)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(807825)",
+      "description": "vm_config(752636)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(807825)",
+      "description": "vm_config(752636)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(92831)",
+      "description": "vm_config(843425)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_config(92831)",
+      "description": "vm_config(843425)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(163216)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(163216)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(240169)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(240169)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(317511)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(317511)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(365149)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(365149)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(366117)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(366117)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(443669)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(443669)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(457823)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(457823)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(494807)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(494807)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(534304)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(534304)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(644488)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(644488)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(725058)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(725058)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(747564)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(747564)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(75052)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(75052)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(752636)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(752636)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(843425)",
+      "detail": null,
+      "outcome": "ok"
+    },
+    {
+      "description": "vm_pending(843425)",
       "detail": null,
       "outcome": "ok"
     },
@@ -906,247 +1056,250 @@
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(156937)",
+      "description": "vm_snapshots(163216)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(156937)",
+      "description": "vm_snapshots(163216)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(204608)",
+      "description": "vm_snapshots(240169)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(204608)",
+      "description": "vm_snapshots(240169)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(244122)",
+      "description": "vm_snapshots(317511)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(244122)",
+      "description": "vm_snapshots(317511)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(362759)",
+      "description": "vm_snapshots(365149)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(362759)",
+      "description": "vm_snapshots(365149)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(389722)",
+      "description": "vm_snapshots(366117)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(389722)",
+      "description": "vm_snapshots(366117)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(393932)",
+      "description": "vm_snapshots(443669)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(393932)",
+      "description": "vm_snapshots(443669)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(489208)",
+      "description": "vm_snapshots(457823)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(489208)",
+      "description": "vm_snapshots(457823)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(509010)",
+      "description": "vm_snapshots(494807)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(509010)",
+      "description": "vm_snapshots(494807)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(572614)",
+      "description": "vm_snapshots(534304)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(572614)",
+      "description": "vm_snapshots(534304)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(589980)",
+      "description": "vm_snapshots(644488)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(589980)",
+      "description": "vm_snapshots(644488)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(60204)",
+      "description": "vm_snapshots(725058)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(60204)",
+      "description": "vm_snapshots(725058)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(612603)",
+      "description": "vm_snapshots(747564)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(612603)",
+      "description": "vm_snapshots(747564)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(738059)",
+      "description": "vm_snapshots(75052)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(738059)",
+      "description": "vm_snapshots(75052)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(807825)",
+      "description": "vm_snapshots(752636)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(807825)",
+      "description": "vm_snapshots(752636)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(92831)",
+      "description": "vm_snapshots(843425)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_snapshots(92831)",
+      "description": "vm_snapshots(843425)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(156937)",
+      "description": "vm_status_current(163216)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(204608)",
+      "description": "vm_status_current(240169)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(244122)",
+      "description": "vm_status_current(317511)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(362759)",
+      "description": "vm_status_current(365149)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(389722)",
+      "description": "vm_status_current(366117)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(393932)",
+      "description": "vm_status_current(443669)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(489208)",
+      "description": "vm_status_current(457823)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(509010)",
+      "description": "vm_status_current(494807)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(572614)",
+      "description": "vm_status_current(534304)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(589980)",
+      "description": "vm_status_current(644488)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(60204)",
+      "description": "vm_status_current(725058)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(612603)",
+      "description": "vm_status_current(747564)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(738059)",
+      "description": "vm_status_current(75052)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(807825)",
+      "description": "vm_status_current(752636)",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "vm_status_current(92831)",
+      "description": "vm_status_current(843425)",
       "detail": null,
       "outcome": "ok"
     }
   ],
   "capture": {
+    "extra_selector_rewritten": false,
     "no_series": false,
+    "prometheus_version": "",
+    "pve_version": "9.2.11",
     "range_seconds": 604800.0,
     "step_seconds": 3600.0,
-    "synthetic_now_epoch": 947276521.64205
+    "synthetic_now_epoch": 947053919.932883
   },
   "counts": {
     "disks": 39,
     "dropped_records": 0,
-    "estimated_sample_points": 39312,
+    "estimated_sample_points": 512694,
     "groups": 1,
     "storages": 2,
     "vms": 15
   },
-  "generated_by": "pve-storage-drs 0.1.1",
+  "generated_by": "pve-storage-drs 0.1.7",
   "ok": true,
-  "salt_fingerprint": "86122d5221861e73a0e9028092cd9ba972d36da5d59967bb076782c3301f7e05",
+  "salt_fingerprint": "e6209f8911a39bcb08714d4c3e0df4993ef1719de7bfe0a52f7ba0d889b70833",
   "schema_version": 1
 }

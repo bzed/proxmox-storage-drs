@@ -21,62 +21,62 @@
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.95, (sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s])))[86400s:276s])",
+      "description": "/api/v1/query quantile_over_time(0.99, (sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s])))[86400s:276s])",
       "detail": null,
       "outcome": "ok"
     },
@@ -116,7 +116,7 @@
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
@@ -126,27 +126,27 @@
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(rd_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_bytes{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_operations{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\"}[300s]))",
+      "description": "/api/v1/query_range sum by (vmid, instance) (rate(wr_total_time_ns{nodename=~\"node-345988ce|node-d8d4d911|node-722c4e62\",vmid=~\"240169|163216|457823|494807|365149|75052|443669|317511|366117|534304|725058|752636|747564|843425|644488\"}[300s]))",
       "detail": null,
       "outcome": "ok"
     },
@@ -241,32 +241,32 @@
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789733998,1789820398]",
+      "description": "range_query chunk [1790058705,1790145105]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789733998,1789820398]",
+      "description": "range_query chunk [1790058705,1790145105]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789733998,1789820398]",
+      "description": "range_query chunk [1790058705,1790145105]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789733998,1789820398]",
+      "description": "range_query chunk [1790058705,1790145105]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789733998,1789820398]",
+      "description": "range_query chunk [1790058705,1790145105]",
       "detail": null,
       "outcome": "ok"
     },
     {
-      "description": "range_query chunk [1789733998,1789820398]",
+      "description": "range_query chunk [1790058705,1790145105]",
       "detail": null,
       "outcome": "ok"
     },
@@ -948,7 +948,7 @@
     "pve_version": "9.2.11",
     "range_seconds": 86400.0,
     "step_seconds": 3600.0,
-    "synthetic_now_epoch": 947333998.4604969
+    "synthetic_now_epoch": 947053904.931495
   },
   "counts": {
     "disks": 39,
@@ -958,7 +958,7 @@
     "storages": 3,
     "vms": 15
   },
-  "generated_by": "pve-storage-drs 0.1.6",
+  "generated_by": "pve-storage-drs 0.1.7",
   "ok": true,
   "salt_fingerprint": "e6209f8911a39bcb08714d4c3e0df4993ef1719de7bfe0a52f7ba0d889b70833",
   "schema_version": 1

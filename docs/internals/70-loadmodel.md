@@ -18,25 +18,40 @@ the solver (`heuristic.py`'s `run_heuristic()`, via `GroupLoad.load_by_disk_key(
 consumes that same set of per-disk `ℓ_d` values against every *candidate*
 assignment it considers, rather than recomputing load per candidate.
 
-## Six queries, not six-times-groups queries
+## Six queries, scoped to the group
 
 The six raw quantities (section 3.4) are fetched with **one instant query
-each**, unfiltered by group — `sum by (vmid, device) (...)` already returns
-every disk Prometheus currently reports, and picking out one group's keys
-in Python is free, whereas six *more* Prometheus queries per group is not.
+each**, scoped to the calling group's own vmids
+(`metrics.group_query_selectors()`) — `sum by (vmid, device) (...)` would
+already return every disk Prometheus currently reports if left unscoped,
+and picking out one group's keys in Python used to be the whole story, but
+REVIEW.md Q-02 (below) is why that stopped being true.
 `read_time_ns`/`write_time_ns` are converted from nanoseconds to seconds
 here, engine-side (`_combined_raw`), for the same reason F-03 moved
 `read_factor`/`write_factor` engine-side: one tested constant beats the
 same `/1e9` repeated across deployed PromQL strings.
 
-**Known limitation, not a bug:** a config with more than one group re-runs
-these same six unfiltered queries once per group — correct (each group's
-coverage/rejection decisions are independent) but wasteful for a many-group
-cluster. Fetching once and slicing per group would be a straightforward
-follow-up if a real deployment's group count ever makes this Prometheus
-load worth avoiding; nothing about `compute_group_load()`'s per-group
-signature forces the current one-fetch-per-call shape, it is just what the
-first implementation does.
+**REVIEW.md Q-02, revisited.** The original design fetched these six
+queries *unfiltered by group* on the theory that Python-side filtering was
+free and six more Prometheus queries per group was not — correct, and
+accepted as a "Low, wasteful but correct" limitation for the 1-3-group
+deployments this project was designed against. It stopped being merely
+wasteful once a real cluster with several hundred VMs spread across many
+groups hit it: every group's plan re-issued the *same* unfiltered,
+cluster-wide aggregation, and Prometheus/gigapipe's own query evaluator
+timed out on it outright ("query timed out in expression evaluation") —
+not wasteful, broken. `metrics.group_query_selectors()` scopes every such
+query (this module's six raw quantities, `compute_disk_load_series()`'s
+own forecaster history fetch, and `metrics.compute_disk_coverage()`) to
+the calling group's own vmids, splitting into
+`metrics.VMID_QUERY_BATCH_SIZE`-sized batches (merged back into one
+logical result) when a single group itself is large enough that even its
+own aggregation would be too big for one query. A config with `N` groups
+still makes `7N` queries — that redundancy (each group's coverage/rejection
+decisions are independent, so the fetch still cannot be shared across
+groups) is unchanged and still just a performance note for a many-group
+deployment — but each of those `7N` queries now aggregates only the disks
+that group actually has, not the whole cluster.
 
 ## Coverage rejection excludes a disk from the group total, not just from its own `ℓ_d`
 

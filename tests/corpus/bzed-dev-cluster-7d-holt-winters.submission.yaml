@@ -1,9 +1,11 @@
 submitted_by: Bernd Zeimetz <bernd@bzed.de>
-submitted_on: 2026-09-11
+submitted_on: 2026-09-23
 consent:
   redistribute_under: AGPL-3.0-or-later
-  reviewed_bundle_before_sending: true
-collected_with: pve-storage-drs 0.1.1
+  # False on purpose -- see bzed-dev-cluster-24h.submission.yaml's identical
+  # note; the same recapture session hand-reviewed this bundle the same way.
+  reviewed_bundle_before_sending: false
+collected_with: pve-storage-drs 0.1.7
 versions:
   pve: 9.2.11
   prometheus_backend: gigapipe
@@ -22,6 +24,26 @@ what_this_reproduces: >
   cpsat legitimately used more moves than the heuristic to reach a far better
   spread at objective.beta_move_count=0.0, which the old check misread as "the
   MILP did worse".
+recaptures:
+  - date: 2026-09-23
+    why: >
+      Same root cause and fix as bzed-dev-cluster-24h.submission.yaml's own
+      2026-09-23 recapture entry: every group-scoped Prometheus query now
+      carries an additional vmid selector (REVIEW.md Q-02), which changes the
+      PromQL text this bundle's files are looked up by. Recaptured from the
+      same real dev cluster with the exact same `--range 7d --step 1h` this
+      submission always used.
+    incidental_size_change: >
+      Same mechanism as bzed-dev-cluster-24h's own note: recapturing also
+      picked up metrics.safe_range_step_seconds() for the first time (merged
+      after this bundle's original 2026-09-11 capture) -- this bundle's
+      metrics.step (1h) sits *far* above metrics.rate_window (300s), so the
+      workaround's own step-narrowing (1h -> ~276s, a ~13x finer grid) is much
+      more pronounced here than on bzed-dev-cluster-24h. Unpacked size grew
+      from ~4.6 MiB to ~51 MiB, well past the 8 MiB documented ceiling
+      (tests/corpus/README.md) -- per Bernd's own explicit call, accepted
+      rather than reparametrized (range/step identical to the original
+      capture).
 repairs:
   - date: 2026-09-14
     what_leaked: >
@@ -29,9 +51,11 @@ repairs:
       unmapped Telegraf host tag ('host': 'data001') that bb9417b's
       _redact_finding_message() fix was meant to remove -- the fix corrected
       only the uncommitted cluster-a bundle, not this already-committed one
-      (REVIEW.md Z-01).
+      (REVIEW.md Z-01). Superseded by the 2026-09-23 recapture above; kept
+      here as historical record of what the pre-2026-09-23 bytes once
+      contained.
     fixed_by: bb9417b (collector fix, prior commit)
-    repaired_by: this commit (rebuilt each message from the structured
+    repaired_by: 2026-09-14 commit (rebuilt each message from the structured
       sample_series field beside it, per tests/corpus/README.md's repair
       procedure; SHA256SUMS updated to match)
   - date: 2026-09-16
@@ -40,9 +64,10 @@ repairs:
       call-log descriptions carried the real, unpseudonymized group name
       that 87b4a6c's _redact_free_text() group-name substitution was meant
       to remove -- the fix corrected only new captures, not this
-      already-committed bundle (REVIEW.md AA-02).
+      already-committed bundle (REVIEW.md AA-02). Superseded by the
+      2026-09-23 recapture above; kept here as historical record.
     fixed_by: 87b4a6c (collector fix, prior commit)
-    repaired_by: this commit (replaced the group qualifier with this
+    repaired_by: 2026-09-16 commit (replaced the group qualifier with this
       bundle's own group-448ef164 pseudonym, from this bundle's own
       config.yaml, per tests/corpus/README.md's repair procedure;
       SHA256SUMS updated to match)

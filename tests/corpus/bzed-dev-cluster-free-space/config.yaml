@@ -42,20 +42,20 @@ groups:
   storages:
   - capability_weight: 1.0
     free_space:
-      hard: 1042488557160
-      soft: 8861152735862
+      hard: 1043956471440
+      soft: 8873630007244
     id: stor-5c5a9627
     reserve_factor: 2.0
   - capability_weight: 1.0
     free_space:
-      hard: 933633604304
-      soft: 7469068834434
+      hard: 941073460740
+      soft: 7528587685916
     id: stor-30d346d4
     reserve_factor: 2.0
   - capability_weight: 1.0
     free_space:
-      hard: 153448048392
-      soft: 1074136338746
+      hard: 154951418018
+      soft: 1084659926125
     id: stor-c210ac69
     reserve_factor: 2.0
 load_weights:
@@ -91,7 +91,7 @@ migration:
   target_load_weight: 1.0
   wipe_load_weight: 1.0
 objective:
-  affinity_counts_pinned_disks: false
+  affinity_counts_pinned_disks: true
   alpha_spread: 1.0
   beta_move_count: 0.25
   delta_capacity_spread: 0.5

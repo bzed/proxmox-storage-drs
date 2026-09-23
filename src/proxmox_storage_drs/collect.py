@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from proxmox_storage_drs import __version__
 from proxmox_storage_drs.anonymize import (
@@ -59,12 +59,15 @@ from proxmox_storage_drs.config import Config, ResolvedConfig
 from proxmox_storage_drs.exceptions import BundleError, MetricsError, PveApiError, TopologyError
 from proxmox_storage_drs.metrics import (
     RAW_METRIC_FIELDS,
+    VMID_QUERY_BATCH_SIZE,
     DiskKey,
     PrometheusClient,
     VerifyMetricsReport,
     build_node_selector,
     build_quantile_over_time_promql,
     build_rate_promql,
+    build_vmid_selector,
+    combine_selectors,
     format_cross_metric_finding,
     raw_metric_name,
     resolve_node_selector,
@@ -75,6 +78,7 @@ from proxmox_storage_drs.metrics import (
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.topology import (
     DISK_KEY_RE,
+    Group,
     Topology,
     _pick_active_node,
     build_topology,
@@ -844,17 +848,65 @@ def _capture_pve_files(
     return files
 
 
+def _group_vmid_batches(
+    vmids: Sequence[int], mapper: Mapper, batch_size: int
+) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
+    """Pairs each real-vmid batch this group's own capture queries issue
+    against the live cluster with the batch a later ``--replay`` run
+    independently reconstructs from the bundle's own (already-pseudonymous)
+    topology -- so the bundle stores a file under exactly the query text
+    replay will ask for. ``metrics.group_query_selectors()`` is the shared
+    implementation of the vmid-batching *scheme itself* (AGENTS.md section
+    5); this function's own job is narrower and capture-specific: it must
+    produce the identical batch *membership*, real side and pseudonym side,
+    that scheme would produce independently on each side.
+
+    Sorting by ``mapper.vmid(v)`` -- the pseudonym, not the real vmid --
+    before slicing into fixed-size batches is deliberate and load-bearing,
+    the exact same class of bug Z-03 already fixed for node names
+    (``_capture_prometheus_files``'s own ``anon_node_selector`` comment): a
+    replay run has no access to real vmids at all, so it always builds its
+    own batches by sorting the *pseudonyms* it already has
+    (``metrics.vmid_query_batches()``, called on a bundle's own
+    already-anonymized ``group.disks``) and slicing the identical way. If
+    this sorted by the real vmid instead, batch *i*'s real members and
+    batch *i*'s pseudonym members would only agree by coincidence.
+
+    Every vmid here was registered with ``mapper.register_vmids()`` before
+    capture began (``capture_bundle()``'s own vmid registration covers
+    every group's every disk up front) -- ``mapper.vmid()`` returning
+    ``None`` for one of them would mean that invariant broke, not a normal
+    "unregistered vmid" case this function should quietly tolerate (this
+    project's own rule against handling what cannot happen)."""
+
+    def pseudonym(vmid: int) -> int:
+        mapped = mapper.vmid(vmid)
+        assert mapped is not None, "group.disks vmids are always registered before capture"
+        return mapped
+
+    ordered = sorted(set(vmids), key=pseudonym)
+    return [
+        (
+            tuple(ordered[i : i + batch_size]),
+            tuple(pseudonym(v) for v in ordered[i : i + batch_size]),
+        )
+        for i in range(0, len(ordered), batch_size)
+    ]
+
+
 def _drive_group_series(
     recording_prom: RecordingPrometheusClient,
     config: Config,
-    group_name: str,
+    group: Group,
     node_selector: str | None,
+    anon_node_selector: str | None,
+    mapper: Mapper,
     range_seconds: float,
     step_seconds: float,
     capture_now: datetime,
     options: CaptureOptions,
     log: CaptureLog,
-) -> None:
+) -> dict[str, str]:
     """Section 16.2 bullets 2-3, one raw metric at a time: the two
     ``quantile_over_time`` instant reductions ``compute_group_load()``
     itself consumes, plus (unless ``--no-series``) the range series over
@@ -862,49 +914,80 @@ def _drive_group_series(
     from at replay time. Issues the calls only -- ``recording_prom``'s own
     ``captured`` log is what :func:`_anonymize_captured_prometheus` turns
     into bundle files, once, after every driver (this one, ``verify_metrics``,
-    :func:`_drive_label_values`) has run."""
+    :func:`_drive_label_values`) has run.
+
+    Every query is scoped to ``group.disks``'s own vmids, batched to
+    :data:`~proxmox_storage_drs.metrics.VMID_QUERY_BATCH_SIZE` via
+    :func:`_group_vmid_batches` -- matching ``loadmodel.py``'s own live
+    fetch path (REVIEW.md Q-02) exactly, since a captured bundle must offer
+    a ``--replay`` run the same query texts a live run would ask for.
+    Returns this group's own ``{real rate_expr: anon rate_expr}`` entries
+    (one per field per vmid batch) for the caller to fold into the bundle
+    -wide ``rate_expr_map`` :func:`_anonymize_captured_prometheus` uses --
+    a group has its own vmid batches, so (unlike the plain node-selector
+    case) these entries cannot be built once, cluster-wide, ahead of the
+    per-group loop."""
     end_epoch = capture_now.timestamp()
     start_epoch = end_epoch - range_seconds
+    vmid_label = config.metrics.labels.vmid
+    batches = _group_vmid_batches([d.vmid for d in group.disks], mapper, VMID_QUERY_BATCH_SIZE)
+    rate_expr_map: dict[str, str] = {}
     for field_name in RAW_METRIC_FIELDS:
         metric_name = raw_metric_name(config.metrics, field_name)
-        rate_expr = build_rate_promql(
-            metric_name,
-            config.metrics.labels.vmid,
-            config.metrics.labels.device,
-            config.metrics.rate_window_seconds,
-            node_selector,
-        )
-        # safe_range_step_seconds(): capture always talks to a real client
-        # (never a BundleError to fall back from), so this is unconditional
-        # here -- must still match loadmodel._fetch_raw_quantity()'s own
-        # use of it exactly, since that is the step a later `--replay` run
-        # tries *first* for this same rate_expr/quantile.
-        query_step = safe_range_step_seconds(
-            config.metrics.step_seconds, config.metrics.rate_window_seconds
-        )
-        for quantile in (config.window.quantile, config.window.upper_quantile):
-            promql = build_quantile_over_time_promql(
-                rate_expr, quantile, config.window.lookback_seconds, query_step
+        for real_batch, anon_batch in batches:
+            real_selector = combine_selectors(
+                node_selector, build_vmid_selector(vmid_label, real_batch)
             )
-            _guarded(
-                log,
-                f"instant quantile_over_time {field_name} q={quantile} ({group_name})",
-                partial(recording_prom.instant_query, promql),
+            anon_selector = combine_selectors(
+                anon_node_selector, build_vmid_selector(vmid_label, anon_batch)
             )
+            rate_expr = build_rate_promql(
+                metric_name,
+                vmid_label,
+                config.metrics.labels.device,
+                config.metrics.rate_window_seconds,
+                real_selector,
+            )
+            rate_expr_map[rate_expr] = build_rate_promql(
+                metric_name,
+                vmid_label,
+                config.metrics.labels.device,
+                config.metrics.rate_window_seconds,
+                anon_selector,
+            )
+            # safe_range_step_seconds(): capture always talks to a real
+            # client (never a BundleError to fall back from), so this is
+            # unconditional here -- must still match
+            # loadmodel._fetch_raw_quantity()'s own use of it exactly,
+            # since that is the step a later `--replay` run tries *first*
+            # for this same rate_expr/quantile.
+            query_step = safe_range_step_seconds(
+                config.metrics.step_seconds, config.metrics.rate_window_seconds
+            )
+            for quantile in (config.window.quantile, config.window.upper_quantile):
+                promql = build_quantile_over_time_promql(
+                    rate_expr, quantile, config.window.lookback_seconds, query_step
+                )
+                _guarded(
+                    log,
+                    f"instant quantile_over_time {field_name} q={quantile} ({group.name})",
+                    partial(recording_prom.instant_query, promql),
+                )
 
-        if options.no_series:
-            continue
-        # safe_range_step_seconds(): must match loadmodel._fetch_raw_quantity_series()'s
-        # own use of it exactly, not just compute_disk_coverage()'s --
-        # that is the step a later `--replay` run reconstructs and
-        # requests for this same rate_expr, and
-        # ReplayPrometheusClient._trim_range_result() rejects a step
-        # mismatch outright (BundleError, not a silent widen). Both sides
-        # derive the same value deterministically from the same
-        # (step_seconds, rate_window_seconds) pair, so capture and replay
-        # stay in lockstep even when the workaround is active.
-        query_step = safe_range_step_seconds(step_seconds, config.metrics.rate_window_seconds)
-        _issue_range_chunks(recording_prom, rate_expr, start_epoch, end_epoch, query_step, log)
+            if options.no_series:
+                continue
+            # safe_range_step_seconds(): must match loadmodel._fetch_raw_quantity_series()'s
+            # own use of it exactly, not just compute_disk_coverage()'s --
+            # that is the step a later `--replay` run reconstructs and
+            # requests for this same rate_expr, and
+            # ReplayPrometheusClient._trim_range_result() rejects a step
+            # mismatch outright (BundleError, not a silent widen). Both
+            # sides derive the same value deterministically from the same
+            # (step_seconds, rate_window_seconds) pair, so capture and
+            # replay stay in lockstep even when the workaround is active.
+            query_step = safe_range_step_seconds(step_seconds, config.metrics.rate_window_seconds)
+            _issue_range_chunks(recording_prom, rate_expr, start_epoch, end_epoch, query_step, log)
+    return rate_expr_map
 
 
 def _drive_label_values(
@@ -1135,16 +1218,20 @@ def _capture_prometheus_files(
         for field in RAW_METRIC_FIELDS
     }
     for group in topology.groups:
-        _drive_group_series(
-            recording_prom,
-            config,
-            group.name,
-            node_selector,
-            range_seconds,
-            step_seconds,
-            capture_now,
-            options,
-            log,
+        rate_expr_map.update(
+            _drive_group_series(
+                recording_prom,
+                config,
+                group,
+                node_selector,
+                anon_node_selector,
+                mapper,
+                range_seconds,
+                step_seconds,
+                capture_now,
+                options,
+                log,
+            )
         )
     _drive_label_values(recording_prom, config, log)
 

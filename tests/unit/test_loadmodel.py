@@ -42,6 +42,7 @@ from proxmox_storage_drs.metrics import (
     PrometheusClient,
     build_quantile_over_time_promql,
     build_rate_promql,
+    group_query_selectors,
     raw_metric_name,
 )
 from proxmox_storage_drs.topology import Disk, Group, Storage
@@ -95,7 +96,23 @@ METRICS = MetricsConfig(rate_window_seconds=600.0, step_seconds=300.0, labels=Me
 PROM_CONFIG = PrometheusConfig(url="http://prom.example.com:9090")
 
 
-def _quantile_promql(field_name: str, node_selector: str | None = None) -> str:
+def _group_selector(group: Group, node_selector: str | None = None) -> str | None:
+    """The one combined selector `compute_group_load()`/`compute_disk_load_series()`
+    build for `group`'s own vmids, via the same `group_query_selectors()`
+    every fixture below now goes through -- every fixture group in this
+    file is far smaller than `VMID_QUERY_BATCH_SIZE`, so this always
+    collapses to exactly one selector/one query per field, matching what
+    this file's `FakeSession` (keyed by exact query text, not a batch
+    list) can answer."""
+    vmids = sorted({d.vmid for d in group.disks})
+    selectors = group_query_selectors(METRICS.labels.vmid, node_selector, vmids)
+    assert (
+        len(selectors) == 1
+    ), "fixture group exceeds VMID_QUERY_BATCH_SIZE -- this helper assumes one query per field"
+    return selectors[0]
+
+
+def _quantile_promql(field_name: str, group: Group, node_selector: str | None = None) -> str:
     """The exact PromQL `_fetch_raw_quantity` builds for one raw field --
     computed with the same public builders loadmodel.py uses, not
     hand-copied, so this stays correct if either changes shape."""
@@ -105,21 +122,21 @@ def _quantile_promql(field_name: str, node_selector: str | None = None) -> str:
         METRICS.labels.vmid,
         METRICS.labels.device,
         METRICS.rate_window_seconds,
-        selector=node_selector,
+        selector=_group_selector(group, node_selector),
     )
     return build_quantile_over_time_promql(
         rate_expr, WINDOW.quantile, WINDOW.lookback_seconds, METRICS.step_seconds
     )
 
 
-def _coverage_promql(node_selector: str | None = None) -> str:
+def _coverage_promql(group: Group, node_selector: str | None = None) -> str:
     """The exact PromQL `compute_disk_coverage` builds for its range query."""
     return build_rate_promql(
         METRICS.read_ops,
         METRICS.labels.vmid,
         METRICS.labels.device,
         METRICS.rate_window_seconds,
-        selector=node_selector,
+        selector=_group_selector(group, node_selector),
     )
 
 
@@ -184,6 +201,7 @@ class FakeSession:
 
 
 def _client(
+    group: Group,
     *,
     read_time: list[dict[str, Any]] | None = None,
     write_time: list[dict[str, Any]] | None = None,
@@ -195,22 +213,30 @@ def _client(
     node_selector: str | None = None,
 ) -> tuple[PrometheusClient, FakeSession]:
     """Build a `PrometheusClient` over a `FakeSession` answering every one of
-    loadmodel.py's six raw-quantity queries plus the coverage range query.
-    Every argument defaults to "no series at all" -- exactly what an idle or
-    genuinely-absent (tpmstate0/unusedN) disk looks like. ``node_selector``
-    must match what the caller passes to `compute_group_load()`/
-    `compute_disk_load_series()` exactly: `FakeSession` looks answers up by
-    the literal query string, so a mismatch here is a `KeyError`, not a
-    silently-wrong result."""
+    loadmodel.py's six raw-quantity queries plus the coverage range query,
+    scoped to ``group``'s own vmids exactly as `compute_group_load()` now
+    scopes them (REVIEW.md Q-02) -- so ``group`` must be the identical
+    `Group` object (same disks) passed to `compute_group_load()` in the
+    same test, or `FakeSession` raises `KeyError` rather than silently
+    answering the wrong query. Every argument defaults to "no series at
+    all" -- exactly what an idle or genuinely-absent (tpmstate0/unusedN)
+    disk looks like. ``node_selector`` must match what the caller passes to
+    `compute_group_load()` exactly, same as before. An empty ``group``
+    issues no query at all (`compute_group_load()`'s own "no disks" early
+    return), so this skips building `query_data`/`range_data` entirely --
+    `_group_selector()` has nothing to build a selector for either."""
+    if not group.disks:
+        empty_session = FakeSession(query_data={})
+        return PrometheusClient(PROM_CONFIG, session=empty_session), empty_session
     query_data = {
-        _quantile_promql("read_time_ns", node_selector): read_time or [],
-        _quantile_promql("write_time_ns", node_selector): write_time or [],
-        _quantile_promql("read_ops", node_selector): read_ops or [],
-        _quantile_promql("write_ops", node_selector): write_ops or [],
-        _quantile_promql("read_bytes", node_selector): read_bytes or [],
-        _quantile_promql("write_bytes", node_selector): write_bytes or [],
+        _quantile_promql("read_time_ns", group, node_selector): read_time or [],
+        _quantile_promql("write_time_ns", group, node_selector): write_time or [],
+        _quantile_promql("read_ops", group, node_selector): read_ops or [],
+        _quantile_promql("write_ops", group, node_selector): write_ops or [],
+        _quantile_promql("read_bytes", group, node_selector): read_bytes or [],
+        _quantile_promql("write_bytes", group, node_selector): write_bytes or [],
     }
-    range_data = {_coverage_promql(node_selector): coverage or []}
+    range_data = {_coverage_promql(group, node_selector): coverage or []}
     session = FakeSession(query_data=query_data, range_data=range_data)
     return PrometheusClient(PROM_CONFIG, session=session), session
 
@@ -266,7 +292,7 @@ def test_default_weights_reproduce_section_14_2_loads_exactly() -> None:
     coverage = [full_coverage(vmid, device) for vmid, device in [(101, "scsi0"), (101, "scsi1")]]
     coverage += [full_coverage(v, d) for v, d in [(102, "scsi0"), (103, "scsi0"), (104, "scsi0")]]
     coverage += [full_coverage(105, "scsi0")]
-    client, _session = _client(read_time=read_time, coverage=coverage)
+    client, _session = _client(group, read_time=read_time, coverage=coverage)
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
@@ -297,7 +323,7 @@ def test_capability_weight_divides_utilization_but_not_load() -> None:
         disks=(make_disk("101:scsi0", "san-a"),),
     )
     coverage = [full_coverage(101, "scsi0")]
-    client, _session = _client(read_time=[series(101, "scsi0", 4.0e9)], coverage=coverage)
+    client, _session = _client(group, read_time=[series(101, "scsi0", 4.0e9)], coverage=coverage)
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
@@ -317,7 +343,7 @@ def test_read_write_factors_are_applied_before_normalization() -> None:
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
     coverage = [full_coverage(101, "scsi0")]
-    client, _session = _client(write_time=[series(101, "scsi0", 2.0e9)], coverage=coverage)
+    client, _session = _client(group, write_time=[series(101, "scsi0", 2.0e9)], coverage=coverage)
 
     weights = LoadWeights(read_factor=1.0, write_factor=3.0)
     result = compute_group_load(client, METRICS, WINDOW, weights, group)
@@ -336,6 +362,7 @@ def test_ops_and_bytes_terms_blend_when_weighted() -> None:
     )
     coverage = [full_coverage(101, "scsi0"), full_coverage(102, "scsi0")]
     client, _session = _client(
+        group,
         read_time=[series(101, "scsi0", 1.0e9), series(102, "scsi0", 1.0e9)],
         read_ops=[series(101, "scsi0", 100.0), series(102, "scsi0", 300.0)],
         coverage=coverage,
@@ -364,7 +391,7 @@ def test_zero_group_total_for_a_weighted_term_guards_division() -> None:
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
     coverage = [full_coverage(101, "scsi0")]
-    client, _session = _client(read_time=[series(101, "scsi0", 1.0e9)], coverage=coverage)
+    client, _session = _client(group, read_time=[series(101, "scsi0", 1.0e9)], coverage=coverage)
 
     weights = LoadWeights(iotime=1.0, ops=0.0, bytes=1.0)
     result = compute_group_load(client, METRICS, WINDOW, weights, group)
@@ -382,7 +409,7 @@ def test_idle_group_has_zero_loads_and_is_flagged_idle() -> None:
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
     coverage = [full_coverage(101, "scsi0")]  # good coverage, just zero-rate data
-    client, _session = _client(coverage=coverage)
+    client, _session = _client(group, coverage=coverage)
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
@@ -394,7 +421,7 @@ def test_idle_group_has_zero_loads_and_is_flagged_idle() -> None:
 
 def test_empty_group_is_idle_with_no_disks_or_storages_and_makes_no_calls() -> None:
     group = Group(name="g", storages=(), disks=())
-    client, session = _client()
+    client, session = _client(group)
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
@@ -418,7 +445,7 @@ def test_compute_group_load_applies_the_node_selector_to_every_query() -> None:
     selector = 'nodename=~"pve01|pve02"'
     coverage = [full_coverage(101, "scsi0")]
     client, session = _client(
-        read_time=[series(101, "scsi0", 2.0e9)], coverage=coverage, node_selector=selector
+        group, read_time=[series(101, "scsi0", 2.0e9)], coverage=coverage, node_selector=selector
     )
 
     result = compute_group_load(
@@ -438,7 +465,7 @@ def test_compute_group_load_node_selector_none_is_unchanged_from_before() -> Non
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
     coverage = [full_coverage(101, "scsi0")]
-    client, _session = _client(read_time=[series(101, "scsi0", 2.0e9)], coverage=coverage)
+    client, _session = _client(group, read_time=[series(101, "scsi0", 2.0e9)], coverage=coverage)
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
     assert result.load_by_disk_key()["101:scsi0"] == pytest.approx(2.0)
 
@@ -453,7 +480,7 @@ def test_compute_group_load_flags_a_selector_matching_no_series_at_all() -> None
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
     selector = 'cluster="pvezebe"'
-    client, _session = _client(node_selector=selector)  # every field defaults to "no series"
+    client, _session = _client(group, node_selector=selector)  # every field defaults to "no series"
 
     result = compute_group_load(
         client, METRICS, WINDOW, LoadWeights(), group, node_selector=selector
@@ -471,7 +498,7 @@ def test_compute_group_load_no_series_matched_is_false_without_a_selector() -> N
     group = Group(
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
-    client, _session = _client()
+    client, _session = _client(group)
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
@@ -489,7 +516,7 @@ def test_compute_group_load_no_series_matched_is_false_with_real_data() -> None:
     selector = 'cluster="pvezebe"'
     coverage = [full_coverage(101, "scsi0")]
     client, _session = _client(
-        read_time=[series(101, "scsi0", 2.0e9)], coverage=coverage, node_selector=selector
+        group, read_time=[series(101, "scsi0", 2.0e9)], coverage=coverage, node_selector=selector
     )
 
     result = compute_group_load(
@@ -511,6 +538,7 @@ def test_low_coverage_disk_falls_back_to_last_known_load() -> None:
     # 101:scsi0 has good coverage; 102:scsi0 has 0/2 -- below min_coverage.
     coverage = [full_coverage(101, "scsi0"), no_coverage(102, "scsi0")]
     client, _session = _client(
+        group,
         read_time=[series(101, "scsi0", 2.0e9), series(102, "scsi0", 999.0e9)],
         coverage=coverage,
     )
@@ -533,7 +561,7 @@ def test_low_coverage_disk_without_fallback_is_flagged_zero_not_silently_accepte
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
     coverage = [no_coverage(101, "scsi0")]
-    client, _session = _client(read_time=[series(101, "scsi0", 5.0e9)], coverage=coverage)
+    client, _session = _client(group, read_time=[series(101, "scsi0", 5.0e9)], coverage=coverage)
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
@@ -550,7 +578,7 @@ def test_disk_absent_from_coverage_series_entirely_is_treated_as_zero_coverage()
     group = Group(
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
-    client, _session = _client(read_time=[series(101, "scsi0", 5.0e9)], coverage=[])
+    client, _session = _client(group, read_time=[series(101, "scsi0", 5.0e9)], coverage=[])
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
@@ -566,7 +594,7 @@ def test_tpmstate0_and_unused_disks_are_never_coverage_rejected() -> None:
         storages=(make_storage("san-a"),),
         disks=(make_disk("101:tpmstate0", "san-a"), make_disk("101:unused0", "san-a")),
     )
-    client, _session = _client(coverage=[])  # no coverage series for either -- expected
+    client, _session = _client(group, coverage=[])  # no coverage series for either -- expected
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
@@ -581,7 +609,7 @@ def test_efidisk0_is_held_to_the_normal_coverage_bar() -> None:
     group = Group(
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:efidisk0", "san-a"),)
     )
-    client, _session = _client(coverage=[])
+    client, _session = _client(group, coverage=[])
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
@@ -591,7 +619,7 @@ def test_efidisk0_is_held_to_the_normal_coverage_bar() -> None:
 # ------------------------------------------------------------- GroupLoad helper
 
 
-def _rate_promql(field_name: str, node_selector: str | None = None) -> str:
+def _rate_promql(field_name: str, group: Group, node_selector: str | None = None) -> str:
     """The exact PromQL `_fetch_raw_quantity_series` builds for one raw
     field -- the bare `rate(...)` expression, unlike `_quantile_promql`'s
     `quantile_over_time`-wrapped instant-query form."""
@@ -601,7 +629,7 @@ def _rate_promql(field_name: str, node_selector: str | None = None) -> str:
         METRICS.labels.vmid,
         METRICS.labels.device,
         METRICS.rate_window_seconds,
-        selector=node_selector,
+        selector=_group_selector(group, node_selector),
     )
 
 
@@ -615,6 +643,7 @@ def range_series(vmid: int, device: str, points: list[tuple[float, float]]) -> d
 
 
 def _series_client(
+    group: Group,
     *,
     read_time: list[dict[str, Any]] | None = None,
     write_time: list[dict[str, Any]] | None = None,
@@ -625,17 +654,23 @@ def _series_client(
     node_selector: str | None = None,
 ) -> tuple[PrometheusClient, FakeSession]:
     """Build a `PrometheusClient` over a `FakeSession` answering
-    `compute_disk_load_series()`'s own six raw-quantity range queries --
-    `_client()`'s counterpart for the series path, keyed by the bare
-    `rate(...)` expression rather than the quantile-wrapped instant-query
-    form. Every argument defaults to no series at all."""
+    `compute_disk_load_series()`'s own six raw-quantity range queries,
+    scoped to ``group``'s own vmids exactly as that function now scopes
+    them (REVIEW.md Q-02) -- `_client()`'s counterpart for the series
+    path, keyed by the bare `rate(...)` expression rather than the
+    quantile-wrapped instant-query form. Every argument defaults to no
+    series at all. An empty ``group`` issues no query at all
+    (`compute_disk_load_series()`'s own "no disks" early return)."""
+    if not group.disks:
+        empty_session = FakeSession(query_data={})
+        return PrometheusClient(PROM_CONFIG, session=empty_session), empty_session
     range_data = {
-        _rate_promql("read_time_ns", node_selector): read_time or [],
-        _rate_promql("write_time_ns", node_selector): write_time or [],
-        _rate_promql("read_ops", node_selector): read_ops or [],
-        _rate_promql("write_ops", node_selector): write_ops or [],
-        _rate_promql("read_bytes", node_selector): read_bytes or [],
-        _rate_promql("write_bytes", node_selector): write_bytes or [],
+        _rate_promql("read_time_ns", group, node_selector): read_time or [],
+        _rate_promql("write_time_ns", group, node_selector): write_time or [],
+        _rate_promql("read_ops", group, node_selector): read_ops or [],
+        _rate_promql("write_ops", group, node_selector): write_ops or [],
+        _rate_promql("read_bytes", group, node_selector): read_bytes or [],
+        _rate_promql("write_bytes", group, node_selector): write_bytes or [],
     }
     session = FakeSession(query_data={}, range_data=range_data)
     return PrometheusClient(PROM_CONFIG, session=session), session
@@ -818,7 +853,7 @@ def test_compute_disk_load_series_applies_the_node_selector_to_every_query() -> 
     )
     selector = 'nodename=~"pve01|pve02"'
     read_time = [range_series(101, "scsi0", [(0.0, 2.0e9), (300.0, 2.0e9)])]
-    client, session = _series_client(read_time=read_time, node_selector=selector)
+    client, session = _series_client(group, read_time=read_time, node_selector=selector)
 
     result = compute_disk_load_series(
         client,
@@ -855,7 +890,7 @@ def test_compute_disk_load_series_matches_section_14_2_at_every_timestamp() -> N
         range_series(int(k.split(":")[0]), k.split(":")[1], [(0.0, v), (300.0, v)])
         for k, v in values.items()
     ]
-    client, _session = _series_client(read_time=read_time)
+    client, _session = _series_client(group, read_time=read_time)
 
     result = compute_disk_load_series(
         client,
@@ -885,7 +920,7 @@ def test_compute_disk_load_series_normalizes_each_timestamp_independently() -> N
         range_series(101, "scsi0", [(0.0, 3.0e9), (300.0, 1.0e9)]),
         range_series(102, "scsi0", [(0.0, 1.0e9), (300.0, 3.0e9)]),
     ]
-    client, _session = _series_client(read_time=read_time)
+    client, _session = _series_client(group, read_time=read_time)
 
     result = compute_disk_load_series(
         client,
@@ -917,7 +952,7 @@ def test_compute_disk_load_series_missing_sample_at_a_timestamp_defaults_to_zero
         range_series(101, "scsi0", [(0.0, 1.0e9)]),
         range_series(102, "scsi0", [(0.0, 1.0e9), (300.0, 1.0e9)]),
     ]
-    client, _session = _series_client(read_time=read_time)
+    client, _session = _series_client(group, read_time=read_time)
 
     result = compute_disk_load_series(
         client,
@@ -939,7 +974,7 @@ def test_compute_disk_load_series_returns_an_empty_series_for_a_disk_with_no_dat
     group = Group(
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
-    client, _session = _series_client()
+    client, _session = _series_client(group)
 
     result = compute_disk_load_series(
         client,
@@ -956,7 +991,7 @@ def test_compute_disk_load_series_returns_an_empty_series_for_a_disk_with_no_dat
 
 def test_compute_disk_load_series_empty_group_makes_no_calls() -> None:
     group = Group(name="g", storages=(), disks=())
-    client, session = _series_client()
+    client, session = _series_client(group)
 
     result = compute_disk_load_series(
         client,
@@ -990,7 +1025,7 @@ def test_compute_disk_load_series_uses_the_given_range_not_window_lookback() -> 
     group = Group(
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
-    client, session = _series_client(read_time=[range_series(101, "scsi0", [(0.0, 1.0e9)])])
+    client, session = _series_client(group, read_time=[range_series(101, "scsi0", [(0.0, 1.0e9)])])
 
     compute_disk_load_series(
         client,
@@ -1019,7 +1054,7 @@ def test_load_by_disk_key_matches_disks_tuple() -> None:
         name="g", storages=(make_storage("san-a"),), disks=(make_disk("101:scsi0", "san-a"),)
     )
     coverage = [full_coverage(101, "scsi0")]
-    client, _session = _client(read_time=[series(101, "scsi0", 1.0e9)], coverage=coverage)
+    client, _session = _client(group, read_time=[series(101, "scsi0", 1.0e9)], coverage=coverage)
 
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 

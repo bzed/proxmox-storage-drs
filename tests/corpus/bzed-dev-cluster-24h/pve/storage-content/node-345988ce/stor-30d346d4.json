@@ -1,0 +1,68 @@
+[
+  {
+    "format": "raw",
+    "size": 26843545600,
+    "vmid": 163216,
+    "volid": "stor-30d346d4:vm-163216-disk-0"
+  },
+  {
+    "format": "raw",
+    "size": 1048576,
+    "vmid": 163216,
+    "volid": "stor-30d346d4:vm-163216-disk-1"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 443669,
+    "volid": "stor-30d346d4:vm-443669-disk-0"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 443669,
+    "volid": "stor-30d346d4:vm-443669-disk-1"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 443669,
+    "volid": "stor-30d346d4:vm-443669-disk-2"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 443669,
+    "volid": "stor-30d346d4:vm-443669-disk-3"
+  },
+  {
+    "format": "raw",
+    "size": 1048576,
+    "vmid": 443669,
+    "volid": "stor-30d346d4:vm-443669-disk-4"
+  },
+  {
+    "format": "raw",
+    "size": 37580963840,
+    "vmid": 534304,
+    "volid": "stor-30d346d4:vm-534304-disk-0"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 534304,
+    "volid": "stor-30d346d4:vm-534304-disk-1"
+  },
+  {
+    "format": "raw",
+    "size": 107374182400,
+    "vmid": 725058,
+    "volid": "stor-30d346d4:vm-725058-disk-0"
+  },
+  {
+    "format": "raw",
+    "size": 161061273600,
+    "vmid": 725058,
+    "volid": "stor-30d346d4:vm-725058-disk-1"
+  }
+]
