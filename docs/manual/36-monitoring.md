@@ -24,7 +24,7 @@ A worked example of a run that gave up after too many outside changes:
 WARNING
 apply completed with 2 warnings: group fc-tier1: execution.max_replans_per_run (3) exceeded (last mismatch: VM 101 is now on 'san-c', not the planned 'san-a') | groups=1 moves_succeeded=2 moves_failed=0 bytes_moved=2199023255552B replans=3 warnings=2 duration=412.6s
 warning: group fc-tier1: 9.50 GiB short of its snapshot reserve / free-space requirement after this run's plan
-pve-storage-drs 0.1.7, mode auto, finished 2026-09-20T20:30:00Z
+pve-storage-drs 0.1.8, mode auto, finished 2026-09-20T20:30:00Z
 ```
 
 - **Line 1** is the state: exactly `OK`, `WARNING` or `CRITICAL`. The plugin turns it

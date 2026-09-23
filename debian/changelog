@@ -1,3 +1,27 @@
+pve-storage-drs (0.1.8) trixie; urgency=medium
+
+  * metrics: every per-group Prometheus raw-quantity and coverage query is
+    now scoped to the group's own vmids, batched to VMID_QUERY_BATCH_SIZE for
+    a larger group. REVIEW.md Q-02 had accepted the unfiltered, cluster-wide
+    queries as "wasteful but correct"; on a real cluster with hundreds of VMs
+    they timed out in Prometheus/gigapipe instead. collect-testdata captures
+    the identical group- and batch-scoped query text, so a --replay bundle
+    still matches a live run; the three committed corpus bundles were
+    recaptured from the dev cluster and reviewed by hand.
+  * output: disk identifiers in plan/apply/explain/show-load and in the apply
+    status file read "name(vmid):device" instead of the bare "vmid:device".
+    The JSON move, outcome, pinned and rejected-alternative payloads gain a
+    parallel "vm_name" field; the existing disk_key and vmid fields are
+    unchanged.
+  * docs: groups[].storages[] in the example configuration now
+    points to free_space's per-storage override syntax.
+  * tests: REVIEW.md AK-01 recorded and pinned. Neither MILP backend
+    replicates the heuristic's cooldown exemption for repairing a live
+    reserve violation (deliberate and documented); a test on both backends
+    now fixes that more conservative outcome so it cannot change silently.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Wed, 23 Sep 2026 18:05:58 +0200
+
 pve-storage-drs (0.1.7) trixie; urgency=medium
 
   * free space (IMPLEMENTATION_PLAN.md section 5.3.1, phase 13): the global
