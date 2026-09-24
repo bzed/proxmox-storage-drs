@@ -1,0 +1,9 @@
+# Keep the knowledge graph focused on the code and the docs that explain it.
+# Generated renderings of the Markdown (duplicate nodes)
+docs/*.pdf
+# Review-finding log: large, mostly noise nodes; the plan records how each finding was addressed
+REVIEW.md
+# Recorded-cluster test data
+tests/corpus/
+# JSON Schema: every keyword (type, minimum, ...) becomes a generic node and swamps the graph
+src/proxmox_storage_drs/config_schema.json
