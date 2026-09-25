@@ -77,8 +77,9 @@ section 3.3):
    `window.lookback` is measured. Below `window.min_coverage`, a **warning**
    naming the disk — that disk's own data will be rejected by the load model
    at plan time and its last known load from `state.json` used instead.
-6. **Observed sample spacing.** The modal gap between consecutive samples of
-   a live series is measured directly, rather than trusted from
+6. **Observed sample spacing.** The real gap between samples is measured
+   (raw samples counted over a 10-minute window with `count_over_time()`,
+   median across series), rather than trusted from
    `metrics.pvestatd_push_interval`. Disagreeing by more than 20%, or
    `metrics.rate_window` being below four times what was actually observed,
    is an **error** — this is what stops a stale `pvestatd_push_interval`

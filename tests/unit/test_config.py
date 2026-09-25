@@ -104,6 +104,7 @@ def test_defaults_are_applied(tmp_path: Path) -> None:
     resolved = config.load_config(str(path), env={})
     cfg = resolved.config
     assert cfg.window.lookback_seconds == 86400.0
+    assert cfg.metrics.pvestatd_push_interval_seconds == 10.0  # pvestatd's own default
     assert cfg.gates.drift_threshold == 0.10
     assert cfg.execution.mode == "dry-run"
     assert cfg.groups[0].storages[0].capability_weight == 1.0

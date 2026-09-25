@@ -97,7 +97,7 @@ class MetricsConfig:
     labels: MetricLabels = field(default_factory=MetricLabels)
     rate_window_seconds: float = 300.0
     step_seconds: float = 300.0
-    pvestatd_push_interval_seconds: float = 60.0
+    pvestatd_push_interval_seconds: float = 10.0
     extra_selector: str | None = None
 
 
@@ -563,7 +563,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         rate_window_seconds=parse_duration_seconds(metrics_raw.get("rate_window", "5m")),
         step_seconds=parse_duration_seconds(metrics_raw.get("step", "5m")),
         pvestatd_push_interval_seconds=parse_duration_seconds(
-            metrics_raw.get("pvestatd_push_interval", "60s")
+            metrics_raw.get("pvestatd_push_interval", "10s")
         ),
         extra_selector=metrics_raw.get("extra_selector"),
     )

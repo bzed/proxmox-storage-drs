@@ -178,7 +178,7 @@ Each `_check_*` function is a single, focused verification and returns
 | `_check_sample_series` | one instant query per metric returns at least one sample, that the expected `vmid`/`device` labels are present on it, and (via its private `_check_cross_metric_disk_consistency()`) that all six metrics report the identical set of `(vmid, device)` disks — a metric whose disk set is a strict subset of the others' is flagged | findings, `{metric_name: sample_labels}` |
 | `_check_device_label_collision` | warns if `metrics.labels.device` is literally `"instance"`, which collides with Prometheus's own scrape-target `instance` label — a common Telegraf misconfiguration | one `Finding` or `None` (pure, no I/O) |
 | `_check_coverage` | runs `compute_disk_coverage()` and flags every disk whose sample coverage over the window falls below `window.min_coverage` | findings, `{DiskKey: coverage_fraction}` |
-| `_check_observed_spacing` | measures the modal delta between consecutive timestamps of one live series over a short recent range, and compares it against what `metrics.rate_window >= 4x` (section 11.1) assumes the real scrape interval to be | findings, `observed_spacing_seconds` |
+| `_check_observed_spacing` | measures the real sample spacing as the median over series of `window / count_over_time(read_ops[window])` (one instant query; a `query_range` would only echo its own step back), and compares it against what `metrics.rate_window >= 4x` (section 11.1) assumes the real scrape interval to be | findings, `observed_spacing_seconds` |
 
 `_check_coverage` and `_check_observed_spacing` both use `metrics.read_ops`
 as the one representative metric rather than probing all six: a coverage or

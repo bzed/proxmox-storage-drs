@@ -620,8 +620,9 @@ else. It shall:
    Prometheus's own scrape-target `instance` label**, and many Telegraf configurations rename or
    overwrite it. The implementer must confirm the real label name here before proceeding;
 5. report per-disk sample coverage over the configured window, so gaps are visible up front;
-6. measure the **observed sample spacing** of a live series (the modal delta between consecutive
-   timestamps in a short `query_range`) and compare it against `metrics.pvestatd_push_interval`.
+6. measure the **observed sample spacing** (the median over series of a short window divided by
+   that window's `count_over_time()` -- never a `query_range`, whose points are one per *step*,
+   so it would only ever echo the step it was asked for) and compare it against `metrics.pvestatd_push_interval`.
    That interval is a PVE-side setting the tool cannot read from the API, so it is declared in
    config; this step is what stops a stale declaration from silently invalidating the
    `rate_window ≥ 4 × interval` rule of §11.1. Error if the two disagree by more than 20%, and
@@ -2733,7 +2734,7 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `quantile ∈ (0,1)` | A fraction; the decision statistic |
 | `min_coverage ∈ (0,1]` | A ratio; 0 would accept a disk with no data |
 | Metric names non-empty; label names non-empty and pairwise distinct | A duplicated label name silently collapses series |
-| `rate_window ≥ 4 × metrics.pvestatd_push_interval` | Below this, `rate()` sees too few points. The interval is a PVE-side setting the tool cannot read, so it is declared in config (default `60s`, PVE's own default) and `verify-metrics` cross-checks it against the observed sample spacing of a live series, erroring if the two disagree by more than 20% |
+| `rate_window ≥ 4 × metrics.pvestatd_push_interval` | Below this, `rate()` sees too few points. The interval is a PVE-side setting the tool cannot read, so it is declared in config (default `10s`, PVE's own default) and `verify-metrics` cross-checks it against the observed sample spacing of a live series, erroring if the two disagree by more than 20% |
 | `window.lookback ≥ forecaster.required_range()` | See §10.1 — otherwise the model can never run |
 | `payback_ratio > 0`, `payback_horizon > 0` | Zero disables the safety test |
 | `payback_horizon ≥ 30d` (warn, not error) | A horizon of days rejects slow-accruing but real benefits; it should approximate VM lifetime, not operator patience (§7.2) |

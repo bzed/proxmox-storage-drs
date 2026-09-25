@@ -75,7 +75,7 @@ metrics:
   # PVE-side push cadence of pvestatd. The tool cannot read this from the API, so
   # declare it here; `pve-storage-drs verify-metrics` measures the real sample spacing of a
   # live series and errors if this value is wrong by more than 20%.
-  pvestatd_push_interval: 60s
+  pvestatd_push_interval: 10s   # pvestatd's own default
 
   # Every query is scoped automatically, so a Prometheus shared by more than
   # one PVE cluster cannot silently sum in a same-numbered vmid from

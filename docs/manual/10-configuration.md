@@ -307,7 +307,7 @@ compares against — is correspondingly doubled (or more) at the same ratio.
 
 ### `metrics.pvestatd_push_interval`
 
-Duration, default `60s`.
+Duration, default `10s` (`pvestatd`'s own default).
 
 How often PVE's `pvestatd` pushes metrics — a PVE-side setting this tool
 cannot read from the API, so it must be declared here. `verify-metrics`
