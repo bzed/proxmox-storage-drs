@@ -417,3 +417,41 @@ def test_check_invariants_accepts_a_plan_that_never_worsens_the_shortfall(
     """Including ``after > 0``: an unfixable shortfall is not a violation."""
     bundle, results = _invariant_inputs(tmp_path, before, after)
     assert vc.check_invariants(bundle, results) == []
+
+
+def _sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str, statsmodels: bool
+) -> list[vc.VariantResult]:
+    (tmp_path / "config.yaml").write_text(f"forecast:\n  model: {model}\n", encoding="utf-8")
+    bundle = vc.Bundle(
+        name="b", directory=tmp_path, submission=tmp_path / "s", expected=tmp_path / "e"
+    )
+    monkeypatch.setattr(vc, "_run_plan", lambda *_a: {"groups": []})
+    monkeypatch.setattr(vc, "_statsmodels_available", lambda: statsmodels)
+    return vc.run_variant_matrix(bundle, full_matrix=False)
+
+
+@needs_full_checkout
+def test_narrow_sweep_adds_the_bundles_own_forecast_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results = _sweep(tmp_path, monkeypatch, "holt_winters", statsmodels=True)
+    assert sorted({r.variant["forecast_model"] for r in results}) == ["holt_winters", "quantile"]
+    assert all(r.skipped is None for r in results)
+
+
+@needs_full_checkout
+def test_narrow_sweep_of_a_quantile_bundle_stays_quantile_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results = _sweep(tmp_path, monkeypatch, "quantile", statsmodels=True)
+    assert {r.variant["forecast_model"] for r in results} == {"quantile"}
+
+
+@needs_full_checkout
+def test_holt_winters_variant_is_recorded_as_skipped_without_statsmodels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results = _sweep(tmp_path, monkeypatch, "holt_winters", statsmodels=False)
+    hw = [r for r in results if r.variant["forecast_model"] == "holt_winters"]
+    assert hw and all(r.report is None and r.skipped for r in hw)

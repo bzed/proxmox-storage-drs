@@ -560,6 +560,14 @@ def _run_plan(bundle_dir: Path, config_path: Path) -> dict[str, Any] | None:
     return result
 
 
+def _statsmodels_available() -> bool:
+    """Without it every holt_winters fit returns None, so the variant would
+    record a plan that quietly means "quantile only" -- skip it instead."""
+    import importlib.util
+
+    return importlib.util.find_spec("statsmodels") is not None
+
+
 def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]:
     import yaml
 
@@ -577,7 +585,13 @@ def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]
     # expected file.
     backends = ["heuristic", "cbc"]
     spread_metrics = _SPREAD_METRICS if full_matrix else _SPREAD_METRICS[:1]
-    forecast_models = _FORECAST_MODELS if full_matrix else _FORECAST_MODELS[:1]
+    # The narrow sweep adds the bundle's own forecast.model to quantile, so a
+    # bundle captured for holt_winters exercises it under `make check` too,
+    # not only under --full-matrix.
+    configured_model = (raw_config.get("forecast") or {}).get("model", "quantile")
+    forecast_models = (
+        _FORECAST_MODELS if full_matrix else tuple(dict.fromkeys(("quantile", configured_model)))
+    )
     beta_sweep = _BETA_SWEEP if full_matrix else _BETA_SWEEP[:1]
 
     results = []
@@ -591,6 +605,11 @@ def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]
                         "forecast_model": forecast_model,
                         "beta": beta,
                     }
+                    if forecast_model == "holt_winters" and not _statsmodels_available():
+                        results.append(
+                            VariantResult(variant, None, skipped="statsmodels is not installed")
+                        )
+                        continue
                     merged = _merge(raw_config, _variant_config_overrides(variant))
                     tmp_config = bundle.directory.parent / f".{bundle.name}.variant.yaml"
                     tmp_config.write_text(yaml.safe_dump(merged), encoding="utf-8")
@@ -717,7 +736,8 @@ def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> lis
     nothing, so a MILP reaching a far better spread with more moves than
     the heuristic is exactly the outcome this check exists to want, not
     flag. (Found for real on a 7-day holt_winters capture --
-    tests/corpus/bzed-dev-cluster-7d-holt-winters -- where the previous
+    tests/corpus/bzed-dev-cluster-7d-holt-winters, since replaced by
+    bzed-dev-cluster-2d-holt-winters -- where the previous
     move-count check flagged the then-CP-SAT backend for using 13 moves
     against the heuristic's 4, when its after_spread was ~0.00002 against
     the heuristic's 0.41: strictly better, not worse.)
@@ -922,7 +942,9 @@ def main(argv: list[str]) -> int:
                 bundle.expected.read_text(encoding="utf-8") if bundle.expected.is_file() else None
             )
             if current != text:
-                stale.append(bundle.expected.name)
+                skipped = sorted({r.skipped for r in results if r.skipped})
+                reason = f" (variants skipped: {'; '.join(skipped)})" if skipped else ""
+                stale.append(bundle.expected.name + reason)
         else:
             bundle.expected.write_text(text, encoding="utf-8")
             print(f"wrote {bundle.expected}")

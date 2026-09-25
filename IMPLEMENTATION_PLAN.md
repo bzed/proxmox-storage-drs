@@ -3045,8 +3045,10 @@ thing to try.
   statistic on a synthetic diurnal series whose next-day peak is higher; the gate choosing
   Holt-Winters on a seasonal-plus-trend series and quantile on white noise; the removed keys and
   `seasonal_naive` rejected by the schema.
-- `bzed-dev-cluster-7d-holt-winters` replays with the forecast block populated; its regenerated
-  expected file is read by hand (which disks were scaled, by how much) before committing.
+- `bzed-dev-cluster-2d-holt-winters` (replacing the 7d bundle, whose capture held only `W`, not the
+  backtest's `2W`) replays with the forecast block populated; its regenerated expected file is
+  read by hand before committing. As captured, the backtest runs and Holt-Winters loses to the
+  baseline (`used: false`), so `used: true` is covered by unit tests only.
 - Manual: when `holt_winters` is worth selecting (diurnal or trending load), what the gate does,
   and that it needs `python3-statsmodels`.
 - `make check` green.
@@ -4045,7 +4047,9 @@ Four kinds of assertion that do hold:
 Per bundle, the matrix the generator sweeps: `solver.backend` ∈ {cbc, heuristic} ×
 `objective.spread_metric` ∈ {l1, minmax} × `forecast.model` ∈ {quantile,
 holt_winters} × `objective.beta_move_count` over a small sweep, with everything else from the
-bundle's own `config.yaml`. A variant whose forecaster is unavailable in the running
+bundle's own `config.yaml`. `--check` (part of `make check`) runs a narrow sweep instead: both
+backends, the first spread metric and beta, and `forecast.model` ∈ {quantile, the bundle's own
+configured model}. A variant whose forecaster is unavailable in the running
 environment is **skipped and recorded as skipped**, never silently dropped: `statsmodels` is an
 optional dependency (`AGENTS.md` §9.1) and a corpus result that quietly means "quantile only" is a
 corpus result that lies.

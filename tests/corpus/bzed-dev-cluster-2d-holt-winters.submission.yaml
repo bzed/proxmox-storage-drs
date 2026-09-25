@@ -1,0 +1,36 @@
+submitted_by: Bernd Zeimetz <bernd@bzed.de>
+submitted_on: 2026-09-25
+consent:
+  redistribute_under: AGPL-3.0-or-later
+  # False on purpose: the bundle was read by hand (config, manifest, findings, a
+  # grep for real names/hosts/IPs -- clean) by the Claude Code session that
+  # collected it, at Bernd's request. The submitter has not opened it yet; flip
+  # this to true once he has.
+  reviewed_bundle_before_sending: false
+collected_with: pve-storage-drs 0.1.8
+versions:
+  pve: 9.2.11
+  prometheus_backend: gigapipe
+what_this_reproduces: >
+  The same real 3-node cluster as bzed-dev-cluster-24h under forecast.model:
+  holt_winters, at the shortest configuration where the phase 14 backtest can
+  actually run: metrics.step 1h, holt_winters.seasonal_periods 24 (one daily
+  cycle), window.lookback 2d (the 2 * seasonal_periods * step floor, so the
+  backtest's fit half holds two full cycles), captured over the 4d the backtest
+  needs (support.capture_range auto = 2 * window.lookback). Replaces
+  bzed-dev-cluster-7d-holt-winters, which was captured over only its own 7d
+  lookback and so could never run the backtest after phase 14 made it need 2W.
+
+  On this capture the backtest runs and Holt-Winters loses to the persistence
+  baseline (backtest_error ~7.9 against baseline_error ~6.0), so the forecast
+  block reports used: false and every load stays observed -- the same outcome
+  the live dev cluster gave at a 3d lookback. The bundle pins that path and the
+  forecast block end to end; the used: true path is covered by unit tests only.
+
+  metrics.rate_window stays at the 300s default, which narrows every range
+  capture to a 276s step (metrics.safe_range_step_seconds()) and puts the bundle
+  at ~27 MiB unpacked (~2.5 MiB gzipped), past the 8 MiB ceiling -- half the
+  7d bundle it replaces. A wider rate_window would have kept the capture at 1h,
+  but this gigapipe deployment returns zero series for rate() range queries at
+  most step/rate_window combinations above 300s, and not even repeatably for
+  the same pair, so the default is the only setting that captures reliably.

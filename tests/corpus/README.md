@@ -18,10 +18,11 @@ pve-storage-drs --replay tests/corpus/<bundle-name> plan --json
 
 **Status: implemented** — phase 10 of section 12, section 16 is the specification.
 `bzed-dev-cluster-24h` is the first bundle, collected from the project's own dev cluster
-(see `bzed-dev-cluster-24h.submission.yaml`). `bzed-dev-cluster-7d-holt-winters` is the same
-cluster with a 7-day window, and `bzed-dev-cluster-free-space` is the first bundle captured
+(see `bzed-dev-cluster-24h.submission.yaml`). `bzed-dev-cluster-2d-holt-winters` is the same
+cluster under `forecast.model: holt_winters` at the shortest window its backtest can run
+with (2d, captured over 4d), and `bzed-dev-cluster-free-space` is the first bundle captured
 *after* phase 13 (section 5.3.1): all three shared storages in the group, a different resolved
-`free_space` soft/hard pair on each, and a plan that is a repair. The first two predate phase 13; their `config.yaml` has no `free_space` block, which is
+`free_space` soft/hard pair on each, and a plan that is a repair. `bzed-dev-cluster-24h` predates phase 13; its `config.yaml` has no `free_space` block, which is
 the default (`soft: 0`, `hard: null`).
 An empty corpus is still a clean pass: the
 test suite is green on a fresh clone even with no bundles in it, so a bundle here is
@@ -156,7 +157,9 @@ Four kinds of assertion, in the order they run:
    eventually be edited to match a bug.
 
 The variant matrix per bundle is `solver.backend` × `objective.spread_metric` ×
-`forecast.model` × a short `objective.beta_move_count` sweep. A variant whose
+`forecast.model` × a short `objective.beta_move_count` sweep. That full matrix is `make
+corpus`; `make check` runs the narrow sweep (both backends, the first spread metric and beta,
+and `forecast.model` ∈ {quantile, the bundle's own configured model}). A variant whose
 forecaster is not installed is **recorded as skipped**, never silently dropped — `statsmodels` is an
 optional dependency, and a corpus result that quietly means "quantile only" is a corpus result
 that lies.
