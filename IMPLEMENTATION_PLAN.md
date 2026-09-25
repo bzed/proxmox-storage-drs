@@ -387,6 +387,7 @@ call site cannot silently add an unnameable member.
 | `optimize_backend_unavailable` | DEBUG under `auto`, WARNING when that backend was explicitly configured | An optional solver dependency is not importable | built: DEBUG under `auto`, WARNING otherwise |
 | `solver_fallback` | WARNING | A configured backend produced no plan and the heuristic took over | as built, correct |
 | `forecast_backtest_failed` | WARNING | `holt_winters` did not beat the quantile baseline for a group (or there is too little history to check); the group ran on `quantile` | built (phase 14b) |
+| `forecast_history_unavailable` | WARNING | The `holt_winters` history query failed (`MetricsError`, or a `--replay` bundle captured over less than `2W`); the group ran on `quantile` | built (phase 14b) |
 | `forecast_used` | INFO | `holt_winters` drove a group's loads: both backtest errors and how many disks were scaled or kept | built (phase 14b) |
 | `forecast_fit_failed`, `forecast_fit_skipped` | DEBUG | One disk's fit failed, or `statsmodels` is missing | built (phase 14b) |
 | `vm_locked`, `orphaned_volumes`, `orphan_check_failed` | WARNING | Section 9.4's hazards | as built, correct |

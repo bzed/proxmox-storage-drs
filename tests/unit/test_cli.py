@@ -1329,6 +1329,32 @@ def test_group_load_warns_when_holt_winters_is_not_used(
     assert any(getattr(r, "event", None) == "forecast_backtest_failed" for r in caplog.records)
 
 
+def test_group_load_keeps_the_observed_load_when_the_forecast_history_query_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: dict[str, Any] = {}
+    _patch_forecast_deps(monkeypatch, _one_disk_group_load(), calls)
+
+    from proxmox_storage_drs.exceptions import MetricsError
+
+    def fail(*_a: object, **_k: object) -> None:
+        raise MetricsError("query timed out")
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_disk_load_series", fail)
+    resolved = _resolved_config(
+        tmp_path,
+        window={"lookback": "50h"},
+        forecast={"model": "holt_winters", "holt_winters": {"seasonal_periods": 10}},
+    )
+    with caplog.at_level(logging.WARNING):
+        load, report = cli._compute_group_load(
+            FAKE_PROM, resolved, _one_disk_group(), None, None, FORECAST_NOW
+        )
+    assert load == _one_disk_group_load()
+    assert report is not None and not report.used and report.disks_kept == 1
+    assert any(getattr(r, "event", None) == "forecast_history_unavailable" for r in caplog.records)
+
+
 def test_group_load_does_not_forecast_an_idle_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

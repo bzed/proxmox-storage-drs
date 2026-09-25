@@ -45,7 +45,7 @@ from proxmox_storage_drs.config import (
     load_config,
 )
 from proxmox_storage_drs.crashrecovery import reconcile_inflight
-from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
+from proxmox_storage_drs.exceptions import BundleError, ConfigError, DrsError, MetricsError
 from proxmox_storage_drs.execute import (
     ConfirmCallback,
     ExecutionResult,
@@ -2273,16 +2273,39 @@ def _compute_group_load(
     range_seconds = max(
         required_range_seconds(config.forecast, window_seconds, step_seconds), 2 * window_seconds
     )
-    disk_series = compute_disk_load_series(
-        prom_client,
-        config.metrics,
-        config.load_weights,
-        group,
-        range_seconds,
-        step_seconds,
-        now.timestamp(),
-        node_selector=node_selector,
-    )
+    try:
+        disk_series = compute_disk_load_series(
+            prom_client,
+            config.metrics,
+            config.load_weights,
+            group,
+            range_seconds,
+            step_seconds,
+            now.timestamp(),
+            node_selector=node_selector,
+        )
+    except (MetricsError, BundleError) as exc:
+        # The observed load is already in hand; a forecast that cannot be
+        # fetched (the widest-range query this tool issues, so the likeliest
+        # to time out) degrades to the quantile model like any other failed
+        # forecast, never to "no plan for this group". BundleError is the
+        # --replay counterpart of a Prometheus with less than 2W of history:
+        # a bundle captured over less than the backtest needs.
+        report = ForecastReport(
+            model=config.forecast.model,
+            used=False,
+            backtest_error=None,
+            baseline_error=None,
+            disks_scaled=0,
+            disks_kept=len(group_load.disks),
+        )
+        logger.warning(
+            "group %s: forecast history unavailable (%s); using the quantile model for this run",
+            group.name,
+            exc,
+            extra={"event": "forecast_history_unavailable", "group": group.name},
+        )
+        return group_load, report
     flagged = {d.disk_key for d in group_load.disks if d.flagged_reason is not None}
     factors, report = forecast_group(
         disk_series,

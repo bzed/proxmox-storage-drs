@@ -69,7 +69,10 @@ its absolute error is no larger than the baseline's (`Backtest.passed`); a tie
 passes. Otherwise the group runs on `quantile` for this run, with a
 `forecast_backtest_failed` warning. Less than `2W` of history (no non-empty half on
 each side of `now - W`) is a failed backtest too: a fresh deployment gets no free
-pass.
+pass. A history query that fails outright (a `MetricsError`, or under `--replay` a
+`BundleError` for a bundle captured over less than `2W`) is handled the same way,
+with a `forecast_history_unavailable` warning: the group keeps its observed loads
+and is still planned.
 
 This replaces the earlier comparison against `gates.imbalance_threshold` — an
 unrelated knob — and a point-at-horizon-versus-window-mean mismatch.
@@ -84,7 +87,8 @@ history actually fetched is `max(required_range_seconds(), 2W)`, via the chunked
 ## Reporting
 
 `forecast_group()` returns `({disk_key: f_d / h_d}, ForecastReport)`. `cli.py`
-logs one line per group (INFO `forecast_used`, WARNING `forecast_backtest_failed`;
+logs one line per group (INFO `forecast_used`, WARNING `forecast_backtest_failed`
+or `forecast_history_unavailable`;
 the per-fit failures inside `holt_winters_quantile()` are DEBUG, one per disk
 would flood the journal), and `explain` and `plan --json` carry
 `forecast: {model, used, backtest_error, baseline_error, disks_scaled,

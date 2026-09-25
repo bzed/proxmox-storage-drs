@@ -552,6 +552,22 @@ def compute_group_load(
             DiskLoad(disk_key=disk.key, load=blended_by_key[disk.key], flagged_reason=None)
         )
 
+    storage_loads, average_utilization = _aggregate_storages(group, disk_loads)
+    return GroupLoad(
+        group_name=group.name,
+        idle=t_total == 0.0,
+        average_utilization=average_utilization,
+        disks=tuple(disk_loads),
+        storages=storage_loads,
+        no_series_matched=no_series_matched,
+    )
+
+
+def _aggregate_storages(
+    group: Group, disk_loads: Sequence[DiskLoad]
+) -> tuple[tuple[StorageLoad, ...], float]:
+    """Each storage's ``L_s``/``u_s`` from its disks' ``l_d``, and the group's
+    ``u*`` -- shared by :func:`compute_group_load` and :func:`apply_forecast`."""
     load_by_key = {d.disk_key: d.load for d in disk_loads}
     storage_loads: list[StorageLoad] = []
     total_load = 0.0
@@ -566,17 +582,8 @@ def compute_group_load(
         )
         total_load += storage_load
         total_capability += storage.capability_weight
-
     average_utilization = total_load / total_capability if total_capability else 0.0
-
-    return GroupLoad(
-        group_name=group.name,
-        idle=t_total == 0.0,
-        average_utilization=average_utilization,
-        disks=tuple(disk_loads),
-        storages=tuple(storage_loads),
-        no_series_matched=no_series_matched,
-    )
+    return tuple(storage_loads), average_utilization
 
 
 def apply_forecast(group_load: GroupLoad, group: Group, factors: Mapping[str, float]) -> GroupLoad:
@@ -595,21 +602,9 @@ def apply_forecast(group_load: GroupLoad, group: Group, factors: Mapping[str, fl
         )
         for d in group_load.disks
     )
-    load_by_key = {d.disk_key: d.load for d in disks}
-    storages: list[StorageLoad] = []
-    total_load = 0.0
-    total_capability = 0.0
-    for storage in group.storages:
-        load = sum(load_by_key[d.key] for d in group.disks if d.current_storage == storage.id)
-        utilization = load / storage.capability_weight if storage.capability_weight else 0.0
-        storages.append(StorageLoad(storage_id=storage.id, load=load, utilization=utilization))
-        total_load += load
-        total_capability += storage.capability_weight
+    storages, average_utilization = _aggregate_storages(group, disks)
     return dataclasses.replace(
-        group_load,
-        average_utilization=total_load / total_capability if total_capability else 0.0,
-        disks=disks,
-        storages=tuple(storages),
+        group_load, average_utilization=average_utilization, disks=disks, storages=storages
     )
 
 
