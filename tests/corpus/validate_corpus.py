@@ -629,8 +629,8 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
     4. **The plan never worsens the reserve shortfall.** The payback
        block's ``reserve_shortfall_bytes_after`` (the final ``Sigma r_s``
        over the executed plan, section 9.5) must not exceed
-       ``..._before``. Deliberately *not* ``after == 0`` -- an oversized
-       ``min_free_bytes`` or a group with no feasible repair legitimately
+       ``..._before``. Deliberately *not* ``after == 0`` -- a group with
+       no feasible repair legitimately
        ends above zero. Why "never raised" holds depends on the backend
        and on ``hard`` (REVIEW.md AI-01):
 

@@ -15,9 +15,8 @@ what_this_reproduces: >
   The first bundle captured *after* phase 13 (free-space requirements, plan section
   5.3.1), from the same real 3-node dev cluster as the two older bundles but with all
   three shared RBD storages in the group (the older bundles carry two, and were captured
-  with the pre-phase-13 collector, so their config.yaml still holds the deprecated
-  snapshot_reserve.min_free_bytes scalar and no free_space block -- they stay as the proof
-  that such a bundle still replays).
+  with the pre-phase-13 collector, so their config.yaml has no free_space block --
+  they stay as the proof that such a bundle still replays).
 
   The live config that produced it: a /VM.*/ storage pattern, a global free_space of
   soft 70% / hard 10%, and literal per-storage overrides of soft 85% (the ~10 TiB
