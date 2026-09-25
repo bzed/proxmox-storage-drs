@@ -2,11 +2,7 @@ submitted_by: Bernd Zeimetz <bernd@bzed.de>
 submitted_on: 2026-09-25
 consent:
   redistribute_under: AGPL-3.0-or-later
-  # False on purpose: the bundle was read by hand (config, manifest, findings, a
-  # grep for real names/hosts/IPs -- clean) by the Claude Code session that
-  # collected it, at Bernd's request. The submitter has not opened it yet; flip
-  # this to true once he has.
-  reviewed_bundle_before_sending: false
+  reviewed_bundle_before_sending: true
 collected_with: pve-storage-drs 0.1.8
 versions:
   pve: 9.2.11

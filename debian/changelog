@@ -1,3 +1,44 @@
+pve-storage-drs (0.1.9) trixie; urgency=medium
+
+  * Incompatible configuration changes. Removed keys now fail validation
+    instead of loading with a warning, so update a config before upgrading:
+    solver.backend: cpsat, migration.saturation_ceiling, per-storage
+    saturation_load, window.upper_quantile, forecast.seasonal_lookback_days,
+    forecast.holt_winters.residual_z, forecast.model: seasonal_naive, and
+    snapshot_reserve.min_free_bytes (use free_space.soft; it is no longer
+    folded into it).
+  * solver: the CP-SAT backend is gone. ortools has no Debian package, so
+    solver.backend: auto always resolved to CBC anyway; CBC via python3-pulp
+    is the only MILP backend, with the heuristic as fallback.
+  * payback: the section 7.3 saturation guard is removed. Migrations are no
+    longer deferred for storage saturation; a move's mirror duration is its
+    size over migration.bwlimit.
+  * forecast (phase 14): forecast.model: holt_winters now drives placement.
+    Each disk's load is scaled by its Holt-Winters forecast of the p95 over
+    the next window.lookback, divided by its observed p95. Per group, a
+    backtest on the group's own history uses it only when it predicts at
+    least as well as repeating the last window, and the group runs on
+    quantile otherwise. Needs 2 x window.lookback of history and
+    python3-statsmodels. plan --json and explain carry a forecast block, and
+    quantile output is unchanged. A failed history query keeps the observed
+    loads instead of dropping the group's plan. Fits use heuristic
+    initialization; the old estimated one never converged at the default
+    288 periods on real data.
+  * forecast.holt_winters.trend defaults to none (was add). An undamped
+    trend over a whole window ran away on single disks in testing.
+  * metrics: pvestatd_push_interval defaults to 10s, pvestatd's own
+    default (was 60s). verify-metrics now measures sample spacing with
+    count_over_time; the old query_range probe only echoed its own step, so
+    a wrong push interval could never be caught.
+  * corpus: bzed-dev-cluster-7d-holt-winters is replaced by
+    bzed-dev-cluster-2d-holt-winters, which is captured over the 2W the
+    backtest needs. make check replays each bundle under its own forecast
+    model as well as quantile, and a holt_winters variant without
+    statsmodels is recorded as skipped. Bundles reviewed by the submitter.
+  * docs: the graphify knowledge graph outputs are committed.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Fri, 25 Sep 2026 13:37:16 +0200
+
 pve-storage-drs (0.1.8) trixie; urgency=medium
 
   * metrics: every per-group Prometheus raw-quantity and coverage query is
