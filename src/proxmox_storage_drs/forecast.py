@@ -116,7 +116,11 @@ def holt_winters_quantile(
                 trend=None if hw.trend == "none" else hw.trend,
                 seasonal=None if hw.seasonal == "none" else hw.seasonal,
                 seasonal_periods=hw.seasonal_periods,
-                initialization_method="estimated",
+                # Initial level/trend/seasonals from a classical decomposition
+                # of the first cycles; only the smoothing parameters are
+                # optimized. "estimated" also optimizes every initial seasonal
+                # and fails to converge at 288 periods on real data.
+                initialization_method="heuristic",
             )
             path = [float(x) for x in model.fit().forecast(steps)]
     except Exception as exc:  # statsmodels raises ValueError, LinAlgError, ... -- all mean "no fit"

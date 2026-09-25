@@ -95,6 +95,16 @@ would flood the journal), and `explain` and `plan --json` carry
 disks_kept}` per group — present only under `holt_winters`, so `quantile` reports
 stay byte-identical.
 
+## Initialization
+
+The fit uses `initialization_method="heuristic"`: the initial level, trend and
+seasonals come from a classical decomposition of the first (up to five) cycles,
+and only the smoothing parameters are optimized. `"estimated"` also optimizes
+every initial seasonal, and at the default 288 periods it did not converge on
+real data at all. The heuristic needs two full cycles, which the
+`window.lookback >= 2 * seasonal_periods * step` rule already guarantees for the
+backtest's fit half.
+
 ## Cost
 
 One `statsmodels` fit per disk with history, plus one for the backtest, per group

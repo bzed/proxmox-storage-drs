@@ -96,6 +96,31 @@ def test_holt_winters_quantile_is_the_p95_of_the_forecast_path_not_its_last_poin
     assert 13.5 < result < 15.5  # ~ 10 + 5 * cos(pi * 0.05)
 
 
+def test_holt_winters_fits_the_default_288_periods_on_two_bursty_days() -> None:
+    """The shipped default (288 periods at a 5m step) over the two cycles the
+    lookback floor guarantees, with bursty noise like real disk I/O. Under
+    ``initialization_method="estimated"`` this raised a ConvergenceWarning on
+    every seed (so no fit, ever, on the live dev cluster); the heuristic
+    initialization fits it."""
+    pytest.importorskip("statsmodels")
+    rng = random.Random(0)
+    step = 300.0
+    series = tuple(
+        (
+            i * step,
+            max(
+                0.0,
+                10
+                + 5 * math.sin(2 * math.pi * i / 288)
+                + rng.expovariate(1.0) * (8 if rng.random() < 0.05 else 1),
+            ),
+        )
+        for i in range(576)
+    )
+    hw = HoltWintersConfig(seasonal_periods=288)
+    assert holt_winters_quantile(series, hw, step, DAY, 0.95) is not None
+
+
 def test_holt_winters_quantile_follows_a_rising_trend_above_the_observed_p95() -> None:
     pytest.importorskip("statsmodels")
     rng = random.Random(2)

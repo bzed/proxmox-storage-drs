@@ -22,7 +22,8 @@ what_this_reproduces: >
   lookback and so could never run the backtest after phase 14 made it need 2W.
 
   On this capture the backtest runs and Holt-Winters loses to the persistence
-  baseline (backtest_error ~7.9 against baseline_error ~6.0), so the forecast
+  baseline (backtest_error ~6.4 against baseline_error ~6.0; ~7.9 before the
+  fit switched to heuristic initialization), so the forecast
   block reports used: false and every load stays observed -- the same outcome
   the live dev cluster gave at a 3d lookback. The bundle pins that path and the
   forecast block end to end; the used: true path is covered by unit tests only.

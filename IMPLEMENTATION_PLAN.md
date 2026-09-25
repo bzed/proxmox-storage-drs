@@ -3038,6 +3038,19 @@ large ratio. No clamp was added (it would be a magic number the plan forbids); i
 gate opens and the factors look wild, a damped trend (`statsmodels`' `damped_trend`) is the first
 thing to try.
 
+**Follow-up sweep (same day, 5 m step, ~7.5 d of retention).** At the default 288 periods
+`initialization_method="estimated"` never converged (it optimizes all 288 initial seasonals as
+well), so every fit was rejected; the fit now uses `"heuristic"` (initial states from a classical
+decomposition of the first cycles, only the smoothing parameters optimized). A rolling-origin
+backtest (every 6 h back through the retention) over step × lookback × trend × seasonal found:
+`seasonal: none` always loses; a 1 h or 15 min step is worse than 5 min (each point is one 5-min
+`rate()` sample, not an average over the step, so a coarse step aliases); 5 min with `3d` beat
+persistence at 4 of 5 origins with or without trend. `trend: add` produced the runaway factors
+above (one disk forecast at 95 % of the whole group's load); `trend: none` kept the worst
+single-disk shift at 23 % for the same score. With 5 min / `3d` / `trend: none` the live gate
+opened (`used: true`, 1.43 against 2.26, 35 of 39 disks scaled) — the first real run on
+Holt-Winters.
+
 **Done when:**
 
 - With `forecast.model: quantile`, `plan --json` for every fixture and quantile corpus variant is
