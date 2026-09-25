@@ -135,10 +135,11 @@ Global options are accepted before the command.
   **apply** run in **confirm**/**auto** mode, a level below the mandatory audit-trail floor
   (**info**) is raised back up to it. **--quiet** is the only way to discard that record.
 
-**--log-format** *auto|text|json*
-: **auto** (the default) writes human-readable text when stderr is a terminal and one JSON object
-  per line anywhere else -- a pipe, a redirect, or journald under systemd. **text** and **json**
-  force one or the other. The report on stdout is unaffected; see **--json** for that.
+**--log-format** *text|json|auto*
+: **text** (the default) writes one human-readable line per log record, at a terminal and in the
+  journal alike. **json** writes one JSON object per line instead, each with an **event** name to
+  filter on. **auto** was the default through 0.1.9 (JSON off a terminal) and now means **text**. The report on stdout is
+  unaffected; see **--json** for that.
 
 **--version**
 : Print the version and exit.

@@ -131,11 +131,14 @@ policy is testable without running a command:
   This is the "a run that can change the cluster logs what it did whether or
   not anyone asked" rule, and it is a *floor* rather than an override
   precisely so `--quiet` can still win.
-- `resolve_format()` — `auto` resolves to `text` at a TTY and `json`
-  everywhere else. A systemd unit therefore gets JSON without the unit
-  saying anything, and an operator at a terminal gets prose without passing
-  a flag; that one rule is the entire fix for "why is my terminal full of
-  JSON".
+- `resolve_format()` — `text` and the legacy `auto` resolve to `text`;
+  only an explicit `json` selects JSON. Through 0.1.9 `auto` sniffed the
+  stream and chose JSON for any non-TTY, which put one JSON object per line
+  into `journalctl -u pve-storage-drs`, the unattended path a person reads
+  far more often than `jq` does. JSON stays for the operator who wants the
+  one record written *as each move starts and finishes* (the end-of-run
+  `--json` report cannot give a run that dies mid-move): they pass
+  `--log-format json` in the unit.
 
 **The handler goes on the root logger, and the package logger carries only
 a level.** The obvious-looking alternative — handler on
@@ -172,7 +175,7 @@ shadow a standard `LogRecord` attribute: `{"message": ...}` raises
 `KeyError: "Attempt to overwrite 'message' in LogRecord"` at runtime, which
 is how the `deadlock` record's payload key came to be `detail`.
 
-`TextFormatter` is the `auto`-at-a-TTY counterpart: `LEVEL: message` for
+`TextFormatter` is the default counterpart: `LEVEL: message` for
 anything above `INFO`, and bare prose at `INFO`, because prefixing every
 line of a requested narrative with `INFO:` is noise rather than
 information.

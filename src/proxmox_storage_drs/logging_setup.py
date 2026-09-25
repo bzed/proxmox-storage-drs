@@ -10,11 +10,11 @@ Two audiences, one set of records. A person at a terminal wants silence
 unless something is wrong; a journal read three weeks later wants every
 decision that changed the cluster, in a form ``journalctl``/``jq`` can
 filter. Section 2.3 resolves that with a level ladder (``--quiet`` <
-default < ``-v`` < ``-vv``), a format that follows the destination
-(:func:`resolve_format` -- text for a TTY, JSON for anything else), and a
-mandatory ``INFO`` floor for any run that can actually change the cluster
-(:func:`floor_for_command`), since an audit trail gated behind a flag the
-operator has to remember is not an audit trail.
+default < ``-v`` < ``-vv``), a format that is text unless JSON is asked
+for (:func:`resolve_format`), and a mandatory ``INFO`` floor for any run
+that can actually change the cluster (:func:`floor_for_command`), since an
+audit trail gated behind a flag the operator has to remember is not an
+audit trail.
 
 ``cli.py`` is the only caller of :func:`configure_logging`; every other
 module gets its logger the ordinary way, ``logging.getLogger(__name__)``,
@@ -31,7 +31,6 @@ import logging
 import math
 import sys
 from datetime import datetime, timezone
-from typing import IO
 
 #: The package's own logger namespace. :func:`configure_logging` sets this
 #: logger's *level* (the handler itself goes on root) so that ``-v`` raises
@@ -49,6 +48,8 @@ _THIRD_PARTY_FLOOR = logging.WARNING
 _STANDARD_RECORD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
 
 LOG_LEVELS = ("error", "warning", "info", "debug")
+#: ``auto`` was the 0.1.9 default (JSON off a TTY), still accepted so a unit file that names
+#: it keeps working; it now means ``text``.
 LOG_FORMATS = ("auto", "text", "json")
 
 
@@ -108,9 +109,9 @@ class TextFormatter(logging.Formatter):
     """One human-readable line per record: ``LEVEL: message``.
 
     Deliberately not a second rendering of the record's structured fields:
-    an operator reading this at a terminal is being told something went
-    wrong, and the ``extra=`` context exists for the machine-readable half
-    of section 2.3. The one exception is ``INFO``, which at a terminal is
+    an operator reading this at a terminal or in the journal is being told
+    something went wrong, and the ``extra=`` context exists for the machine-readable half
+    of section 2.3. The one exception is ``INFO``, which is
     the audit trail the operator asked for with ``-v`` (or that an ``auto``
     run emits unasked) -- it prints unprefixed, because prefixing every
     line of a requested narrative with ``INFO:`` is noise, not information.
@@ -164,22 +165,17 @@ def floor_for_command(command: str, effective_mode: str) -> int | None:
     return None
 
 
-def resolve_format(log_format: str, stream: IO[str] | None = None) -> str:
-    """``auto`` -> ``"text"`` at a TTY, ``"json"`` anywhere else.
+def resolve_format(log_format: str) -> str:
+    """``auto`` and ``text`` -> ``"text"``; ``json`` -> ``"json"``.
 
-    A person gets prose; journald, a pipe and a redirect get the JSON object
-    a script can parse. This is what makes a systemd unit correct without
-    the unit having to say anything, and what keeps JSON out of an
-    interactive terminal -- section 2.3's whole format story, in one rule.
-    An explicit ``text``/``json`` overrides it in either direction.
+    JSON is opt-in. It used to be chosen for any non-TTY stderr, which put
+    one JSON object per line into ``journalctl -u pve-storage-drs`` -- the
+    unattended path, read by a person far more often than by ``jq``. An
+    operator who does want the machine-readable stream (one record written
+    as each move starts and finishes, which the ``--json`` report cannot
+    give a run that dies mid-move) passes ``--log-format json``.
     """
-    if log_format != "auto":
-        return log_format
-    target = sys.stderr if stream is None else stream
-    try:
-        return "text" if target.isatty() else "json"
-    except (AttributeError, ValueError):  # pragma: no cover - detached/closed stream
-        return "json"
+    return "json" if log_format == "json" else "text"
 
 
 def configure_logging(
