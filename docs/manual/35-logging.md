@@ -61,21 +61,22 @@ moved or why — which is why a timer unit should not pass it.
 
 ## Text or JSON
 
-`--log-format auto` (the default) writes **human-readable text when stderr
-is a terminal** and **one JSON object per line everywhere else** — a pipe, a
-redirect, or journald under systemd. So the same command reads well by hand
-and parses correctly under a timer, with nothing to configure:
+`--log-format text` (the default) writes **one human-readable line per
+record**, at a terminal and in the journal alike, so `journalctl -u
+pve-storage-drs` reads like the terminal output:
 
 ```
 $ pve-storage-drs -v plan 2>&1 >/dev/null | head -1
 run started: plan (dry-run)
-
-$ pve-storage-drs -v plan 2>log.json >/dev/null ; head -c 120 log.json
-{"command": "plan", "event": "run_started", "level": "INFO", "logger": ...
 ```
 
-`--log-format text` and `--log-format json` force one or the other in either
-direction.
+`--log-format json` writes **one JSON object per line** instead, for a
+pipeline that filters on it:
+
+```
+$ pve-storage-drs --log-format json -v plan 2>log.json >/dev/null ; head -c 120 log.json
+{"command": "plan", "event": "run_started", "level": "INFO", "logger": ...
+```
 
 Every JSON record carries an `event`, which is the supported way to filter:
 
@@ -83,9 +84,20 @@ Every JSON record carries an `event`, which is the supported way to filter:
 journalctl -u pve-storage-drs.service -o cat | jq -r 'select(.event=="move_started") | .upid'
 ```
 
+This is the one stream written *as each move starts and finishes*, UPID
+included; the `--json` report on stdout only appears once the run is over,
+so a run that dies mid-move never prints it. That is the reason to choose
+JSON for an unattended timer.
+
+`--log-format auto` was the default through 0.1.9 and chose JSON whenever
+stderr was not a terminal, which included the journal. It is still accepted
+and now means `text`; a unit that relied on it for JSON needs
+`--log-format json`.
+
 ## Under systemd
 
-Point `StandardError=` at the journal and let the defaults do the rest: the
-non-TTY stream selects JSON on its own, and `auto` mode raises its own
-verbosity to log the audit trail. Do not add `--quiet`; do not add `-v`
-(it is only needed if you also want the trail from a `dry-run` timer).
+Point `StandardError=` at the journal and let the defaults do the rest:
+`auto` mode raises its own verbosity to log the audit trail, as text. Add
+`--log-format json` if something downstream parses the journal. Do not add
+`--quiet`; do not add `-v` (it is only needed if you also want the trail
+from a `dry-run` timer).

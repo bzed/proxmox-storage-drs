@@ -240,8 +240,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log-format",
         choices=LOG_FORMATS,
-        default="auto",
-        help="auto selects human-readable text at a terminal and JSON anywhere else.",
+        default="text",
+        help="text (the default) is one human-readable line per record; json is one JSON "
+        "object per line. auto is a legacy alias for text.",
     )
     parser.add_argument(
         "--version",

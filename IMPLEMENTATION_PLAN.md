@@ -332,6 +332,14 @@ JSON or whose pipeline wants text.
 Automation states a level; it should not have to count `v`s to get one. The one exception is the
 mandatory floor above: a level below it on a `confirm`/`auto` run is raised back up, not honoured.
 
+**As built, revised after 0.1.9:** `auto` no longer sniffs the stream. JSON as the non-TTY
+default put one JSON object per line into `journalctl -u pve-storage-drs`, which a person reads far
+more often than `jq`. The default is now `text` everywhere; `json` is opt-in with `--log-format
+json`, and `auto` stays accepted as a legacy alias for `text`. The reason to keep JSON at all is
+that it is the only record written as each move starts and finishes -- the end-of-run `--json`
+report never appears for a run that dies mid-move. The paragraph above describes the original
+design.
+
 #### Where the handler is attached
 
 **As built (REVIEW.md X-06):** the single handler is attached to the **root** logger, not to

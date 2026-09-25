@@ -28,16 +28,6 @@ from proxmox_storage_drs.logging_setup import (
     resolve_level,
 )
 
-
-class _FakeTTY(io.StringIO):
-    def __init__(self, isatty: bool) -> None:
-        super().__init__()
-        self._isatty = isatty
-
-    def isatty(self) -> bool:
-        return self._isatty
-
-
 # ------------------------------------------------------------------ levels
 
 
@@ -119,12 +109,11 @@ def test_explicit_log_level_above_the_floor_still_works(capsys: pytest.CaptureFi
 # ------------------------------------------------------------------ format
 
 
-def test_resolve_format_follows_the_destination() -> None:
-    assert resolve_format("auto", _FakeTTY(True)) == "text"
-    assert resolve_format("auto", _FakeTTY(False)) == "json"
-    # An explicit choice overrides the sniffing in both directions.
-    assert resolve_format("json", _FakeTTY(True)) == "json"
-    assert resolve_format("text", _FakeTTY(False)) == "text"
+def test_resolve_format_is_text_unless_json_is_asked_for() -> None:
+    # `auto` is the 0.1.9 default (JSON off a TTY), kept as an alias for text.
+    assert resolve_format("auto") == "text"
+    assert resolve_format("text") == "text"
+    assert resolve_format("json") == "json"
 
 
 def test_text_format_emits_no_json(capsys: pytest.CaptureFixture[str]) -> None:

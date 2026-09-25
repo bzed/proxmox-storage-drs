@@ -1842,7 +1842,7 @@ def test_mode_override_flows_through_main(
     # about "plan" specifically. "plan" itself is real now and would try a
     # genuine network connection here if used unmocked (.agents/testing.md).
     path = write_config(tmp_path)
-    cli.main(["-c", str(path), "--mode", "auto", "apply"])
+    cli.main(["-c", str(path), "--log-format", "json", "--mode", "auto", "apply"])
     err_lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
     events = [json.loads(ln) for ln in err_lines]
     override_events = [e for e in events if e["event"] == "mode_override"]
@@ -4111,13 +4111,16 @@ def test_v_logs_the_decision_trail(capsys: pytest.CaptureFixture[str]) -> None:
     assert by_event["load_digest"]["disks"] > 0
 
 
-def test_log_format_auto_emits_json_when_stderr_is_not_a_tty(
+def test_log_format_auto_emits_text_even_when_stderr_is_not_a_tty(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """JSON is opt-in: under journald (a non-TTY) the default is text."""
     assert cli.main(["--replay", str(CORPUS_BUNDLE), "-v", "plan"]) == 0
     err = capsys.readouterr().err
-    assert err.startswith("{")
-    json.loads(err.splitlines()[0])
+    assert "run started: plan" in err
+    assert not err.lstrip().startswith("{")
+    assert cli.main(["--replay", str(CORPUS_BUNDLE), "-v", "--log-format", "auto", "plan"]) == 0
+    assert not capsys.readouterr().err.lstrip().startswith("{")
 
 
 def test_log_format_text_emits_no_json(capsys: pytest.CaptureFixture[str]) -> None:
