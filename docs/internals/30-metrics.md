@@ -144,7 +144,7 @@ VictoriaMetrics/gigapipe backend's own max-points-per-timeseries limit (11,000 b
 confirmed live with a 500 `"exceeded maximum resolution of 11,000 points per timeseries"`.
 `collect.py`'s capture path (`_issue_range_chunks`, section 16.2) was already immune to this --
 day-sized chunking there predates the live-fetch bug -- but `loadmodel.py`'s own raw-series fetch,
-the one that feeds a `plan`/`apply` run's section 7.3 saturation guard, issued one unchunked
+the one that feeds a forecast, issued one unchunked
 request regardless of range.
 
 `stitch_range_results(captures)` is the shared merge both paths now use: given several

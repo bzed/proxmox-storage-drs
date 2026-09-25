@@ -392,7 +392,6 @@ def _invariant_inputs(  # type: ignore[no-untyped-def]
                 "moves": [{"disk_key": "1:scsi0", "to_storage": "stor-b"}],
                 "payback": {
                     "rejected_moves": [],
-                    "deferred_moves": [],
                     "reserve_shortfall_bytes_before": shortfall_before,
                     "reserve_shortfall_bytes_after": shortfall_after,
                 },

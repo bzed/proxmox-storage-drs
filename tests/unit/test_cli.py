@@ -265,7 +265,8 @@ def test_run_started_and_config_warnings_are_logged_at_info(
     run) rather than a WARNING repeated every 15 minutes forever. Both are
     part of the audit trail, so both need ``-v`` to be seen -- see
     ``test_a_clean_read_only_run_is_silent`` for the other half of that."""
-    path = write_config(tmp_path)
+    # A payback_horizon under 30 days is the advisory this config triggers.
+    path = write_config(tmp_path, migration={"payback_horizon": "7d"})
     cli.main(["-c", str(path), "-v", "--log-format", "json", "apply"])
     err_lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
     records = [json.loads(ln) for ln in err_lines]
@@ -273,7 +274,7 @@ def test_run_started_and_config_warnings_are_logged_at_info(
     assert "config_loaded" not in by_event
     assert by_event["run_started"]["command"] == "apply"
     assert by_event["run_started"]["config_sha256"]
-    assert by_event["config_warning"]["level"] == "INFO"  # no saturation_load configured
+    assert by_event["config_warning"]["level"] == "INFO"  # short payback_horizon
     # Emitted even though this run fails without a reachable cluster: "it
     # exited 1 having issued nothing" is exactly what the summary is for.
     assert by_event["run_summary"]["command"] == "apply"
@@ -347,7 +348,6 @@ def _sample_topology() -> Topology:
             id="san-a",
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=8 * (1 << 40),
             used_bytes=3 * (1 << 40),
             foreign_used_bytes=0,
@@ -362,7 +362,6 @@ def _sample_topology() -> Topology:
             id="san-b",
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=8 * (1 << 40),
             used_bytes=0,
             foreign_used_bytes=0,
@@ -631,7 +630,6 @@ def _no_reserve_violation_topology() -> Topology:
             id=sid,
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=100 * (1 << 40),
             used_bytes=1 * (1 << 40),
             foreign_used_bytes=0,
@@ -1087,7 +1085,6 @@ def _repairable_sample_topology() -> Topology:
             id=s.id,
             capability_weight=s.capability_weight,
             reserve_factor=s.reserve_factor,
-            saturation_load=s.saturation_load,
             capacity_bytes=16 * (1 << 40) if s.id == "san-b" else s.capacity_bytes,
             used_bytes=s.used_bytes,
             foreign_used_bytes=s.foreign_used_bytes,
@@ -1195,7 +1192,6 @@ def test_plan_json_output_accepts_payback_when_saferemove_is_off(
             id=s.id,
             capability_weight=s.capability_weight,
             reserve_factor=s.reserve_factor,
-            saturation_load=s.saturation_load,
             capacity_bytes=s.capacity_bytes,
             used_bytes=s.used_bytes,
             foreign_used_bytes=s.foreign_used_bytes,
@@ -1226,236 +1222,6 @@ def test_plan_json_output_accepts_payback_when_saferemove_is_off(
     assert payback["accepted"] is True
     assert payback["benefit_load_seconds"] == 0.0  # genuinely zero, not a failure to compute it
     assert payback["ratio"] == 0.0  # a real cost with zero benefit -> ratio 0, still accepted
-
-
-class _StubForecaster:
-    """A `Forecaster` whose `predict()` always returns the same, huge
-    upper bound regardless of input -- deterministically triggers section
-    7.3's saturation guard without needing to hand-derive a real
-    quantile/seasonal_naive/holt_winters number."""
-
-    def __init__(self, upper_bound: float) -> None:
-        self._upper_bound = upper_bound
-
-    def required_range(self) -> object:
-        return None
-
-    def predict(self, series: object, horizon: object) -> object:
-        from proxmox_storage_drs.forecast import Forecast
-
-        return Forecast(point_estimate=0.0, upper_bound=self._upper_bound)
-
-
-def test_plan_json_output_defers_a_move_via_the_saturation_guard(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """san-a (the source, and the only storage with any disk currently
-    resident -- san-b starts empty in this fixture) configures a tight
-    `saturation_load` -- with `cli.build_forecaster()` stubbed to always
-    forecast a huge upper bound, the move is deferred by section 7.3's
-    guard, not merely scored, and `deferred_moves` (not `rejected_moves`)
-    is what reports it."""
-    topology = _repairable_sample_topology()
-    group = topology.groups[0]
-    storages = tuple(
-        Storage(
-            id=s.id,
-            capability_weight=s.capability_weight,
-            reserve_factor=s.reserve_factor,
-            saturation_load=10.0 if s.id == "san-a" else s.saturation_load,
-            capacity_bytes=s.capacity_bytes,
-            used_bytes=s.used_bytes,
-            foreign_used_bytes=s.foreign_used_bytes,
-            saferemove=False,
-            saferemove_throughput_bytes_per_sec=None,
-            free_space_soft_bytes=0,
-            free_space_hard_bytes=0,
-            storage_type="dir",
-            allowed_formats=frozenset({"raw", "qcow2"}),
-        )
-        for s in group.storages
-    )
-    topology = Topology(
-        groups=(Group(name=group.name, storages=storages, disks=group.disks),),
-        warnings=topology.warnings,
-    )
-    _patch_plan_deps(monkeypatch, topology, _sample_group_load())
-    monkeypatch.setattr(
-        "proxmox_storage_drs.cli.build_forecaster", lambda *a, **k: _StubForecaster(1000.0)
-    )
-    monkeypatch.setattr("proxmox_storage_drs.cli.compute_disk_load_series", lambda *a, **k: {})
-    path = write_config(tmp_path)
-    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    payback = payload["groups"][0]["payback"]
-    assert payback["deferred_moves"] == ["101:scsi0"]
-    assert payback["rejected_moves"] == []  # a defer is not a hard-duration rejection
-    assert payback["accepted"] is False
-
-
-def test_apply_excludes_a_saturation_deferred_move_from_execution(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`_apply_payback_gate()` must exclude a deferred move from what it
-    hands to `execute_plan()`, exactly like a hard-duration-rejected one
-    -- exercised here via `dry-run`, which reports every move's outcome
-    without needing a fake PVE API at all."""
-    topology = _repairable_sample_topology()
-    group = topology.groups[0]
-    storages = tuple(
-        Storage(
-            id=s.id,
-            capability_weight=s.capability_weight,
-            reserve_factor=s.reserve_factor,
-            saturation_load=10.0 if s.id == "san-a" else s.saturation_load,
-            capacity_bytes=s.capacity_bytes,
-            used_bytes=s.used_bytes,
-            foreign_used_bytes=s.foreign_used_bytes,
-            saferemove=False,
-            saferemove_throughput_bytes_per_sec=None,
-            free_space_soft_bytes=0,
-            free_space_hard_bytes=0,
-            storage_type="dir",
-            allowed_formats=frozenset({"raw", "qcow2"}),
-        )
-        for s in group.storages
-    )
-    topology = Topology(
-        groups=(Group(name=group.name, storages=storages, disks=group.disks),),
-        warnings=topology.warnings,
-    )
-    _patch_plan_deps(monkeypatch, topology, _sample_group_load())
-    monkeypatch.setattr(
-        "proxmox_storage_drs.cli.build_forecaster", lambda *a, **k: _StubForecaster(1000.0)
-    )
-    monkeypatch.setattr("proxmox_storage_drs.cli.compute_disk_load_series", lambda *a, **k: {})
-    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
-    assert cli.main(["-c", str(path), "--mode", "dry-run", "apply"]) == 0
-    out = capsys.readouterr().out
-    assert "web01(101):scsi0" in out
-    assert "skipped: deferred: would push a target storage's I/O over migration." in out
-    assert "would_move" not in out  # the only move in this plan was deferred, never executed
-
-
-def test_plan_json_output_saturation_guard_is_skipped_without_any_saturation_load(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No storage in the group configures `saturation_load` -- the guard
-    must not even call `compute_disk_load_series()`/`build_forecaster()`,
-    matching the plan's own "loses only this one advisory check, at no
-    Prometheus cost" promise."""
-
-    def fail(*_a: object, **_k: object) -> None:
-        raise AssertionError("the saturation guard must not fetch anything when unconfigured")
-
-    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
-    monkeypatch.setattr("proxmox_storage_drs.cli.build_forecaster", fail)
-    monkeypatch.setattr("proxmox_storage_drs.cli.compute_disk_load_series", fail)
-    path = write_config(tmp_path)
-    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    payback = payload["groups"][0]["payback"]
-    assert payback["deferred_moves"] == []
-
-
-# ------------------------------------------------------- saturation guard history range
-
-
-def _saturated_one_disk_group() -> Group:
-    group = _one_disk_group()
-    storages = tuple(
-        dataclasses.replace(s, saturation_load=10.0 if s.id == "san-a" else s.saturation_load)
-        for s in group.storages
-    )
-    return Group(name=group.name, storages=storages, disks=group.disks)
-
-
-def test_saturation_forecast_inputs_widens_history_for_a_backtested_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A model that §10.2 backtests (anything but ``quantile``) must fetch
-    at least ``2 * window.lookback_seconds`` of history, even when the
-    forecaster's own ``required_range_seconds()`` is smaller -- otherwise
-    ``backtest_error()``'s fit half always falls outside the fetched
-    series and the gate can never validate the model (the bug this test
-    guards against: ``holt_winters`` tuned so
-    ``2 * seasonal_periods * step == window.lookback`` used to fetch
-    exactly ``window.lookback``, one half of what the backtest needs)."""
-    captured: dict[str, float] = {}
-
-    def fake_compute_disk_load_series(
-        client: object,
-        metrics: object,
-        load_weights: object,
-        group: object,
-        range_seconds: float,
-        step_seconds: object,
-        now_epoch: object,
-        node_selector: object = None,
-    ) -> dict[str, object]:
-        captured["range_seconds"] = range_seconds
-        return {}
-
-    monkeypatch.setattr(
-        "proxmox_storage_drs.cli.compute_disk_load_series", fake_compute_disk_load_series
-    )
-    resolved = _resolved_config(
-        tmp_path,
-        window={"lookback": "50h"},  # 180000s -> 2W = 360000s
-        forecast={
-            "model": "holt_winters",
-            "holt_winters": {"seasonal_periods": 10},  # 2*10*300 = 6000s, well under 2W
-        },
-    )
-    result = cli._saturation_forecast_inputs(
-        "fake-client",  # type: ignore[arg-type]
-        resolved,
-        _saturated_one_disk_group(),
-        datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc),
-        None,
-    )
-    assert result is not None
-    assert captured["range_seconds"] == 2 * 180000.0
-
-
-def test_saturation_forecast_inputs_does_not_widen_history_for_quantile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``quantile`` is never backtested (`_backtest_gated_forecaster()`
-    returns immediately for it) -- widening its history fetch to
-    ``2 * window.lookback_seconds`` would only add Prometheus cost this
-    model never spends, so it must keep fetching exactly its own
-    ``required_range_seconds()`` (``window.lookback_seconds`` itself)."""
-    captured: dict[str, float] = {}
-
-    def fake_compute_disk_load_series(
-        client: object,
-        metrics: object,
-        load_weights: object,
-        group: object,
-        range_seconds: float,
-        step_seconds: object,
-        now_epoch: object,
-        node_selector: object = None,
-    ) -> dict[str, object]:
-        captured["range_seconds"] = range_seconds
-        return {}
-
-    monkeypatch.setattr(
-        "proxmox_storage_drs.cli.compute_disk_load_series", fake_compute_disk_load_series
-    )
-    resolved = _resolved_config(
-        tmp_path, window={"lookback": "50h"}, forecast={"model": "quantile"}
-    )
-    result = cli._saturation_forecast_inputs(
-        "fake-client",  # type: ignore[arg-type]
-        resolved,
-        _saturated_one_disk_group(),
-        datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc),
-        None,
-    )
-    assert result is not None
-    assert captured["range_seconds"] == 180000.0
 
 
 # ------------------------------------------------------- backtest validation gate
@@ -1711,7 +1477,6 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
             id="san-a",
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=8 * (1 << 40),
             used_bytes=2 * (1 << 40),
             foreign_used_bytes=0,
@@ -1726,7 +1491,6 @@ def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_dead
             id="san-b",
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=8 * (1 << 40),
             used_bytes=0,
             foreign_used_bytes=0,
@@ -1867,7 +1631,6 @@ def _balanced_non_violating_topology() -> Topology:
             id="san-a",
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=8 * (1 << 40),
             used_bytes=1 * (1 << 40),
             foreign_used_bytes=0,
@@ -1882,7 +1645,6 @@ def _balanced_non_violating_topology() -> Topology:
             id="san-b",
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=8 * (1 << 40),
             used_bytes=1 * (1 << 40),
             foreign_used_bytes=0,
@@ -2022,7 +1784,6 @@ def _balanced_apply_topology() -> Topology:
             id=sid,
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=100 * (1 << 40),
             used_bytes=2 * (1 << 40) if sid == "san-a" else 0,
             foreign_used_bytes=0,
@@ -2736,7 +2497,6 @@ def _fragmented_group() -> Group:
             id=sid,
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=8 * (1 << 40),
             used_bytes=0,
             foreign_used_bytes=0,
@@ -3762,7 +3522,6 @@ def _one_disk_group() -> Group:
             id=sid,
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=8 * (1 << 40),
             used_bytes=0,
             foreign_used_bytes=0,

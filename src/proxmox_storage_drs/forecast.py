@@ -2,11 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Pluggable load forecasting. See IMPLEMENTATION_PLAN.md section 10.
 
-The optimizer and the section 7.3 saturation guard consume the **upper
-bound**, never the point estimate (section 10.1): being wrong in the
-direction of "busier than it looks" costs a slightly suboptimal balance,
-being wrong the other way risks migrating a disk onto a storage that is
-about to saturate.
+Nothing consumes a forecaster's ``upper_bound`` any more (the section 7.3
+saturation guard that did was removed); phase 14b replaces this module's
+role with a backtest-validated Holt-Winters forecast of each disk's p95.
 
 Each forecaster owns its own required history (section 10.1's table) because
 the *decision* window (``window.lookback``) and the *history a model needs*
@@ -29,7 +27,7 @@ import logging
 import statistics
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Iterable, Mapping, Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
 from proxmox_storage_drs.config import ForecastConfig
 
@@ -46,8 +44,7 @@ class Forecast:
     """A point estimate and an upper bound over a horizon.
 
     Both are in the same unit as the input series (section 4: average
-    in-flight I/O requests, when forecasting load). The optimizer and section
-    7.3's saturation guard must use ``upper_bound``, never ``point_estimate``.
+    in-flight I/O requests, when forecasting load).
     """
 
     point_estimate: float
@@ -64,29 +61,6 @@ class Forecaster(Protocol):
     def predict(self, series: TimeSeries, horizon: timedelta) -> Forecast:
         """Return a point estimate and an upper bound for ``horizon``."""
         ...  # pragma: no cover - Protocol method body is never executed
-
-
-def storage_upper_bound(
-    forecaster: Forecaster,
-    disk_load_series: Mapping[str, TimeSeries],
-    disk_keys: Iterable[str],
-    horizon: timedelta,
-) -> float:
-    """Section 10.1: ``L̂_s(Δ) = Σ_{d : x_{d,s}=1} û_d(Δ)`` -- every given
-    disk's own upper bound, forecast independently from its own series,
-    summed. Summing upper bounds (rather than forecasting the storage's
-    own already-summed series directly) is deliberately conservative: it
-    assumes every disk peaks together, the right direction for a guard
-    whose failure mode is starting a mirror onto an already-busy array
-    (section 10.1's own words). A ``disk_keys`` entry missing from
-    ``disk_load_series`` (no data fetched for it at all) forecasts an
-    empty series -- every :class:`Forecaster` already returns a zero
-    :class:`Forecast` for that, per its own docstring, so this never
-    raises a ``KeyError`` for a disk this run simply has no history for
-    yet."""
-    return sum(
-        forecaster.predict(disk_load_series.get(key, ()), horizon).upper_bound for key in disk_keys
-    )
 
 
 def _quantile(values: Sequence[float], q: float) -> float:
@@ -407,6 +381,6 @@ def backtest_validated(
     """``True`` only when :func:`backtest_error` both ran (enough history
     existed to backtest at all) and came back within
     ``gates.imbalance_threshold`` -- the one boolean gate
-    ``cli._saturation_forecast_inputs()`` actually acts on."""
+    ``cli._backtest_gated_forecaster()`` actually acts on."""
     error = backtest_error(forecaster, series, now_epoch_seconds, window_seconds)
     return error is not None and error <= imbalance_threshold

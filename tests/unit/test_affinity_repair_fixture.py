@@ -80,7 +80,6 @@ def _make_storage(id_: str, foreign_used_tib: float = 0.0) -> Storage:
         id=id_,
         capability_weight=1.0,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=8 * TIB,
         used_bytes=0,
         foreign_used_bytes=round(foreign_used_tib * TIB),

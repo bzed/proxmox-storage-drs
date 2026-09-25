@@ -26,7 +26,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -60,8 +60,6 @@ from proxmox_storage_drs.forecast import (
     backtest_validated,
     build_forecaster,
     group_aggregate_series,
-    required_range_seconds,
-    storage_upper_bound,
 )
 from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
 from proxmox_storage_drs.heuristic import (
@@ -76,7 +74,7 @@ from proxmox_storage_drs.heuristic import (
     raw_spread,
     run_heuristic,
 )
-from proxmox_storage_drs.loadmodel import GroupLoad, compute_disk_load_series, compute_group_load
+from proxmox_storage_drs.loadmodel import GroupLoad, compute_group_load
 from proxmox_storage_drs.logging_setup import (
     LOG_FORMATS,
     LOG_LEVELS,
@@ -98,7 +96,6 @@ from proxmox_storage_drs.payback import (
     compute_wipe_duration_seconds,
     evaluate_plan_payback,
     executed_assignment,
-    mirror_duration_seconds,
     repair_markers,
 )
 from proxmox_storage_drs.pve import PveClient
@@ -137,7 +134,6 @@ from proxmox_storage_drs.timewindow import current_deadline
 from proxmox_storage_drs.topology import (
     Disk,
     Group,
-    Storage,
     Topology,
     build_topology,
     format_disk_id,
@@ -1144,15 +1140,6 @@ def _render_plan_payback_lines(
                 for key in payback_result.rejected_moves
             )
         )
-    if payback_result.deferred_moves:
-        lines.append(
-            "  ⚠ deferred: would push a target storage's I/O over migration."
-            "saturation_ceiling: "
-            + ", ".join(
-                format_disk_id(key, _vm_name_for(vm_name_by_key, key))
-                for key in payback_result.deferred_moves
-            )
-        )
     return lines
 
 
@@ -1424,7 +1411,6 @@ def _render_group_plan_json(
             "ratio": payback_result.ratio,
             "aggregate_ok": payback_result.aggregate_ok,
             "rejected_moves": list(payback_result.rejected_moves),
-            "deferred_moves": list(payback_result.deferred_moves),
             "accepted": payback_result.accepted,
             "repair_exempt": payback_result.repair_exempt,
             "reserve_shortfall_bytes_before": payback_result.reserve_shortfall_bytes_before,
@@ -2191,74 +2177,6 @@ class _GroupPlan:
     shortfall_bytes: int = 0
 
 
-def _saturation_forecast_inputs(
-    prom_client: PrometheusClient,
-    resolved: ResolvedConfig,
-    group: Group,
-    now: datetime,
-    node_selector: str | None,
-) -> tuple[Forecaster, dict[str, TimeSeries]] | None:
-    """Section 7.3's saturation guard needs a forecaster and every disk's
-    own load history -- but only when at least one storage in ``group``
-    actually configures ``saturation_load``. Returns ``None`` to skip the
-    guard entirely otherwise, matching the plan's own words literally: a
-    group that leaves it unset everywhere "loses only this one advisory
-    check", at no Prometheus cost -- fetching a history no storage in
-    this group could ever use would contradict that.
-
-    ``range_seconds`` is at least the *configured forecaster's* own
-    requirement (``forecast.required_range_seconds()``), not ``window.lookback``
-    -- section 10.1's own "genuinely different things"
-    (`docs/internals/20-forecasting.md`) -- but, for a model
-    ``_backtest_gated_forecaster()`` below actually backtests
-    (``seasonal_naive``/``holt_winters``; ``quantile`` never is), never less
-    than ``2 * window.lookback_seconds`` either: the backtest fits on
-    ``[now-2W, now-W)`` and checks against ``[now-W, now]`` (section 10.2),
-    so it needs a full ``2W`` of history regardless of how little the
-    forecaster itself demands. A model tuned to the plan's own minimum --
-    ``required_range_seconds() == window.lookback_seconds``, e.g.
-    ``holt_winters`` with ``2 * seasonal_periods * step == lookback`` --
-    would otherwise have its backtest fit half fall entirely outside the
-    fetched series every single run, `backtest_error()` always returning
-    `None` for "not enough history" regardless of how much real history
-    Prometheus actually has. ``quantile`` is left alone: widening it would
-    only add Prometheus cost this model never spends.
-    """
-    if not any(s.saturation_load is not None for s in group.storages):
-        return None
-    forecast_config = resolved.config.forecast
-    window = resolved.config.window
-    metrics = resolved.config.metrics
-    range_seconds = required_range_seconds(
-        forecast_config, window.lookback_seconds, metrics.step_seconds
-    )
-    if forecast_config.model != "quantile":
-        range_seconds = max(range_seconds, 2 * window.lookback_seconds)
-    now_epoch = now.timestamp()
-    forecaster = build_forecaster(
-        forecast_config,
-        window.lookback_seconds,
-        metrics.step_seconds,
-        now_epoch,
-        window.quantile,
-        window.upper_quantile,
-    )
-    disk_series = compute_disk_load_series(
-        prom_client,
-        metrics,
-        resolved.config.load_weights,
-        group,
-        range_seconds,
-        metrics.step_seconds,
-        now_epoch,
-        node_selector=node_selector,
-    )
-    forecaster = _backtest_gated_forecaster(
-        forecaster, forecast_config, resolved, disk_series, now_epoch, window.lookback_seconds
-    )
-    return forecaster, disk_series
-
-
 def _backtest_gated_forecaster(
     forecaster: Forecaster,
     forecast_config: ForecastConfig,
@@ -2272,8 +2190,8 @@ def _backtest_gated_forecaster(
     validate and nothing more conservative to fall back to);
     ``seasonal_naive``/``holt_winters`` must have actually predicted the
     group's own recent past accurately (``forecast.backtest_validated()``,
-    within ``gates.imbalance_threshold``) before section 7.3's saturation
-    guard trusts them at all. A model that fails -- or that cannot yet be
+    within ``gates.imbalance_threshold``) before anything trusts them at
+    all. A model that fails -- or that cannot yet be
     validated for lack of history -- falls back to ``quantile`` for this
     run, logged once at warning; a fresh deployment is not given a free
     pass just because it has no track record yet
@@ -2287,7 +2205,7 @@ def _backtest_gated_forecaster(
     logger.warning(
         "forecast.model %r did not accurately predict this group's own recent history (or "
         "there is not enough history yet to check); using the simpler quantile model for "
-        "this run's saturation guard instead",
+        "this run instead",
         forecast_config.model,
         extra={"event": "forecast_backtest_failed", "model": forecast_config.model},
     )
@@ -2299,36 +2217,6 @@ def _backtest_gated_forecaster(
         now_epoch,
         window.quantile,
         window.upper_quantile,
-    )
-
-
-def _compute_one_move_cost(
-    move: ScheduledMove,
-    storages_by_id: dict[str, Storage],
-    group: Group,
-    migration: MigrationConfig,
-    saturation_inputs: tuple[Forecaster, dict[str, TimeSeries]] | None,
-) -> MoveCost:
-    """One move's section 7.1 cost, plus (only when ``saturation_inputs``
-    is not ``None``) section 7.3's saturation defer check -- computing
-    each endpoint's own ``L_hat_s(duration_mirror)`` from its *currently*
-    resident disks (`payback.compute_move_cost()`'s own docstring on why
-    not the moving disk's hypothetical arrival) before handing off to the
-    pure cost function. Factored out of `_plan_group()`'s own list
-    comprehension purely to stay within this project's flake8 complexity
-    limit."""
-    source = storages_by_id[move.from_storage]
-    if saturation_inputs is None:
-        return compute_move_cost(move, source, migration)
-    forecaster, disk_series = saturation_inputs
-    target = storages_by_id[move.to_storage]
-    horizon = timedelta(seconds=mirror_duration_seconds(move, migration))
-    src_keys = [d.key for d in group.disks if d.current_storage == move.from_storage]
-    dst_keys = [d.key for d in group.disks if d.current_storage == move.to_storage]
-    l_hat_src = storage_upper_bound(forecaster, disk_series, src_keys, horizon)
-    l_hat_dst = storage_upper_bound(forecaster, disk_series, dst_keys, horizon)
-    return compute_move_cost(
-        move, source, migration, target=target, l_hat_src=l_hat_src, l_hat_dst=l_hat_dst
     )
 
 
@@ -2447,7 +2335,6 @@ def _log_payback_verdict(group: Group, payback: PaybackResult, required_ratio: f
             "ratio": payback.ratio,
             "required_ratio": required_ratio,
             "rejected_moves": list(payback.rejected_moves),
-            "deferred_moves": list(payback.deferred_moves),
             "repair_exempt": payback.repair_exempt,
             "reserve_shortfall_bytes_before": payback.reserve_shortfall_bytes_before,
             "reserve_shortfall_bytes_after": payback.reserve_shortfall_bytes_after,
@@ -2545,20 +2432,8 @@ def _plan_group(
     )
 
     storages_by_id = {s.id: s for s in group.storages}
-    # Only when there is a move to cost (REVIEW.md T-07): a fully
-    # deadlocked plan (`order` empty) has no `_compute_one_move_cost()`
-    # call to feed, so skip the guard's own `query_range` fetches
-    # entirely rather than pay for up to 7 days of history at a 5-minute
-    # step and throw the result away unused.
-    saturation_inputs = (
-        _saturation_forecast_inputs(prom_client, resolved, group, now, node_selector)
-        if schedule_result.order
-        else None
-    )
     move_costs = [
-        _compute_one_move_cost(
-            move, storages_by_id, group, resolved.config.migration, saturation_inputs
-        )
+        compute_move_cost(move, storages_by_id[move.from_storage], resolved.config.migration)
         for move in schedule_result.order
     ]
     spread_metric = resolved.config.objective.spread_metric
@@ -2576,13 +2451,11 @@ def _plan_group(
     )
     # Section 7.3's outcome trigger and revert test both score the plan's
     # *executed* endpoint -- final_assignment with every disk a hard
-    # per-move rule has taken out (exceeds_max_duration/saturation_deferred,
-    # both already known from move_costs) held back at its current storage
+    # per-move rule has taken out (exceeds_max_duration, already
+    # known from move_costs) held back at its current storage
     # -- not the solver's raw target. "What it will really run", not merely
     # "what got ordered".
-    excluded_disk_keys = frozenset(
-        mc.disk_key for mc in move_costs if mc.exceeds_max_duration or mc.saturation_deferred
-    )
+    excluded_disk_keys = frozenset(mc.disk_key for mc in move_costs if mc.exceeds_max_duration)
     executed_final_assignment = executed_assignment(
         group, schedule_result.final_assignment, excluded_disk_keys
     )
@@ -2828,25 +2701,16 @@ def _make_inflight_callbacks(
 def _refused_move_outcomes(
     order: tuple[ScheduledMove, ...], payback: PaybackResult
 ) -> list[MoveOutcome]:
-    """The two section 7.3 per-move exclusions -- the hard duration rule
-    (``rejected_moves``) and the best-effort saturation guard
-    (``deferred_moves``) -- rendered as ``"skipped"`` outcomes, in that
-    priority order for a move flagged by both (the hard rule is the more
-    definitive reason). Factored out of :func:`_apply_payback_gate` purely
-    to stay within this project's flake8 complexity limit."""
+    """Section 7.3's hard per-move duration rule (``rejected_moves``)
+    rendered as ``"skipped"`` outcomes. Factored out of
+    :func:`_apply_payback_gate` purely to stay within this project's flake8
+    complexity limit."""
     rejected_keys = set(payback.rejected_moves)
-    deferred_keys = set(payback.deferred_moves)
     outcomes: list[MoveOutcome] = []
     for m in order:
-        if m.disk_key in rejected_keys:
-            detail = "refused: would take longer than migration.max_single_move_duration allows"
-        elif m.disk_key in deferred_keys:
-            detail = (
-                "deferred: would push a target storage's I/O over migration."
-                "saturation_ceiling -- re-evaluate on a later run"
-            )
-        else:
+        if m.disk_key not in rejected_keys:
             continue
+        detail = "refused: would take longer than migration.max_single_move_duration allows"
         outcomes.append(MoveOutcome(m.disk_key, m.from_storage, m.to_storage, "skipped", detail))
     return outcomes
 
@@ -2868,8 +2732,7 @@ def _apply_payback_gate(
 ) -> ExecutionResult:
     """Section 7.3's payback verdict gates *execution*, not merely the
     report (REVIEW.md S-02): a move `rejected_moves` names (the hard
-    per-move `migration.max_single_move_duration` rule) or `deferred_moves`
-    names (the best-effort saturation guard) must never reach `execute.py`
+    per-move `migration.max_single_move_duration` rule) must never reach `execute.py`
     regardless of the plan's aggregate economics, and a plan that fails
     the aggregate economic test (``not aggregate_ok``) must not be
     executed at all. This is the same "report, never force" policy
@@ -2904,7 +2767,7 @@ def _apply_payback_gate(
     assert group_plan.schedule_result is not None and group_plan.payback_result is not None
     order = group_plan.schedule_result.order
     payback = group_plan.payback_result
-    excluded_keys = set(payback.rejected_moves) | set(payback.deferred_moves)
+    excluded_keys = set(payback.rejected_moves)
     refused = _refused_move_outcomes(order, payback)
 
     if not payback.aggregate_ok:

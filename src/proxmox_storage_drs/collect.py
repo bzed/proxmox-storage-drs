@@ -149,7 +149,7 @@ def capture_range_seconds(config: Config, override: float | None) -> float:
     forecaster's ``required_range()``, not just the configured one, unless
     ``--range``/``override`` was given. Also never less than
     ``2 * window.lookback_seconds``: section 10.2's backtest gate
-    (``cli._saturation_forecast_inputs()``) fits on ``[now-2W, now-W)`` and
+    (``cli._backtest_gated_forecaster()``) fits on ``[now-2W, now-W)`` and
     checks against ``[now-W, now]`` for *any* backtested model
     (``seasonal_naive``/``holt_winters``), so a bundle captured with only
     the configured forecaster's own minimum would replay the backtest gate
@@ -1614,7 +1614,7 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
     anonymization as a pattern (its text names real storages), so the
     bundle carries the literal, anonymized ids it matched instead, with
     each storage's already-resolved (pattern-default-or-literal-override)
-    ``capability_weight``/``reserve_factor``/``saturation_load``/
+    ``capability_weight``/``reserve_factor``/
     ``free_space`` -- exactly what a replay needs, and none of what would
     let it re-test the expansion itself, a gap named here rather than
     discovered later.
@@ -1643,11 +1643,6 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
                             "soft": s.free_space_soft_bytes,
                             "hard": s.free_space_hard_bytes,
                         },
-                        **(
-                            {"saturation_load": s.saturation_load}
-                            if s.saturation_load is not None
-                            else {}
-                        ),
                     }
                     for s in group.storages
                 ],
@@ -1712,7 +1707,6 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
             "max_single_move_duration": config.migration.max_single_move_duration_seconds,
             "account_saferemove_wipe": config.migration.account_saferemove_wipe,
             "wipe_load_weight": config.migration.wipe_load_weight,
-            "saturation_ceiling": config.migration.saturation_ceiling,
             "assume_thick_provisioning": config.migration.assume_thick_provisioning,
         },
         "objective": {

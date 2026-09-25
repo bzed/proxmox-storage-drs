@@ -31,35 +31,13 @@ would silently desynchronize config validation from what the forecaster
 itself believes it needs. (`IMPLEMENTATION_PLAN.md` section 10.1 has the
 full per-model table this generalizes from.)
 
-## Why the upper bound, never the point estimate
+## Nothing consumes the upper bound
 
 Every `Forecaster.predict()` returns a `Forecast(point_estimate,
-upper_bound)`. Nothing in this module enforces that callers use
-`upper_bound` — that discipline belongs to the caller: the section 7.3
-saturation guard (`payback.py`'s `compute_move_cost()`, via
-`storage_upper_bound()` below) already only ever reads `.upper_bound`;
-the optimizer does not consume a forecast at all yet. The asymmetry is
-stated in the module docstring and repeated here because it is easy to
-get backwards under time pressure: overestimating costs a slightly worse
-balance, underestimating risks scheduling a mirror onto a storage that is
-about to saturate.
-
-## `storage_upper_bound()`: section 10.1's per-disk sum, not a per-storage forecast
-
-Section 10.1 is explicit that `L̂_s(Δ)` is `Σ_{d : x_{d,s}=1} û_d(Δ)` —
-every disk on `s` forecast **independently**, then summed — never the
-forecast of `s`'s own already-summed series. `storage_upper_bound()` is
-exactly that sum, given a `Forecaster`, `{disk_key: TimeSeries}` (typically
-`loadmodel.compute_disk_load_series()`'s own output), the disk keys
-currently on one storage, and a horizon. Summing upper bounds this way is
-deliberately conservative (it assumes every disk peaks together — the
-right direction for a guard whose failure mode is starting a mirror onto
-an already-busy array), and is real, measurable extra conservatism
-whenever a group's disks do not actually peak in lockstep: forecasting
-one already-summed series directly would let one disk's trough offset
-another's peak, understating the storage's own worst case. A disk key
-with no fetched series at all forecasts as an empty one (`0.0`), never a
-`KeyError` — this run may simply have no history for a disk yet.
+upper_bound)`. The only consumer of `upper_bound` was section 7.3's
+saturation guard, removed by phase 14a (a migration is throttled by
+`migration.bwlimit_bytes_per_sec` alone). Phase 14b rewrites this module's
+contract around a forecast of each disk's p95 over the next `window.lookback`.
 
 ## `QuantileForecaster`
 
@@ -108,7 +86,7 @@ Fitting successfully (`HoltWintersForecaster`'s own two fallback
 conditions above) is not the same question as fitting *accurately* —
 section 10.2's backtest is what actually answers the second one, once
 per group, before `seasonal_naive`/`holt_winters` is trusted to drive the
-section 7.3 saturation guard at all. `quantile` is never backtested: it
+load model at all. `quantile` is never backtested: it
 does no fitting, so there is nothing to validate and nothing more
 conservative to fall back to.
 
@@ -143,11 +121,8 @@ be both more expensive and would raise an unanswerable question (use the
 fancier model for the disks it happens to fit and `quantile` for the rest,
 *within the same run*?) that the plan itself never poses.
 
-`cli._backtest_gated_forecaster()` is the one caller: built once per
-group inside `_saturation_forecast_inputs()`, right after
-`build_forecaster()` and `loadmodel.compute_disk_load_series()`, before
-either is used to derive any move's `l_hat_src`/`l_hat_dst`. A model that
-fails validation falls back to a fresh `QuantileForecaster` (routed
+`cli._backtest_gated_forecaster()` is the one caller (nothing calls it
+between 14a and 14b). A model that fails validation falls back to a fresh `QuantileForecaster` (routed
 through `build_forecaster()` again with `forecast.model` overridden to
 `"quantile"`, never hand-constructed — the one factory, see below), logged
 at warning with the model name that failed.

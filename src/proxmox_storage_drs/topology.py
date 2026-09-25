@@ -192,7 +192,6 @@ class Storage:
     id: str
     capability_weight: float
     reserve_factor: float
-    saturation_load: float | None
     capacity_bytes: int
     used_bytes: int
     foreign_used_bytes: int  # U^ext, section 5.1.1
@@ -482,7 +481,6 @@ def _match_pattern_entries(
                 id=sid,
                 capability_weight=storage_cfg.capability_weight,
                 reserve_factor=storage_cfg.reserve_factor,
-                saturation_load=storage_cfg.saturation_load,
                 free_space_soft=storage_cfg.free_space_soft,
                 free_space_hard=storage_cfg.free_space_hard,
             )
@@ -1073,7 +1071,6 @@ def _build_storages(
                 id=sid,
                 capability_weight=storage_cfg.capability_weight,
                 reserve_factor=_resolve_reserve_factor(storage_cfg, config),
-                saturation_load=storage_cfg.saturation_load,
                 capacity_bytes=capacity_bytes,
                 used_bytes=int(status["used"]),
                 foreign_used_bytes=foreign_bytes,

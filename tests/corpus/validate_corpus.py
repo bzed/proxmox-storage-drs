@@ -622,11 +622,10 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
        ``exceeds_max_duration: true`` -- the pipeline's own payback/
        scheduling stage must never hand ``order_moves()`` a move it has
        already flagged as exceeding ``migration.max_single_move_duration``.
-    3. **Section 7.3's saturation guard, structurally.** A disk payback
-       rejected or deferred must not also appear as an accepted move --
-       the two lists (``payback.rejected_moves``/``deferred_moves`` and
-       ``moves``) are supposed to partition the candidate set, never
-       overlap.
+    3. **Rejected moves are not accepted moves.** A disk payback
+       rejected must not also appear as an accepted move -- the two lists
+       (``payback.rejected_moves`` and ``moves``) are supposed to partition
+       the candidate set, never overlap.
     4. **The plan never worsens the reserve shortfall.** The payback
        block's ``reserve_shortfall_bytes_after`` (the final ``Sigma r_s``
        over the executed plan, section 9.5) must not exceed
@@ -652,7 +651,7 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
          and the executed plan is what this check reads.
        * **``hard < soft``** (a deliberate dip, section 5.3.1): that
          scheduler guarantee no longer covers the endpoint, and a dropped
-         (rejected/deferred/deadlocked) move can leave a MILP endpoint
+         (rejected/deadlocked) move can leave a MILP endpoint
          higher than the solver's. A violation here is a real signal, not
          noise -- the heuristic trading reserve for balance is a known,
          documented limitation, not a bug in this check -- but it is the
@@ -687,15 +686,12 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
                         "migration.max_single_move_duration -- section 7.3's duration rule"
                     )
             payback = group_report.get("payback") or {}
-            rejected_or_deferred = set(payback.get("rejected_moves", [])) | set(
-                payback.get("deferred_moves", [])
-            )
-            overlap = accepted_keys & rejected_or_deferred
+            overlap = accepted_keys & set(payback.get("rejected_moves", []))
             if overlap:
                 violations.append(
                     f"{bundle.name} [{result.variant}]: group {group_report['name']!r} "
                     f"accepted move(s) {sorted(overlap)} also appear in payback's own "
-                    "rejected/deferred list"
+                    "rejected list"
                 )
             before = payback.get("reserve_shortfall_bytes_before")
             after = payback.get("reserve_shortfall_bytes_after")

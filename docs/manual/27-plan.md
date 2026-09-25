@@ -189,16 +189,6 @@ and left for you to review, not silently adjusted. See
   per disk.
 - **No automatic re-solve-and-shrink on a failing payback test** (see
   above) — reported, not fixed for you.
-- **The section 7.3 saturation-ceiling defer check only covers the
-  mirroring phase**, not a second, separate check for the *draining*
-  phase a `saferemove` wipe holds a storage in afterward — that needs
-  `schedule.py` to reason about which moves actually overlap in time,
-  which it does not do. The check itself is otherwise active for any
-  storage that configures `saturation_load` (still none in this
-  project's own dogfooding cluster) — a deferred move is reported
-  separately from a hard-duration-rejected one (`deferred_moves`, not
-  `rejected_moves`) and excluded from `apply` the same way. See
-  `docs/internals/96-payback.md`.
 - **`plan` itself still only reads `state.json`, never writes it.** Its
   gate reads real `last_balance` history when a group has one recorded
   (see `docs/internals/15-state.md`), and a disk/storage cooldown pins or
@@ -243,7 +233,5 @@ full `.total`, `evaluate_assignment()` re-scored at the same true weights
 outcome trigger itself — see above), `reserve_shortfall_bytes_before`/
 `_after` (`Σ r_s` on the current assignment and on the plan's executed
 endpoint, what `repair_exempt` is decided from), `rejected_moves` (disk
-keys failing the hard duration rule), `deferred_moves` (disk keys deferred
-by the section 7.3 saturation guard — empty unless a storage in the group
-configures `saturation_load`) and `accepted` (`aggregate_ok` and neither
-list non-empty).
+keys failing the hard duration rule) and `accepted` (`aggregate_ok` and
+`rejected_moves` empty).

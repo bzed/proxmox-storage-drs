@@ -376,13 +376,7 @@ def test_time_window_start_equals_end_is_rejected(tmp_path: Path) -> None:
         config.load_config(str(path), env={})
 
 
-def test_missing_saturation_load_is_a_warning_not_an_error(tmp_path: Path) -> None:
-    path = write_config(tmp_path, minimal_config_dict())
-    resolved = config.load_config(str(path), env={})
-    assert any("saturation_load" in w for w in resolved.warnings)
-
-
-def test_configured_saturation_load_silences_the_warning(tmp_path: Path) -> None:
+def test_saturation_load_is_accepted_ignored_and_warns_once(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["groups"][0]["storages"] = [
         {"id": "san-a", "saturation_load": 64},
@@ -390,7 +384,21 @@ def test_configured_saturation_load_silences_the_warning(tmp_path: Path) -> None
     ]
     path = write_config(tmp_path, data)
     resolved = config.load_config(str(path), env={})
-    assert resolved.warnings == ()
+    assert sum("saturation_load is ignored" in w for w in resolved.warnings) == 1
+
+
+def test_saturation_ceiling_is_accepted_ignored_and_warns(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["migration"] = {"bwlimit_bytes_per_sec": 100 * 1024 * 1024, "saturation_ceiling": 0.85}
+    path = write_config(tmp_path, data)
+    resolved = config.load_config(str(path), env={})
+    assert sum("saturation_ceiling is ignored" in w for w in resolved.warnings) == 1
+
+
+def test_no_saturation_warning_when_neither_key_is_written(tmp_path: Path) -> None:
+    path = write_config(tmp_path, minimal_config_dict())
+    resolved = config.load_config(str(path), env={})
+    assert not any("saturation" in w for w in resolved.warnings)
 
 
 def test_payback_horizon_default_is_365d(tmp_path: Path) -> None:

@@ -97,7 +97,6 @@ def _make_storage(
         id=id_,
         capability_weight=1.0,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=10 * TIB,
         used_bytes=0,
         foreign_used_bytes=round(foreign_used_tib * TIB),
@@ -319,7 +318,7 @@ def test_end_to_end_repair_is_exempt_from_the_economic_test() -> None:
     assert benefit == pytest.approx(-123_114_070.59, rel=1e-3)
 
     excluded_disk_keys: frozenset[str] = frozenset(
-        mc.disk_key for mc in move_costs if mc.exceeds_max_duration or mc.saturation_deferred
+        mc.disk_key for mc in move_costs if mc.exceeds_max_duration
     )
     executed_final = executed_assignment(
         group, schedule_result.final_assignment, excluded_disk_keys

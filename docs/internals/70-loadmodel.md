@@ -152,13 +152,8 @@ Every disk in the group gets an entry, even an empty one — unlike
 at all: a forecaster's own `required_range()` is a much longer, coarser
 signal than that rule was built to validate, and a sparse history is
 exactly what the forecaster itself needs to see to distrust its own fit.
-This is section 10's raw material for the section 7.3 saturation guard:
-`cli.py`'s `_saturation_forecast_inputs()` calls it once per group, then
-feeds the result through `forecast.storage_upper_bound()` to get each
-move's `l_hat_src`/`l_hat_dst` — see
-[`96-payback.md`](96-payback.md) for how `payback.py` uses those two
-figures to reject a move that would push a target storage's own forecast
-load past that storage's configured `saturation_load`.
+This is section 10's raw material for a forecast of each disk's load
+(phase 14b wires it into `cli.py`).
 
 ## What `loadmodel.py` is, and is not, responsible for
 
@@ -166,8 +161,8 @@ load past that storage's configured `saturation_load`.
 `compute_group_load()`'s `ℓ_d`/`L_s`/`u_s` feed `gates.py`'s drift/imbalance
 gates ([`80-gates.md`](80-gates.md); `reserve.py`'s reserve override is
 computed separately, straight from the group's disks/storages, not through
-this module), and `compute_disk_load_series()` feeds the section 7.3
-saturation guard above — but this module decides none of those verdicts
+this module), and `compute_disk_load_series()` feeds a section 10 forecast — but this
+module decides none of those verdicts
 itself. `pve-storage-drs show-load` reports `ℓ_d`/`L_s`/`u_s` directly;
 deciding whether a group should be re-balanced at all is `gates.py`'s job,
 not this one's.

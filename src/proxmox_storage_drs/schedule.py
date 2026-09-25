@@ -46,9 +46,6 @@ forgotten -- see ``docs/internals/95-schedule.md``):
   needs; every move here is scheduled as if no cooldown applies and no
   other run's moves are already in flight, the same simplification
   ``gates.py`` already documents for ``last_load=None``.
-- **The section 7.3 saturation check.** Belongs with ``payback.py``
-  (implemented), which itself documents why the check is deferred (needs
-  a forecaster upper bound over an arbitrary horizon, not yet available).
 """
 
 from __future__ import annotations

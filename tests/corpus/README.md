@@ -145,7 +145,7 @@ Four kinds of assertion, in the order they run:
 2. **Invariants, not optima.** The reserve is satisfied wherever a reserve-feasible
    assignment exists; section 8.1's transient predicate holds at every step of the emitted
    order; every move targets a storage (C2) permits for that disk; section 7.3's per-move
-   duration rule and saturation guard hold for every accepted move; the objective handed to
+   duration rule holds for every accepted move; the objective handed to
    the scheduler equals the objective recomputed from the final assignment.
 3. **MILP versus heuristic on real data.** CBC and the heuristic solve the same
    bundle; the MILP objective must be `<=` the heuristic's. A heuristic that beats the MILP means the shared

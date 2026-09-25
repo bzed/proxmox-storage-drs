@@ -138,7 +138,6 @@ class StorageConfig:
     id: str
     capability_weight: float = 1.0
     reserve_factor: float | None = None
-    saturation_load: float | None = None
     # None means inherit the group's free_space.soft/.hard -- the same
     # per-storage-null-means-inherit rule reserve_factor already has
     # (section 5.3.1).
@@ -235,7 +234,6 @@ class MigrationConfig:
     max_single_move_duration_seconds: float = 21600.0  # 6h
     account_saferemove_wipe: bool = True
     wipe_load_weight: float = 1.0
-    saturation_ceiling: float = 0.85
     assume_thick_provisioning: bool = True
     # Below this size, a disk carries zero beta/gamma and needs no payback
     # verdict (section 5.4 D^big, section 7.1/7.3) -- comfortably above an
@@ -484,6 +482,7 @@ def load_config(
     warnings = _validate_semantics(
         config, require_connection=require_connection, free_space_written=_free_space_written(raw)
     )
+    warnings.extend(_ignored_saturation_warnings(raw))
 
     return ResolvedConfig(config=config, path=path, sha256=sha256, warnings=tuple(warnings))
 
@@ -601,7 +600,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
                     id=s["id"],
                     capability_weight=s.get("capability_weight", 1.0),
                     reserve_factor=s.get("reserve_factor"),
-                    saturation_load=s.get("saturation_load"),
                     free_space_soft=_parse_free_space_value(
                         s.get("free_space", {}).get("soft"),
                         where=f"groups[{g['name']!r}].storages[{s['id']!r}].free_space.soft",
@@ -654,7 +652,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         ),
         account_saferemove_wipe=mig_raw.get("account_saferemove_wipe", True),
         wipe_load_weight=mig_raw.get("wipe_load_weight", 1.0),
-        saturation_ceiling=mig_raw.get("saturation_ceiling", 0.85),
         assume_thick_provisioning=mig_raw.get("assume_thick_provisioning", True),
         tiny_disk_bytes=parse_size_bytes(mig_raw.get("tiny_disk_bytes", 67_108_864)),
     )
@@ -798,6 +795,33 @@ def _free_space_written(raw: dict[str, Any]) -> bool:
     if "free_space" in raw:
         return True
     return any("free_space" in s for g in raw.get("groups", []) for s in g.get("storages", []))
+
+
+def _ignored_saturation_warnings(raw: dict[str, Any]) -> list[str]:
+    """``migration.saturation_ceiling`` and ``groups[].storages[].saturation_load``
+    belonged to a storage-saturation guard that no longer exists: a migration
+    is throttled by ``migration.bwlimit_bytes_per_sec`` alone. The schema
+    keeps accepting both keys (it is closed, so removing them would turn every
+    config that ever set them -- and every committed diagnostic bundle --
+    into a validation error); they are read by nothing, and each warns once."""
+    warnings: list[str] = []
+    if "saturation_ceiling" in (raw.get("migration") or {}):
+        warnings.append(
+            "migration.saturation_ceiling is ignored: the storage saturation guard was "
+            "removed, migrations are throttled by migration.bwlimit_bytes_per_sec only; "
+            "delete the key"
+        )
+    if any(
+        s.get("saturation_load") is not None
+        for g in raw.get("groups", [])
+        for s in g.get("storages", [])
+    ):
+        warnings.append(
+            "groups[].storages[].saturation_load is ignored: the storage saturation guard "
+            "was removed, migrations are throttled by migration.bwlimit_bytes_per_sec only; "
+            "delete the key"
+        )
+    return warnings
 
 
 def _check_free_space_deprecation(
@@ -958,26 +982,6 @@ def _check_forecast_window(config: Config, errors: list[str]) -> None:
         )
 
 
-def _check_saturation_load(config: Config, warnings: list[str]) -> None:
-    """Warn (never error) where section 7.3's saturation guard is inactive.
-
-    The warning text itself names no section: a plain-language explanation
-    plus the exact config key to set is something an operator who has
-    never opened IMPLEMENTATION_PLAN.md can act on; a bare "section 7.3"
-    citation is not (the user's own words: "a normal user will not
-    understand" it, and "error messages must point to the instructions
-    with a wording" they can follow)."""
-    for group in config.groups:
-        for storage in group.storages:
-            if storage.saturation_load is None:
-                warnings.append(
-                    f"group {group.name!r} storage {storage.id!r}: no saturation_load "
-                    "configured, so migrations onto it are never checked against its I/O "
-                    "capacity before starting -- set groups[].storages[].saturation_load "
-                    "for it if you know the storage's queue-depth limit"
-                )
-
-
 def _check_payback_horizon(config: Config, warnings: list[str]) -> None:
     """Warn (never error) below the horizon section 7.2 treats as a sane assumption
     about VM lifetime -- ``payback_horizon > 0`` is already enforced structurally by
@@ -1073,7 +1077,6 @@ def _validate_semantics(
     _check_thick_provisioning(config, errors)
     _check_metrics(config, errors)
     _check_forecast_window(config, errors)
-    _check_saturation_load(config, warnings)
     _check_payback_horizon(config, warnings)
     _check_objective_weights(config, warnings)
     _check_time_windows(config, errors)

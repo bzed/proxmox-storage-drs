@@ -267,8 +267,8 @@ own report:
 
 ```
 {"event": "config_loaded", "level": "INFO", ...}
-{"event": "config_warning", "level": "WARNING", ... "no saturation_load configured ..."}
-{"event": "config_warning", "level": "WARNING", ... "no saturation_load configured ..."}
+{"event": "config_warning", "level": "WARNING", ... "migration.payback_horizon (…s) is below 30 days ..."}
+{"event": "config_warning", "level": "WARNING", ... "migration.payback_horizon (…s) is below 30 days ..."}
 {"event": "storage_pattern_expanded", "level": "INFO", ...}
 {"event": "optimize_backend_unavailable", "level": "WARNING", ... "solver.backend=cpsat requested but ortools is not importable"}
 ```
@@ -382,7 +382,7 @@ call site cannot silently add an unnameable member.
 | `replan` | INFO | Section 9.2's re-plan loop fired: which group, which attempt, why | built |
 | `deadlock` | WARNING | Section 8's scheduler could not order a move set | built |
 | `mode_override` | INFO / WARNING | `--mode` differs from the config; WARNING when it escalates (section 11.3) | as built, correct |
-| `config_warning` | INFO | Configuration advisories (e.g. a storage with no `saturation_load`) | built: INFO |
+| `config_warning` | INFO | Configuration advisories (e.g. a `payback_horizon` under 30 days) | built: INFO |
 | `storage_pattern_expanded` | DEBUG | A `/regex/` storage id matched a set | built: DEBUG |
 | `optimize_backend_unavailable` | DEBUG under `auto`, WARNING when that backend was explicitly configured | An optional solver dependency is not importable | built: DEBUG under `auto`, WARNING otherwise |
 | `solver_fallback` | WARNING | A configured backend produced no plan and the heuristic took over | as built, correct |
@@ -407,8 +407,8 @@ otherwise be quietly reverted:
   `cli._solve_group()` already suppresses its *own* fallback warning under `auto`; the inner probe
   must learn the same distinction, and must say `not available` rather than `requested but ...`
   when nobody requested it.
-- **`config_warning` is an advisory about a file, not an event in a run.** "Storage X has no
-  `saturation_load`" is equally true on every run until someone edits the config; repeating it at
+- **`config_warning` is an advisory about a file, not an event in a run.** "`payback_horizon` is
+  below 30 days" is equally true on every run until someone edits the config; repeating it at
   WARNING every 15 minutes trains operators to ignore warnings. It drops to INFO (so the audit
   trail still records what configuration was in force) and `verify-storages` — the command whose
   entire job is auditing storage configuration — reports it where an operator will act on it.
@@ -1166,7 +1166,7 @@ same physical unit as `raw_t`. Under the default weights the rescale is an exact
   left normalized to sum to 1, `ω = 1.0` would silently be `T_g` times too large — on a busy group
   with `T_g ≈ 20` every migration would look twenty times more expensive than it is and the payback
   test of §7.3 would reject almost everything.
-- §7.3's saturation guard and §5.3's big-M bound both need an absolute load scale.
+- §5.3's big-M bound needs an absolute load scale.
 - The worked example in §14 uses raw loads (`Σℓ = 7.4`, not 1.0) and is self-consistent only under
   this definition.
 
@@ -1235,7 +1235,6 @@ four groups is four small problems, not one large one.
 | `f_s` | snapshot reserve factor for `s` (default 2.0) |
 | `soft_s` | configured free-space requirement for `s`, in bytes — the plan endpoint (§5.3.1) |
 | `hard_s` | transient free-space floor for `s`, in bytes, `≤ soft_s` (§5.3.1, §8.1) |
-| `N_s` | saturation load of `s`, in in-flight I/O requests; optional, §7.3 only — not part of the MILP |
 
 **Provisioned size, never allocated size — on every storage type.** `z_d` is what the volume was
 *provisioned* at, and `Σ_d z_d·x_{d,s} + Uˢᵉˣᵗ` is what a storage is counted as holding, including on
@@ -1855,9 +1854,10 @@ comparable to `ℓ`, which is measured in the same units (§4). `cost_d` is ther
 **load-seconds**. The wipe is charged to the source only, because it is a sequential write over the
 old volume with nothing happening on the target; `ω_wipe` (`migration.wipe_load_weight`, default
 1.0) is its own weight so an operator who knows their array shrugs off a throttled zeroing pass can
-lower it without touching the mirror weights. §7.3 charges the same quantity to the saturation guard
-for the whole `draining` window. **Phase 14a removes that guard and the `headroom_src`/`headroom_dst`
-terms (never defined, never built): the mirror duration is `z_d / bwlimit`, full stop (§12.1).**
+lower it without touching the mirror weights. **The mirror duration is `z_d / bwlimit`, full stop:
+`migration.bwlimit_bytes_per_sec` is the only throttle a migration needs, and this tool does not model
+storage saturation while one runs (§12.1; REVIEW.md AL-04).** An earlier draft's `headroom_src`/
+`headroom_dst` terms were never defined and never built.
 
 **A disk below `migration.tiny_disk_bytes` costs nothing.** `cost_d = 0` when
 `z_d < tiny_disk_bytes` (default 64 MiB — comfortably above an EFI var store or TPM state, and far
@@ -1981,11 +1981,6 @@ verdict, while every hard rule below applies to it exactly as to any other move.
 test:
 
 - `duration_d > migration.max_single_move_duration` (default 6h) → reject the move;
-- the move would push either endpoint above `migration.saturation_ceiling · saturation_load` during
-  the mirror → defer the move to a later run rather than reject the plan (see below); skipped for a
-  storage with no `saturation_load` configured — **removed by phase 14a (§12.1, REVIEW.md AL-04):
-  migrations may run at any time, throttled by `migration.bwlimit_bytes_per_sec` alone; this bullet
-  and everything from "Defining 'during the mirror'" through the `N_s` paragraphs below go with it;**
 - the move violates the transient reserve invariant of section 8 → reject.
 
 **A plan that repairs is exempt from the aggregate test.** The trigger is the plan's *outcome*:
@@ -1997,15 +1992,15 @@ benefit already draws (`cli.py` evaluates its `final_breakdown` against it, not 
 solver's aspirational target): a partially deadlocked plan is scored on what it will really
 run, and a plan whose *target* repairs but whose schedule never gets there is not exempt.
 **"What it will really run" means after the hard per-move rules below have taken their moves
-out, not merely after ordering.** The two rules that fire at this gate rather than during
-scheduling — the `max_single_move_duration` rejection and the saturation-ceiling deferral —
-drop moves from what is executed but not from `schedule_result.order`, so a repair move either
-of them refuses would otherwise sit in the order, satisfy the trigger, and buy a **plan-level
+out, not merely after ordering.** The one rule that fires at this gate rather than during
+scheduling — the `max_single_move_duration` rejection —
+drops moves from what is executed but not from `schedule_result.order`, so a repair move it
+refuses would otherwise sit in the order, satisfy the trigger, and buy a **plan-level
 exemption for the balance moves that survive it** — the economic test skipped on a plan that no
 longer repairs, and whose shortfall §9.5 then reports as unmet. Take both sums over the move set
-the gate will actually execute (the order minus the refused and deferred moves), which is
-well-defined because neither refusal depends on the exemption: both are per-move verdicts on
-`cost_d`/`duration_d` alone, computed before the aggregate test is consulted. §8.1's transient
+the gate will actually execute (the order minus the refused moves), which is
+well-defined because the refusal does not depend on the exemption: it is a per-move verdict on
+`duration_d` alone, computed before the aggregate test is consulted. §8.1's transient
 invariant needs no such treatment — `order_moves()` enforces it while building the order, so a
 breaching move never reaches it in the first place. The
 outcome trigger, not a per-move flag, is what makes the mandate
@@ -2105,77 +2100,18 @@ a future bundle showing tiny moves emitted with `A_before = A_after` is evidence
 narrowest available fix being to require `A_before > A_after` for a zero-cost plan, which needs no
 threshold because the affinity debt moves in discrete steps.
 
-**Defining "during the mirror".** *(Removed by phase 14a, §12.1 — kept until then as the
-description of the built guard.)* `u_s` as used everywhere else is a p95 over the lookback window —
-a robust *statistic*, not an instantaneous reading — so adding an instantaneous `ω` to it would mix
-two different kinds of quantity. Define the check explicitly:
+**Migrations are throttled by `bwlimit`, and by nothing else.** A migration may run at any time. The
+tool does not model storage saturation — no per-storage queue depth, no forecast of the load a mirror
+would meet, no deferral. `migration.bwlimit_bytes_per_sec` is passed to every `move_disk` call and is
+the whole throttle; `max_single_move_duration`, the transient reserve invariant of §8.1 and
+`execution.cooldown_per_storage` (sized against the wipe time, §9.3) are the only per-move and
+per-storage limits. Earlier revisions carried a best-effort `saturation_load`/`saturation_ceiling`
+guard here; it was inactive unless an operator set a number that has no safe default, could only
+defer moves, and was removed by phase 14a (§12.1, REVIEW.md AL-04). Both config keys are still
+accepted, ignored and warned about, so an existing config keeps loading.
 
-```
-L_during(s)  =  L̂_s(duration_d)  +  Σ_{m in flight at s} ω_role(m,s)
-
-check:  L_during(s)  ≤  saturation_ceiling · N_s        for s ∈ {src, dst}
-```
-
-where `L̂_s(Δ)` is the **forecaster's upper bound on `L_s`** — the storage's *aggregate* load over a
-horizon equal to the move's expected duration (§10), in average in-flight I/O requests, the same
-units as `ℓ` (§4) and as `ω`. It is **not** the capability-normalized `u_s`; mixing the two here was
-the original defect in this rule.
-
-**`ω_role(m,s)` depends on the move's *state*, not only on its endpoints.** A move stays in the
-in-flight set `M` until it reaches `done` (§8.2). That is right for capacity, but a *fixed* role
-charge would be wrong for load: once the mirror has switched over, this move writes nothing more to
-the target, while the source is being **zeroed** for as long as `saferemove` takes. So:
-
-```
-state        charge on src(m)     charge on dst(m)
------------  -------------------  -----------------
-mirroring    ω_src                ω_dst
-draining     ω_wipe               0
-done         0                    0
-```
-
-`ω_wipe` is `migration.wipe_load_weight`, default 1.0 — the zeroing pass is one sequential writer,
-so 1.0 is the natural value and it is the same quantity §7.1 charges for `duration_wipe_d`. With
-this, a 44-hour wipe on a busy source stays visible to the saturation guard for its whole duration
-instead of vanishing from the check the moment `move_disk` reports OK, which is the only way the
-guard can protect the *next* move scheduled onto that storage. The capacity invariant of §8.1 needs
-no change: it already holds the move in `M` until `done`, and the source-side byte accounting of
-`mirroring` and `draining` is identical.
-
-Two honest caveats. The wipe is throttled by construction (10 MiB/s by default), so charging it a
-full `ω` is conservative — deliberately so, because the alternative is to under-count a storage that
-is busy zeroing 1.5 TiB. And this remains a best-effort guard: a deployment with no
-`saturation_load` set skips it entirely, and there `execution.cooldown_per_storage`, sized against
-the wipe time (§9.3), is the blunter mitigation that still works.
-
-**`N_s` is what the check is measured against, and it is not `c_s`.** `c_s` is a *relative*
-capability weight whose default is 1.0 and whose absolute value is meaningless — only the ratios
-between storages in a group affect the balance objective, so `saturation_ceiling · c_s` compares a
-physical queue depth against a dimensionless preference. That is dimensionally wrong in both
-directions: with `c_s = 1.0` a storage carrying an entirely healthy `L_s = 6.5` would fail a 0.85
-ceiling outright, and a storage weighted `c_s = 0.5` would be held to half the ceiling of its peer
-purely for being labelled less capable. Instead:
-
-```
-N_s = storages[].saturation_load     — the number of concurrent I/O requests storage s services
-                                       before queueing delay dominates. An absolute, physical
-                                       property of the array (roughly its effective queue depth).
-```
-
-`N_s` has **no safe default and is `null` unless the operator sets it**, in which case the check is
-skipped for that storage and `pve-storage-drs explain` says so. We cannot infer it: the observed peak `L_s` is
-not a capacity (an idle storage would get a tiny `N_s` and reject every migration onto it, which is
-exactly backwards), and neither `c_s` nor the LUN size tells us anything about queue depth. Obtain
-it from the array's documented queue depth, or empirically as the `L_s` at which measured latency
-starts climbing super-linearly. Sizing `N_s` in the same units as `ℓ` is straightforward because
-both come from the same Little's-law quantity.
-
-This is deliberately a **best-effort guard**, not a physical limit: even with `N_s` set we have no
-model of the array's true saturation point, only the load we can attribute to guests.
-`max_single_move_duration` and the transient reserve invariant of §8.1 are the hard bounds and are
-always active; this one exists to avoid the obviously bad case of starting a long mirror onto a
-storage that is already close to its service limit. A deployment that leaves every `saturation_load`
-unset is fully supported and loses only this one advisory check.
+The `draining` state below still matters, to capacity (§8.1) and ordering (§8.2): a move stays in
+`M` until its source volume is gone.
 
 If the plan fails the aggregate test, re-solve with `β` and `γ` doubled and retry, up to three times.
 This naturally converges on the smaller subset of high-value moves rather than abandoning the run —
@@ -2265,10 +2201,7 @@ version of this rule in the codebase.
 2. keeps `|M| ≤ max_concurrent_migrations`;
 3. keeps the count of in-flight moves touching any single storage — **as either source or target** —
    at or below `max_concurrent_per_storage`;
-4. respects the saturation check of §7.3, which sums `ω_role(m,s)` over **every** move still in
-   `M` at that storage — including moves in `draining`, whose source is charged `ω_wipe` and whose
-   target is charged nothing;
-5. violates no per-disk or per-storage cooldown.
+4. violates no per-disk or per-storage cooldown.
 
 With the default `max_concurrent_per_storage: 1`, two moves targeting the same storage serialize
 automatically and the generalized form collapses to the single-move form. That is the recommended
@@ -2322,11 +2255,7 @@ done:       source volume absent from /storage/{a}/content
 
 For the generalized transient invariant of §8.1 the *source-side* accounting of `mirroring` and
 `draining` is identical, so keep a move in `M` until it reaches `done` and the invariant needs no
-change at all. The *load* charge is not identical across the two states, and §7.3's `ω_role(m,s)`
-table is what distinguishes them: a draining move charges `ω_wipe` to its source and nothing to its
-target. Keeping the move in `M` is therefore what makes the wipe visible to the saturation guard as
-well as to the capacity check — which is the point, since the wipe is by far the longer of the two
-windows on a large disk. What does change is that ordering rule 2 — "moves that free space a later move needs"
+change at all. What does change is that ordering rule 2 — "moves that free space a later move needs"
 — cannot be satisfied within a run when the source wipes slowly. The scheduler must therefore treat a
 predicted free-space release as **unrealised until observed**, and a plan whose feasibility depends on
 one is split rather than executed on faith (§8.3, option 2).
@@ -2731,25 +2660,16 @@ this makes the distinction concrete rather than vacuous: the point estimate is `
 
 **As built (REVIEW.md T-03):** the decision statistic that actually drives the gates, solver,
 payback and ordering is `window.quantile` (the point estimate), computed once per group by
-`loadmodel.compute_group_load()`. The upper bound described above is real and exercised, but its
-only consumer is §7.3's saturation-ceiling guard, and only for a storage that configures
-`saturation_load` — the guard calls a `Forecaster` (built here, gated by the §10.2 backtest below)
-to get `L̂_s(Δ)`. Wiring the upper bound into the optimizer's own input, as this section describes,
-remains future work — **phase 14** (§12), tracked as REVIEW.md AL-01, records the design and its one
-deliberate default change; until then, treat every occurrence of "the optimizer consumes the upper
-bound" in this document as the target design, not the current behaviour.
+`loadmodel.compute_group_load()`. The upper bound described above was consumed only by §7.3's
+saturation guard, which phase 14a removed; nothing reads it now. Wiring the upper bound into the
+optimizer, as this section describes, is **not** the plan any more — see the next paragraph.
 
 **Superseded by phase 14 (§12.1).** The optimizer will not consume the upper bound: the decision
 statistic stays `window.quantile`, and `holt_winters` predicts that same quantile over the *next*
-`W` instead of the last one. The table above, the paragraph on the upper bound, and the per-storage
-`L̂_s(Δ)` paragraph below (the saturation guard's input, removed in 14a) are rewritten to §12.1 when
-phase 14 lands.
+`W` instead of the last one. The table above and the paragraph on the upper bound are rewritten to §12.1 when phase 14b lands.
+The per-storage `L̂_s(Δ)` sum that used to follow (the saturation guard's input) was removed in 14a.
 
-Forecasts are produced **per disk**. Where §7.3 needs a per-*storage* bound `L̂_s(Δ)`, it is the sum
-of the per-disk upper bounds over the disks assigned to `s` in the state being evaluated:
-`L̂_s(Δ) = Σ_{d : x_{d,s}=1} û_d(Δ)`. Summing upper bounds is conservative — it assumes the disks peak
-together — which is the right direction for a guard whose failure mode is starting a mirror onto an
-already-busy array.
+Forecasts are produced **per disk** (§12.1 point 2).
 
 Config validation (§11.1) must **reject** a configuration whose Prometheus retention or whose
 selected forecaster and window are mutually inconsistent, rather than silently degrading. Enabling a
@@ -2769,7 +2689,7 @@ seasonal model is a statement that the history exists to support it.
   to let a model whose backtest error exceeds the imbalance threshold drive migrations. **Phase 14b
   replaces the threshold with a baseline comparison (§12.1 point 3).**
 
-**As built (bug fix):** the live §7.3 saturation-guard fetch (`cli.py`'s
+**As built (bug fix):** the live per-disk forecast-history fetch (formerly `cli.py`'s
 `_saturation_forecast_inputs()`, via `loadmodel.compute_disk_load_series()`) used to issue one
 **unchunked** `query_range` over its whole computed range — `2 · window.lookback` from §10.2's own
 backtest-gate floor above, combined with a fine `metrics.step`, confirmed live to exceed a
@@ -2881,8 +2801,7 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `tiny_disk_bytes ≥ 0` | The size below which a disk moves free of `β`, `γ` and the payback test (§5.4, §7); `0` restores the old accounting |
 | `delta_capacity_spread ≥ 0`; warn when `> alpha_spread` | A negative weight would reward concentration; above `α`, data evenness outweighs I/O evenness in every comparison and the tool is no longer an I/O balancer first |
 | `capacity_spread_threshold > 0` where set, `null` disables | A ratio of fill fractions to the mean fill; it can legitimately exceed 1 (§14.2 measures 1.85) |
-| `saturation_ceiling ∈ (0,1]` | A fraction of `saturation_load`, not of `capability_weight` |
-| `saturation_load > 0` where set; warn once per run for each storage where it is unset | §7.3's guard is silently inactive without it |
+| `saturation_ceiling` / `saturation_load` written | Accepted and ignored, one warning each — the saturation guard was removed (§12.1) |
 | `max_concurrent_* ≥ 1` | Zero would deadlock the scheduler |
 | `execution.locks.wait_timeout > 0`, `on_timeout ∈ {skip, abort}` | A zero timeout turns every ordinary backup window into a failed run |
 | `execution.source_release.timeout ≥ z_max / saferemove_throughput` for every storage where saferemove is on | Otherwise every large move times out into `draining` (§9.3) |
@@ -3001,7 +2920,7 @@ nothing at all — stays checkable instead of silent:
   suffix after the closing slash.
 - **The entry's options apply to every storage it matches.** A pattern entry accepts the same
   per-storage options as a literal one (`capability_weight`, `reserve_factor`,
-  `saturation_load`, `free_space`), and every matched storage inherits them. This is the point of
+  `free_space`), and every matched storage inherits them. This is the point of
   the feature: one entry weights or reserves a whole LUN family. A pattern-level `free_space` is
   resolved per matched storage — a `"10%"` demands a tenth of *each* LUN's own capacity (§5.3.1).
 - **A literal entry beats a pattern.** Within one group, a storage named by a literal entry uses
@@ -3095,7 +3014,7 @@ model storage saturation around migrations — a migration may run at any time, 
 `migration.bwlimit_bytes_per_sec`, and that is the whole throttle. Keep it small; every item below
 that is not needed for that goal is out of scope.
 
-#### 14a — remove the §7.3 saturation guard (one commit)
+#### 14a — remove the §7.3 saturation guard (one commit) — **done**
 
 Why: it is the forecaster's only consumer today, it is inactive unless an operator sets
 `saturation_load` (which has no safe default, §7.3, and is set nowhere we know of), and all it can do
@@ -3695,7 +3614,7 @@ bug waiting to happen; this table is the audit.
 | `load_weights.iotime/ops/bytes` | §4, `ℓ_d` |
 | `load_weights.read_factor/write_factor` | §4, `raw_X(d)`, applied engine-side before normalization |
 | `window.lookback` | §3.4 reduction range |
-| `window.quantile` / `upper_quantile` | §10.1, point estimate (the actual decision statistic) vs. the bound (§7.3 saturation guard only — see the "As built" note in §10.1) |
+| `window.quantile` / `upper_quantile` | §10.1, point estimate (the actual decision statistic) vs. the bound (read by nothing since phase 14a; removed by 14b — see the "As built" note in §10.1) |
 | `window.min_coverage` | §3.4, disk data rejection |
 | `groups[].storages[].id` in pattern form (`/…/`) | §11.4 expansion into group membership; the entry's options apply to every matched storage |
 | `groups[].storages[].capability_weight` | §4, `u_s = L_s / c_s` |
@@ -3721,8 +3640,7 @@ bug waiting to happen; this table is the audit.
 | `exclude.skip_vms_with_snapshots` | §3.7, §5.3 (C2) pinning |
 | `objective.affinity_counts_pinned_disks` | §5.3 (C3) range: all of `D` (default) or `D^mov` |
 | `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
-| `migration.saturation_ceiling` | §7.3 `L_during(s) ≤ saturation_ceiling · N_s` |
-| `groups[].storages[].saturation_load` | §7.3 `N_s`; guard skipped when unset |
+| `migration.saturation_ceiling`, `groups[].storages[].saturation_load` | Accepted and ignored since phase 14a (§12.1); no formula |
 | `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity/delta_capacity_spread` | §5.4 (the `δ` term and the I/O-weighted `κ` term also enter §7.2's benefit) |
 | `objective.reserve_violation_penalty` | §5.3 (C5), *floor* for the single-stage `P` alternative |
 | `metrics.pvestatd_push_interval` | §11.1 `rate_window` validation; §3.3 `verify-metrics` |
@@ -4022,7 +3940,7 @@ between it and the recorded responses shows up as a key miss (§16.5) rather tha
 
 Everything else — `window`, `snapshot_reserve`, `free_space`, `gates`, `migration`, `objective`,
 `solver`, `execution`, `forecast`, `report`, the per-storage `capability_weight`/`reserve_factor`/
-`saturation_load`/`free_space` — is carried **verbatim**. Those knobs are the test case.
+`free_space` — is carried **verbatim**. Those knobs are the test case.
 
 #### What is deliberately preserved
 
@@ -4159,8 +4077,7 @@ Four kinds of assertion that do hold:
 2. **Invariants, not optima** — reconstructed from what `plan --json`'s own group report already
    records per variant (X-07): every move in the plan is to a storage (C2) permits for that group;
    no accepted move carries `exceeds_max_duration: true` (§7.3's duration rule); a disk payback
-   rejected or deferred never also appears as an accepted move (§7.3's saturation guard,
-   structurally). These are checkable without knowing the optimum, and they are what
+   rejected never also appears as an accepted move (structurally). These are checkable without knowing the optimum, and they are what
    `check_invariants()` actually asserts. Three properties this bullet used to claim as checked and
    is not: §8.1's per-step transient predicate needs the emitted *order*, which no `plan --json`
    field carries (the `Σ r_s` half of this gap is closed as of phase 13 — the payback block's

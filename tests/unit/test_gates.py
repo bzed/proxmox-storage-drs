@@ -359,7 +359,6 @@ def make_storage(id_: str, capacity_tib: float = 8.0) -> Storage:
         id=id_,
         capability_weight=1.0,
         reserve_factor=0.0,
-        saturation_load=None,
         capacity_bytes=round(capacity_tib * TIB),
         used_bytes=0,
         foreign_used_bytes=0,

@@ -116,7 +116,7 @@
                 "id": { "type": "string", "minLength": 1 },
                 "capability_weight": { "type": "number", "exclusiveMinimum": 0 },
                 "reserve_factor": { "type": ["number", "null"], "minimum": 0 },
-                "saturation_load": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+                "saturation_load": { "type": ["number", "null"], "exclusiveMinimum": 0, "deprecated": true },
                 "free_space": {
                   "type": "object",
                   "additionalProperties": false,
@@ -163,7 +163,7 @@
         "max_single_move_duration": { "type": ["string", "number"], "exclusiveMinimum": 0 },
         "account_saferemove_wipe": { "type": "boolean" },
         "wipe_load_weight": { "type": "number", "minimum": 0 },
-        "saturation_ceiling": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "saturation_ceiling": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "deprecated": true },
         "assume_thick_provisioning": { "type": "boolean" },
         "tiny_disk_bytes": { "type": ["string", "number"], "minimum": 0 }
       }

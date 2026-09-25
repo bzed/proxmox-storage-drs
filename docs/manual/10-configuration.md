@@ -342,17 +342,10 @@ nor suppresses a migration.
 
 Fraction in (0, 1), default `0.99`.
 
-The quantile the **saturation guard** actually consumes — must be
-`>= window.quantile`. (The saturation guard is the migration-time safety
-check, `migration.saturation_ceiling` below, that defers a move if it would
-push a storage's forecasted load past a configured ceiling; it runs only for
-a storage that sets `groups[].storages[].saturation_load`.) Being wrong in
-the direction of "busier than it looks" costs the guard deferring a move
-that was actually safe; the other direction risks the guard missing a
-mirror that pushes a storage past saturation. The optimizer itself still
-decides placement from `window.quantile`, the point estimate, not this
-upper bound; wiring the upper bound into the optimizer's own input remains
-future work. (`IMPLEMENTATION_PLAN.md` §10.1's "As built" note.)
+Read by nothing any more. It was the quantile a migration-time saturation
+guard consumed; that guard is gone (a migration is throttled by
+`migration.bwlimit_bytes_per_sec` alone), and the key is kept only so an
+existing config still loads. Must be `>= window.quantile`.
 
 ### `window.min_coverage`
 
@@ -444,7 +437,7 @@ ends with `/` — matching one or more storage ids (`IMPLEMENTATION_PLAN.md`
 section 11.4). A pattern is matched with `re.fullmatch` (case-sensitive)
 against the live cluster's storage inventory on every run, so `/san-.*/`
 picks up a LUN added after the config was written with no edit needed; its
-own entry's `capability_weight`/`reserve_factor`/`saturation_load` apply to
+own entry's `capability_weight`/`reserve_factor` apply to
 every storage it matches. A literal entry always overrides a pattern that
 also matches its storage, so one member of a pattern-matched family can
 still be pinned to different options. A storage may belong to **at most
@@ -486,24 +479,18 @@ storages — `"10%"` demands different byte counts on a 20 TiB and a 2 TiB
 LUN, which is the point: "a tenth of the LUN free" is one policy applied
 per storage, not one number shared across the family.
 
-### `groups[].storages[].saturation_load`
+### `groups[].storages[].saturation_load` (deprecated)
 
-Positive number or `null`, default `null`.
-
-The storage's approximate queue depth — the number of concurrent I/O
-requests it services before latency climbs super-linearly — in the same
-units as the load model (average in-flight I/O). Used only by the
-saturation guard on a migration's mirror (see `window.upper_quantile`
-above). **Has no safe default**: an idle storage's observed load is not its
-capacity, so leaving this `null` (the default) simply disables that one
-advisory check for the storage; the hard bounds always apply regardless —
-`migration.max_single_move_duration`, and the **transient reserve
-invariant**: the `snapshot_reserve` floor (below) checked against the
-storage's actual state *while a migration is in flight*, when a moving
-disk's source and target copies are both briefly fully allocated at once,
-not merely before and after. Obtain a real value for `saturation_load` from
-the array's documented queue depth, or by observing where latency actually
-starts climbing.
+Positive number or `null`. **Accepted and ignored**, with one warning per
+run when any storage sets it. It fed a per-storage saturation guard that
+deferred a migration when the storage's forecast load would pass a ceiling;
+that guard was removed. A migration may start at any time and is throttled
+by `migration.bwlimit_bytes_per_sec` alone; the hard bounds
+`migration.max_single_move_duration` and the **transient reserve
+invariant** (the `snapshot_reserve` floor checked against the storage's
+actual state *while a migration is in flight*, when a moving disk's source
+and target copies are both briefly fully allocated at once) are unchanged.
+Delete the key.
 
 ## `snapshot_reserve` — the free-space floor
 
@@ -607,10 +594,8 @@ Fraction, default `0.20`.
 The minimum relative spread across a group's storages before a plan is
 actually built. A group under this threshold is left alone even if it has
 drifted. Also, unrelatedly, this same value doubles as the backtest error
-ceiling a non-`quantile` `forecast.model` (`seasonal_naive`/`holt_winters`)
-must stay within before its forecast is trusted to drive the saturation
-guard for that group's run — see `forecast.model` below for how that
-backtest works.
+ceiling a non-`quantile` `forecast.model` must stay within — see
+`forecast.model` below.
 
 ### `gates.capacity_spread_threshold`
 
@@ -741,17 +726,14 @@ migration cost badly if that assumption is wrong.
 Weight, default `1.0`.
 
 In-flight I/O charged to the source for the whole `saferemove` wipe duration
-— both in the cost model and in the saturation guard, where a draining move
-charges this to its source and nothing to its target. The
-zeroing pass is one sequential writer, so `1.0` is the natural value.
+in the cost model. The zeroing pass is one sequential writer, so `1.0` is
+the natural value.
 
-### `migration.saturation_ceiling`
+### `migration.saturation_ceiling` (deprecated)
 
-Fraction in (0, 1], default `0.85`.
-
-The fraction of a storage's `saturation_load` (not of `capability_weight`) a
-move may drive it to. Inactive for any storage whose `saturation_load` is
-`null` — the default, since there is no safe way to infer it.
+Fraction in (0, 1]. **Accepted and ignored**, with one warning per run when
+it is written; see `groups[].storages[].saturation_load` above. Delete the
+key.
 
 ### `migration.assume_thick_provisioning`
 
@@ -788,8 +770,7 @@ Size, default `67108864` (64 MiB).
 A disk smaller than this carries zero `beta_move_count`/`gamma_move_bytes_per_tib`
 cost in the objective and zero `cost_d` in the payback model — it still
 counts as a scheduled move and every hard per-move safety rule
-(`max_single_move_duration`, the saturation guard, the transient reserve
-invariant) still applies to it exactly like any other move, but it needs no
+(`max_single_move_duration`, the transient reserve invariant) still applies to it exactly like any other move, but it needs no
 payback verdict and cannot make a plan fail the aggregate `payback_ratio`
 test. Together with `objective.kappa_vm_affinity`, this is what lets a tiny
 volume — an `efidisk0` var store or `tpmstate0`, both normally a few hundred
@@ -1026,7 +1007,7 @@ Integer `>= 1`, default `1`.
 How many moves may be in flight across the whole run at once, in `--mode
 auto` only (`dry-run`/`confirm` always run strictly sequentially
 regardless of this setting). Above `1` requires the *generalized* form of the transient reserve
-invariant (see `groups[].storages[].saturation_load` above for the
+invariant (see `snapshot_reserve.factor` above for the
 single-move definition): several disks can land on one storage at once, and
 none of their sources release space until each individually completes —
 `apply` re-checks it live before launching each move. Launch order stays strictly FIFO: `apply` never reorders the
@@ -1270,15 +1251,13 @@ and `holt_winters` need more history than the decision window alone — see
 below — and `pve-storage-drs` refuses to start if `window.lookback` (or your
 Prometheus retention) cannot supply it, rather than silently falling back.
 
-**Backtest-validated before use.** Only when the saturation guard is
-actually active (some `groups[].storages[].saturation_load` is set): a
-`seasonal_naive`/`holt_winters` model is fit on the older half of its own
-recent history and checked against what actually happened in the newer
-half, once per group, before it is trusted for that run. A model that
-misses by more than `gates.imbalance_threshold` — or that does not yet
-have enough history to backtest at all — falls back to `quantile` for that
-group's saturation guard this run, logged at warning. `quantile` itself is
-never backtested; there is nothing to validate and nothing more
+**Backtest-validated before use.** A `seasonal_naive`/`holt_winters` model is
+fit on the older half of its own recent history and checked against what
+actually happened in the newer half, once per group, before it is trusted
+for that run. A model that misses by more than `gates.imbalance_threshold`
+— or that does not yet have enough history to backtest at all — falls back
+to `quantile` for that group this run, logged at warning. `quantile` itself
+is never backtested; there is nothing to validate and nothing more
 conservative to fall back to. (`IMPLEMENTATION_PLAN.md` section 10.2.)
 
 ### `forecast.seasonal_lookback_days`
@@ -1303,7 +1282,7 @@ To fit **weekly** seasonality instead of daily (e.g. weekends look
 different from weekdays), widen this together with `window.lookback`:
 `seasonal_periods: 2016` (7d at the default 5m step) needs
 `window.lookback` of at least 28 days (`2 * 2016 * 5m`). The fetch behind
-this — both the live `plan`/`apply` saturation guard and
+this — both a live `plan`/`apply` and
 `collect-testdata` — is chunked into day-sized requests regardless of how
 wide the range gets, so a large `seasonal_periods`/`window.lookback`
 combination no longer risks exceeding a Prometheus-compatible backend's
@@ -1332,9 +1311,7 @@ The seasonal component passed to the same fit.
 Weight, default `2.0`.
 
 The upper bound is `point_estimate + residual_z * stdev(residuals)` from the
-in-sample fit — this is what the saturation guard actually consumes (see
-`window.upper_quantile` above for the equivalent under the `quantile`
-model; the optimizer itself does not consume this).
+in-sample fit. Nothing consumes it any more; phase 14b removes the key.
 
 ## `support` — diagnostic bundles
 

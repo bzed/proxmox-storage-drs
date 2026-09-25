@@ -7805,7 +7805,8 @@ terms) alive for no placement benefit.
 **Recommendation:** delete it (plan §12.1, 14a). Keep both config keys accepted-and-ignored with a
 warning so existing configs and the committed bundles still validate.
 
-**Status:** Open (scheduled: plan §12 phase 14a).
+**Status:** Fixed (phase 14a). The guard, `storage_upper_bound()` and every config/topology field
+are deleted; `saturation_load`/`saturation_ceiling` stay in the schema, are ignored and warn once each.
 
 ---
 
@@ -7833,8 +7834,8 @@ plan and this review agree on what "done" means before either is started.
 - **AL-03 → phase 15 (scheduled).** Phase row written: defaults once, on the dataclass; loader
   passes present keys only, through field-level converters; schema generated from or checked
   against the same source; zero behaviour change. Not started.
-- **AL-04 → phase 14a (scheduled).** Plan §12.1 lists what goes; §7.1/§7.3/§10.1 carry
-  "removed by phase 14a" notes until it lands. AL-01's design narrowed at the same time (14b).
+- **AL-04 → fixed (phase 14a).** Plan §12.1 listed what went; §7.1/§7.3/§10.1/§15.1 are rewritten.
+  AL-01's design was narrowed at the same time (14b, still open).
 - **AL-02 follow-up.** Stale CP-SAT mentions the removal missed (`README.md` ×2,
   `docs/manual/27-plan.md`, `run-with-system-python.sh`, `.agents/python-style.md`) fixed.
 

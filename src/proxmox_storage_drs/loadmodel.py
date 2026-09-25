@@ -10,8 +10,7 @@ per-storage `L_s`/`u_s` and group-wide `u*` that ``show-load`` and the
 gates/solver (not yet written) need. Every quantity here is in **average
 in-flight I/O requests** unless documented otherwise -- section 4 is
 explicit that the rescale back onto that absolute scale is not cosmetic:
-everything downstream (the saturation guard, the big-M bound, the objective
-weights) is calibrated against it.
+everything downstream (the big-M bound, the objective weights) is calibrated against it.
 """
 
 from __future__ import annotations
@@ -611,7 +610,7 @@ def compute_disk_load_series(
     per disk for the decision statistic. ``range_seconds``/``step_seconds``
     are the caller's own choice (typically
     ``forecast.required_range_seconds()``/``metrics.step_seconds`` -- see
-    ``payback.py``'s section 7.3 saturation guard, the one caller today),
+    the section 10 forecast, when one is used),
     not fixed to ``window.lookback`` the way :func:`compute_group_load`
     is: section 10.1 is explicit that a forecaster's own history
     requirement and the decision window are "genuinely different things."
