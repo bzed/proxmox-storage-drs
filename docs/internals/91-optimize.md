@@ -1,18 +1,32 @@
-# The MILP backends: CP-SAT and CBC
+# The MILP backend: CBC via pulp
 
 **What does this page answer?** How does `optimize.py` turn section 5.3's
-constraint set into a real CP-SAT/CBC model, why is the reserve solved in
-two lexicographic stages rather than one big-M objective, and what does
-`cli.py`'s backend dispatch actually do when a MILP solver is unavailable
-or fails? Describes `proxmox_storage_drs/optimize.py`.
+constraint set into a real CBC model (built through `pulp`), why is the
+reserve solved in two lexicographic stages rather than one big-M
+objective, and what does `cli.py`'s backend dispatch actually do when the
+MILP solver is unavailable or fails? Describes
+`proxmox_storage_drs/optimize.py`.
 
-## Both backends solve, then hand off to `heuristic.evaluate_assignment()`
+A CP-SAT (`ortools`) backend shared this module until REVIEW.md AL-02
+removed it: `ortools` is not in Debian, is excluded from vendoring by the
+plan's own dependency rules, and is not something operators install by
+hand on PVE hosts, so on every deployment `solver.backend: auto`
+resolved to CBC regardless. What went with it: the integral-coefficient
+scaling discipline of section 5.5's former CP-SAT paragraphs (the
+`K`/`W` scales, per-coefficient constant folding, the `γ`-quantization
+trap of REVIEW.md F-14, the S-09 int64 assertions), the
+`cpsat_available()` probe, the `cpsat` arm of `cli.py`'s cascade and of
+the corpus sweep matrix, and a `pip install ortools` exception in GitHub
+Actions. Any future integer backend must re-earn F-14's analysis rather
+than inherit it.
+
+## The backend solves, then hands off to `heuristic.evaluate_assignment()`
 
 `solve()` builds a model, extracts the winning `x_{d,s}` assignment, and
 immediately calls the *same* `heuristic.evaluate_assignment()` the
 heuristic backend uses to produce the reported
 `ObjectiveBreakdown` — one implementation of the section 5.4 objective,
-shared by every backend (AGENTS.md section 5; `heuristic.py`'s own module
+shared by the solver and the heuristic alike (AGENTS.md section 5; `heuristic.py`'s own module
 docstring was written anticipating exactly this: "built specifically so
 `optimize.py` can call the identical function"). A modeling mistake in
 this module can therefore make the solver choose a *suboptimal* assignment
@@ -40,85 +54,43 @@ second code path for. `Σ r_s > 0` in a lexicographic result provably means
 
 **That proof depends on stage 1 actually being solved to proven
 optimality, not merely to `solver.mip_gap`** (REVIEW.md S-07). An earlier
-revision applied the same `mip_gap` to both stages: CP-SAT's stage 1
-accepted `FEASIBLE` (an incumbent, not a proven minimum) whenever the gap
-was satisfied, and PuLP's own `LpStatus` string is `"Optimal"` whether
-CBC proved the bound or merely stopped because `gapRel` was satisfied --
+revision applied the same `mip_gap` to both stages, and PuLP's own
+`LpStatus` string is `"Optimal"` whether CBC proved the bound or merely
+stopped because `gapRel` was satisfied —
 either way, stage 2 then pinned `Σ r_s` to that unproven incumbent
 (`==`), which can both accept a shortfall up to the gap *and* forbid
-finding less of it. Fixed by forcing stage 1's own gap to `0` in both
-backends regardless of the configured `solver.mip_gap` (which now applies
-to stage 2's real objective alone), requiring CP-SAT's stage 1 status to
-be exactly `OPTIMAL` (never `FEASIBLE`), and changing stage 2's slack
-constraint from `==` to `<=` in both backends -- monotone-safe (stage 2
+finding less of it. Fixed by forcing stage 1's own gap to `0` regardless
+of the configured `solver.mip_gap` (which now applies
+to stage 2's real objective alone) and changing stage 2's slack
+constraint from `==` to `<=` -- monotone-safe (stage 2
 can never do worse than the now-proven stage-1 value) rather than brittle
 against a hypothetical disagreement between the two solves. Cheap in
 practice: stage 1 is a near-feasibility problem that closes instantly on
 realistic groups, so forcing an exact proof costs nothing measurable.
 
-## CP-SAT: section 5.5's exact integer scaling
-
-Every coefficient is folded and rounded exactly as section 5.5 specifies:
-
-- `_LOAD_SCALE` (`K = 10⁶`) scales every load-valued quantity (`e_s`, `t`,
-  `u*`). (C6)'s per-(disk, storage) coefficient is `a_{d,s} = round(K ·
-  ℓ_d / c_s)` — folded and rounded *once*, per the plan's own warning
-  against computing `round(K/c_s)` and multiplying separately (which
-  rounds the capability weight itself and would make CP-SAT and CBC
-  disagree for a non-integer `c_s`).
-- `_WEIGHT_SCALE` (`W = 10⁴`) scales every objective weight
-  (`α`/`β`/`γ`/`κ` — section 5.4's imbalance, move-count, moved-bytes and
-  VM-affinity weights, `objective.alpha_spread`/`beta_move_count`/
-  `gamma_move_bytes_per_tib`/`kappa_vm_affinity` in config, the same four
-  `heuristic.py` computes `ObjectiveBreakdown` from — see
-  `90-heuristic.md`). The `γ` term folds `z_d` into its own coefficient
-  (`round(γ·W·K·z_d^TiB)`) rather than factoring out a standalone
-  `γ_scaled = round(γ·K/2²⁰)` — the plan's own worked example of *why*
-  that shortcut is wrong: at the default `γ = 0.05/TiB`, it rounds to
-  zero and CP-SAT would silently stop caring about disk size when
-  choosing what to move.
-- Every size-valued quantity (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`,
-  `Uˢᵉˣᵗ`, `soft_s`/`hard_s`) is a whole-MiB integer (`_mib()`), already
-  exact, needing no scale of its own. `soft_s` is `storage.
-  free_space_soft_bytes` — resolved once per storage by `topology.py`
-  (`60-topology.md`), never a scalar threaded in from config; `r[s.id] >=
-  _mib(s.free_space_soft_bytes)` is the model's other one-sided bound on
-  `R_s`, alongside the `reserve_factor·Z_s` one below.
-- `_RESERVE_FACTOR_SCALE` is this module's own addition, not named in the
-  plan: (C5)'s `R_s ≥ f_s·Z_s` multiplies a *variable* (`Z_s`) by
-  `reserve_factor`, which section 5.5's "fold constants into a
-  coefficient" recipe does not directly cover (that recipe is for a
-  constant multiplying a *binary* decision variable). Expressed instead
-  as `SCALE·R_s ≥ round(f_s·SCALE)·Z_s` with `SCALE = 10⁶` — a single
-  linear constraint, correct to within `1/SCALE` MiB, utterly negligible
-  next to any real disk size.
-
-Section 5.5 also asks for two build-time assertions guarding this
-folding, and `_cpsat_objective_terms()` now has both (REVIEW.md S-09):
-`_assert_nonzero_when_weighted()` catches exactly the `γ` trap the
-paragraph above describes — a non-zero configured weight whose *rounded*
-coefficient collapsed to `0` (only ever a sub-kilobyte disk at the
-default `γ`, per `test_gamma_trap_assertion_fires_end_to_end_for_a_sub_kilobyte_disk`)
-— and `_assert_objective_magnitude_within_int64()` checks a coarse,
-deliberately conservative worst-case sum of every term against `2⁶²`,
-an order of magnitude under CP-SAT's own `2⁶³-1` domain limit. Neither
-applies to CBC, whose continuous, unscaled model has no analogous
-overflow risk.
-
-`AddHint(x[d, σ₀(d)], 1)` warm-starts every candidate from the current
-assignment, in both stages (harmless when unused, and stage 1's own
-optimum is frequently "keep everyone where they are" when nothing already
-violates (C5)).
-
-## CBC: "direct transcription", deliberately not scaled
+## CBC via pulp: "direct transcription", deliberately unscaled
 
 The plan's own words for this backend: "continuous `e_s`, `Z_s`, `r_s` are
 fine." `_cbc_feasibility_constraints()`/`_cbc_objective_terms()` write the
-identical constraints CP-SAT does, but with plain floats — no
-`_LOAD_SCALE`/`_WEIGHT_SCALE` anywhere, because CBC needs none of
-CP-SAT's integer-coefficient discipline. `solver.mip_gap` and
-`solver.time_limit_seconds` map onto `pulp.COIN_CMD(gapRel=...,
-timeLimit=...)` directly.
+section 5.3/5.4 constraints directly, in plain floats — no scaling
+anywhere, no integer-coefficient discipline to satisfy.
+`solver.mip_gap` and `solver.time_limit_seconds` map onto
+`pulp.COIN_CMD(gapRel=..., timeLimit=...)` directly.
+
+Every size-valued quantity (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`,
+`Uˢᵉˣᵗ`, `soft_s`/`hard_s`) is expressed in whole MiB (`_mib()`) and
+every load in section 4's average in-flight I/O requests, before the
+weights are applied — not for exactness (floats would be exact enough)
+but for LP conditioning: raw bytes (~10¹²-10¹⁴) alongside load values
+(~1-10) badly condition the matrix for CBC's simplex, and CBC does not
+raise on that, it silently returns a numerically poor "optimal"
+(confirmed on a real corpus bundle, where an unscaled model made CBC's
+own post-plan spread almost 100× worse than the heuristic's on the same
+weights). `soft_s` is `storage.
+free_space_soft_bytes` — resolved once per storage by `topology.py`
+(`60-topology.md`), never a scalar threaded in from config; `r[s.id] >=
+_mib(s.free_space_soft_bytes)` is the model's one-sided bound on
+`R_s`, alongside the `reserve_factor·Z_s` one.
 
 Every variable is built with `_lp_variable()`, a thin wrapper around the
 direct `pulp.LpVariable(name, ...)` constructor — **not**
@@ -152,38 +124,31 @@ that fails for some other reason (a malformed model, a killed subprocess)
 — either way, still "this backend cannot produce a plan", never a bare
 traceback.
 
-## `kappa*w_v` and `D^big`: the same weighting in both backends
+## `kappa*w_v` and `D^big`: weighting folded as data
 
 Section 5.4's `w_v = max(1, l_v/l_bar)` is data, not a variable — computed
 once per group by `heuristic.compute_vm_weights()` (imported by this
 module, never recomputed here) and folded into a **per-vmid** `kappa`
 coefficient, exactly like `u*`/`b_bar` are already folded elsewhere in this
-file. CP-SAT builds `kappa_scaled_values: dict[int, int]` in place of the
-old single flat `kappa_scaled` — `round(kappa·W·K·w_v)` per vmid, each
-still guarded by `_assert_nonzero_when_weighted()` — and
-`_assert_objective_magnitude_within_int64()`'s own worst-case bound sums
-`abs(k)` over that dict instead of multiplying one flat value by
-`num_vmids`. CBC does the continuous equivalent: `kappa · w_v` multiplies
-each vmid's own `pulp.lpSum(y[v, s.id] ...)` term directly.
+file: `kappa · w_v` multiplies each vmid's own `pulp.lpSum(y[v, s.id] ...)`
+term directly, at full float precision.
 
 `D^big = {d : z_d >= migration.tiny_disk_bytes}` restricts `beta`/`gamma`
 to `movable` disks at or above the configured threshold — not a coefficient
-of `0` for an excluded disk, but the disk's terms skipped entirely (so
-`_assert_nonzero_when_weighted()` never fires for one; a deliberately
-excluded coefficient is not the rounding-to-zero bug that assertion
-exists to catch). Both changes are exercised end to end, not just at the
+of `0` for an excluded disk, but the disk's terms skipped entirely. This is
+exercised end to end, not just at the
 coefficient level, by `test_optimize.py`'s
 `test_tiny_disk_bytes_lets_a_tiny_disk_reunite_with_its_vm_for_free` — a
 1 MiB `efidisk0` that is not worth a full `beta` migration at
 `tiny_disk_bytes: 0` becomes free to reunite with its VM once the
-threshold covers it, on both backends — and by
+threshold covers it — and by
 `tests/unit/test_affinity_repair_fixture.py`, which runs section 14.7's
-whole fixture through `solve()` for both backends and confirms they agree
+whole fixture through `solve()` and confirms it agrees
 with the heuristic.
 
-## `(C1)`/`(C3)`/`(C4)`/`(C5)` are shared code, factored once per backend
+## `(C1)`/`(C3)`/`(C4)`/`(C5)` are shared code, built once per stage
 
-`_cpsat_feasibility_constraints()`/`_cbc_feasibility_constraints()` build
+`_cbc_feasibility_constraints()` builds
 exactly the constraints both lexicographic stages need identically — only
 the *objective* differs between stage 1 (`Minimize(Σ r_s)`) and stage 2
 (the real section 5.4 objective, with `Σ r_s` fixed to stage 1's result as
@@ -203,8 +168,8 @@ pinned disk).
 
 ## `cli.py`'s dispatch: `auto` cascades, an explicit backend still falls back
 
-`cli._solve_group()` implements `solver.backend`'s four values:
-`"auto"` tries `cpsat` then `cbc`; `"cpsat"`/`"cbc"` try only that one;
+`cli._solve_group()` implements `solver.backend`'s three values:
+`"auto"` tries `cbc`; `"cbc"` tries only that one;
 `"heuristic"` skips `optimize.solve()` entirely. Whichever backend
 `solve()` cannot use (library not importable, or no feasible solution
 within `solver.time_limit_seconds`) returns `None` — never an exception —
@@ -213,19 +178,19 @@ and `_solve_group()` moves to the next one in the cascade, ending at
 **even to an explicitly forced backend**: section 13's failure-mode table
 says "solver infeasible or timing out -> fall back to the heuristic;
 never emit a partial/unvalidated assignment", with no carve-out for
-`solver.backend: cpsat` specifically. The one difference: falling back
-from an *explicit* backend logs a warning (an operator who named `cpsat`
+`solver.backend: cbc` specifically. The one difference: falling back
+from an *explicit* backend logs a warning (an operator who named `cbc`
 to reproduce a specific result should not have to diff `--json` output to
 notice `auto` quietly ran instead); falling back within `auto` itself is
 expected and silent. `plan`'s human and `--json` output both report which
-backend actually produced each group's plan (`solver: cpsat (optimal)` /
-`"solver_backend": "cpsat", "solver_status": "optimal"`), precisely so
+backend actually produced each group's plan (`solver: cbc (optimal)` /
+`"solver_backend": "cbc", "solver_status": "optimal"`), precisely so
 that distinction is never hidden.
 
-## The storage cooldown: enforced in both stages, both backends (REVIEW.md S-04)
+## The storage cooldown: enforced in both stages (REVIEW.md S-04)
 
-`_cpsat_feasibility_constraints()`/`_cbc_feasibility_constraints()` both
-take `cooldown_storages` now and add one constraint per `(d, s)` pair
+`_cbc_feasibility_constraints()`
+takes `cooldown_storages` and adds one constraint per `(d, s)` pair
 where `s` is in it and is not `d`'s current storage: `x_{d,s} = 0`.
 Applied inside the shared feasibility-constraint builder, it lands in
 *both* lexicographic stages automatically (built once per stage, per
@@ -242,7 +207,7 @@ unenforced, reasoning that cooldowns were inert anyway since nothing
 wrote `state.json`'s cooldown timestamps yet. That reasoning stopped
 holding the moment `execute.py`/`apply` (phase 7) started calling
 `state.with_recorded_cooldown()` — from that point on, `solver.backend:
-auto`'s default cascade to CP-SAT/CBC could plan straight through a
+auto`'s cascade to the MILP could plan straight through a
 cooldown the heuristic would have respected, silently disagreeing with it
 on the exact case the cooldown exists for. Fixed as above.
 
@@ -264,42 +229,40 @@ two-phase solve — a real, separately-scoped piece of work.
 
 **(C2) format-compatibility eligibility is implemented**, in the same
 place and the same way as the cooldown fix just above: `_fixed_zero_pairs()`
-is the one generator both `_cpsat_feasibility_constraints()` and
-`_cbc_feasibility_constraints()` call to decide which `(disk, storage)`
+is the one generator `_cbc_feasibility_constraints()`
+calls to decide which `(disk, storage)`
 pairs get `x_{d,s}=0`, yielding a pair whenever the storage is in
 `cooldown_storages` **or** `topology.storage_accepts_format(s, d.format)`
 is false — one shared function rather than the cooldown check and the
-format check duplicated inline in each backend (which is what pushed
-`_cpsat_feasibility_constraints()` over this project's own complexity
-limit the first time both were written inline; factoring the *decision*
-out, not just the loop, is what brought it back under). A disk already
+format check duplicated inline in the model builder (factoring the
+*decision* out, not just the loop, is what keeps the builder under this
+project's own complexity limit). A disk already
 resident on a storage is never fixed away from it by either rule.
 
 ## Deliberately not implemented in this pass
 
-- **A live cluster's numpy/pandas footprint.** `ortools` pulls in numpy
-  (and numpy pulls in nothing further this project cares about) purely as
-  its own transitive dependency; nothing in this project imports numpy
-  directly. A recent numpy's bundled type stubs use syntax newer than this
-  project's `python_version = "3.11"` mypy target, which `mypy`'s
-  `follow_imports = "skip"` (used for `ortools.*` itself) cannot rescue,
-  because a stub-level *parse* error happens before mypy ever gets to
-  apply a per-module setting to it. This surfaces whenever `ortools` (via
-  `pip install -e .[solver]`) or `statsmodels`'s own `[forecast]` extra
-  happens to pull in an affected numpy version into the *same* venv
-  `mypy` runs against -- verified directly (extending the `follow_imports
-  = "skip"` override to `pulp.*`/`statsmodels.*`/`numpy.*` itself does not
-  rescue it either, it is that hard a parse error). `make typecheck` does
+- **A live cluster's numpy/pandas footprint.** `statsmodels` (the
+  `[forecast]` extra) pulls in numpy purely as its own transitive
+  dependency; nothing in this project imports numpy directly. A recent
+  numpy's bundled type stubs use syntax newer than this project's
+  `python_version = "3.11"` mypy target, and no per-module mypy setting
+  can rescue it, because a stub-level *parse* error happens before mypy
+  ever gets to apply a setting to it. (When the former `ortools` backend
+  existed, its own numpy dependency surfaced the same problem through
+  `pip install -e .[solver]` — verified directly, extending an override
+  to `pulp.*`/`statsmodels.*`/`numpy.*` does not rescue it either, it is
+  that hard a parse error.) `make typecheck` does
   not risk this at all: it runs mypy against its own dedicated
   `.venv-typecheck` (`make venv-typecheck`, `.[dev]` only), never the
   `.venv` that `make test`/`make cov` install `solver`/`forecast` into for
   full backend coverage -- a *separate* venv, not a reused one later
   cleaned up, so nothing either target does to `.venv` can ever reach it.
-  See the `Makefile`'s own comment on `TCVENV`. Both MILP
-  backends were verified for real during development (`pip install
+  See the `Makefile`'s own comment on `TCVENV`. The CBC backend was
+  verified for real during development (`pip install
   -e .[solver]`, all of `test_optimize.py` passing and reproducing the
-  section 14 and `reserve-tradeoff.yaml` fixtures' exact numbers for both
-  CP-SAT and CBC) — see `tests/unit/test_optimize.py`'s own docstring.
+  section 14 and `reserve-tradeoff.yaml` fixtures' exact numbers —
+  first with both backends, before CP-SAT's removal) — see
+  `tests/unit/test_optimize.py`'s own docstring.
   That first pass installed pulp 3.3+ from PyPI, not the version actually
   packaged for the deployment target — a gap REVIEW.md's tenth pass
   caught (S-01): `python3-pulp 2.7.0+dfsg` (Debian trixie, also what CI's
@@ -320,19 +283,16 @@ resident on a storage is never fixed away from it by either rule.
   one pip happens to resolve.
 
   That first verification pass was a one-off, done by hand. It no longer
-  is, in either place this project runs tests, though the two get there
-  differently. CI (`.github/workflows/tests.yml`'s "test" job) has one
-  container, no separate venvs: `coinor-cbc`/`python3-pulp` are apt
-  packages installed up front (CBC's cases need nothing else), and
-  `ortools` is `pip install`ed as its own step, placed *after*
-  `make SYSTEM_TOOLS=1 typecheck` runs, never before it — the numpy/mypy
-  footprint above is exactly why that ordering matters there, since
-  `SYSTEM_TOOLS=1` points every tool straight at the one system Python,
-  with nothing to isolate `mypy` from what that `pip install` just added.
-  Locally, `make test`/`make cov` install `solver`/`forecast` into
+  is, in either place this project runs tests. CI
+  (`.github/workflows/tests.yml`'s "test" job) apt-installs
+  `coinor-cbc`/`python3-pulp` up front, and
+  nothing pip-installs anything any more — the former `ortools` step was
+  removed with the backend (AL-02), which also removed the only ordering
+  constraint that single-container environment ever had. Locally,
+  `make test`/`make cov` install `solver`/`forecast` into
   `.venv` themselves (loudly, never fatally, if that install fails —
-  `Makefile`'s own `SOLVER_EXTRAS`), so `test_optimize.py`'s cpsat cases
+  `Makefile`'s own `SOLVER_EXTRAS`), so the CBC cases
   run there too without a developer needing to know to do it by hand;
   `make typecheck` never touches that venv at all, using its own
   `.venv-typecheck` instead, so there is no ordering to get right the way
-  CI's single environment needs.
+  CI's single environment once needed.

@@ -356,16 +356,6 @@
         "solver_backend": "cbc",
         "spread_metric": "l1"
       }
-    },
-    {
-      "report": null,
-      "skipped": "not swept without --full-matrix",
-      "variant": {
-        "beta": 0.0,
-        "forecast_model": "quantile",
-        "solver_backend": "cpsat",
-        "spread_metric": "l1"
-      }
     }
   ],
   "schema_version": 1

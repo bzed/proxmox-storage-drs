@@ -286,7 +286,7 @@ neither being non-empty.
   count, and a VM's pinned disks exerted no pull on its movable ones — two
   528 KiB `efidisk0` moves on a real cluster were emitted on a `3.6e-7`
   capacity-spread difference — a relative improvement of `6e-8`, on which
-  CP-SAT and CBC did not even agree — with a `kappa` gain of exactly
+  the then-two MILP backends (CP-SAT and CBC) did not even agree — with a `kappa` gain of exactly
   zero, each one a live migration holding a VM lock and burning
   `gates.cooldown_per_storage` on its target. Correcting that default
   turned the same two moves into genuine reunifications worth a discrete

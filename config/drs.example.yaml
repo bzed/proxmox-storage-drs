@@ -317,7 +317,7 @@ objective:
   reserve_violation_penalty: 1000.0
 
 solver:
-  backend: auto          # auto | cpsat | cbc | heuristic
+  backend: auto          # auto | cbc | heuristic
   time_limit_seconds: 60
   mip_gap: 0.02
   heuristic_iterations: 5000

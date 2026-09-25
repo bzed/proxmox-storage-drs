@@ -45,11 +45,11 @@ Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the 
 ```
 
 The `solver:` line names whichever backend actually produced this plan --
-`heuristic`, `cpsat` or `cbc` -- plus, for a MILP backend, `(optimal)` or
+`heuristic` or `cbc` -- plus, for the MILP backend, `(optimal)` or
 `(feasible)` (the gap was not proven closed within `solver.time_limit_seconds`,
 but a solution was still found). It is not always what `solver.backend`
-says: `auto` tries CP-SAT then CBC before the heuristic, and even an
-explicitly forced `cpsat`/`cbc` falls back to the heuristic (logged as a
+says: `auto` tries CBC before the heuristic, and even an
+explicitly forced `cbc` falls back to the heuristic (logged as a
 warning in that case) rather than failing the whole run, if that library
 is not installed or cannot solve within the time limit -- see
 `docs/internals/91-optimize.md`.
@@ -221,8 +221,8 @@ and left for you to review, not silently adjusted. See
 
 `--json` emits `groups[]`, each with `gate` (identical shape to
 `show-load`'s), `solver_backend`/`solver_status` (`null`/`null` when the
-gate said `NO ACTION`; otherwise `"heuristic"`/`null`, or `"cpsat"`/
-`"cbc"` with `"optimal"`/`"feasible"` -- the same information the human
+gate said `NO ACTION`; otherwise `"heuristic"`/`null`, or `"cbc"`
+with `"optimal"`/`"feasible"` -- the same information the human
 output's `solver:` line names), `moves[]` (`disk_key`, `vmid`, `vm_name`, `device`,
 `from_storage`, `to_storage`, `size_bytes`, `imbalance_reduction`,
 `repair` (the section 7.3 revert-test marker — see "The `payback:` line"

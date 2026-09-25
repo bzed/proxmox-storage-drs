@@ -9,7 +9,7 @@ section 2 architecture actually exists right now?
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
 gate, solve, cost, order, execute. As of this page, all seven exist, with
 **two** interchangeable stage-4 (solve) backends — the dependency-free
-heuristic and the MILP (CP-SAT/CBC) path — selected by `solver.backend`.
+heuristic and the MILP (CBC via `pulp`) path — selected by `solver.backend`.
 Stage 7 (execute) is real for all three `execution.mode` values,
 including `auto`'s own section 9.1 time-window/migration-count budgets,
 section 9.2 re-plan loop, and section 8.1/9.2's concurrent execution
@@ -67,7 +67,7 @@ utilization — all four in [`70-loadmodel.md`](70-loadmodel.md).
                                      reserve override / drift / imbalance, section 6)
                                                       │
                           heuristic.py (run_heuristic():          optimize.py (solve():
-                          seed / repair / descend,                 CP-SAT / CBC, lexicographic
+                          seed / repair / descend,                 CBC via pulp, lexicographic
                           section 5.4/5.5)                         reserve solve, section 5.5)
                                       └───────────────┬────────────────────┘
                                                       ▼
@@ -113,7 +113,7 @@ utilization — all four in [`70-loadmodel.md`](70-loadmodel.md).
 | `loadmodel.py` | `compute_group_load()`: the raw-series-to-`ℓ_d` blend, `min_coverage` rejection, current `L_s`/`u_s` | section 4 |
 | `gates.py` | `evaluate_group_gates()`: reserve override, drift, imbalance — the act/no-act verdict, with reasoning | section 6 |
 | `heuristic.py` | `run_heuristic()`: seed/repair/descend, and `evaluate_assignment()`, the section 5.4 objective shared with the MILP path too; every candidate-generating helper excludes a (C2) format-ineligible target | sections 5.4/5.5, 5.3 (C2) |
-| `optimize.py` | `solve()`: CP-SAT/CBC, section 5.3's constraints (including (C2) format eligibility, `_fixed_zero_pairs()`), the lexicographic two-stage reserve solve | section 5.5, 5.3 (C2) |
+| `optimize.py` | `solve()`: CBC via pulp, section 5.3's constraints (including (C2) format eligibility, `_fixed_zero_pairs()`), the lexicographic two-stage reserve solve | section 5.5, 5.3 (C2) |
 | `schedule.py` | `order_moves()`: transient-feasible ordering of a target assignment's moves, deadlock reporting | section 8 |
 | `payback.py` | `evaluate_plan_payback()`: the cost/benefit acceptance test, with a plan-outcome repair exemption (`current_shortfall_bytes`/`final_shortfall_bytes`, section 7.3) mirroring `gates.py`'s reserve override in spirit but scored on the plan's own `Σ r_s`, not a per-move flag; `repair_markers()`/`executed_assignment()`: the section 7.3 revert test | section 7, 5.3.1 |
 | `execute.py` | `execute_plan()`: pre-flight re-check per move, VM-lock wait, `move_disk`, the three-condition completion criterion, orphan detection on failure, `auto`'s own time-window/migration-count budgets | section 9 |
@@ -133,8 +133,8 @@ still only ever produces a strictly-sequential *order* (see below);
 `execute.py`'s concurrent executor uses that same order as a launch
 queue rather than needing `schedule.py` to reason about overlapping
 in-flight windows itself. `optimize.py` (phase 6)
-is done: `plan`/`apply` pick CP-SAT, CBC or the heuristic per
-`solver.backend`, and both MILP backends now enforce the storage cooldown
+is done: `plan`/`apply` pick CBC or the heuristic per
+`solver.backend`, and the MILP backend enforces the storage cooldown
 identically to the heuristic (see [`91-optimize.md`](91-optimize.md)).
 Cooldowns and drift history are read *and written*: `topology.py`'s (C2)
 per-disk pin and `heuristic.py`'s per-storage target exclusion consume
@@ -195,9 +195,9 @@ this.
   the seed/repair/descend search, cross-checked against section 14's exact
   objective totals, the storage-cooldown destination filter and its
   repair-side exemption, and what "polish" and format eligibility still owe.
-- [`91-optimize.md`](91-optimize.md) — the CP-SAT and CBC MILP backends,
-  section 5.5's exact integer coefficient scaling (and the `γ`-term trap
-  it exists to avoid), why the reserve is solved in two lexicographic
+- [`91-optimize.md`](91-optimize.md) — the CBC MILP backend,
+  why it is deliberately unscaled (and the LP-conditioning reason it still
+  works in whole MiB), why the reserve is solved in two lexicographic
   stages rather than one big-M objective, and `cli.py`'s
   `solver.backend` dispatch (`auto`'s cascade, and why an explicitly
   forced backend still falls back to the heuristic rather than failing).

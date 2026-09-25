@@ -42,7 +42,7 @@ $ pve-storage-drs -v plan
 run started: plan (dry-run)
 group fc-tier1: load 7.400 across 6 disks
 group fc-tier1: ACT -- imbalance 255.0% meets or exceeds gates.imbalance_threshold (20.0%)
-group fc-tier1: cpsat plan, 2 move(s)
+group fc-tier1: cbc plan, 2 move(s)
 group fc-tier1: payback ratio 151 (need 10) -> accepted
 run finished: plan exit=0
 ```

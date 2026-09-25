@@ -136,7 +136,7 @@ The join between them is the disk identity `(vmid, device)`, which both sides ex
 | `topology.py` | Build the disk/storage/group model, eligibility rules, storage-pattern expansion (§11.4) |
 | `loadmodel.py` | Reduce raw series to the scalar load vector `ℓ` |
 | `forecast.py` | Pluggable forecaster (quantile, seasonal-naive, Holt-Winters) |
-| `optimize.py` | MILP formulation (CP-SAT / CBC) |
+| `optimize.py` | MILP formulation (CBC via `pulp`) |
 | `heuristic.py` | Dependency-free greedy + local search fallback |
 | `payback.py` | Migration cost model and acceptance test |
 | `schedule.py` | Ordering under the transient reserve invariant |
@@ -155,8 +155,8 @@ moves guests between nodes (§1), and a shorter name would suggest this tool rep
 
 ### 2.1 Implementation, deployment and operations
 
-**Language: Python 3.11+.** The decision is driven by the solver and forecasting libraries — OR-Tools
-CP-SAT and `statsmodels` have no usable equivalent in Go or Rust without substantial
+**Language: Python 3.11+.** The decision is driven by the solver and forecasting libraries — `pulp`
+driving CBC, and `statsmodels`, have no usable equivalent in Go or Rust without substantial
 reimplementation, and PVE hosts already ship Python, so operators can read and patch the tool.
 Single-binary deployment is not a requirement here; if it ever becomes one, the dependency-free
 heuristic path (§5.5) is the portable subset worth porting.
@@ -177,17 +177,17 @@ without it.
 | `jsonschema` | Config validation (§11.1) | `python3-jsonschema` 4.19 |
 | `pulp` | MILP via CBC — **the default, packaged solver path** | `python3-pulp` 2.7 + `coinor-cbc` 2.10 (both `Depends`) |
 | `statsmodels` | Holt-Winters, optional | `python3-statsmodels` 0.14 |
-| `ortools` | CP-SAT, optional and unpackaged | **not in Debian** |
 | `pytest`, `pytest-cov`, `pytest-xdist` | Tests; groups are independent so they parallelize | `python3-pytest*` |
 
-`ortools` is the one dependency Debian does not carry, and it is not a candidate for vendoring: it
-is a large C++ extension, not a pure-Python module. It therefore stays a **pip-only optional
-extra**, and CP-SAT is a bonus for whoever installs it rather than the assumed backend. §5.5 must
-be read accordingly: on a Debian install the MILP is solved by **CBC through `python3-pulp`**, with
-the dependency-free heuristic below that.
+**There is deliberately no `ortools` row.** A CP-SAT backend built on it was specified here once,
+and removed (REVIEW.md AL-02): Debian does not carry `ortools`, it is not a candidate for vendoring
+(a large C++ extension, not a pure-Python module), and it would not be installed by hand on PVE
+hosts — so on every deployment `solver.backend: auto` resolved to CBC regardless, and a second
+model builder existed only for a backend production could never run. The MILP is solved by
+**CBC through `python3-pulp`**, with the dependency-free heuristic below that.
 
-Make `ortools` and `statsmodels` **optional extras** in `pyproject.toml`; `pulp` stays one there
-too, for a plain `pip install` outside Debian, but `debian/control` treats it differently: `pulp`
+Make `statsmodels` an **optional extra** in `pyproject.toml`; `pulp` stays one too, for a plain
+`pip install` outside Debian, but `debian/control` treats it differently: `pulp`
 and `coinor-cbc` are `Depends`, not `Recommends`, so `apt install pve-storage-drs` always gets a
 real MILP solver by default — CBC-through-`pulp` is the primary solver on the deployment target,
 not a bonus for whoever remembers to add it. This is a packaging default, not a claim that the
@@ -197,12 +197,10 @@ solver extra, or a broken one), whenever a solve fails or times out, or whenever
 `solver.backend: heuristic` is configured explicitly — and the code path that reaches it is
 still tested (`test_heuristic.py`, and `test_optimize.py`'s own "solver unavailable" branches),
 just no longer by installing the Debian package without its `Depends`, since that configuration no
-longer exists. `ortools` (CP-SAT) is the one solver that stays a true opt-in extra: not in Debian
-at all, `solver.backend: auto` prefers it over CBC only when a motivated admin has `pip install`ed
-it by hand. The autopkgtest in §2.2 still imports every module of the installed package with only
+longer exists. The autopkgtest in §2.2 still imports every module of the installed package with only
 the binary package's `Depends` present — now including `pulp`/`coinor-cbc` — so it verifies the
 tool's real, default solver path rather than proving heuristic-only operation; an optional
-dependency (`ortools`, `statsmodels`) imported at module level still fails it.
+dependency (`statsmodels`) imported at module level still fails it.
 
 **Licence and contribution rules.** The project is **AGPL-3.0-or-later**, copyright
 Bernd Zeimetz <bernd@bzed.de>; every source file carries the two-line SPDX header. `AGENTS.md` and
@@ -401,10 +399,11 @@ Three level corrections deserve their reasons stated, since each one is a judgem
 otherwise be quietly reverted:
 
 - **`optimize_backend_unavailable` under `auto` is not a warning.** `solver.backend: auto` *means*
-  "use the best solver installed here"; probing for CP-SAT and not finding it is that option
-  working, not degrading. Today it logs at WARNING once per group per run, forever, on every
-  cluster that did not install the optional dependency — and its message says
-  `solver.backend=cpsat requested`, which is false: `auto` requested it, not the operator.
+  "use the best solver installed here"; probing for an optional solver and not finding it (when
+  this was written, CP-SAT; today CBC on a plain `pip install` without the `solver` extra) is that
+  option working, not degrading. It then logged at WARNING once per group per run, forever, on
+  every cluster that did not install the optional dependency — and its message said
+  `solver.backend=cpsat requested`, which was false: `auto` requested it, not the operator.
   `cli._solve_group()` already suppresses its *own* fallback warning under `auto`; the inner probe
   must learn the same distinction, and must say `not available` rather than `requested but ...`
   when nobody requested it.
@@ -1539,8 +1538,8 @@ the model infeasible and the tool useless exactly when it is most needed. Two wa
 effectively hard:
 
 1. **Lexicographic, preferred and provably correct.** Solve in two stages: minimize `Σ_s r_s`
-   alone; then fix `Σ_s r_s` to that minimum as a constraint and minimize the §5.4 objective. Both
-   CP-SAT and CBC support this by re-solving. The reserve is then never traded against balance at
+   alone; then fix `Σ_s r_s` to that minimum as a constraint and minimize the §5.4 objective. CBC
+   supports this by re-solving. The reserve is then never traded against balance at
    any weight, and `Σ r_s > 0` provably means *physically impossible*, not merely *unattractive*.
 2. **Single-stage big-M**, simpler but requiring calibration: keep `P · Σ_s r_s` in the objective
    with `P` large enough that no achievable gain from the other terms can pay for a violation worth
@@ -1704,85 +1703,29 @@ applying the weights, so the defaults in the example config are meaningful.
 
 ### 5.5 Solver backends
 
-**CP-SAT (preferred).** All variables and coefficients must be integral. The single most important
-observation is that `ℓ_d`, `z_d`, `c_s`, `C_s` and `Uˢᵉˣᵗ` are **data, not variables** — every one of
-them appears only as a coefficient multiplying a binary. So they never need a shared scale factor of
-their own: fold each of them into its coefficient *once*, at full precision, and round the finished
-coefficient. Doing that removes both classes of scaling error that a naive "scale everything by `K`"
-approach introduces.
+**CBC via PuLP — the one MILP backend.** Direct transcription of §5.3's constraint set and §5.4's
+objective; continuous `e_s`, `Z_s`, `r_s` are fine, so there is no scaling discipline at all. Two
+unit rules still apply, both for conditioning rather than correctness: size-valued quantities are
+expressed in whole MiB (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`, `Uˢᵉˣᵗ`, `soft_s`) and loads in average
+in-flight I/O requests (§4), so raw bytes (~10¹²-10¹⁴) never sit next to load values (~1-10) in the
+LP matrix — CBC's simplex does not error on a badly conditioned matrix, it silently returns a
+numerically poor "optimal" (confirmed on a real corpus bundle, where an unscaled model made CBC's
+own post-plan spread almost 100× worse than the heuristic's on the same weights).
 
-Two scales are needed, one for quantities that appear as *variables* and one for the objective:
+Assert after solving that the unscaled objective recomputed in floating point from the returned
+assignment — `heuristic.evaluate_assignment()`, the one objective implementation every backend
+reports through — agrees with what the solve was told it achieved; a cheap guard against a modeling
+mistake silently producing wrong plans.
 
-| Scale | Applies to | Value |
-|---|---|---|
-| `K` | the load-valued variables `e_s`, `t`, the fill-deviation variables `d_s`, and the constants `u*`, `L_s`, `b̄` they are compared against | `10⁶` (micro-units) |
-| — | the size-valued variables `Z_s`, `R_s`, `r_s` and the constants `z_d`, `C_s`, `Uˢᵉˣᵗ`, `soft_s` | MiB (integers already) |
-| `W` | every objective weight, so `α`, `β`, `γ`, `κ`, `P` keep four decimals | `10⁴` |
-
-**Constraint coefficients.** In (C6) the storage load enters as `Σ_d ℓ_d·x_{d,s} / c_s`. Do *not*
-compute `round(K/c_s)` and multiply — that rounds the capability weight itself and makes CP-SAT and
-CBC disagree for non-binary `c_s`. Fold both constants into one per-(disk, storage) coefficient:
-
-```
-a_{d,s} = round(K · ℓ_d / c_s)          →   Σ_d a_{d,s}·x_{d,s} − round(K·u*) ≤ e_s^int  (and the
-                                                                                mirror image)
-```
-
-The error is then a single rounding of the finished product: `|a_{d,s} − K·ℓ_d/c_s| ≤ 0.5`, i.e.
-`≤ 5×10⁻⁷` in load units per disk, **independent of `c_s`**. Summed over a group of even 1 000 disks
-that is `< 5×10⁻⁴` — three orders below the solver's `mip_gap` of 0.02, so it cannot change the
-selected plan and the two backends stay directly comparable. (C4)/(C5) are already integral in MiB,
-and (C7) folds exactly like (C6): the per-(disk, storage) coefficient is
-`round(K · z_d / (b̄·C_s))`, with the constant `K·(1 − Uˢᵉˣᵗ/(C_s·b̄))` rounded once — one rounding
-error per coefficient, independent of `C_s` and `b̄`.
-
-**Objective coefficients.** Same rule — `z_d` is a constant, so the `γ` term's coefficient is
-per-disk and needs no separate `γ_scaled`:
-
-```
-min   Σ_s round(α·W)              · e_s^int                     (imbalance)
-    + Σ_d round(β·W·K)            · (1 − x_{d,σ₀(d)})           (number of migrations, d ∈ D^big)
-    + Σ_d round(γ·W·K·z_d^TiB)    · (1 − x_{d,σ₀(d)})           (bytes migrated, d ∈ D^big)
-    + Σ_v round(κ·W·K·w_v)        · (Σ_s y_{v,s} − 1)           (fragmentation, I/O-weighted)
-    + Σ_s round(δ·W)              · d_s^int                     (data spread)
-    + Σ_s round(P·W·K / 2²⁰)      · r_s^MiB                     (reserve violation)
-```
-
-`w_v` folds like any other constant (§5.4), and the `d`-sums are over `D^big`, whose tiny members
-deliberately carry zero `β`/`γ` coefficients.
-
-The `·K` on the count-valued terms puts them on the same footing as `α·W·e_s^int`, which already
-carries a factor `K` inside `e_s^int`.
-
-**Why this matters — the trap in the obvious formulation.** Factoring `γ` out as a standalone
-per-MiB integer, `γ_scaled = round(γ · K / 2²⁰)`, silently **zeroes the bytes-migrated term at the
-default weight**:
-
-```
-γ = 0.05/TiB,  K = 10⁶   →   round(0.05 · 10⁶ / 2²⁰) = round(0.0477) = 0
-```
-
-CP-SAT would then ignore disk size entirely when choosing what to move, diverging from CBC and the
-heuristic, which use continuous coefficients — and doing so with no error and no warning. Raising
-`K` is not a fix worth making: `γ·K/2²⁰ ≥ 0.5` requires `K ≥ 2²⁰/(2·0.05) ≈ 1.05×10⁷`, so even
-`K = 10⁷` still rounds to zero, and the first `K` that works yields `γ_scaled = 1` — a 100 %
-quantization error on the coefficient. Folding `z_d` in instead gives, for the §14 fixture's 0.5 TiB
-disk, `round(0.05 · 10⁴ · 10⁶ · 0.5) = 2.5×10⁸`: exact, with no minimum-`γ` restriction at all.
-
-**Magnitudes.** The largest coefficient is the reserve term, `round(P·W·K/2²⁰) ≈ 9.5×10⁶` per MiB at
-`P = 1000`; a 1 TiB shortfall gives ≈ 10¹³. The imbalance term reaches `α·W·K·Σe_s ≈ 1.5×10¹¹` for
-`Σe_s = 15`. Both are comfortably inside int64, which is what CP-SAT requires. Assert at model-build
-time that every coefficient is a non-zero integer wherever its unscaled weight is non-zero — the
-regression test for the `γ` trap above — with one deliberate exception: the `β`/`γ` coefficients
-of a disk below `migration.tiny_disk_bytes` are exactly zero by design (§5.4), and the assertion
-must expect that. Assert also that the maximum objective magnitude is below 2⁶².
-
-Warm-start from the current assignment via `AddHint(x[d, σ₀(d)], 1)`, which typically finds the
-incumbent immediately and spends the rest of the time limit proving the gap. Assert after solving
-that the unscaled objective recomputed in floating point agrees with the solver's value to within
-the rounding bound — a cheap guard against a scaling mistake silently producing wrong plans.
-
-**CBC via PuLP.** Direct transcription; continuous `e_s`, `Z_s`, `r_s` are fine.
+A **CP-SAT (`ortools`) backend was specified here once and removed** (REVIEW.md AL-02): not in
+Debian, excluded from vendoring by this section's own dependency rules, and not something operators
+install by hand on PVE hosts, so `solver.backend: auto` resolved to CBC on every deployment — the
+second model builder, its integral-coefficient discipline (per-coefficient constant folding, the
+`K`/`W` scales, the `γ`-quantization trap of REVIEW.md F-14, the int64 magnitude assertions) and
+its CI/packaging exceptions existed only for a backend production could never run. Those rules are
+CP-SAT's own and were removed with it; a future integer backend must re-earn F-14's analysis rather
+than inherit it. The §14 fixture agreement that once read "CP-SAT and CBC agree on every `β` case"
+now binds CBC to the exhaustively-enumerated optimum alone.
 
 **Heuristic fallback (no dependency, and the path for very large groups).**
 
@@ -2146,8 +2089,9 @@ any other kind of move*, and a defect in it surfaces directly as migrations that
 Exactly that happened. With §5.3 (C3)'s affinity term excluding pinned disks — the pre-fix default,
 see §3.6 — two 528 KiB `efidisk0` moves on a real cluster scored a κ gain of precisely zero and
 were emitted anyway on a `3.6 × 10⁻⁷` capacity-spread difference, a relative improvement of about
-`6 × 10⁻⁸`, on which the three solver backends did not even agree (CP-SAT emitted two moves, CBC
-none). Each was a live migration with a VM lock, a PVE task and a `saferemove` wipe, and each burned
+`6 × 10⁻⁸`, on which the three then-existing solver backends did not even agree (CP-SAT emitted
+two moves, CBC none; the CP-SAT backend has since been removed — AL-02). Each was a live migration
+with a VM lock, a PVE task and a `saferemove` wipe, and each burned
 `gates.cooldown_per_storage` on its target. Correcting (C3)'s default turned the same two moves into
 genuine reunifications worth a discrete `1.0` of objective, and the three backends into agreement.
 
@@ -2787,8 +2731,9 @@ payback and ordering is `window.quantile` (the point estimate), computed once pe
 only consumer is §7.3's saturation-ceiling guard, and only for a storage that configures
 `saturation_load` — the guard calls a `Forecaster` (built here, gated by the §10.2 backtest below)
 to get `L̂_s(Δ)`. Wiring the upper bound into the optimizer's own input, as this section describes,
-remains future work; until then, treat every occurrence of "the optimizer consumes the upper bound"
-in this document as the target design, not the current behaviour.
+remains future work — **phase 14** (§12), tracked as REVIEW.md AL-01, records the design and its one
+deliberate default change; until then, treat every occurrence of "the optimizer consumes the upper
+bound" in this document as the target design, not the current behaviour.
 
 Forecasts are produced **per disk**. Where §7.3 needs a per-*storage* bound `L̂_s(Δ)`, it is the sum
 of the per-disk upper bounds over the disks assigned to `s` in the state being evaluated:
@@ -3112,9 +3057,19 @@ Each phase is independently testable and useful on its own.
 | 11 | Logging policy (§2.3) | **Done.** A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
 | 12 | Capacity-spread objective and gate, one-year payback horizon (§5.3 (C7), §5.4 `δ`, §6, §7.2) | **Done.** Fixtures regenerated with the `delta_values` sweep and the 365d horizon; a replayed bundle shows the capacity gate deciding; `explain` reports the fill deviation; the manual documents `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` and the new `payback_horizon` default (the manpage documents no individual knob, by §11's own established convention) |
 | 13 | Free-space requirements (§5.3.1, §5.3 (C5), §6 override, §7.3 repair exemption, §8.1 hard floor) **and the (C2) format-compatibility eligibility it needs** | `config_schema.json` gains the block **first** — the schema is closed (`additionalProperties: false` throughout, deliberately: it is where a typo'd key is caught, §11.1's structural pass), so a `free_space:` key is rejected before `config.py` ever sees it: a top-level `free_space` object and a `free_space` property on `groups[].storages[]`, each with `soft`/`hard` typed `["string", "number", "null"]` for §5.3.1's grammar (integer bytes, byte-unit string, `"N%"`, and `null` with its two by-level meanings); `config.py` then resolves `free_space.soft/hard` per storage (bytes, byte-unit strings, percentages; global, per-storage, per-pattern; the global `snapshot_reserve.min_free_bytes` scalar deprecated, folded in per storage after percent conversion as `soft_s = max(soft_s_resolved, min_free_bytes)` — §5.3.1), validates `hard ≤ soft` and `soft < C_s` **on the written values, before that fold** (§5.3.1, "validate as written, then fold"); the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py`, `execute.py`'s live execution-time re-check and every `cli.py` call site that threads the scalar today, and `collect.py`'s bundle manifest (which serialises the scalar, so a replayed bundle carries the pair instead — §16); `topology.Storage` gains the type/format fields (C2) needs and both solver backends fix `x_{d,s}=0` for format-incompatible targets; `payback.py`'s repair detection (`ScheduledMove.resolves_reserve_violation`, set by `schedule.py`'s "source presently violating" test) is replaced by §7.3's outcome trigger (exempt iff the plan's final `Σ r_s` is strictly below the current assignment's) plus a per-move `repair` marker computed by the revert test — re-scoring `Σ r_s` on the final assignment with one `x` held — while `order_moves()`'s internal priority-1 test keeps §8.2's "source currently violating" form (a current-state rule, not a plan-outcome one); the outcome trigger is a **signature and data-flow change**, not a flag swap: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s`, so the current and final slack are threaded in from its sole production caller (`cli.py`'s plan builder, `evaluate_plan_payback()`'s only call site outside tests) — both sums already exist there as `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses` (`solve_outcome.initial_breakdown` and the R-02 `final_breakdown` are in hand at the call site), so the change is two sums over objects already passed to the benefit computation, no new plumbing through the solver — with one sequencing constraint the signature change must respect: the final sum is taken over the move set the gate will actually execute, i.e. **after** the per-move duration rejections and saturation deferrals are known and their moves removed (§7.3), so the refusal computation that today lives inside `evaluate_plan_payback()` has to produce its verdicts before the trigger's sums are taken rather than alongside them, and `_execute_group_plan()`'s `excluded_keys` filtering stops being the only place the drop is applied; the exemption also gains a `--json` surface it has never had — `repair_exempt` plus `reserve_shortfall_bytes_before`/`_after` in the payback block (§9.5), without which an exempt plan and one accepted on merit are the same object to `validate_corpus.py`'s expected files (§16.6 checks 2 and 4); the sweep is defined by grep, not by enumeration — every file matching `git grep -l resolves_reserve_violation` (today: `payback.py`, `schedule.py`, `cli.py`, `test_schedule.py`, `test_cli.py`, `test_payback.py`, `test_execute.py`, both `tests/corpus/*.expected.json` bundles, `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, plus the plan and REVIEW.md) is updated with it, and every file matching `git grep -l evaluate_plan_payback` (which adds `test_affinity_repair_fixture.py`, whose positional three-argument call breaks on the signature change without ever naming the flag, and `docs/internals/00-overview.md`) with the signature change — the manual's `resolves_reserve_violation` prose must be *split*, not renamed: its scheduling half (§8.2 priority 1) keeps the current-state form, its exemption half becomes the plan-level outcome trigger; the §14.8 fixture (which requires the format rule, landed in the same commit — so it carries no `requires_format_eligibility` marker, see §14.8's AH-03 note) proves the mandate, the exemption and both `hard`-sweep orders; the manual documents the block, and `config/drs.example.yaml` gains it in **phase 13's own commit** as `soft: 0` / `hard: null` (it is a shipped artefact, §8, and today carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all) — `hard: null` there is load-bearing rather than cosmetic: any spelled-out `hard` below the folded floor would weaken §8.1's transient charge for exactly the operators the fold protects, because the built check charges `min_free_bytes` on every in-flight state and `hard_s` is what replaces it, while `hard: null` (= `soft`) leaves an upgrading deprecated-key config exactly as strong as it is today; and the scalar → pair replacement gets the same grep treatment as the flag, because it deprecates a **documented config key** and reaches further than the code: every file matching `git grep -l min_free_bytes` (today 30 — the `src/` files named above plus `config_schema.json`, seven test modules, both `tests/corpus/*/config.yaml` replay inputs (**left as captured** — AH-06: a committed bundle is real captured data, and a pre-`free_space` bundle is the compatibility case replay must keep serving), `config/drs.example.yaml`, `docs/manual/10-configuration.md` — whose `### snapshot_reserve.min_free_bytes` reference section becomes the deprecation notice and the `free_space` documentation — `docs/manual/00-installation.md`, `docs/manual/27-plan.md`, `docs/manual/30-safety-and-status.md`, `docs/internals/60-topology.md`, `docs/internals/91-optimize.md`, `docs/internals/95-schedule.md` — which documents the built fold of the scalar into the transient check — `.agents/domain-invariants.md`, whose invariant 2 is written `used + max(f·Z_s, min_free_bytes) ≤ C_s` and becomes `soft_s`, `.agents/testing.md`, plus the plan and REVIEW.md) is updated with it; **one file the sweep does not name still needs the same treatment**: `verify-storages` gains the resolved `soft_s`/`hard_s` per storage, with the level each came from (§3.5 — the derivation an operator cannot otherwise predict, and the same argument that put the pattern expansion there), so `docs/manual/25-show-load-and-verify-storages.md` joins the phase's file set even though it matches none of the three greps today |
+| 14 | Forecast-driven decision statistic (§10.1's target design; REVIEW.md T-03 and AL-01) | The per-disk statistic the gates, solver, payback and ordering consume is the **backtest-gated forecaster's upper bound** û_d(W), with `W = window.lookback` — the same horizon §10.2's backtest already validates — computed per group by `loadmodel` from the per-disk series the saturation guard's own `compute_disk_load_series()` already fetches, gated by the same per-group backtest with the same quantile fallback (`quantile` itself needs no gate: it fits nothing); with the default `forecast.model: quantile` this is a **deliberate default change** — the decision statistic moves from `window.quantile` (p95) to `window.upper_quantile` (p99), so gates, plans and payback all turn conservative by one quantile, and the §14 fixtures and every committed corpus `expected.json` are regenerated to match; a seasonal model drives placement only where it demonstrably predicted this group's own last window (within `gates.imbalance_threshold`), quantile otherwise with the existing warning; `explain` reports which statistic and which forecaster produced the run; the manual documents the default change and when a seasonal model is worth selecting — strong diurnal structure or trending demand, the cases where a trailing p99 lags what the VMs are about to need |
+| 15 | Single-source configuration defaults (§11.1; REVIEW.md AL-03) | Every default exists **exactly once, on the dataclass field**; the loader constructs each config class from the raw mapping by passing **only the keys the operator actually wrote**, through field-level converters (duration/byte/percent strings, list→tuple), so no `.get(key, default)` ever restates a default — today's twin copies in `config.py` (e.g. `model: str = "quantile"` on `ForecastConfig` beside `fc_raw.get("model", "quantile")` in the loader, and the same shape for every other knob) are gone; `config_schema.json`, the third copy of the shape, is generated from the same field/type/enum source — or, if generation proves heavier than checking, a check target fails on drift between schema and dataclasses — so it cannot rot either; **zero operator-visible behaviour change**: `--help`, the manual's option tables and `config/drs.example.yaml` values are byte-identical before and after, proven by the fixture and corpus checks running green untouched |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
+
+Phase 6's done-when said "CP-SAT and CBC agree on every `β` case"; that agreement was proven while
+both backends existed. The CP-SAT backend has since been removed (REVIEW.md AL-02 — not in Debian,
+never installable on the deployment target), and the fixture now binds CBC to the
+exhaustively-enumerated optimum alone. Phases 14 and 15 were added after the phase 13
+implementation by the twenty-eighth review pass (REVIEW.md section 56): 14 closes §10.1's own
+target design and is a behaviour change; 15 is a pure internal refactor with no behaviour to
+specify beyond §11.1's existing validation rules.
 
 Phase 11 is last only because it was found last — dogfooding the finished tool, where the noise on
 a clean run and the silence on an `auto` run are both obvious in a way they never were while the
@@ -4093,13 +4048,14 @@ Four kinds of assertion that do hold:
    today only `explain --json` emits. A real and deliberate gap, named here rather than discovered
    later (the same shape as this section's own pattern-expansion gap above) — either sweep
    `explain --json` too or add the missing fields to `plan --json`'s group report to close it.
-3. **MILP versus heuristic, on real data.** Run the same bundle through CP-SAT, CBC and the
-   heuristic and assert neither MILP backend's `after_spread` (`plan --json`'s already-computed
-   post-plan spread fraction) is worse than the heuristic's. This is the cross-check §14 can only
+3. **MILP versus heuristic, on real data.** Run the same bundle through CBC and the
+   heuristic and assert the MILP backend's `after_spread` (`plan --json`'s already-computed
+   post-plan spread fraction) is not worse than the heuristic's. This is the cross-check §14 can only
    perform on six disks, and it is the single highest-value thing a real bundle buys: a heuristic
    that beats the MILP means the two have drifted apart on the shared feasibility or objective
    functions, which `AGENTS.md` §5 exists to prevent and which no synthetic fixture of this size
-   can detect. **CBC-versus-CP-SAT agreement is not checked** (X-07): a first attempt comparing
+   can detect. **CBC-versus-CP-SAT agreement was never checked, and is now uncheckable** (X-07; the
+   CP-SAT backend was removed, AL-02): a first attempt comparing
    `after_spread` against `solver.mip_gap` as a relative tolerance produced real disagreement on a
    committed bundle under `--full-matrix` (cbc 0.0016 vs. cpsat 0.0034-0.0112 across several
    variants) that was legitimate under `mip_gap` on the *objective* the solvers actually optimize —
@@ -4118,13 +4074,13 @@ Four kinds of assertion that do hold:
 
 #### The variant matrix
 
-Per bundle, the matrix the generator sweeps: `solver.backend` ∈ {cp-sat, cbc, heuristic} ×
+Per bundle, the matrix the generator sweeps: `solver.backend` ∈ {cbc, heuristic} ×
 `objective.spread_metric` ∈ {l1, minmax} × `forecast.model` ∈ {quantile, seasonal_naive,
 holt_winters} × `objective.beta_move_count` over a small sweep, with everything else from the
-bundle's own `config.yaml`. A variant whose backend or forecaster is unavailable in the running
-environment is **skipped and recorded as skipped**, never silently dropped: CP-SAT is an optional
-dependency (`AGENTS.md` §9.1) and a corpus result that quietly means "CBC only" is a corpus result
-that lies.
+bundle's own `config.yaml`. A variant whose forecaster is unavailable in the running
+environment is **skipped and recorded as skipped**, never silently dropped: `statsmodels` is an
+optional dependency (`AGENTS.md` §9.1) and a corpus result that quietly means "quantile only" is a
+corpus result that lies.
 
 #### Size, and bundles too big to commit
 

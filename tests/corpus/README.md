@@ -147,9 +147,8 @@ Four kinds of assertion, in the order they run:
    order; every move targets a storage (C2) permits for that disk; section 7.3's per-move
    duration rule and saturation guard hold for every accepted move; the objective handed to
    the scheduler equals the objective recomputed from the final assignment.
-3. **MILP versus heuristic on real data.** CP-SAT, CBC and the heuristic solve the same
-   bundle; the MILP objective must be `<=` the heuristic's, and the two MILP backends must
-   agree within section 5.5's tolerance. A heuristic that beats the MILP means the shared
+3. **MILP versus heuristic on real data.** CBC and the heuristic solve the same
+   bundle; the MILP objective must be `<=` the heuristic's. A heuristic that beats the MILP means the shared
    feasibility or objective functions have drifted apart — the thing `AGENTS.md` section 5
    exists to prevent, and the thing only a large real instance can detect.
 4. **Regression.** `<bundle-name>.expected.json` records, per variant, the gate verdict, the
@@ -158,9 +157,9 @@ Four kinds of assertion, in the order they run:
    eventually be edited to match a bug.
 
 The variant matrix per bundle is `solver.backend` × `objective.spread_metric` ×
-`forecast.model` × a short `objective.beta_move_count` sweep. A variant whose backend or
-forecaster is not installed is **recorded as skipped**, never silently dropped — CP-SAT is an
-optional dependency, and a corpus result that quietly means "CBC only" is a corpus result
+`forecast.model` × a short `objective.beta_move_count` sweep. A variant whose
+forecaster is not installed is **recorded as skipped**, never silently dropped — `statsmodels` is an
+optional dependency, and a corpus result that quietly means "quantile only" is a corpus result
 that lies.
 
 ## What a bundle does and does not hide

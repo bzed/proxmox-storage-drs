@@ -2083,7 +2083,7 @@ class _SolveOutcome:
 
     assignment: Assignment
     initial_breakdown: ObjectiveBreakdown
-    backend: str  # "cpsat" | "cbc" | "heuristic"
+    backend: str  # "cbc" | "heuristic"
     status: str | None  # "optimal" | "feasible" for a MILP backend, None for the heuristic
 
 
@@ -2094,7 +2094,7 @@ def _solve_group(
     cooldown_storages: frozenset[str],
 ) -> _SolveOutcome:
     """Section 5.5's backend dispatch. ``solver.backend: auto`` cascades
-    CP-SAT, then CBC, then the heuristic; an explicitly forced backend that
+    CBC, then the heuristic; an explicitly forced backend that
     cannot produce a plan (library not importable, or no feasible solution
     within ``solver.time_limit_seconds``) falls back to the heuristic too
     -- section 13's failure-mode table says plainly "solver infeasible or
@@ -2103,14 +2103,13 @@ def _solve_group(
     explicitly named (`docs/manual/10-configuration.md`'s own
     `solver.backend` text: forcing one is "to reproduce or compare a
     result", not to disable this safety net). A forced backend that falls
-    back anyway is logged at warning -- an operator who asked for `cpsat`
+    back anyway is logged at warning -- an operator who asked for `cbc`
     specifically should not have to diff `--json` output to notice `auto`
     quietly happened instead.
     """
     solver = resolved.config.solver
     cascade = {
-        "auto": ("cpsat", "cbc"),
-        "cpsat": ("cpsat",),
+        "auto": ("cbc",),
         "cbc": ("cbc",),
         "heuristic": (),
     }[solver.backend]

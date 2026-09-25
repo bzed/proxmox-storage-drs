@@ -948,8 +948,8 @@ reserve_shortfall_tib`, one of the six terms `explain`'s `objective:`
 line prints. It is used exactly as configured — no floor, no automatic
 raise, no warning.
 
-The MILP backends (`solver.backend: cpsat`/`cbc`, and `auto` when either is
-available) solve the reserve **lexicographically** instead: the reserve is
+The MILP backend (`solver.backend: cbc`, and `auto`) solves the reserve
+**lexicographically** instead: the reserve is
 fixed as a hard constraint and solved for first, before the rest of the
 objective above is even considered, so no weight — this one included — can
 trade it away. A single-stage alternative exists on paper: computing a
@@ -957,22 +957,30 @@ provably-dominant penalty from the group's own load instead of taking this
 key at face value, with a `max(configured, computed)` floor. It is not
 implemented, so this key never gets raised automatically for any backend —
 what you set is exactly what the heuristic backend uses, and the MILP
-backends never consult it at all. (`IMPLEMENTATION_PLAN.md` section 5.3.)
+backend never consults it at all. (`IMPLEMENTATION_PLAN.md` section 5.3.)
 
 ## `solver` — which backend plans
 
 ### `solver.backend`
 
-One of `auto`, `cpsat`, `cbc`, `heuristic`; default `auto`.
+One of `auto`, `cbc`, `heuristic`; default `auto`.
 
-`auto` prefers CP-SAT (`pip install proxmox-storage-drs[solver]` -- not
-packaged for Debian), falls back to CBC (the packaged solver path via
-`python3-pulp` + `coinor-cbc`), then the dependency-free heuristic. `cpsat`/
-`cbc` force one specific backend, failing that group's solve back to the
-heuristic (never a silent substitution of the *other* MILP backend) if its
+`auto` uses CBC — the packaged solver path via `python3-pulp` +
+`coinor-cbc`, both hard dependencies of the Debian package — and falls
+back to the dependency-free heuristic if that library is not importable
+or its `cbc` binary cannot run (a plain `pip install` without the
+`solver` extra; never on a Debian install). `cbc` forces that one
+backend, failing that group's solve back to the
+heuristic if its
 library is not importable or it cannot solve within `solver.time_limit_seconds`
 -- force a specific backend only to reproduce or compare a result.
 `heuristic` skips the solver entirely. See `docs/internals/91-optimize.md`.
+
+(A `cpsat` value existed through release 0.1.8, selecting an optional
+`ortools`-based backend; it was removed — `ortools` has no Debian
+package and the backend could therefore never run on a PVE host — and a
+config that still names it now fails schema validation, loudly, as it
+should.)
 
 ### `solver.time_limit_seconds`
 
@@ -986,15 +994,9 @@ falls back cleanly instead.
 
 Fraction, default `0.02`.
 
-Acceptable optimality gap for the MILP solve: CP-SAT/CBC may stop once the
+Acceptable optimality gap for the MILP solve: CBC may stop once the
 best solution found is within this fraction of a proven lower bound, rather
-than solving to exact optimality. The CP-SAT backend must also convert
-every fractional weight and load value into an integer coefficient before
-solving, which introduces its own rounding error — worked out to roughly
-`5×10⁻⁴` of summed load-deviation units even for a 1,000-disk group, three
-orders of magnitude below this default `0.02` gap, so that rounding error
-cannot itself change which plan is selected or make CP-SAT and CBC
-disagree. (`IMPLEMENTATION_PLAN.md` section 5.5.)
+than solving to exact optimality. (`IMPLEMENTATION_PLAN.md` section 5.5.)
 
 ### `solver.heuristic_iterations`
 

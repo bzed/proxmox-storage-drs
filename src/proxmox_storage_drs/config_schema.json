@@ -186,7 +186,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "backend": { "type": "string", "enum": ["auto", "cpsat", "cbc", "heuristic"] },
+        "backend": { "type": "string", "enum": ["auto", "cbc", "heuristic"] },
         "time_limit_seconds": { "type": "number", "exclusiveMinimum": 0 },
         "mip_gap": { "type": "number", "minimum": 0, "maximum": 1 },
         "heuristic_iterations": { "type": "integer", "exclusiveMinimum": 0 }

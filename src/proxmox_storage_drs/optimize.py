@@ -1,56 +1,63 @@
 # SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The MILP solver backends. See IMPLEMENTATION_PLAN.md section 5.5.
+"""The MILP solver backend. See IMPLEMENTATION_PLAN.md section 5.5.
 
-Two backends, CP-SAT (`ortools`) and CBC (via `pulp`), both solving the
-section 5.3 constraint set with the **lexicographic** two-stage reserve
-solve the plan recommends as the default: stage 1 minimizes
-``Σ_s r_s`` (the total reserve shortfall) alone; stage 2 fixes that total
-as a hard constraint and minimizes the real section 5.4 objective over
-every assignment that does not exceed it. The reserve is then never
-traded against balance at *any* weight -- there is no `P` to calibrate,
-and `Σ r_s > 0` in the result provably means "physically impossible for
-any assignment", never "not worth it". The single-stage big-M alternative
-the plan also describes is not implemented here: it exists in the plan to
-be *compared against* the lexicographic solve (see
-``tests/fixtures/generate_expected.py``, which proves both against
-exhaustive enumeration on ``reserve-tradeoff.yaml``), not as a second
-runtime mode -- there is no `solver.*` config knob that selects it, and
-the plan itself says "use the lexicographic solve by default" without
-qualification.
+One backend, CBC (via `pulp`), solving the section 5.3 constraint set with
+the **lexicographic** two-stage reserve solve the plan recommends as the
+default: stage 1 minimizes ``Σ_s r_s`` (the total reserve shortfall)
+alone; stage 2 fixes that total as a hard constraint and minimizes the
+real section 5.4 objective over every assignment that does not exceed it.
+The reserve is then never traded against balance at *any* weight -- there
+is no `P` to calibrate, and ``Σ r_s > 0`` in the result provably means
+"physically impossible for any assignment", never "not worth it". The
+single-stage big-M alternative the plan also describes is not implemented
+here: it exists in the plan to be *compared against* the lexicographic
+solve (see ``tests/fixtures/generate_expected.py``, which proves both
+against exhaustive enumeration on ``reserve-tradeoff.yaml``), not as a
+second runtime mode -- there is no `solver.*` config knob that selects
+it, and the plan itself says "use the lexicographic solve by default"
+without qualification.
 
-Both backends solve for `x_{d,s}` alone (and, internally, whatever
-auxiliary variables each needs to linearize the objective) and then hand
+A CP-SAT (`ortools`) backend shared this module until REVIEW.md AL-02
+removed it: `ortools` is not in Debian, is excluded from vendoring by the
+plan's own dependency rules, and is not something operators install by
+hand on PVE hosts, so on every deployment ``solver.backend: auto``
+resolved to CBC regardless -- a second model builder, its integral
+coefficient discipline and its int64 assertions existed only for a
+backend production could never run.
+
+The backend solves for `x_{d,s}` alone (and, internally, whatever
+auxiliary variables it needs to linearize the objective) and then hands
 the resulting assignment to `heuristic.evaluate_assignment()` for the
 *reported* :class:`~proxmox_storage_drs.heuristic.ObjectiveBreakdown` --
-one implementation of the objective, shared by every backend including
-this one (AGENTS.md section 5; `heuristic.py`'s own module docstring was
-written anticipating exactly this). A MILP modeling mistake in this
-module can at worst make the solver choose a *suboptimal* (but always
-correctly *reported*) assignment; it can never make the tool *believe*
-an assignment is better than it is, because the number that ends up in
-`plan`'s output never comes from this module's own objective value.
+one implementation of the objective, shared by the solver and the
+heuristic alike (AGENTS.md section 5; `heuristic.py`'s own module
+docstring was written anticipating exactly this). A MILP modeling mistake
+in this module can at worst make the solver choose a *suboptimal* (but
+always correctly *reported*) assignment; it can never make the tool
+*believe* an assignment is better than it is, because the number that
+ends up in `plan`'s output never comes from this module's own objective
+value.
 
 **Failure is not exceptional here.** Section 13's own failure-mode table
 says plainly: "Solver infeasible or timing out -> fall back to the
 heuristic; never emit a partial/unvalidated assignment" -- with no
 carve-out for a backend the operator explicitly asked for via
 `solver.backend`. `solve()` therefore returns `None`, not an exception,
-whenever the requested backend's library cannot be imported or the solve
-produces no feasible incumbent within `solver.time_limit_seconds`; the
-caller (`cli.py`) is what turns that into "try the next backend" or "fall
-back to `heuristic.run_heuristic()`". Nothing here raises
-:class:`~proxmox_storage_drs.exceptions.SolverError` -- that exception's
-own docstring is "neither solver backend **could produce a feasible or
-heuristic plan**", and the heuristic never fails, so this module has no
-occasion to reach for it.
+whenever `pulp` cannot be imported or the solve produces no feasible
+incumbent within `solver.time_limit_seconds`; the caller (`cli.py`) is
+what turns that into "fall back to `heuristic.run_heuristic()`". Nothing
+here raises :class:`~proxmox_storage_drs.exceptions.SolverError` -- that
+exception's own docstring is "neither solver backend **could produce a
+feasible or heuristic plan**", and the heuristic never fails, so this
+module has no occasion to reach for it.
 
 **Deliberately not implemented in this pass** (see
 ``docs/internals/91-optimize.md``):
 
 - **The storage cooldown's repair-exemption asymmetry is not replicated
-  here** (REVIEW.md S-04 fixed the gap this bullet used to describe: both
-  MILP models now hard-fix `x_{d,s}=0` for `s in cooldown_storages` in
+  here** (REVIEW.md S-04 fixed the gap this bullet used to describe: the
+  MILP model now hard-fixes `x_{d,s}=0` for `s in cooldown_storages` in
   *both* lexicographic stages, whenever `s` is not `d`'s current storage
   -- section 6's "accepts no new incoming moves", identical to
   `heuristic._descend()`'s own `target.id in cooldown_storages` check).
@@ -70,32 +77,28 @@ occasion to reach for it.
   reports an accurate, if pessimistic-relative-to-the-heuristic,
   shortfall rather than a wrong one).
 **(C2) format-compatibility eligibility is implemented** (section 12's
-phase 13): both `_cpsat_feasibility_constraints()` and
-`_cbc_feasibility_constraints()` fix `x_{d,s} = 0` for every ``(d, s)``
-pair where `topology.storage_accepts_format(s, d.format)` is false, in the
-same loop and alongside the same fix the storage-cooldown exclusion above
-already applies -- a disk already resident on an ineligible storage is
-never fixed there by this rule (only (C2)'s own pin at topology build time
-puts it there), but is never proposed as a target for any *other* disk
-either.
+phase 13): `_cbc_feasibility_constraints()` fixes `x_{d,s} = 0` for every
+``(d, s)`` pair where `topology.storage_accepts_format(s, d.format)` is
+false, in the same loop and alongside the same fix the storage-cooldown
+exclusion above already applies -- a disk already resident on an
+ineligible storage is never fixed there by this rule (only (C2)'s own pin
+at topology build time puts it there), but is never proposed as a target
+for any *other* disk either.
 
-- **The plan's post-solve floating-point/scaled-objective agreement
-  assertion** ("assert... recomputed in floating point agrees with the
-  solver's value... a cheap guard against a scaling mistake") is not a
-  separate check here: `evaluate_assignment()` *is* that recomputation,
-  called unconditionally on every solve, and its result is what gets
-  reported -- there is no second code path whose silent disagreement
-  would go unnoticed. `test_optimize.py`'s cross-checks against the
+- **The plan's post-solve objective-agreement assertion** ("assert...
+  recomputed in floating point agrees with the solver's value... a cheap
+  guard against a scaling mistake") is not a separate check here:
+  `evaluate_assignment()` *is* that recomputation, called
+  unconditionally on every solve, and its result is what gets reported
+  -- there is no second code path whose silent disagreement would go
+  unnoticed. `test_optimize.py`'s cross-checks against the
   exhaustively-enumerated fixtures are the sharper version of the same
-  guard: not just "internally consistent" but "agrees with a
-  independently proven optimum". Section 5.5's other two assertions from
-  the same paragraph -- every coefficient a non-zero integer wherever its
-  unscaled weight is non-zero, and the objective's maximum magnitude
-  under `2**62` -- *are* implemented, as `_assert_nonzero_when_weighted()`
-  and `_assert_objective_magnitude_within_int64()` in
-  `_cpsat_objective_terms()` (REVIEW.md S-09; CP-SAT's own integer
-  -coefficient discipline is what these two guard, so neither applies to
-  CBC's continuous, unscaled model).
+  guard: not just "internally consistent" but "agrees with an
+  independently proven optimum". (Section 5.5's former integer
+  coefficient assertions, REVIEW.md S-09, guarded CP-SAT's integral
+  discipline alone and were removed with that backend, AL-02; this
+  model is continuous and unscaled, so there is nothing they could
+  guard here.)
 """
 
 from __future__ import annotations
@@ -119,18 +122,6 @@ from proxmox_storage_drs.topology import Disk, Group, Storage, storage_accepts_f
 
 logger = logging.getLogger(__name__)
 
-# Section 5.5's two scales: K for load-valued variables/constants, W for
-# every objective weight. Size-valued quantities (Z_s, R_s, r_s, z_d, C_s,
-# Uˢᵉˣᵗ, soft_s/hard_s) need no scale of their own -- they are rounded to
-# whole MiB, already integral. `_RESERVE_FACTOR_SCALE` is this module's
-# own addition, not named in the plan: `reserve_factor` (`f_s`) multiplies
-# a *variable* (`Z_s`), not a constant, in (C5), so it cannot be folded
-# into a single per-(d,s) coefficient the way section 5.5 folds `ℓ_d/c_s`
-# -- it needs its own fixed-point scale to stay an integer *coefficient*
-# in `SCALE·R_s ≥ round(f_s·SCALE)·Z_s` rather than a non-integer one.
-_LOAD_SCALE = 1_000_000  # K
-_WEIGHT_SCALE = 10_000  # W
-_RESERVE_FACTOR_SCALE = 1_000_000
 _BYTES_PER_MIB = 1 << 20
 _BYTES_PER_TIB = 1 << 40
 
@@ -196,14 +187,6 @@ def _pinned_of_vmid(group: Group, vmid: int, objective: ObjectiveConfig) -> tupl
     return tuple(d for d in group.disks if d.vmid == vmid and d.pinned_reason is not None)
 
 
-def cpsat_available() -> bool:
-    try:
-        import ortools.sat.python.cp_model  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 def cbc_available() -> bool:
     try:
         import pulp  # noqa: F401
@@ -262,7 +245,7 @@ class OptimizeResult:
     assignment: Assignment
     breakdown: ObjectiveBreakdown
     initial_breakdown: ObjectiveBreakdown
-    backend: str  # "cpsat" | "cbc"
+    backend: str  # "cbc"
     status: str  # "optimal" | "feasible"
 
 
@@ -277,13 +260,14 @@ def solve(
     probing: bool = False,
     tiny_disk_bytes: int = 0,
 ) -> OptimizeResult | None:
-    """Solve one group with ``backend`` (``"cpsat"`` or ``"cbc"``).
+    """Solve one group with ``backend`` (``"cbc"``).
 
     ``probing`` says this backend was chosen by ``solver.backend: auto``'s
     cascade rather than named by the operator, which is what decides
     whether a missing optional dependency is worth a warning: ``auto``
-    *means* "use the best solver installed here", so probing for CP-SAT and
-    not finding it is that option working, not degrading (section 2.3).
+    *means* "use the best solver installed here", so probing for pulp on
+    a plain ``pip`` install without the ``solver`` extra and not finding
+    it is that option working, not degrading (section 2.3).
     ``tiny_disk_bytes`` is ``config.migration.tiny_disk_bytes`` (section
     5.4's ``D^big``).
 
@@ -309,8 +293,8 @@ def solve(
     )
 
     if not movable:
-        # Nothing this solver could change -- both backends would agree
-        # trivially, so skip building a degenerate empty model.
+        # Nothing this solver could change -- the solve is trivially the
+        # current assignment, so skip building a degenerate empty model.
         return OptimizeResult(
             assignment=initial,
             breakdown=initial_breakdown,
@@ -319,10 +303,9 @@ def solve(
             status="optimal",
         )
 
-    solvers = {"cpsat": _solve_cpsat, "cbc": _solve_cbc}
-    if backend not in solvers:  # pragma: no cover - cli.py never passes anything else
+    if backend != "cbc":  # pragma: no cover - cli.py never passes anything else
         raise ValueError(f"optimize.solve() does not know backend {backend!r}")
-    outcome = solvers[backend](
+    outcome = _solve_cbc(
         group,
         movable,
         load_by_key,
@@ -392,432 +375,6 @@ def _no_feasible_solution(backend: str, group: Group, stage: str) -> None:
     )
 
 
-# ------------------------------------------------------------------ CP-SAT
-
-
-def _cpsat_feasibility_constraints(
-    cp_model: Any,
-    model: Any,
-    group: Group,
-    movable: tuple[Disk, ...],
-    vmids: list[int],
-    pinned_by_storage: dict[str, tuple[Disk, ...]],
-    objective: ObjectiveConfig,
-    size_bound: int,
-    cooldown_storages: frozenset[str] = frozenset(),
-) -> tuple[dict[Any, Any], dict[Any, Any], dict[Any, Any], dict[Any, Any]]:
-    """(C1)/(C2)/(C3)/(C4)/(C5) -- identical in both lexicographic stages, so
-    built once per stage by both `_solve_cpsat()` calls to `build()`
-    rather than duplicated inline (keeping that function's own branching
-    within this project's complexity limit)."""
-    x = {
-        (d.key, s.id): model.NewBoolVar(f"x_{d.key}_{s.id}")
-        for d in movable
-        for s in group.storages
-    }
-    y = {(v, s.id): model.NewBoolVar(f"y_{v}_{s.id}") for v in vmids for s in group.storages}
-    z = {s.id: model.NewIntVar(0, size_bound, f"Z_{s.id}") for s in group.storages}
-    r = {s.id: model.NewIntVar(0, size_bound, f"R_{s.id}") for s in group.storages}
-    slack = {s.id: model.NewIntVar(0, size_bound, f"r_{s.id}") for s in group.storages}
-
-    for d in movable:
-        model.Add(sum(x[d.key, s.id] for s in group.storages) == 1)
-        model.AddHint(x[d.key, d.current_storage], 1)
-    for d, s in _fixed_zero_pairs(movable, group.storages, cooldown_storages):
-        model.Add(x[d.key, s.id] == 0)
-
-    for v in vmids:
-        movable_of_v = [d for d in movable if d.vmid == v]
-        pinned_of_v = _pinned_of_vmid(group, v, objective)
-        for s in group.storages:
-            for d in movable_of_v:
-                model.Add(x[d.key, s.id] <= y[v, s.id])
-            model.Add(
-                y[v, s.id]
-                <= sum(x[d.key, s.id] for d in movable_of_v)
-                + sum(1 for d in pinned_of_v if d.current_storage == s.id)
-            )
-            if any(d.current_storage == s.id for d in pinned_of_v):
-                model.Add(y[v, s.id] == 1)
-
-    for s in group.storages:
-        pinned_largest = max((_mib(d.size_bytes) for d in pinned_by_storage[s.id]), default=0)
-        if pinned_largest:
-            model.Add(z[s.id] >= pinned_largest)
-        for d in movable:
-            model.Add(z[s.id] >= _mib(d.size_bytes) * x[d.key, s.id])
-
-    for s in group.storages:
-        reserve_factor_scaled = round(s.reserve_factor * _RESERVE_FACTOR_SCALE)
-        model.Add(_RESERVE_FACTOR_SCALE * r[s.id] >= reserve_factor_scaled * z[s.id])
-        model.Add(r[s.id] >= _mib(s.free_space_soft_bytes))
-        pinned_used = sum(_mib(d.size_bytes) for d in pinned_by_storage[s.id])
-        foreign_mib = _mib(s.foreign_used_bytes)
-        model.Add(
-            sum(_mib(d.size_bytes) * x[d.key, s.id] for d in movable)
-            + pinned_used
-            + foreign_mib
-            + r[s.id]
-            <= _mib(s.capacity_bytes) + slack[s.id]
-        )
-
-    return x, y, z, slack
-
-
-def _cpsat_storage_lhs(
-    s: Any,
-    movable: tuple[Disk, ...],
-    pinned_by_storage: dict[str, tuple[Disk, ...]],
-    load_by_key: Mapping[str, float],
-    x: dict[Any, Any],
-) -> Any:
-    """(C6)'s per-storage scaled load, section 5.5's `a_{d,s} = round(K *
-    ell_d / c_s)` folded coefficients plus pinned disks' constant
-    contribution -- the LHS both the L1 and minmax forms compare against."""
-    pinned_load = sum(load_by_key.get(d.key, 0.0) for d in pinned_by_storage[s.id])
-    pinned_scaled = (
-        round(_LOAD_SCALE * pinned_load / s.capability_weight) if s.capability_weight else 0
-    )
-    coeffs = {
-        d.key: (
-            round(_LOAD_SCALE * load_by_key.get(d.key, 0.0) / s.capability_weight)
-            if s.capability_weight
-            else 0
-        )
-        for d in movable
-    }
-    return sum(coeffs[d.key] * x[d.key, s.id] for d in movable) + pinned_scaled
-
-
-def _cpsat_storage_fill_lhs(
-    s: Any,
-    movable: tuple[Disk, ...],
-    pinned_by_storage: dict[str, tuple[Disk, ...]],
-    average_fill: float,
-    x: dict[Any, Any],
-) -> tuple[Any, int]:
-    """(C7)'s per-storage scaled fill deviation, folded exactly like (C6)'s
-    `_cpsat_storage_lhs` (section 5.5: "(C7) folds exactly like (C6): the
-    per-(disk, storage) coefficient is round(K * z_d / (b_bar*C_s)), with
-    the constant K*(1 - Uext/(C_s*b_bar)) rounded once") -- on the same `K`
-    scale as (C6)'s `e_s`, not a separate, larger one (REVIEW.md AA-01: a
-    per-storage coefficient built from an aggregated MiB numerator and a
-    much larger scale reintroduced the very "obvious formulation" trap
-    section 5.5 warns the gamma term away from, six orders of magnitude
-    too strong at the default weights). Returns ``(lhs, bound)``, `lhs`
-    approximating `K*(b_s - b_bar)/b_bar` and `bound` a safe upper bound on
-    `|lhs|` for the caller's `d_s` domain. Callers must never invoke this
-    when ``average_fill`` is 0 -- section 5.3 (C7): "if b_bar = 0 the group
-    holds no data: the term is inactive" -- the caller's own
-    ``if average_fill:`` guard is what makes that true."""
-    capacity_mib = _mib(s.capacity_bytes)
-    denom = average_fill * capacity_mib
-    if not denom:
-        return 0, 0
-    pinned_used = sum(_mib(d.size_bytes) for d in pinned_by_storage[s.id])
-    external_mib = pinned_used + _mib(s.foreign_used_bytes)
-    const = round(_LOAD_SCALE * (1 - external_mib / denom))
-    coeffs = {d.key: round(_LOAD_SCALE * _mib(d.size_bytes) / denom) for d in movable}
-    lhs = sum(coeffs[d.key] * x[d.key, s.id] for d in movable) - const
-    bound = sum(coeffs.values()) + abs(const)
-    return lhs, bound
-
-
-def _assert_nonzero_when_weighted(unscaled_weight: float, scaled: int, name: str) -> None:
-    """Section 5.5: "assert... every coefficient is a non-zero integer
-    wherever its unscaled weight is non-zero" -- the regression guard
-    for the gamma trap (REVIEW.md S-09): `if gamma_scaled: terms.append(...)`
-    a few lines above *silently drops* a coefficient that rounded to
-    zero, which is exactly the failure shape this assertion exists to
-    catch. Unreachable at the default weights after per-disk folding (a
-    coefficient rounds to zero only for a sub-kilobyte disk), but "can't
-    happen in practice" is what an assertion is for, not a reason to skip
-    writing it."""
-    assert not (unscaled_weight and not scaled), (
-        f"{name} rounded to 0 despite a non-zero configured weight ({unscaled_weight!r}) -- "
-        "this is an internal solver bug, please report it"
-    )
-
-
-def _assert_objective_magnitude_within_int64(
-    beta_scaled: int,
-    gamma_scaled_values: list[int],
-    kappa_scaled_values: list[int],
-    alpha_scaled: int,
-    delta_scaled: int,
-    num_big_movable: int,
-    num_storages: int,
-    load_bound: int,
-    fill_bound_total: int,
-) -> None:
-    """Section 5.5: "assert... the maximum objective magnitude is below
-    2**62" (REVIEW.md S-09). A coarse, deliberately conservative upper
-    bound -- every term at its own worst case simultaneously, which no
-    real solution reaches -- computed directly from the same scaled
-    coefficients and bounds the model already uses, not a second solve or
-    a second pass over the built model. CP-SAT's own `IntVar`/objective
-    domain is bounded at `2**63 - 1`; staying an order of magnitude under
-    that is what makes overflow structurally impossible at any realistic
-    cluster size, rather than merely unlikely. ``fill_bound_total`` is
-    `Sum_s d_bound_s` -- the (C7) analogue of `load_bound * num_storages`,
-    summed rather than multiplied because each storage's `d_s` domain
-    bound is its own (`_cpsat_storage_fill_lhs()` returns a per-storage
-    bound, unlike `_LOAD_SCALE`'s shared coefficient). ``kappa_scaled_values``
-    is one ``w_v``-weighted coefficient per vmid (section 5.4) -- summed
-    like ``gamma_scaled_values`` rather than multiplied by a single flat
-    value, then scaled by ``num_storages`` since each vmid's own term still
-    ranges over every storage's ``y_{v,s}``. ``num_big_movable`` is
-    ``|D^big|`` among the movable disks (section 5.4): beta ranges only
-    over that subset."""
-    worst_case = (
-        beta_scaled * num_big_movable
-        + sum(abs(g) for g in gamma_scaled_values)
-        + sum(abs(k) for k in kappa_scaled_values) * num_storages
-        + abs(alpha_scaled) * load_bound * num_storages
-        + abs(delta_scaled) * fill_bound_total
-    )
-    assert worst_case < 2**62, (
-        f"objective magnitude bound {worst_case} exceeds 2**62 -- solver.* weights or "
-        "disk/group sizes are large enough to risk CP-SAT integer overflow"
-    )
-
-
-def _cpsat_capacity_spread_term(
-    model: Any,
-    group: Group,
-    movable: tuple[Disk, ...],
-    pinned_by_storage: dict[str, tuple[Disk, ...]],
-    objective: ObjectiveConfig,
-    average_fill: float,
-    x: dict[Any, Any],
-    terms: list[Any],
-) -> tuple[int, int]:
-    """(C7): data spread, always L1 regardless of `objective.spread_metric`
-    (section 5.4: "the term is L1 and stays L1 whatever
-    objective.spread_metric is set to" -- unlike (C6), there is no minmax
-    alternative for `d_s`). Inactive whenever the group holds no data
-    (``average_fill == 0``, section 5.3 (C7)) or the weight is 0 (section
-    5.4: "0 disables the term") -- both leave `delta_scaled`/no
-    `d`-variables built at all, matching how alpha/beta/gamma/kappa are
-    each skipped the same way in `_cpsat_objective_terms()`. Appends its
-    term to ``terms`` in place and returns ``(delta_scaled,
-    fill_bound_total)`` for that function's own overflow assertion --
-    factored out purely to stay within this project's complexity limit."""
-    delta_scaled = round(objective.delta_capacity_spread * _WEIGHT_SCALE) if average_fill else 0
-    if average_fill:
-        _assert_nonzero_when_weighted(objective.delta_capacity_spread, delta_scaled, "delta_scaled")
-    fill_bound_total = 0
-    if delta_scaled and average_fill:
-        d = {}
-        for s in group.storages:
-            lhs, bound = _cpsat_storage_fill_lhs(s, movable, pinned_by_storage, average_fill, x)
-            d[s.id] = model.NewIntVar(0, bound, f"d_{s.id}")
-            model.Add(lhs <= d[s.id])
-            model.Add(-lhs <= d[s.id])
-            fill_bound_total += bound
-        terms.append(delta_scaled * sum(d.values()))
-    return delta_scaled, fill_bound_total
-
-
-def _cpsat_objective_terms(
-    model: Any,
-    group: Group,
-    movable: tuple[Disk, ...],
-    vmids: list[int],
-    pinned_by_storage: dict[str, tuple[Disk, ...]],
-    load_by_key: Mapping[str, float],
-    objective: ObjectiveConfig,
-    u_star: float,
-    average_fill: float,
-    load_bound: int,
-    x: dict[Any, Any],
-    y: dict[Any, Any],
-    tiny_disk_bytes: int,
-) -> list[Any]:
-    """Section 5.5's stage-2 objective coefficients -- (C6)/(C7) plus the
-    beta/gamma/kappa terms -- factored out of `_solve_cpsat()` to keep
-    that function's own branching within this project's complexity limit."""
-    terms: list[Any] = []
-    beta_scaled = round(objective.beta_move_count * _WEIGHT_SCALE * _LOAD_SCALE)
-    _assert_nonzero_when_weighted(objective.beta_move_count, beta_scaled, "beta_scaled")
-    # Section 5.4's D^big: beta/gamma range only over movable disks at or
-    # above tiny_disk_bytes -- a disk below it is deliberately excluded
-    # from both sums (not merely zeroed), so neither term's assertion
-    # applies to it either.
-    big_movable = [d for d in movable if d.size_bytes >= tiny_disk_bytes]
-    gamma_scaled_values: list[int] = []
-    for d in big_movable:
-        moved = 1 - x[d.key, d.current_storage]
-        if beta_scaled:
-            terms.append(beta_scaled * moved)
-        gamma_scaled = round(
-            objective.gamma_move_bytes_per_tib
-            * _WEIGHT_SCALE
-            * _LOAD_SCALE
-            * (d.size_bytes / _BYTES_PER_TIB)
-        )
-        _assert_nonzero_when_weighted(
-            objective.gamma_move_bytes_per_tib, gamma_scaled, f"gamma_scaled[{d.key}]"
-        )
-        gamma_scaled_values.append(gamma_scaled)
-        if gamma_scaled:
-            terms.append(gamma_scaled * moved)
-
-    # Section 5.4's w_v = max(1, l_v/l_bar): a per-vmid coefficient, not the
-    # single flat kappa_scaled of before -- w_v is data (computed from
-    # load_by_key, never a solver variable), so it folds into the
-    # coefficient exactly like every other per-(disk,storage)/per-vmid
-    # constant section 5.5 already folds.
-    vm_weights = compute_vm_weights(group, load_by_key, vmids)
-    kappa_scaled_values: dict[int, int] = {}
-    for v in vmids:
-        kappa_scaled_values[v] = round(
-            objective.kappa_vm_affinity * _WEIGHT_SCALE * _LOAD_SCALE * vm_weights[v]
-        )
-        _assert_nonzero_when_weighted(
-            objective.kappa_vm_affinity, kappa_scaled_values[v], f"kappa_scaled[{v}]"
-        )
-        if kappa_scaled_values[v]:
-            terms.append(kappa_scaled_values[v] * (sum(y[v, s.id] for s in group.storages) - 1))
-
-    alpha_scaled = round(objective.alpha_spread * _WEIGHT_SCALE)
-    _assert_nonzero_when_weighted(objective.alpha_spread, alpha_scaled, "alpha_scaled")
-    u_star_scaled = round(_LOAD_SCALE * u_star)
-    if objective.spread_metric == "minmax":
-        t = model.NewIntVar(0, load_bound, "t")
-        for s in group.storages:
-            model.Add(_cpsat_storage_lhs(s, movable, pinned_by_storage, load_by_key, x) <= t)
-        if alpha_scaled:
-            terms.append(alpha_scaled * t)
-    else:
-        e = {s.id: model.NewIntVar(0, load_bound, f"e_{s.id}") for s in group.storages}
-        for s in group.storages:
-            lhs = _cpsat_storage_lhs(s, movable, pinned_by_storage, load_by_key, x)
-            model.Add(lhs - u_star_scaled <= e[s.id])
-            model.Add(u_star_scaled - lhs <= e[s.id])
-        if alpha_scaled:
-            terms.append(alpha_scaled * sum(e.values()))
-
-    delta_scaled, fill_bound_total = _cpsat_capacity_spread_term(
-        model, group, movable, pinned_by_storage, objective, average_fill, x, terms
-    )
-
-    _assert_objective_magnitude_within_int64(
-        beta_scaled,
-        gamma_scaled_values,
-        list(kappa_scaled_values.values()),
-        alpha_scaled,
-        delta_scaled,
-        len(big_movable),
-        len(group.storages),
-        load_bound,
-        fill_bound_total,
-    )
-    return terms
-
-
-def _solve_cpsat(
-    group: Group,
-    movable: tuple[Disk, ...],
-    load_by_key: Mapping[str, float],
-    objective: ObjectiveConfig,
-    time_limit_seconds: float,
-    mip_gap: float,
-    cooldown_storages: frozenset[str] = frozenset(),
-    probing: bool = False,
-    tiny_disk_bytes: int = 0,
-) -> tuple[Assignment, str] | None:
-    try:
-        from ortools.sat.python import cp_model
-    except ImportError:
-        _log_backend_unavailable("cpsat", "ortools is not importable", probing)
-        return None
-
-    pinned_by_storage = _pinned_by_storage(group)
-    vmids = _relevant_vmids(group, movable, objective)
-    u_star = group_average_utilization(group, load_by_key)
-    b_bar = group_average_fill(group)
-    total_load = sum(load_by_key.get(d.key, 0.0) for d in group.disks)
-    total_mib = sum(_mib(d.size_bytes) for d in group.disks)
-    size_bound = max((_mib(s.capacity_bytes) for s in group.storages), default=0) + total_mib + 1
-    load_bound = round(_LOAD_SCALE * (total_load + 1.0)) + 1
-
-    def build() -> tuple[Any, dict[Any, Any], dict[Any, Any], dict[Any, Any]]:
-        model = cp_model.CpModel()
-        x, y, _z, slack = _cpsat_feasibility_constraints(
-            cp_model,
-            model,
-            group,
-            movable,
-            vmids,
-            pinned_by_storage,
-            objective,
-            size_bound,
-            cooldown_storages,
-        )
-        return model, x, y, slack
-
-    model1, _x1, _y1, slack1 = build()
-    model1.Minimize(sum(slack1.values()))
-    solver1 = cp_model.CpSolver()
-    solver1.parameters.max_time_in_seconds = time_limit_seconds
-    # Stage 1's whole point is a *proven* minimum -- "Σ r_s > 0 provably
-    # means physically impossible", not "impossible within mip_gap"
-    # (REVIEW.md S-07). `mip_gap` is stage 2's tolerance on the real
-    # objective, not stage 1's on the reserve floor; forced to 0 here
-    # regardless of what the operator configured, and only `OPTIMAL`
-    # (never `FEASIBLE`, which would mean the gap was merely satisfied,
-    # not proven closed) is accepted as this stage's answer. Cheap: this
-    # stage is a near-feasibility problem that closes instantly on
-    # realistic groups, per this module's own docstring.
-    solver1.parameters.relative_gap_limit = 0.0
-    status1 = solver1.Solve(model1)
-    if status1 != cp_model.OPTIMAL:
-        _no_feasible_solution("cpsat", group, "1 (reserve)")
-        return None
-    min_slack = round(solver1.ObjectiveValue())
-
-    model2, x2, y2, slack2 = build()
-    # `<=`, not `==`: stage 1 already proved `min_slack` is the true
-    # minimum, so stage 2 can never find less of it -- `<=` is exactly as
-    # tight as `==` there, but stays monotone-safe (never worse than the
-    # incumbent) rather than brittle against a hypothetical floating
-    # -point disagreement between the two solves (REVIEW.md S-07).
-    model2.Add(sum(slack2.values()) <= min_slack)
-    terms = _cpsat_objective_terms(
-        model2,
-        group,
-        movable,
-        vmids,
-        pinned_by_storage,
-        load_by_key,
-        objective,
-        u_star,
-        b_bar,
-        load_bound,
-        x2,
-        y2,
-        tiny_disk_bytes,
-    )
-    model2.Minimize(sum(terms))
-    solver2 = cp_model.CpSolver()
-    solver2.parameters.max_time_in_seconds = time_limit_seconds
-    solver2.parameters.relative_gap_limit = mip_gap
-    status2 = solver2.Solve(model2)
-    if status2 not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        _no_feasible_solution("cpsat", group, "2 (objective)")
-        return None
-
-    assignment: Assignment = {
-        d.key: next(s.id for s in group.storages if solver2.Value(x2[d.key, s.id])) for d in movable
-    }
-    for disk in group.disks:
-        if disk.pinned_reason is not None:
-            assignment[disk.key] = disk.current_storage
-    status = "optimal" if status2 == cp_model.OPTIMAL else "feasible"
-    return assignment, status
-
-
 # --------------------------------------------------------------------- CBC
 
 
@@ -832,8 +389,9 @@ def _cbc_feasibility_constraints(
     cooldown_storages: frozenset[str] = frozenset(),
 ) -> tuple[dict[Any, Any], dict[Any, Any], dict[Any, Any], dict[Any, Any]]:
     """(C1)/(C2)/(C3)/(C4)/(C5), continuous -- "direct transcription" per the
-    plan's own words for this backend, no scaling needed. Factored out for
-    the same reason as `_cpsat_feasibility_constraints()`."""
+    plan's own words for this backend, no scaling needed. Factored out so
+    both lexicographic stages of `_solve_cbc()` share one constraint
+    builder instead of duplicating it inline."""
     x = {
         (d.key, s.id): _lp_variable(pulp, f"x_{d.key}_{s.id}", cat="Binary")
         for d in movable
@@ -915,8 +473,7 @@ def _cbc_storage_fill(
     divided by `C_s`. In MiB, like every other size-valued quantity in this
     model (C4)/(C5) already use -- raw bytes here (~1e12-1e14) alongside
     load values (~1-10) would badly condition the LP matrix for CBC's
-    simplex, which is silently *not* the same failure shape as CP-SAT's
-    integer-overflow guards: it does not raise, it just returns a
+    simplex, and CBC does not raise on that, it just returns a
     numerically poor "optimal" (confirmed against a real corpus bundle,
     where an unscaled version of this function made CBC's own after_spread
     almost 100x worse than the heuristic's on the same weights)."""
@@ -956,8 +513,10 @@ def _cbc_objective_terms(
             terms.append(
                 objective.gamma_move_bytes_per_tib * (d.size_bytes / _BYTES_PER_TIB) * moved
             )
-    # Section 5.4's w_v = max(1, l_v/l_bar) -- see _cpsat_objective_terms()'s
-    # identical comment on why this is data, folded per vmid.
+    # Section 5.4's w_v = max(1, l_v/l_bar) is data, not a variable --
+    # computed from the same load vector everything else here uses and
+    # folded per vmid at full float precision (CBC's coefficients are
+    # continuous, so there is nothing to round).
     if objective.kappa_vm_affinity:
         vm_weights = compute_vm_weights(group, load_by_key, vmids)
         for v in vmids:
@@ -1005,8 +564,7 @@ def _cbc_capacity_spread_term(
     term is inactive") or the weight is 0 (section 5.4: "0 disables the
     term"). Appends its term to ``terms`` in place -- factored out of
     `_cbc_objective_terms()` purely to stay within this project's
-    complexity limit, the same reason `_cpsat_capacity_spread_term()` is
-    factored out of its own CP-SAT counterpart."""
+    complexity limit."""
     if objective.delta_capacity_spread and average_fill:
         d = {s.id: _lp_variable(pulp, f"d_{s.id}", lowBound=0) for s in group.storages}
         for s in group.storages:

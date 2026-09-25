@@ -30,7 +30,7 @@ from proxmox_storage_drs.heuristic import (
     raw_spread,
     run_heuristic,
 )
-from proxmox_storage_drs.optimize import cbc_available, cpsat_available, solve
+from proxmox_storage_drs.optimize import cbc_available, solve
 from proxmox_storage_drs.payback import (
     compute_benefit_load_seconds,
     compute_move_cost,
@@ -43,9 +43,6 @@ TIB = 1 << 40
 MIB = 1 << 20
 
 BACKENDS = [
-    pytest.param(
-        "cpsat", marks=pytest.mark.skipif(not cpsat_available(), reason="ortools not installed")
-    ),
     pytest.param("cbc", marks=pytest.mark.skipif(not cbc_available(), reason="pulp not installed")),
 ]
 

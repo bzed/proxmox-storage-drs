@@ -105,7 +105,7 @@ storage that also carried a large amount of *pinned* (immovable) load,
 with `kappa_vm_affinity` at its default `0.50`. Every individual disk
 move `_descend()` tried was a net loss once fragmentation was paid for,
 so it found *zero* improving moves at all and left the cluster at its
-full, 196%-imbalance starting point — even though CP-SAT, given the exact
+full, 196%-imbalance starting point — even though the MILP solver, given the exact
 same data, found the two-disk relocation immediately. A dependency-free
 heuristic that can get stuck this badly on a real, unremarkable cluster
 undermines the one thing section 5.5 asks it to be: "the path for very

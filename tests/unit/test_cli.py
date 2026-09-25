@@ -786,7 +786,7 @@ def test_plan_passes_active_storage_cooldowns_to_the_heuristic(
     )
     # Pin the heuristic explicitly: this test is about cooldown plumbing
     # into `run_heuristic()`, not about `solver.backend: auto`'s own
-    # dispatch -- when ortools/pulp genuinely are importable (the Debian
+    # dispatch -- when pulp genuinely is importable (the Debian
     # package build and CI's own apt-installed toolchain both install
     # coinor-cbc/python3-pulp deliberately, unlike the plain dev venv),
     # "auto" picks cbc and `run_heuristic()` is never called at all.
@@ -3813,7 +3813,7 @@ def test_solve_group_uses_the_milp_result_when_available(
 ) -> None:
     from proxmox_storage_drs.optimize import OptimizeResult
 
-    resolved = _resolved_config(tmp_path, solver={"backend": "cpsat"})
+    resolved = _resolved_config(tmp_path, solver={"backend": "cbc"})
     group = _one_disk_group()
     loads = {"101:scsi0": 1.0}
     breakdown = _fake_breakdown(group, loads, resolved)
@@ -3821,7 +3821,7 @@ def test_solve_group_uses_the_milp_result_when_available(
         assignment={"101:scsi0": "san-b"},
         breakdown=breakdown,
         initial_breakdown=breakdown,
-        backend="cpsat",
+        backend="cbc",
         status="optimal",
     )
     calls: list[str] = []
@@ -3841,20 +3841,20 @@ def test_solve_group_uses_the_milp_result_when_available(
         return fake_result
 
     def fail_heuristic(*args: object, **kwargs: object) -> None:
-        raise AssertionError("must not fall back to the heuristic when cpsat succeeds")
+        raise AssertionError("must not fall back to the heuristic when cbc succeeds")
 
     monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", fake_solve)
     monkeypatch.setattr("proxmox_storage_drs.cli.run_heuristic", fail_heuristic)
 
     outcome = cli._solve_group(group, loads, resolved, frozenset())
 
-    assert calls == ["cpsat"]
-    assert outcome.backend == "cpsat"
+    assert calls == ["cbc"]
+    assert outcome.backend == "cbc"
     assert outcome.status == "optimal"
     assert outcome.assignment == {"101:scsi0": "san-b"}
 
 
-def test_solve_group_auto_cascades_cpsat_then_cbc_then_heuristic(
+def test_solve_group_auto_cascades_cbc_then_heuristic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     resolved = _resolved_config(tmp_path)  # solver.backend defaults to "auto"
@@ -3870,7 +3870,7 @@ def test_solve_group_auto_cascades_cpsat_then_cbc_then_heuristic(
 
     outcome = cli._solve_group(group, loads, resolved, frozenset())
 
-    assert calls == ["cpsat", "cbc"]
+    assert calls == ["cbc"]
     assert outcome.backend == "heuristic"
     assert outcome.status is None
     assert outcome.assignment == {"101:scsi0": "san-a"}  # nothing improves a lone disk's spread
@@ -3896,7 +3896,7 @@ def test_solve_group_warns_when_an_explicit_backend_falls_back(
 ) -> None:
     import logging
 
-    resolved = _resolved_config(tmp_path, solver={"backend": "cpsat"})
+    resolved = _resolved_config(tmp_path, solver={"backend": "cbc"})
     group = _one_disk_group()
     monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", lambda *a, **k: None)
 
@@ -4391,11 +4391,11 @@ def test_solve_group_tells_optimize_whether_it_is_probing(
         return None
 
     # The real heuristic runs afterwards, exactly as in
-    # `test_solve_group_auto_cascades_cpsat_then_cbc_then_heuristic`: a
+    # `test_solve_group_auto_cascades_cbc_then_heuristic`: a
     # lone disk has nothing to improve, so it returns quickly.
     monkeypatch.setattr("proxmox_storage_drs.cli.optimize.solve", fake_solve)
 
-    for backend, expected in (("auto", True), ("cpsat", False), ("cbc", False)):
+    for backend, expected in (("auto", True), ("cbc", False)):
         seen.clear()
         resolved = _resolved_config(tmp_path, solver={"backend": backend})
         cli._solve_group(group, loads, resolved, frozenset())
