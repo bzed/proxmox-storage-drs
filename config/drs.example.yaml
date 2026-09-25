@@ -178,11 +178,6 @@ snapshot_reserve:
   # transiently during a migration. PVE 9 volume-chain snapshots allocate a new
   # full-size LV per snapshot, which is what this protects.
   factor: 2.0
-  # DEPRECATED: syntax for free_space.soft below. Still accepted -- folded in
-  # as a per-storage lower bound on top of the resolved free_space.soft, never
-  # as a substitute for it -- but new configs should set free_space.soft
-  # instead, which has per-storage and percentage forms this scalar never had.
-  min_free_bytes: 0
   # Count volumes not managed by DRS (templates, orphans, other clusters)
   # against capacity. Strongly recommended.
   count_foreign_volumes: true

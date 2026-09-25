@@ -197,7 +197,6 @@ class GroupConfig:
 @dataclass(frozen=True, slots=True)
 class SnapshotReserveConfig:
     factor: float = 2.0
-    min_free_bytes: int = 0
     count_foreign_volumes: bool = True
 
 
@@ -476,9 +475,7 @@ def load_config(
 
     _validate_schema(raw)
     config = _build_config(raw, environ)
-    warnings = _validate_semantics(
-        config, require_connection=require_connection, free_space_written=_free_space_written(raw)
-    )
+    warnings = _validate_semantics(config, require_connection=require_connection)
 
     return ResolvedConfig(config=config, path=path, sha256=sha256, warnings=tuple(warnings))
 
@@ -613,7 +610,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
     sr_raw = raw.get("snapshot_reserve", {})
     snapshot_reserve = SnapshotReserveConfig(
         factor=sr_raw.get("factor", 2.0),
-        min_free_bytes=parse_size_bytes(sr_raw.get("min_free_bytes", 0)),
         count_foreign_volumes=sr_raw.get("count_foreign_volumes", True),
     )
 
@@ -774,41 +770,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
 
 
 # ------------------------------------------------------------ semantic rules
-
-
-def _free_space_written(raw: dict[str, Any]) -> bool:
-    """Whether the operator wrote a ``free_space`` block anywhere -- the
-    top-level knob or any ``groups[].storages[].free_space`` entry. Used
-    only to decide whether the deprecation warning below fires: folding
-    ``snapshot_reserve.min_free_bytes`` in as a per-storage floor (section
-    5.3.1) is silent and correct with no ``free_space`` written at all
-    (the deprecated key alone still works), so the warning is reserved for
-    the case both keys actually say something.
-    """
-    if "free_space" in raw:
-        return True
-    return any("free_space" in s for g in raw.get("groups", []) for s in g.get("storages", []))
-
-
-def _check_free_space_deprecation(
-    config: Config, warnings: list[str], *, free_space_written: bool
-) -> None:
-    """Resolution rule, section 11.1 (warn and continue): both
-    ``snapshot_reserve.min_free_bytes`` and ``free_space.soft`` express the
-    same quantity -- a minimum-free floor -- so ``topology.py`` folds them
-    with ``max()`` per storage rather than picking a "winner": a winner rule
-    could silently lower a configured floor on upgrade, which ``max()``
-    never can.
-    """
-    if config.snapshot_reserve.min_free_bytes > 0 and free_space_written:
-        warnings.append(
-            "both snapshot_reserve.min_free_bytes and free_space are configured -- "
-            "snapshot_reserve.min_free_bytes is deprecated syntax for free_space.soft "
-            "and is folded in as a lower bound on every storage's resolved free_space.soft "
-            "(the larger of the two applies), never as a substitute for it; migrate the "
-            "value into free_space.soft and remove snapshot_reserve.min_free_bytes once "
-            "its floor is reflected there"
-        )
 
 
 def _check_schema_version(config: Config, errors: list[str]) -> None:
@@ -1013,9 +974,7 @@ def _check_connection_config(config: Config, errors: list[str]) -> None:
         errors.append("prometheus.url is required")
 
 
-def _validate_semantics(
-    config: Config, *, require_connection: bool = True, free_space_written: bool = False
-) -> list[str]:
+def _validate_semantics(config: Config, *, require_connection: bool = True) -> list[str]:
     """Section 11.1 rules that jsonschema cannot express (cross-field, or need
     a value computed from two independently-optional settings). Returns
     non-fatal warnings; raises :class:`ConfigError` (with every error found,
@@ -1037,7 +996,6 @@ def _validate_semantics(
     _check_objective_weights(config, warnings)
     _check_time_windows(config, errors)
     _check_support(config, errors)
-    _check_free_space_deprecation(config, warnings, free_space_written=free_space_written)
 
     if errors:
         raise ConfigError("config validation failed:\n  " + "\n  ".join(errors))

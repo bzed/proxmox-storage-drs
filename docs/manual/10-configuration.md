@@ -483,21 +483,6 @@ volume-chain snapshots allocate a new full-size volume per snapshot, which
 is what this protects against. This is the constraint the tool never trades
 against balance (`IMPLEMENTATION_PLAN.md` section 5.3, (C5)).
 
-### `snapshot_reserve.min_free_bytes`
-
-Size, default `0`. **Deprecated syntax for `free_space.soft` below.**
-
-An absolute floor, applied as `reserve = max(factor * largest_disk,
-min_free_bytes)`. Matters when a storage's largest disk is small: with
-`factor: 2.0` and a 10 GiB largest disk, the snapshot term alone would
-reserve only 20 GiB on a 20 TiB LUN — exactly what `free_space.soft` now
-expresses, with per-storage and percentage forms this scalar never had.
-Still accepted, and still works: if set alongside `free_space.soft` it is
-folded in as a floor on top of the resolved value (the larger of the two
-applies on every storage, never a "last one wins" substitution — a config
-warning names both keys when this happens), so upgrading is never a silent
-weakening. New configs should use `free_space.soft` instead.
-
 ### `snapshot_reserve.count_foreign_volumes`
 
 Boolean, default `true`.

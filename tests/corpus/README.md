@@ -21,10 +21,9 @@ pve-storage-drs --replay tests/corpus/<bundle-name> plan --json
 (see `bzed-dev-cluster-24h.submission.yaml`). `bzed-dev-cluster-7d-holt-winters` is the same
 cluster with a 7-day window, and `bzed-dev-cluster-free-space` is the first bundle captured
 *after* phase 13 (section 5.3.1): all three shared storages in the group, a different resolved
-`free_space` soft/hard pair on each, and a plan that is a repair. The first two predate phase 13
-and still carry the deprecated `snapshot_reserve.min_free_bytes` scalar in their `config.yaml` —
-deliberately left as captured, since they are the proof that a bundle from before `free_space`
-existed still replays. An empty corpus is still a clean pass: the
+`free_space` soft/hard pair on each, and a plan that is a repair. The first two predate phase 13; their `config.yaml` has no `free_space` block, which is
+the default (`soft: 0`, `hard: null`).
+An empty corpus is still a clean pass: the
 test suite is green on a fresh clone even with no bundles in it, so a bundle here is
 additional coverage, not a dependency.
 

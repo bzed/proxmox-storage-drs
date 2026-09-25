@@ -1618,14 +1618,10 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
 
     ``free_space.soft``/``.hard`` are written as ``s.free_space_soft_bytes``/
     ``s.free_space_hard_bytes`` -- section 5.3.1's fully-resolved per
-    -storage pair (inheritance, percent conversion and the deprecated
-    ``snapshot_reserve.min_free_bytes`` fold all already applied), plain
+    -storage pair (inheritance and percent conversion already applied), plain
     absolute byte counts rather than the operator's original percentage or
     pattern-level setting, the same "resolved, not re-derivable" choice
-    already made for ``reserve_factor`` here. A replayed bundle therefore
-    carries the pair directly and needs no ``min_free_bytes`` at all --
-    see ``snapshot_reserve`` below, which drops that scalar for the same
-    reason."""
+    already made for ``reserve_factor`` here."""
     groups = []
     for group in topology.groups:
         groups.append(

@@ -570,44 +570,12 @@ def test_free_space_soft_percentage_above_100_is_rejected(tmp_path: Path) -> Non
         config.load_config(str(path), env={})
 
 
-def test_free_space_deprecation_warning_fires_only_with_both_keys_written(
-    tmp_path: Path,
-) -> None:
-    data = minimal_config_dict()
-    data["snapshot_reserve"] = {"min_free_bytes": "1GiB"}
-    data["free_space"] = {"soft": "2GiB"}
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert any("min_free_bytes" in w and "free_space" in w for w in resolved.warnings)
-
-
-def test_free_space_deprecation_warning_silent_with_only_min_free_bytes(tmp_path: Path) -> None:
+def test_min_free_bytes_is_rejected_in_favour_of_free_space(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["snapshot_reserve"] = {"min_free_bytes": "1GiB"}
     path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert not any("min_free_bytes" in w and "deprecated" in w for w in resolved.warnings)
-
-
-def test_free_space_deprecation_warning_silent_with_only_free_space(tmp_path: Path) -> None:
-    data = minimal_config_dict()
-    data["free_space"] = {"soft": "2GiB"}
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert not any("min_free_bytes" in w and "deprecated" in w for w in resolved.warnings)
-
-
-def test_free_space_deprecation_warning_fires_for_a_per_storage_only_override(
-    tmp_path: Path,
-) -> None:
-    """``_free_space_written()``'s other branch: no top-level ``free_space``
-    block at all, but a ``groups[].storages[].free_space`` entry counts too."""
-    data = minimal_config_dict()
-    data["snapshot_reserve"] = {"min_free_bytes": "1GiB"}
-    data["groups"][0]["storages"][0]["free_space"] = {"soft": "2GiB"}
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert any("min_free_bytes" in w and "free_space" in w for w in resolved.warnings)
+    with pytest.raises(ConfigError, match="min_free_bytes"):
+        config.load_config(str(path), env={})
 
 
 def test_multiple_errors_are_all_reported(tmp_path: Path) -> None:

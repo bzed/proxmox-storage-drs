@@ -155,8 +155,8 @@ def compute_reserve_status(
 
     ``R_s = max(f_s * Z_s, soft_s)`` -- ``soft_s`` is
     ``storage.free_space_soft_bytes``, resolved per storage by ``topology.py``
-    (section 5.3.1: inheritance, percent-to-bytes conversion and the
-    deprecated ``min_free_bytes`` fold all already applied), the same way
+    (section 5.3.1: inheritance and percent-to-bytes conversion already
+    applied), the same way
     ``reserve_factor`` is already resolved onto ``storage.reserve_factor``
     rather than threaded in as a separate scalar. ``storage_of`` defaults to
     ``Disk.current_storage`` (today's real placement); pass a

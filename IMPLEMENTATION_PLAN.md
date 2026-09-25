@@ -833,8 +833,7 @@ expansion of every `/…/` storage pattern (§11.4) — the entry and the storag
 lists cluster storages matched by no group, so an over-broad or dead pattern is visible before any
 plan relies on it. The resolved requirement is there for the same reason the pattern expansion is:
 a percentage resolves against *each* LUN's own capacity, a pattern entry's `free_space` lands on
-every storage it matched, and the deprecated `min_free_bytes` folds in as a per-storage floor on
-top of all of it (§5.3.1) — three ways for one line of config to mean a different number per
+every storage it matched — two ways for one line of config to mean a different number per
 storage, and this is the one command where that derivation is visible before a plan depends on it.
 Since `soft_s` now drives §6's override, §7.3's exemption and §9.5's shortfall lines, an operator
 who cannot predict it cannot predict the balancer. This is the command that
@@ -1358,7 +1357,7 @@ Two one-sided bounds are exact for `R_s = max(f_s·Z_s, soft_s)` because (C5) pu
 free" rule, and (C4) is what makes it expressible in a linear model at all. `soft_s` is the storage's
 **configured free-space requirement** (§5.3.1): the number of bytes that must be free on `s` when the
 plan has fully run, whether the operator asked for it as an absolute byte count or as a percentage of
-the storage's capacity. It generalizes the old `min_free_bytes` floor — a storage whose largest disk
+the storage's capacity. It replaces the old global `min_free_bytes` floor (removed, no compatibility shim) — a storage whose largest disk
 is small needed one (with `f=2` and a 10 GiB largest disk, the snapshot term alone would reserve only
 20 GiB on a 20 TiB LUN), but so does a storage that must keep headroom for reasons the snapshot rule
 cannot see: a thin-provisioning safety margin, a quota for volumes this tool does not manage, or the
@@ -1441,64 +1440,12 @@ for the one exception. `null` at the global level means *no free-space requireme
 (the snapshot reserve may still impose one); `null` at the per-storage level means *inherit the
 global value*, the same inheritance `reserve_factor` already has.
 
-`snapshot_reserve.min_free_bytes` is **deprecated syntax for `free_space.soft`** — and it was
-never more than a global scalar: the built `config.py` carries it as one number on the
-`snapshot_reserve` block, with no per-storage form (unlike `reserve_factor`). `config.py` accepts
-it, warns, and folds it in **per storage, after percent-to-bytes conversion**:
-`soft_s = max(soft_s_resolved, min_free_bytes)` for every storage, where `soft_s_resolved` is
-what the inheritance above produced. Per storage, because that is what the key means in the
-built code — `reserve.py` applies it as a floor on *every* storage
-(`required = max(round(f_s·largest), min_free_bytes)`), and the built transient check charges it
-on every in-flight state the same way — and because a percentage has no global value to fold
-into: `"10%"` resolves to 2 TiB on a 20 TiB LUN and 200 GiB on a 2 TiB one, so a single global
-`max()` has no answer. Folded per storage, the deprecated floor cannot be lowered **as a
-plan-endpoint requirement** by the new knob — not by a smaller global `soft`, not by a
-per-storage override, not by a percentage landing on a small LUN — and the warning says exactly
-that: both keys are named, and the deprecated one is reported as a lower bound on every storage
-rather than as one resolved number. The transient floor is the one place the new knob may move
-it, deliberately and explicitly: see the `hard` sentence below.
-Two keys carrying different values are two requirements, and the union is the only resolution
-that cannot reduce safety — `max()` can only raise a floor, while any "winner" rule is a guess
-that can silently lower one. That is not hypothetical: an operator who adopts the new example
-config (which spells out `free_space: soft: 0`) while keeping an old `min_free_bytes: 1 TiB`
-hits the both-set case **on upgrade**, and a "soft wins" rule would drop a configured 1 TiB
-floor to zero behind a warning that reads like a deprecation notice. The transient side needs
-no rule of its own: `hard: null` (the default) means `hard_s = soft_s`, so the folded floor
-keeps the §8.1 predicate exactly as strong as the built `max(f_b·max(Z_b,z_d), min_free_bytes)`
-check, and an operator who then sets `hard` below it is using the new knob for the dip it exists
-to allow, on top of a floor the warning still names.
-
-**Validate as written, then fold.** The fold is the *last* step of resolution: inheritance
-first, then percent-to-bytes conversion, then §11.1's two `free_space` checks against the values
-the operator actually wrote, and only then `soft_s = max(soft_s_resolved, min_free_bytes)`. The
-order matters in both directions, which is why it is stated rather than left to the
-implementation.
-
-- `hard_s ≤ soft_s` checked *after* the fold would be checked against a propped-up `soft_s`: a
-  config whose written `hard` exceeds its written `soft` would pass for as long as a large
-  `min_free_bytes` stayed in the file, and deleting the deprecated key — exactly what the
-  warning asks the operator to do — would turn a running configuration into a startup failure.
-  The typo has to be caught when it is written, not when the prop is removed.
-- `soft_s < C_s` checked after the fold would error on an oversized *deprecated* floor, and that
-  is the one deliberate non-promotion here: a `min_free_bytes` above some storage's capacity has
-  never been a startup failure (the built code reports it as that storage's permanent shortfall,
-  §9.5), and "the old key keeps working" cannot mean a running config refuses to start on
-  upgrade. The error applies to the new knob's own value; an oversized deprecated floor warns and
-  reports as the unfixable shortfall it always was.
-
-The order has a third consequence, and it is the one an implementation gets wrong by following the
-list above too literally (REVIEW.md AH-01): the two validations run on *written* values, but a
-**null** `hard` is not a written value — it is defined as `hard_s = soft_s`, and that `soft_s` is the
-*folded* one. A null `hard` is therefore settled **after** the fold, from the folded `soft_s`;
-resolving it before the fold (to `soft_s_resolved`) would leave `hard_s = 0` for a config carrying
-only `min_free_bytes` and drop the floor from §8.1's transient charge — silently, since that config
-gets no deprecation warning. A **written** `hard` stays as written: it is the operator's explicit
-dip, validated against the written `soft` and never raised by the fold.
-
-No `schema_version` bump: the old key keeps working, and the new block is additive — but the
-block is only *reachable* once `config_schema.json` carries it, because that schema is closed
-(`additionalProperties: false` throughout, deliberately: §11.1's structural pass is where a
-typo'd key is caught). §12's phase-13 row lists it first for that reason.
+`snapshot_reserve.min_free_bytes` — a global scalar with no per-storage form and no percentages — was
+the built predecessor of `free_space.soft`. It has been **removed** outright (no fold, no warning; the
+schema is closed, so a config that still sets it fails validation). `soft_s` is exactly what the
+inheritance above produced, converted from a percentage where needed, and validated as written:
+`hard_s ≤ soft_s` and `soft_s < C_s` are §11.1 startup errors, checked against that resolved pair.
+`hard: null` means `hard_s = soft_s`.
 
 **Soft is the plan endpoint; hard is the floor at every instant.** `soft_s` is the requirement the
 finished plan must satisfy — (C5) enforces it, the lexicographic stage repairs it, and §6's override
@@ -2748,7 +2695,7 @@ requirement-to-setting mapping:
 |---|---|
 | Storage groups VMs may not leave | `groups[].storages[]` — literal ids or `/regex/` patterns (§11.4) |
 | 2× largest disk free for snapshots | `snapshot_reserve.factor` (default `2.0`), per-storage override |
-| Keep N bytes / N% of each storage free | `free_space.soft` — global, per-storage or per-pattern (§5.3.1); `snapshot_reserve.min_free_bytes` is deprecated syntax for it |
+| Keep N bytes / N% of each storage free | `free_space.soft` — global, per-storage or per-pattern (§5.3.1) |
 | Min % changed traffic before migrating | `gates.drift_threshold` (default `0.10`) |
 | % I/O difference across the group | `gates.imbalance_threshold` |
 | Timeframe considered | `window.lookback` (default `24h`) |
@@ -2778,9 +2725,9 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | Every `/…/` pattern compiles as a Python regular expression, checked at load time | A malformed pattern must fail with the compiler's own message, not crash at match time (§11.4) |
 | Within a group, no storage is matched by two pattern entries | Which entry's options apply would be arbitrary; a literal entry overriding a pattern is allowed and is not this error (§11.4) |
 | `capability_weight > 0` | Appears in a denominator |
-| `reserve_factor ≥ 0`, `min_free_bytes ≥ 0` | Negative reserve is meaningless; `min_free_bytes` is accepted as deprecated `free_space.soft` syntax (§5.3.1) |
-| `free_space.soft/hard`: absolute values `≥ 0` and parseable (bytes or byte-unit string); percentages `"N%"` with `0 ≤ N < 100`; `hard ≤ soft` **after** per-storage resolution and percent-to-bytes conversion, and **before** the deprecated `min_free_bytes` fold | §5.3.1. A `hard` above `soft` makes every plan for a compliant storage infeasible; a percentage of 100 or more is a typo, not a policy. Before the fold, because the fold can only raise `soft_s`: checked after it, a written `hard > soft` would hide behind a large `min_free_bytes` and surface as a startup failure the moment the operator deletes the deprecated key (§5.3.1, "validate as written, then fold") |
-| `free_space.soft < C_s` for every storage, after resolution — the `free_space` value's own, **not** the folded `min_free_bytes` (see the resolution rules below) | A requirement no disk could leave room for is a typo; caught only once the inventory is loaded, like the pattern rules of §11.4 |
+| `reserve_factor ≥ 0` | Negative reserve is meaningless |
+| `free_space.soft/hard`: absolute values `≥ 0` and parseable (bytes or byte-unit string); percentages `"N%"` with `0 ≤ N < 100`; `hard ≤ soft` after per-storage resolution and percent-to-bytes conversion | §5.3.1. A `hard` above `soft` makes every plan for a compliant storage infeasible; a percentage of 100 or more is a typo, not a policy |
+| `free_space.soft < C_s` for every storage, after resolution | A requirement no disk could leave room for is a typo; caught only once the inventory is loaded, like the pattern rules of §11.4 |
 | `0 ≤ drift_threshold ≤ 1`, `0 ≤ imbalance_threshold ≤ 1` | They are ratios |
 | `quantile ∈ (0,1)` | A fraction; the decision statistic |
 | `min_coverage ∈ (0,1]` | A ratio; 0 would accept a disk with no data |
@@ -2799,20 +2746,6 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `report.warn_pinned_load_fraction ∈ (0,1]` | A ratio |
 | Time windows: `start ≠ end`; crossing midnight allowed and explicit | Ambiguity here silently disables `auto` |
 | `execution.mode ∈ {dry-run, confirm, auto}` | Typo must not silently fall back to acting |
-
-**Resolution rules (warn and continue).** Everything above is a hard error. Two load-time
-situations are not errors but *resolutions* of a config that says two things at once, and they
-warn and continue by design — an implementer must not read them into the table above:
-
-- `snapshot_reserve.min_free_bytes` and `free_space.soft` both set → `soft_s =
-  max(soft_s_resolved, min_free_bytes)` per storage, after percent-to-bytes conversion, with a
-  warning naming both keys and stating that the deprecated one applies as a lower bound on every
-  storage. §5.3.1: both keys express the same quantity — a minimum-free floor — so the union is
-  the only resolution that cannot silently lower a configured floor on upgrade; a "winner" rule
-  is a guess. The `free_space` rows above that *are* errors stay errors.
-- `min_free_bytes` above some storage's capacity → warn, do not error: the storage reports a
-  permanent unfixable shortfall (§9.5), exactly as the built code treats it today. The
-  `soft_s < C_s` error applies to the new knob's own value only (§5.3.1).
 
 ### 11.2 `state.json`
 
@@ -2990,7 +2923,7 @@ exhaustively-enumerated optimum alone. Phases 14 and 15 were added after the pha
 implementation by the twenty-eighth review pass (REVIEW.md section 56): 14 closes §10.1's own
 target design and is a behaviour change; 15 is a pure internal refactor with no behaviour to
 specify beyond §11.1's existing validation rules. Phase 14's scope was then cut down by operator
-direction (REVIEW.md AL-04, §12.1): no p95 → p99 default change, and the saturation guard goes.
+direction (REVIEW.md AL-04, §12.1): no p95 → p99 default change, and the saturation guard goes. Also after phase 14, and by the same direction (no compatibility shims: the only users are the maintainers), `snapshot_reserve.min_free_bytes` and its fold into `free_space.soft` were removed; phase 13's row above describes the fold as it was built.
 
 Phase 11 is last only because it was found last — dogfooding the finished tool, where the noise on
 a clean run and the silence on an `auto` run are both obvious in a way they never were while the
@@ -3492,7 +3425,7 @@ plus foreign volumes — the admin's new VMs, which DRS does not manage — of 6
 
 Loads read 2.05/2.05/2.05 — `E = 0`, the drift and imbalance gates shut — and the snapshot
 reserve alone is satisfied everywhere (`packed`: 7.5 + 2.0 = 9.5 ≤ 10). Only the configured free
-space is violated, by 0.5 TiB, on `packed` alone. This is the case the old `min_free_bytes` could
+space is violated, by 0.5 TiB, on `packed` alone. This is the case the removed `min_free_bytes` could
 not express as a *per-storage policy* and could not *repair*: nothing distinguishes it from a
 healthy cluster except the requirement. (The gate's ACT is what lets the engine plan — see the
 capacity-gate prerequisite above — and the requirement is what makes the solver *move*. The
@@ -3618,7 +3551,6 @@ bug waiting to happen; this table is the audit.
 | `groups[].storages[].id` in pattern form (`/…/`) | §11.4 expansion into group membership; the entry's options apply to every matched storage |
 | `groups[].storages[].capability_weight` | §4, `u_s = L_s / c_s` |
 | `snapshot_reserve.factor` | §5.3 (C5), `R_s ≥ f_s·Z_s` |
-| `snapshot_reserve.min_free_bytes` | §5.3 (C5), `R_s ≥ soft_s` — deprecated syntax for `free_space.soft` (§5.3.1) |
 | `free_space.soft` (global, per-storage, per-pattern) | §5.3 (C5), `R_s ≥ soft_s`; §6 reserve override; §7.3 repair exemption |
 | `free_space.hard` (global, per-storage, per-pattern) | §8.1 transient invariant, `max(f_b·…, hard_b)` floor |
 | `snapshot_reserve.count_foreign_volumes` | §5.1.1, `Uˢᵉˣᵗ` |
@@ -4077,8 +4009,8 @@ Four kinds of assertion that do hold:
    field carries (the `Σ r_s` half of this gap is closed as of phase 13 — the payback block's
    `reserve_shortfall_bytes_before`/`_after` are the current and final `Σ r_s`, and
    `check_invariants()` asserts the part of it that is an invariant: the plan never *raises* the
-   shortfall. Not `= 0`: an oversized deprecated `min_free_bytes`, or a group with no feasible
-   repair, legitimately ends above zero); "the objective the scheduler was handed
+   shortfall. Not `= 0`: a group with no feasible
+   repair legitimately ends above zero); "the objective the scheduler was handed
    equals the objective recomputed from the final assignment" needs the six-term breakdown, which
    today only `explain --json` emits. A real and deliberate gap, named here rather than discovered
    later (the same shape as this section's own pattern-expansion gap above) — either sweep

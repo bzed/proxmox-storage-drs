@@ -52,12 +52,6 @@ Two `null`s, and they do not mean the same thing: **global** `hard: null` is a *
 `hard_s = soft_s`); **per-storage** `hard: null` is an *absence* ("inherit the global"). Same
 inheritance `reserve_factor` already has.
 
-The deprecated `snapshot_reserve.min_free_bytes` folds in **per storage, after percent-to-bytes
-conversion, as the last step**: `soft_s = max(soft_s_resolved, min_free_bytes)`. Validate the
-written values *first* (`hard ≤ soft`, `soft < C_s`), then fold — checking after the fold would
-let a written `hard > soft` hide behind the deprecated key and blow up the moment the operator
-deletes it, which is exactly what the deprecation warning asks them to do.
-
 ## 2b. Provisioned size, never allocated — over-provisioning is never considered (§5.1)
 
 `z_d` is the disk's *provisioned* size and a storage is counted as holding `Σ z_d·x_{d,s} + Uˢᵉˣᵗ`,
