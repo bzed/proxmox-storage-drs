@@ -1,3 +1,21 @@
+pve-storage-drs (0.1.10) trixie; urgency=medium
+
+  * logging: --log-format now defaults to text everywhere. It used to be
+    "auto", which chose JSON whenever stderr was not a terminal and so put a
+    JSON object per line into journalctl. JSON is opt-in with --log-format
+    json; "auto" is still accepted and means text. A unit or pipeline that
+    relied on the JSON default needs --log-format json added.
+  * apply: the run log names disks as name(vmid):device in "move started",
+    "move finished", the retry and lock warnings and the orphaned-volume
+    warnings, as plan and explain already did. The structured fields still
+    carry the vmid:device key.
+  * ci: pushing a debian/<version> tag publishes the built .deb and a
+    SHA256SUMS as a GitHub release, after the build, lintian and
+    install-and-run steps pass. A tag that disagrees with this changelog
+    fails before the build.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Fri, 25 Sep 2026 17:00:14 +0200
+
 pve-storage-drs (0.1.9) trixie; urgency=medium
 
   * Incompatible configuration changes. Removed keys now fail validation
