@@ -73,9 +73,17 @@ that must land together (version files, a `debian/changelog` entry, a git tag) a
 without the others. Mechanically:
 
 ```sh
+/graphify . --update                         # refresh the knowledge graph first (docs too, not just code)
+git add graphify-out/graph.json graphify-out/graph.html graphify-out/GRAPH_REPORT.md
+git commit -m "Refresh the graphify graph for <version>"   # its own commit, just before "Release <version>"
+# ... version bump + changelog + "Release <version>" commit, merge --no-ff to main ...
 make check                                   # must be green before tagging anything
 git tag -a debian/<version> -m "pve-storage-drs <version>"
 ```
+
+Between releases `graphify-out/` is rebuilt in the working tree by a git hook and stays
+uncommitted; only a release commits it. Commit just the three tracked files — the untracked
+`cache/`, dated backup directories and `.graphify_*` files stay out.
 
 The tag is annotated (`-a`), named `debian/<version>` to match this repo's existing tags
 (`git tag -l`), and created on the commit that lands the version bump once it is on `main` — not
