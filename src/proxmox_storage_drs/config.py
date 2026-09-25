@@ -479,7 +479,6 @@ def load_config(
     warnings = _validate_semantics(
         config, require_connection=require_connection, free_space_written=_free_space_written(raw)
     )
-    warnings.extend(_ignored_key_warnings(raw))
 
     return ResolvedConfig(config=config, path=path, sha256=sha256, warnings=tuple(warnings))
 
@@ -789,61 +788,6 @@ def _free_space_written(raw: dict[str, Any]) -> bool:
     if "free_space" in raw:
         return True
     return any("free_space" in s for g in raw.get("groups", []) for s in g.get("storages", []))
-
-
-# Config keys that once did something and no longer do. The schema is closed
-# (an unknown key is a typo, section 11.1), so removing a key outright would turn
-# every config that ever set it -- and every committed diagnostic bundle -- into a
-# validation error. Instead the schema keeps them (marked deprecated), nothing
-# reads them, and each warns once when written. ``(section, key, reason)``;
-# ``section`` is a dotted path into the raw mapping.
-_IGNORED_KEYS: tuple[tuple[str, str, str], ...] = (
-    (
-        "migration",
-        "saturation_ceiling",
-        "the storage saturation guard was removed; migrations are throttled by "
-        "migration.bwlimit_bytes_per_sec only",
-    ),
-    (
-        "window",
-        "upper_quantile",
-        "no placement decision reads an upper bound; the decision statistic is window.quantile",
-    ),
-    (
-        "forecast",
-        "seasonal_lookback_days",
-        "forecast.model seasonal_naive was removed; holt_winters covers a diurnal cycle",
-    ),
-    (
-        "forecast.holt_winters",
-        "residual_z",
-        "the forecast is its own p95 over the next window.lookback, with no residual band",
-    ),
-)
-
-
-def _ignored_key_warnings(raw: dict[str, Any]) -> list[str]:
-    """One warning per key of :data:`_IGNORED_KEYS` the operator wrote, plus
-    one for ``groups[].storages[].saturation_load`` (which lives in a list, so
-    a dotted path cannot name it)."""
-    warnings: list[str] = []
-    for section, key, reason in _IGNORED_KEYS:
-        node: Any = raw
-        for part in section.split("."):
-            node = node.get(part) if isinstance(node, dict) else None
-        if isinstance(node, dict) and key in node:
-            warnings.append(f"{section}.{key} is ignored: {reason}; delete the key")
-    if any(
-        s.get("saturation_load") is not None
-        for g in raw.get("groups", [])
-        for s in g.get("storages", [])
-    ):
-        warnings.append(
-            "groups[].storages[].saturation_load is ignored: the storage saturation guard "
-            "was removed, migrations are throttled by migration.bwlimit_bytes_per_sec only; "
-            "delete the key"
-        )
-    return warnings
 
 
 def _check_free_space_deprecation(

@@ -7738,7 +7738,7 @@ disk; the backtest gate compares against the quantile baseline instead of
 
 **Status:** Fixed (phase 14b). `forecast.py` is rewritten around a backtest-gated Holt-Winters p95;
 `cli._compute_group_load()` feeds `show-load` and `plan`/`apply`; `seasonal_naive`, `Forecast.upper_bound`,
-`upper_quantile` and `residual_z` are gone (the last three stay as accepted-and-ignored keys). One
+`upper_quantile` and `residual_z` are gone (and the three config keys, deleted from the schema with no compatibility shim). One
 observation from the dev cluster is recorded in plan §12.1: forced open, the per-disk factors span
 0.00 – 39, so a damped trend is the first thing to try if a real gate opens and they look wild.
 
@@ -7806,11 +7806,11 @@ has no safe default and is set on no known cluster; its only effect is deferring
 a per-storage forecasting path (`L̂_s(Δ)`, the `ω_role` state table, the undefined `headroom_*`
 terms) alive for no placement benefit.
 
-**Recommendation:** delete it (plan §12.1, 14a). Keep both config keys accepted-and-ignored with a
-warning so existing configs and the committed bundles still validate.
+**Recommendation:** delete it (plan §12.1, 14a). Delete both config keys outright
+(no compatibility shim; the only users are the maintainers).
 
-**Status:** Fixed (phase 14a). The guard, `storage_upper_bound()` and every config/topology field
-are deleted; `saturation_load`/`saturation_ceiling` stay in the schema, are ignored and warn once each.
+**Status:** Fixed (phase 14a). The guard, `storage_upper_bound()`, every config/topology field
+and both config keys are deleted; a config that sets them fails validation.
 
 ---
 

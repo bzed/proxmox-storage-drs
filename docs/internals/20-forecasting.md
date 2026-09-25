@@ -22,8 +22,7 @@ Two things it deliberately is not:
   of the path is near the peak.
 - **No `z * sigma` band.** A forecast p95 is compared with its `quantile`-model
   peers' observed p95; a residual band would inflate exactly the disks that were
-  forecast. (`forecast.holt_winters.residual_z` and `window.upper_quantile` are
-  accepted and ignored with a warning.)
+  forecast.
 
 There is no forecaster protocol and no model registry any more: `quantile` needs
 no code here at all, `seasonal_naive` was removed (its statistic — the median of

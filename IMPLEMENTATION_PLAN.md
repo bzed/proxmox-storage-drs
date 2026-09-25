@@ -2109,8 +2109,8 @@ the whole throttle; `max_single_move_duration`, the transient reserve invariant 
 `execution.cooldown_per_storage` (sized against the wipe time, §9.3) are the only per-move and
 per-storage limits. Earlier revisions carried a best-effort `saturation_load`/`saturation_ceiling`
 guard here; it was inactive unless an operator set a number that has no safe default, could only
-defer moves, and was removed by phase 14a (§12.1, REVIEW.md AL-04). Both config keys are still
-accepted, ignored and warned about, so an existing config keeps loading.
+defer moves, and was removed by phase 14a (§12.1, REVIEW.md AL-04). Both config keys were deleted
+outright: the schema is closed, so a config that still sets them fails validation.
 
 The `draining` state below still matters, to capacity (§8.1) and ordering (§8.2): a move stays in
 `M` until its source volume is gone.
@@ -2653,7 +2653,7 @@ forecast. There is no upper bound and nothing consumes one (REVIEW.md T-03, AL-0
 saturation guard that did was removed by phase 14a). `seasonal_naive` was removed for the same
 reason — its statistic (the median of the same hour of day) is not a forecast over `W`. The removed
 config keys `window.upper_quantile`, `forecast.seasonal_lookback_days` and
-`forecast.holt_winters.residual_z` stay in the closed schema, are ignored, and warn once each.
+`forecast.holt_winters.residual_z` were deleted with it; a config that sets one fails validation.
 
 The forecast never replaces a load, it **scales** it: `ℓ_d ← ℓ_d · f_d / h_d`, with `f_d` the
 forecast p95 and `h_d` the observed p95 of the same per-timestamp series (`loadmodel.
@@ -2792,7 +2792,6 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `tiny_disk_bytes ≥ 0` | The size below which a disk moves free of `β`, `γ` and the payback test (§5.4, §7); `0` restores the old accounting |
 | `delta_capacity_spread ≥ 0`; warn when `> alpha_spread` | A negative weight would reward concentration; above `α`, data evenness outweighs I/O evenness in every comparison and the tool is no longer an I/O balancer first |
 | `capacity_spread_threshold > 0` where set, `null` disables | A ratio of fill fractions to the mean fill; it can legitimately exceed 1 (§14.2 measures 1.85) |
-| `saturation_ceiling` / `saturation_load` written | Accepted and ignored, one warning each — the saturation guard was removed (§12.1) |
 | `max_concurrent_* ≥ 1` | Zero would deadlock the scheduler |
 | `execution.locks.wait_timeout > 0`, `on_timeout ∈ {skip, abort}` | A zero timeout turns every ordinary backup window into a failed run |
 | `execution.source_release.timeout ≥ z_max / saferemove_throughput` for every storage where saferemove is on | Otherwise every large move times out into `draining` (§9.3) |
@@ -2978,7 +2977,7 @@ Each phase is independently testable and useful on its own.
 | 11 | Logging policy (§2.3) | **Done.** A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
 | 12 | Capacity-spread objective and gate, one-year payback horizon (§5.3 (C7), §5.4 `δ`, §6, §7.2) | **Done.** Fixtures regenerated with the `delta_values` sweep and the 365d horizon; a replayed bundle shows the capacity gate deciding; `explain` reports the fill deviation; the manual documents `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` and the new `payback_horizon` default (the manpage documents no individual knob, by §11's own established convention) |
 | 13 | Free-space requirements (§5.3.1, §5.3 (C5), §6 override, §7.3 repair exemption, §8.1 hard floor) **and the (C2) format-compatibility eligibility it needs** | `config_schema.json` gains the block **first** — the schema is closed (`additionalProperties: false` throughout, deliberately: it is where a typo'd key is caught, §11.1's structural pass), so a `free_space:` key is rejected before `config.py` ever sees it: a top-level `free_space` object and a `free_space` property on `groups[].storages[]`, each with `soft`/`hard` typed `["string", "number", "null"]` for §5.3.1's grammar (integer bytes, byte-unit string, `"N%"`, and `null` with its two by-level meanings); `config.py` then resolves `free_space.soft/hard` per storage (bytes, byte-unit strings, percentages; global, per-storage, per-pattern; the global `snapshot_reserve.min_free_bytes` scalar deprecated, folded in per storage after percent conversion as `soft_s = max(soft_s_resolved, min_free_bytes)` — §5.3.1), validates `hard ≤ soft` and `soft < C_s` **on the written values, before that fold** (§5.3.1, "validate as written, then fold"); the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py`, `execute.py`'s live execution-time re-check and every `cli.py` call site that threads the scalar today, and `collect.py`'s bundle manifest (which serialises the scalar, so a replayed bundle carries the pair instead — §16); `topology.Storage` gains the type/format fields (C2) needs and both solver backends fix `x_{d,s}=0` for format-incompatible targets; `payback.py`'s repair detection (`ScheduledMove.resolves_reserve_violation`, set by `schedule.py`'s "source presently violating" test) is replaced by §7.3's outcome trigger (exempt iff the plan's final `Σ r_s` is strictly below the current assignment's) plus a per-move `repair` marker computed by the revert test — re-scoring `Σ r_s` on the final assignment with one `x` held — while `order_moves()`'s internal priority-1 test keeps §8.2's "source currently violating" form (a current-state rule, not a plan-outcome one); the outcome trigger is a **signature and data-flow change**, not a flag swap: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s`, so the current and final slack are threaded in from its sole production caller (`cli.py`'s plan builder, `evaluate_plan_payback()`'s only call site outside tests) — both sums already exist there as `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses` (`solve_outcome.initial_breakdown` and the R-02 `final_breakdown` are in hand at the call site), so the change is two sums over objects already passed to the benefit computation, no new plumbing through the solver — with one sequencing constraint the signature change must respect: the final sum is taken over the move set the gate will actually execute, i.e. **after** the per-move duration rejections and saturation deferrals are known and their moves removed (§7.3), so the refusal computation that today lives inside `evaluate_plan_payback()` has to produce its verdicts before the trigger's sums are taken rather than alongside them, and `_execute_group_plan()`'s `excluded_keys` filtering stops being the only place the drop is applied; the exemption also gains a `--json` surface it has never had — `repair_exempt` plus `reserve_shortfall_bytes_before`/`_after` in the payback block (§9.5), without which an exempt plan and one accepted on merit are the same object to `validate_corpus.py`'s expected files (§16.6 checks 2 and 4); the sweep is defined by grep, not by enumeration — every file matching `git grep -l resolves_reserve_violation` (today: `payback.py`, `schedule.py`, `cli.py`, `test_schedule.py`, `test_cli.py`, `test_payback.py`, `test_execute.py`, both `tests/corpus/*.expected.json` bundles, `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, plus the plan and REVIEW.md) is updated with it, and every file matching `git grep -l evaluate_plan_payback` (which adds `test_affinity_repair_fixture.py`, whose positional three-argument call breaks on the signature change without ever naming the flag, and `docs/internals/00-overview.md`) with the signature change — the manual's `resolves_reserve_violation` prose must be *split*, not renamed: its scheduling half (§8.2 priority 1) keeps the current-state form, its exemption half becomes the plan-level outcome trigger; the §14.8 fixture (which requires the format rule, landed in the same commit — so it carries no `requires_format_eligibility` marker, see §14.8's AH-03 note) proves the mandate, the exemption and both `hard`-sweep orders; the manual documents the block, and `config/drs.example.yaml` gains it in **phase 13's own commit** as `soft: 0` / `hard: null` (it is a shipped artefact, §8, and today carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all) — `hard: null` there is load-bearing rather than cosmetic: any spelled-out `hard` below the folded floor would weaken §8.1's transient charge for exactly the operators the fold protects, because the built check charges `min_free_bytes` on every in-flight state and `hard_s` is what replaces it, while `hard: null` (= `soft`) leaves an upgrading deprecated-key config exactly as strong as it is today; and the scalar → pair replacement gets the same grep treatment as the flag, because it deprecates a **documented config key** and reaches further than the code: every file matching `git grep -l min_free_bytes` (today 30 — the `src/` files named above plus `config_schema.json`, seven test modules, both `tests/corpus/*/config.yaml` replay inputs (**left as captured** — AH-06: a committed bundle is real captured data, and a pre-`free_space` bundle is the compatibility case replay must keep serving), `config/drs.example.yaml`, `docs/manual/10-configuration.md` — whose `### snapshot_reserve.min_free_bytes` reference section becomes the deprecation notice and the `free_space` documentation — `docs/manual/00-installation.md`, `docs/manual/27-plan.md`, `docs/manual/30-safety-and-status.md`, `docs/internals/60-topology.md`, `docs/internals/91-optimize.md`, `docs/internals/95-schedule.md` — which documents the built fold of the scalar into the transient check — `.agents/domain-invariants.md`, whose invariant 2 is written `used + max(f·Z_s, min_free_bytes) ≤ C_s` and becomes `soft_s`, `.agents/testing.md`, plus the plan and REVIEW.md) is updated with it; **one file the sweep does not name still needs the same treatment**: `verify-storages` gains the resolved `soft_s`/`hard_s` per storage, with the level each came from (§3.5 — the derivation an operator cannot otherwise predict, and the same argument that put the pattern expansion there), so `docs/manual/25-show-load-and-verify-storages.md` joins the phase's file set even though it matches none of the three greps today |
-| 14 | Holt-Winters-driven placement; §7.3 saturation guard removed (§12.1; REVIEW.md T-03, AL-01, AL-04) | Two commits, in order. **14a** deletes the saturation guard — `migration.bwlimit_bytes_per_sec` is the only throttle a migration needs — keeping `saturation_load`/`saturation_ceiling` accepted-and-ignored with a deprecation warning so existing configs and every committed bundle still validate. **14b** scales each disk's `ℓ_d` by a backtest-validated Holt-Winters forecast of its p95 over the next `window.lookback`, at the one point gates, solver, payback and ordering all read it. The default `forecast.model: quantile` is unchanged: §14 fixtures and quantile corpus variants byte-identical apart from the removed saturation fields. Done when §12.1's checklist holds |
+| 14 | Holt-Winters-driven placement; §7.3 saturation guard removed (§12.1; REVIEW.md T-03, AL-01, AL-04) | Two commits, in order. **14a** deletes the saturation guard — `migration.bwlimit_bytes_per_sec` is the only throttle a migration needs — deleting `saturation_load`/`saturation_ceiling` from the schema outright (no compatibility shim: a config that sets them fails validation, and the committed bundles' `config.yaml` were edited). **14b** scales each disk's `ℓ_d` by a backtest-validated Holt-Winters forecast of its p95 over the next `window.lookback`, at the one point gates, solver, payback and ordering all read it. The default `forecast.model: quantile` is unchanged: §14 fixtures and quantile corpus variants byte-identical apart from the removed saturation fields. Done when §12.1's checklist holds |
 | 15 | Single-source configuration defaults (§11.1; REVIEW.md AL-03) | Every default exists **exactly once, on the dataclass field**; the loader constructs each config class from the raw mapping by passing **only the keys the operator actually wrote**, through field-level converters (duration/byte/percent strings, list→tuple), so no `.get(key, default)` ever restates a default — today's twin copies in `config.py` (e.g. `model: str = "quantile"` on `ForecastConfig` beside `fc_raw.get("model", "quantile")` in the loader, and the same shape for every other knob) are gone; `config_schema.json`, the third copy of the shape, is generated from the same field/type/enum source — or, if generation proves heavier than checking, a check target fails on drift between schema and dataclasses — so it cannot rot either; **zero operator-visible behaviour change**: `--help`, the manual's option tables and `config/drs.example.yaml` values are byte-identical before and after, proven by the fixture and corpus checks running green untouched |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
@@ -3012,9 +3011,8 @@ Why: it is the forecaster's only consumer today, it is inactive unless an operat
 is defer moves. `execute.py` already passes `bwlimit` to every `move_disk`; `max_single_move_duration`,
 the transient reserve invariant (§8.1) and `execution.cooldown_per_storage` stay as they are.
 
-Delete (use `git grep -n saturation` as the checklist; it must come back empty outside REVIEW.md,
-this plan's history notes, the schema's two deprecated keys, the deprecation warning and the
-committed `tests/corpus/*/config.yaml` inputs, which are captured data and stay untouched):
+Delete (use `git grep -n saturation` as the checklist; it must come back empty outside REVIEW.md
+and this plan's history notes):
 
 - `payback.py`: `_saturation_deferred()`, `MoveCost.saturation_deferred`,
   `PaybackResult.deferred_moves`, `compute_move_cost()`'s `target`/`l_hat_src`/`l_hat_dst`
@@ -3036,12 +3034,12 @@ committed `tests/corpus/*/config.yaml` inputs, which are captured data and stay 
   loses the knob rows. In their place one sentence in §7.3: migrations are throttled by `bwlimit`
   only; the tool does not model storage saturation.
 
-Compatibility: `config_schema.json` **keeps** `groups[].storages[].saturation_load` and
-`migration.saturation_ceiling` — the schema is closed, so dropping them would turn every config
-that set them, and all three committed corpus bundles (`saturation_ceiling: 0.85`), into a
-validation error. `config.py` ignores them and warns once each, the same shape as the
-`snapshot_reserve.min_free_bytes` deprecation. `plan --json` loses `deferred_moves` and the per-move
-`saturation_deferred`; regenerate the fixture and corpus expected files and say so in the changelog.
+No compatibility shim (operator direction: the only users are the maintainers): `config_schema.json`
+drops `groups[].storages[].saturation_load` and `migration.saturation_ceiling`, so a config that still
+sets either fails validation. The three committed corpus bundles' `config.yaml` had `saturation_ceiling`
+(and, for 14b, `upper_quantile`, `seasonal_lookback_days`, `residual_z`); those lines were removed and
+each bundle's `SHA256SUMS` entry updated. `plan --json` loses `deferred_moves` and the per-move
+`saturation_deferred`; the fixture and corpus expected files are regenerated.
 
 #### 14b — Holt-Winters-driven `ℓ_d` (one commit) — **done**
 
@@ -3084,8 +3082,8 @@ default p95 → p99). That changed every plan on every cluster for no forecastin
    over `W` — and after 14a nothing consumes it; Holt-Winters' seasonal term covers the diurnal case.
    It leaves the schema enum (loud, like `cpsat`; changelog) and the corpus variant matrix. Likewise
    delete `Forecast.upper_bound`, `holt_winters.residual_z` and the forecaster-side
-   `upper_quantile` if nothing reads them any more; a removed **config key** stays
-   accepted-and-ignored with a warning, as in 14a.
+   `upper_quantile` if nothing reads them any more; a removed **config key** is
+   deleted from the schema too — no compatibility shim, as in 14a.
 
 6. **Output.** Holt-Winters' per-call fallback warning drops to DEBUG (one per disk would flood the
    journal); instead one INFO per group, e.g. `group g: forecast holt_winters used (backtest err
@@ -3111,8 +3109,8 @@ thing to try.
   identical to 14a's output.
 - Unit tests cover: the ratio (`h_d = 0`, flagged disk and failed fit keep `ℓ_d`); the p95-of-path
   statistic on a synthetic diurnal series whose next-day peak is higher; the gate choosing
-  Holt-Winters on a seasonal-plus-trend series and quantile on white noise; the saturation keys
-  accepted with a warning; `seasonal_naive` rejected by the schema.
+  Holt-Winters on a seasonal-plus-trend series and quantile on white noise; the removed keys and
+  `seasonal_naive` rejected by the schema.
 - `bzed-dev-cluster-7d-holt-winters` replays with the forecast block populated; its regenerated
   expected file is read by hand (which disks were scaled, by how much) before committing.
 - Manual: when `holt_winters` is worth selecting (diurnal or trending load), what the gate does,
@@ -3641,7 +3639,6 @@ bug waiting to happen; this table is the audit.
 | `exclude.skip_vms_with_snapshots` | §3.7, §5.3 (C2) pinning |
 | `objective.affinity_counts_pinned_disks` | §5.3 (C3) range: all of `D` (default) or `D^mov` |
 | `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
-| `migration.saturation_ceiling`, `groups[].storages[].saturation_load` | Accepted and ignored since phase 14a (§12.1); no formula |
 | `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity/delta_capacity_spread` | §5.4 (the `δ` term and the I/O-weighted `κ` term also enter §7.2's benefit) |
 | `objective.reserve_violation_penalty` | §5.3 (C5), *floor* for the single-stage `P` alternative |
 | `metrics.pvestatd_push_interval` | §11.1 `rate_window` validation; §3.3 `verify-metrics` |

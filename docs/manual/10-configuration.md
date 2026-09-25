@@ -339,14 +339,6 @@ The point-estimate quantile: each disk's load is the p95 of its raw signal
 over `window.lookback`, not the mean, so one traffic spike neither triggers
 nor suppresses a migration.
 
-### `window.upper_quantile` (deprecated)
-
-Fraction in (0, 1). **Accepted and ignored**, with one warning per run when
-it is written. It was the quantile a migration-time saturation guard
-consumed; that guard is gone (a migration is throttled by
-`migration.bwlimit_bytes_per_sec` alone) and no placement decision reads an
-upper bound. Delete the key.
-
 ### `window.min_coverage`
 
 Fraction in (0, 1], default `0.80`.
@@ -478,19 +470,6 @@ when it comes from a pattern entry matching several differently-sized
 storages — `"10%"` demands different byte counts on a 20 TiB and a 2 TiB
 LUN, which is the point: "a tenth of the LUN free" is one policy applied
 per storage, not one number shared across the family.
-
-### `groups[].storages[].saturation_load` (deprecated)
-
-Positive number or `null`. **Accepted and ignored**, with one warning per
-run when any storage sets it. It fed a per-storage saturation guard that
-deferred a migration when the storage's forecast load would pass a ceiling;
-that guard was removed. A migration may start at any time and is throttled
-by `migration.bwlimit_bytes_per_sec` alone; the hard bounds
-`migration.max_single_move_duration` and the **transient reserve
-invariant** (the `snapshot_reserve` floor checked against the storage's
-actual state *while a migration is in flight*, when a moving disk's source
-and target copies are both briefly fully allocated at once) are unchanged.
-Delete the key.
 
 ## `snapshot_reserve` — the free-space floor
 
@@ -644,6 +623,11 @@ estimate the payback test uses: a move's mirror is assumed to take
 `disk_bytes / bwlimit_bytes_per_sec` seconds (see `migration.payback_ratio`
 below for the full cost/benefit comparison).
 
+This is the **whole** throttle on a migration: it may start at any time, and
+the tool does not model storage saturation. The other limits are
+`migration.max_single_move_duration` and the transient reserve invariant (see
+`snapshot_reserve.factor`).
+
 ### `migration.source_load_weight`
 
 Weight, default `1.0`.
@@ -728,12 +712,6 @@ Weight, default `1.0`.
 In-flight I/O charged to the source for the whole `saferemove` wipe duration
 in the cost model. The zeroing pass is one sequential writer, so `1.0` is
 the natural value.
-
-### `migration.saturation_ceiling` (deprecated)
-
-Fraction in (0, 1]. **Accepted and ignored**, with one warning per run when
-it is written; see `groups[].storages[].saturation_load` above. Delete the
-key.
 
 ### `migration.assume_thick_provisioning`
 
@@ -1284,14 +1262,6 @@ Prometheus must hold `2 · window.lookback` of history for the gate to run at
 all; and `python3-statsmodels` must be installed (without it every disk keeps
 its observed load).
 
-### `forecast.seasonal_lookback_days` (deprecated)
-
-**Accepted and ignored**, with one warning per run when written: `seasonal_naive`
-was removed (`holt_winters`' seasonal term covers a daily cycle, and
-`seasonal_naive` was never a forecast over the next window). A config that
-selects `forecast.model: seasonal_naive` fails validation; choose `holt_winters`
-or `quantile`.
-
 ### `forecast.holt_winters.seasonal_periods`
 
 Integer `> 0`, default `288` (24h at a 5-minute step).
@@ -1327,11 +1297,6 @@ The trend component passed to the underlying Holt-Winters fit
 One of `add`, `mul`, `none`; default `add`.
 
 The seasonal component passed to the same fit.
-
-### `forecast.holt_winters.residual_z` (deprecated)
-
-**Accepted and ignored**, with one warning per run when written. The forecast is
-its own p95 over the next window with no residual band; delete the key.
 
 ## `support` — diagnostic bundles
 

@@ -81,7 +81,6 @@
       "properties": {
         "lookback": { "type": ["string", "number"] },
         "quantile": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
-        "upper_quantile": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "deprecated": true },
         "min_coverage": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
       }
     },
@@ -116,7 +115,6 @@
                 "id": { "type": "string", "minLength": 1 },
                 "capability_weight": { "type": "number", "exclusiveMinimum": 0 },
                 "reserve_factor": { "type": ["number", "null"], "minimum": 0 },
-                "saturation_load": { "type": ["number", "null"], "exclusiveMinimum": 0, "deprecated": true },
                 "free_space": {
                   "type": "object",
                   "additionalProperties": false,
@@ -163,7 +161,6 @@
         "max_single_move_duration": { "type": ["string", "number"], "exclusiveMinimum": 0 },
         "account_saferemove_wipe": { "type": "boolean" },
         "wipe_load_weight": { "type": "number", "minimum": 0 },
-        "saturation_ceiling": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "deprecated": true },
         "assume_thick_provisioning": { "type": "boolean" },
         "tiny_disk_bytes": { "type": ["string", "number"], "minimum": 0 }
       }
@@ -275,15 +272,13 @@
       "additionalProperties": false,
       "properties": {
         "model": { "type": "string", "enum": ["quantile", "holt_winters"] },
-        "seasonal_lookback_days": { "type": "number", "minimum": 0, "deprecated": true },
         "holt_winters": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "seasonal_periods": { "type": "integer", "exclusiveMinimum": 0 },
             "trend": { "type": "string", "enum": ["add", "mul", "none"] },
-            "seasonal": { "type": "string", "enum": ["add", "mul", "none"] },
-            "residual_z": { "type": "number", "exclusiveMinimum": 0, "deprecated": true }
+            "seasonal": { "type": "string", "enum": ["add", "mul", "none"] }
           }
         }
       }

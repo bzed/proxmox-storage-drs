@@ -41,9 +41,7 @@ path themselves.
    and partly because each is independently testable). `errors` become one
    `ConfigError` naming every problem found, not just the first; `warnings`
    are returned to the caller (`ResolvedConfig.warnings`) for `cli.py` to log
-   — the payback-horizon and objective-weight advisories, and the
-   accepted-but-ignored `saturation_load`/`saturation_ceiling` deprecation
-   (see below), are warning-only.
+   — the payback-horizon and objective-weight advisories are warning-only.
 
 Every duration or size field is parsed **once**, at this point, via
 `units.parse_duration_seconds`/`parse_size_bytes`, and stored on the

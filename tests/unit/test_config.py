@@ -292,21 +292,6 @@ def test_malformed_storage_pattern_is_rejected_at_load_time(tmp_path: Path) -> N
         config.load_config(str(path), env={})
 
 
-def test_removed_forecast_keys_are_accepted_ignored_and_warn(tmp_path: Path) -> None:
-    data = minimal_config_dict()
-    data["window"] = {"lookback": "48h", "quantile": 0.95, "upper_quantile": 0.99}
-    data["forecast"] = {
-        "model": "holt_winters",
-        "seasonal_lookback_days": 7,
-        "holt_winters": {"residual_z": 2.0},
-    }
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    for key in ("window.upper_quantile", "forecast.seasonal_lookback_days"):
-        assert sum(f"{key} is ignored" in w for w in resolved.warnings) == 1
-    assert sum("forecast.holt_winters.residual_z is ignored" in w for w in resolved.warnings) == 1
-
-
 def test_seasonal_naive_is_rejected_by_the_schema(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["forecast"] = {"model": "seasonal_naive"}
@@ -391,29 +376,37 @@ def test_time_window_start_equals_end_is_rejected(tmp_path: Path) -> None:
         config.load_config(str(path), env={})
 
 
-def test_saturation_load_is_accepted_ignored_and_warns_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "section, key, value",
+    [
+        ("migration", "saturation_ceiling", 0.85),
+        ("window", "upper_quantile", 0.99),
+        ("forecast", "seasonal_lookback_days", 7),
+    ],
+)
+def test_removed_config_keys_are_rejected(
+    tmp_path: Path, section: str, key: str, value: object
+) -> None:
+    data = minimal_config_dict()
+    data[section] = {**data.get(section, {}), key: value}
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match=key):
+        config.load_config(str(path), env={})
+
+
+def test_removed_storage_and_holt_winters_keys_are_rejected(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["groups"][0]["storages"] = [
         {"id": "san-a", "saturation_load": 64},
-        {"id": "san-b", "saturation_load": 64},
+        {"id": "san-b"},
     ]
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert sum("saturation_load is ignored" in w for w in resolved.warnings) == 1
-
-
-def test_saturation_ceiling_is_accepted_ignored_and_warns(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="saturation_load"):
+        config.load_config(str(write_config(tmp_path, data)), env={})
     data = minimal_config_dict()
-    data["migration"] = {"bwlimit_bytes_per_sec": 100 * 1024 * 1024, "saturation_ceiling": 0.85}
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert sum("saturation_ceiling is ignored" in w for w in resolved.warnings) == 1
-
-
-def test_no_saturation_warning_when_neither_key_is_written(tmp_path: Path) -> None:
-    path = write_config(tmp_path, minimal_config_dict())
-    resolved = config.load_config(str(path), env={})
-    assert not any("saturation" in w for w in resolved.warnings)
+    data["window"] = {"lookback": "48h"}
+    data["forecast"] = {"model": "holt_winters", "holt_winters": {"residual_z": 2.0}}
+    with pytest.raises(ConfigError, match="residual_z"):
+        config.load_config(str(write_config(tmp_path, data)), env={})
 
 
 def test_payback_horizon_default_is_365d(tmp_path: Path) -> None:
