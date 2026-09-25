@@ -67,6 +67,11 @@ class FakeClock:
         return Clock(now=self.now, sleep=self.sleep)
 
 
+def log_messages(caplog: pytest.LogCaptureFixture, event: str) -> list[str]:
+    """Rendered messages of the captured records carrying ``event``."""
+    return [r.getMessage() for r in caplog.records if getattr(r, "event", None) == event]
+
+
 def make_disk(key: str, size_tib: float, storage: str, node: str = "pve01") -> Disk:
     vmid, device = key.split(":")
     return Disk(
@@ -348,7 +353,7 @@ def test_vm_lock_clears_within_timeout_then_proceeds() -> None:
     assert len(fc.slept) >= 1
 
 
-def test_vm_lock_timeout_with_on_timeout_skip() -> None:
+def test_vm_lock_timeout_with_on_timeout_skip(caplog: pytest.LogCaptureFixture) -> None:
     client, _api = client_with(
         {
             "nodes/pve01/qemu/101/config": {
@@ -362,9 +367,13 @@ def test_vm_lock_timeout_with_on_timeout_skip() -> None:
         locks=LocksConfig(wait_timeout_seconds=100.0, poll_interval_seconds=30.0, on_timeout="skip")
     )
     fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
-    result = run(client, default_group(), (make_move(),), execution=execution, clock=fc)
+    with caplog.at_level(logging.WARNING, logger="proxmox_storage_drs.execute"):
+        result = run(client, default_group(), (make_move(),), execution=execution, clock=fc)
     assert result.outcomes[0].status == "skipped"
     assert "still locked" in result.outcomes[0].detail
+    assert log_messages(caplog, "vm_locked") == [
+        "VM vm101(101) is locked (backup); waiting up to 100.0"
+    ]
     assert result.outcomes[0].always_stop is False
     assert result.stopped_early is False
 
@@ -416,7 +425,7 @@ def test_is_task_lock_timeout_matches_pve_wording_only() -> None:
     assert not _is_task_lock_timeout(f"move_disk task {UPID} failed: some lock error, got timeout")
 
 
-def test_task_lock_timeout_is_retried_and_succeeds() -> None:
+def test_task_lock_timeout_is_retried_and_succeeds(caplog: pytest.LogCaptureFixture) -> None:
     """Section 9.3 point 3: the very race this fix targets -- a
     `move_disk` task's own flock on the VM config file, still held by
     another task's cleanup for a moment, fails the first attempt even
@@ -443,10 +452,13 @@ def test_task_lock_timeout_is_retried_and_succeeds() -> None:
         locks=LocksConfig(task_retry_limit=2, task_retry_backoff_seconds=15.0)
     )
     fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
-    result = run(client, default_group(), (make_move(),), execution=execution, clock=fc)
+    with caplog.at_level(logging.WARNING, logger="proxmox_storage_drs.execute"):
+        result = run(client, default_group(), (make_move(),), execution=execution, clock=fc)
     assert result.outcomes[0].status == "moved"
     assert result.outcomes[0].upid == upid2
     assert fc.slept == [15.0]
+    (retry,) = log_messages(caplog, "move_disk_task_lock_retry")
+    assert retry.startswith("retrying move_disk of vm101(101):scsi0 after a task lock timeout")
     move_disk_posts = [c for c in api.calls if c[1] == "nodes/pve01/qemu/101/move_disk"]
     assert len(move_disk_posts) == 2
 
@@ -911,7 +923,7 @@ def test_live_transient_check_fails_safe_when_the_live_read_errors(failing: str)
 # --------------------------------------------------------------------- failures
 
 
-def test_task_failure_marks_failed_and_detects_orphans() -> None:
+def test_task_failure_marks_failed_and_detects_orphans(caplog: pytest.LogCaptureFixture) -> None:
     client, _api = client_with(
         {
             f"nodes/pve01/tasks/{UPID}/status": {
@@ -926,10 +938,15 @@ def test_task_failure_marks_failed_and_detects_orphans() -> None:
             ],
         }
     )
-    result = run(client, default_group(), (make_move(),))
+    with caplog.at_level(logging.WARNING, logger="proxmox_storage_drs.execute"):
+        result = run(client, default_group(), (make_move(),))
     assert result.outcomes[0].status == "failed"
     assert result.outcomes[0].orphaned_volumes == ("san-b:vm-101-disk-0",)
     assert result.stopped_early is True  # abort_on_failure defaults True
+    assert log_messages(caplog, "orphaned_volumes") == [
+        "orphaned volume(s) left on san-b after the failed move of vm101(101):scsi0: "
+        "san-b:vm-101-disk-0"
+    ]
 
 
 def test_task_failure_continues_when_abort_on_failure_false() -> None:
@@ -2098,7 +2115,9 @@ def test_concurrent_lock_timeout_with_abort_semantics_fails_and_stops() -> None:
     assert not any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
 
 
-def test_concurrent_lock_timeout_with_skip_semantics_continues_to_the_next_move() -> None:
+def test_concurrent_lock_timeout_with_skip_semantics_continues_to_the_next_move(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """`execution.locks.on_timeout: skip` (the default): the locked head
     times out `"skipped"`, not `"failed"`, and -- unlike the abort case --
     the queue simply advances to 202, which launches normally."""
@@ -2114,7 +2133,13 @@ def test_concurrent_lock_timeout_with_skip_semantics_continues_to_the_next_move(
         max_concurrent_migrations=2,
         locks=LocksConfig(wait_timeout_seconds=5.0, poll_interval_seconds=10.0, on_timeout="skip"),
     )
-    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    with caplog.at_level(logging.WARNING, logger="proxmox_storage_drs.execute"):
+        result = run_concurrent(
+            client, two_source_two_target_group(), two_disjoint_moves(), execution
+        )
+    assert log_messages(caplog, "vm_locked") == [
+        "VM vm201(201) is locked (backup); waiting up to 5.0"
+    ]
     outcomes_by_key = {o.disk_key: o for o in result.outcomes}
     assert outcomes_by_key["201:scsi0"].status == "skipped"
     assert outcomes_by_key["201:scsi0"].always_stop is False
@@ -2123,7 +2148,9 @@ def test_concurrent_lock_timeout_with_skip_semantics_continues_to_the_next_move(
     assert any(c[1] == "nodes/pve01/qemu/202/move_disk" for c in api.calls)
 
 
-def test_concurrent_task_lock_timeout_is_retried_and_succeeds() -> None:
+def test_concurrent_task_lock_timeout_is_retried_and_succeeds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Section 9.3 point 3's retry, concurrent counterpart of
     `test_task_lock_timeout_is_retried_and_succeeds`: `_poll_inflight_once()`
     reissues `move_disk` for 201 in place rather than resolving it, and
@@ -2150,10 +2177,23 @@ def test_concurrent_task_lock_timeout_is_retried_and_succeeds() -> None:
         max_concurrent_migrations=2,
         locks=LocksConfig(task_retry_limit=1, task_retry_backoff_seconds=5.0),
     )
-    result = run_concurrent(client, two_source_two_target_group(), two_disjoint_moves(), execution)
+    with caplog.at_level(logging.INFO, logger="proxmox_storage_drs.execute"):
+        result = run_concurrent(
+            client, two_source_two_target_group(), two_disjoint_moves(), execution
+        )
     outcomes_by_key = {o.disk_key: o for o in result.outcomes}
     assert outcomes_by_key["201:scsi0"].status == "moved"
     assert outcomes_by_key["201:scsi0"].upid == upid_a2
+    # Both launch paths (the initial one and the in-place reissue) and the
+    # poll-resolved finish name the disk the way plan/explain do.
+    started = log_messages(caplog, "move_started")
+    assert f"move started: vm201(201):scsi0 san-a -> san-c ({UPID_A})" in started
+    assert f"move started: vm201(201):scsi0 san-a -> san-c ({upid_a2})" in started
+    assert f"move finished: vm201(201):scsi0 -> moved ({upid_a2})" in log_messages(
+        caplog, "move_finished"
+    )
+    (retry,) = log_messages(caplog, "move_disk_task_lock_retry")
+    assert retry.startswith("retrying move_disk of vm201(201):scsi0 after a task lock timeout")
     assert outcomes_by_key["202:scsi0"].status == "moved"
     move_disk_201_calls = [c for c in api.calls if c[1] == "nodes/pve01/qemu/201/move_disk"]
     assert len(move_disk_201_calls) == 2
@@ -2355,6 +2395,9 @@ def test_every_issued_move_is_logged_with_its_upid(caplog: pytest.LogCaptureFixt
     started = [r for r in caplog.records if getattr(r, "event", None) == "move_started"]
     finished = [r for r in caplog.records if getattr(r, "event", None) == "move_finished"]
     assert len(started) == 1 and len(finished) == 1
+    # The message names the disk the way plan/explain do, not by bare key.
+    assert started[0].getMessage() == f"move started: vm101(101):scsi0 san-a -> san-b ({UPID})"
+    assert finished[0].getMessage() == f"move finished: vm101(101):scsi0 -> moved ({UPID})"
     assert started[0].upid == UPID  # type: ignore[attr-defined]
     assert started[0].disk_key == "101:scsi0"  # type: ignore[attr-defined]
     assert started[0].from_storage == "san-a"  # type: ignore[attr-defined]
