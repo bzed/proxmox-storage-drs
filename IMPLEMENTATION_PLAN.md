@@ -1856,7 +1856,8 @@ comparable to `ℓ`, which is measured in the same units (§4). `cost_d` is ther
 old volume with nothing happening on the target; `ω_wipe` (`migration.wipe_load_weight`, default
 1.0) is its own weight so an operator who knows their array shrugs off a throttled zeroing pass can
 lower it without touching the mirror weights. §7.3 charges the same quantity to the saturation guard
-for the whole `draining` window.
+for the whole `draining` window. **Phase 14a removes that guard and the `headroom_src`/`headroom_dst`
+terms (never defined, never built): the mirror duration is `z_d / bwlimit`, full stop (§12.1).**
 
 **A disk below `migration.tiny_disk_bytes` costs nothing.** `cost_d = 0` when
 `z_d < tiny_disk_bytes` (default 64 MiB — comfortably above an EFI var store or TPM state, and far
@@ -1982,7 +1983,9 @@ test:
 - `duration_d > migration.max_single_move_duration` (default 6h) → reject the move;
 - the move would push either endpoint above `migration.saturation_ceiling · saturation_load` during
   the mirror → defer the move to a later run rather than reject the plan (see below); skipped for a
-  storage with no `saturation_load` configured;
+  storage with no `saturation_load` configured — **removed by phase 14a (§12.1, REVIEW.md AL-04):
+  migrations may run at any time, throttled by `migration.bwlimit_bytes_per_sec` alone; this bullet
+  and everything from "Defining 'during the mirror'" through the `N_s` paragraphs below go with it;**
 - the move violates the transient reserve invariant of section 8 → reject.
 
 **A plan that repairs is exempt from the aggregate test.** The trigger is the plan's *outcome*:
@@ -2102,7 +2105,8 @@ a future bundle showing tiny moves emitted with `A_before = A_after` is evidence
 narrowest available fix being to require `A_before > A_after` for a zero-cost plan, which needs no
 threshold because the affinity debt moves in discrete steps.
 
-**Defining "during the mirror".** `u_s` as used everywhere else is a p95 over the lookback window —
+**Defining "during the mirror".** *(Removed by phase 14a, §12.1 — kept until then as the
+description of the built guard.)* `u_s` as used everywhere else is a p95 over the lookback window —
 a robust *statistic*, not an instantaneous reading — so adding an instantaneous `ω` to it would mix
 two different kinds of quantity. Define the check explicitly:
 
@@ -2735,6 +2739,12 @@ remains future work — **phase 14** (§12), tracked as REVIEW.md AL-01, records
 deliberate default change; until then, treat every occurrence of "the optimizer consumes the upper
 bound" in this document as the target design, not the current behaviour.
 
+**Superseded by phase 14 (§12.1).** The optimizer will not consume the upper bound: the decision
+statistic stays `window.quantile`, and `holt_winters` predicts that same quantile over the *next*
+`W` instead of the last one. The table above, the paragraph on the upper bound, and the per-storage
+`L̂_s(Δ)` paragraph below (the saturation guard's input, removed in 14a) are rewritten to §12.1 when
+phase 14 lands.
+
 Forecasts are produced **per disk**. Where §7.3 needs a per-*storage* bound `L̂_s(Δ)`, it is the sum
 of the per-disk upper bounds over the disks assigned to `s` in the state being evaluated:
 `L̂_s(Δ) = Σ_{d : x_{d,s}=1} û_d(Δ)`. Summing upper bounds is conservative — it assumes the disks peak
@@ -2756,7 +2766,8 @@ seasonal model is a statement that the history exists to support it.
 - Require at least `2 × seasonal_periods` samples before trusting a Holt-Winters fit, and fall back to
   `quantile` otherwise — with a **logged warning**, since a silent fallback hides a misconfiguration.
 - Validate by backtesting: fit on `[t−2T, t−T]`, predict `[t−T, t]`, compare against actual. Refuse
-  to let a model whose backtest error exceeds the imbalance threshold drive migrations.
+  to let a model whose backtest error exceeds the imbalance threshold drive migrations. **Phase 14b
+  replaces the threshold with a baseline comparison (§12.1 point 3).**
 
 **As built (bug fix):** the live §7.3 saturation-guard fetch (`cli.py`'s
 `_saturation_forecast_inputs()`, via `loadmodel.compute_disk_load_series()`) used to issue one
@@ -3057,7 +3068,7 @@ Each phase is independently testable and useful on its own.
 | 11 | Logging policy (§2.3) | **Done.** A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
 | 12 | Capacity-spread objective and gate, one-year payback horizon (§5.3 (C7), §5.4 `δ`, §6, §7.2) | **Done.** Fixtures regenerated with the `delta_values` sweep and the 365d horizon; a replayed bundle shows the capacity gate deciding; `explain` reports the fill deviation; the manual documents `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` and the new `payback_horizon` default (the manpage documents no individual knob, by §11's own established convention) |
 | 13 | Free-space requirements (§5.3.1, §5.3 (C5), §6 override, §7.3 repair exemption, §8.1 hard floor) **and the (C2) format-compatibility eligibility it needs** | `config_schema.json` gains the block **first** — the schema is closed (`additionalProperties: false` throughout, deliberately: it is where a typo'd key is caught, §11.1's structural pass), so a `free_space:` key is rejected before `config.py` ever sees it: a top-level `free_space` object and a `free_space` property on `groups[].storages[]`, each with `soft`/`hard` typed `["string", "number", "null"]` for §5.3.1's grammar (integer bytes, byte-unit string, `"N%"`, and `null` with its two by-level meanings); `config.py` then resolves `free_space.soft/hard` per storage (bytes, byte-unit strings, percentages; global, per-storage, per-pattern; the global `snapshot_reserve.min_free_bytes` scalar deprecated, folded in per storage after percent conversion as `soft_s = max(soft_s_resolved, min_free_bytes)` — §5.3.1), validates `hard ≤ soft` and `soft < C_s` **on the written values, before that fold** (§5.3.1, "validate as written, then fold"); the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py`, `execute.py`'s live execution-time re-check and every `cli.py` call site that threads the scalar today, and `collect.py`'s bundle manifest (which serialises the scalar, so a replayed bundle carries the pair instead — §16); `topology.Storage` gains the type/format fields (C2) needs and both solver backends fix `x_{d,s}=0` for format-incompatible targets; `payback.py`'s repair detection (`ScheduledMove.resolves_reserve_violation`, set by `schedule.py`'s "source presently violating" test) is replaced by §7.3's outcome trigger (exempt iff the plan's final `Σ r_s` is strictly below the current assignment's) plus a per-move `repair` marker computed by the revert test — re-scoring `Σ r_s` on the final assignment with one `x` held — while `order_moves()`'s internal priority-1 test keeps §8.2's "source currently violating" form (a current-state rule, not a plan-outcome one); the outcome trigger is a **signature and data-flow change**, not a flag swap: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s`, so the current and final slack are threaded in from its sole production caller (`cli.py`'s plan builder, `evaluate_plan_payback()`'s only call site outside tests) — both sums already exist there as `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses` (`solve_outcome.initial_breakdown` and the R-02 `final_breakdown` are in hand at the call site), so the change is two sums over objects already passed to the benefit computation, no new plumbing through the solver — with one sequencing constraint the signature change must respect: the final sum is taken over the move set the gate will actually execute, i.e. **after** the per-move duration rejections and saturation deferrals are known and their moves removed (§7.3), so the refusal computation that today lives inside `evaluate_plan_payback()` has to produce its verdicts before the trigger's sums are taken rather than alongside them, and `_execute_group_plan()`'s `excluded_keys` filtering stops being the only place the drop is applied; the exemption also gains a `--json` surface it has never had — `repair_exempt` plus `reserve_shortfall_bytes_before`/`_after` in the payback block (§9.5), without which an exempt plan and one accepted on merit are the same object to `validate_corpus.py`'s expected files (§16.6 checks 2 and 4); the sweep is defined by grep, not by enumeration — every file matching `git grep -l resolves_reserve_violation` (today: `payback.py`, `schedule.py`, `cli.py`, `test_schedule.py`, `test_cli.py`, `test_payback.py`, `test_execute.py`, both `tests/corpus/*.expected.json` bundles, `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, plus the plan and REVIEW.md) is updated with it, and every file matching `git grep -l evaluate_plan_payback` (which adds `test_affinity_repair_fixture.py`, whose positional three-argument call breaks on the signature change without ever naming the flag, and `docs/internals/00-overview.md`) with the signature change — the manual's `resolves_reserve_violation` prose must be *split*, not renamed: its scheduling half (§8.2 priority 1) keeps the current-state form, its exemption half becomes the plan-level outcome trigger; the §14.8 fixture (which requires the format rule, landed in the same commit — so it carries no `requires_format_eligibility` marker, see §14.8's AH-03 note) proves the mandate, the exemption and both `hard`-sweep orders; the manual documents the block, and `config/drs.example.yaml` gains it in **phase 13's own commit** as `soft: 0` / `hard: null` (it is a shipped artefact, §8, and today carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all) — `hard: null` there is load-bearing rather than cosmetic: any spelled-out `hard` below the folded floor would weaken §8.1's transient charge for exactly the operators the fold protects, because the built check charges `min_free_bytes` on every in-flight state and `hard_s` is what replaces it, while `hard: null` (= `soft`) leaves an upgrading deprecated-key config exactly as strong as it is today; and the scalar → pair replacement gets the same grep treatment as the flag, because it deprecates a **documented config key** and reaches further than the code: every file matching `git grep -l min_free_bytes` (today 30 — the `src/` files named above plus `config_schema.json`, seven test modules, both `tests/corpus/*/config.yaml` replay inputs (**left as captured** — AH-06: a committed bundle is real captured data, and a pre-`free_space` bundle is the compatibility case replay must keep serving), `config/drs.example.yaml`, `docs/manual/10-configuration.md` — whose `### snapshot_reserve.min_free_bytes` reference section becomes the deprecation notice and the `free_space` documentation — `docs/manual/00-installation.md`, `docs/manual/27-plan.md`, `docs/manual/30-safety-and-status.md`, `docs/internals/60-topology.md`, `docs/internals/91-optimize.md`, `docs/internals/95-schedule.md` — which documents the built fold of the scalar into the transient check — `.agents/domain-invariants.md`, whose invariant 2 is written `used + max(f·Z_s, min_free_bytes) ≤ C_s` and becomes `soft_s`, `.agents/testing.md`, plus the plan and REVIEW.md) is updated with it; **one file the sweep does not name still needs the same treatment**: `verify-storages` gains the resolved `soft_s`/`hard_s` per storage, with the level each came from (§3.5 — the derivation an operator cannot otherwise predict, and the same argument that put the pattern expansion there), so `docs/manual/25-show-load-and-verify-storages.md` joins the phase's file set even though it matches none of the three greps today |
-| 14 | Forecast-driven decision statistic (§10.1's target design; REVIEW.md T-03 and AL-01) | The per-disk statistic the gates, solver, payback and ordering consume is the **backtest-gated forecaster's upper bound** û_d(W), with `W = window.lookback` — the same horizon §10.2's backtest already validates — computed per group by `loadmodel` from the per-disk series the saturation guard's own `compute_disk_load_series()` already fetches, gated by the same per-group backtest with the same quantile fallback (`quantile` itself needs no gate: it fits nothing); with the default `forecast.model: quantile` this is a **deliberate default change** — the decision statistic moves from `window.quantile` (p95) to `window.upper_quantile` (p99), so gates, plans and payback all turn conservative by one quantile, and the §14 fixtures and every committed corpus `expected.json` are regenerated to match; a seasonal model drives placement only where it demonstrably predicted this group's own last window (within `gates.imbalance_threshold`), quantile otherwise with the existing warning; `explain` reports which statistic and which forecaster produced the run; the manual documents the default change and when a seasonal model is worth selecting — strong diurnal structure or trending demand, the cases where a trailing p99 lags what the VMs are about to need |
+| 14 | Holt-Winters-driven placement; §7.3 saturation guard removed (§12.1; REVIEW.md T-03, AL-01, AL-04) | Two commits, in order. **14a** deletes the saturation guard — `migration.bwlimit_bytes_per_sec` is the only throttle a migration needs — keeping `saturation_load`/`saturation_ceiling` accepted-and-ignored with a deprecation warning so existing configs and every committed bundle still validate. **14b** scales each disk's `ℓ_d` by a backtest-validated Holt-Winters forecast of its p95 over the next `window.lookback`, at the one point gates, solver, payback and ordering all read it. The default `forecast.model: quantile` is unchanged: §14 fixtures and quantile corpus variants byte-identical apart from the removed saturation fields. Done when §12.1's checklist holds |
 | 15 | Single-source configuration defaults (§11.1; REVIEW.md AL-03) | Every default exists **exactly once, on the dataclass field**; the loader constructs each config class from the raw mapping by passing **only the keys the operator actually wrote**, through field-level converters (duration/byte/percent strings, list→tuple), so no `.get(key, default)` ever restates a default — today's twin copies in `config.py` (e.g. `model: str = "quantile"` on `ForecastConfig` beside `fc_raw.get("model", "quantile")` in the loader, and the same shape for every other knob) are gone; `config_schema.json`, the third copy of the shape, is generated from the same field/type/enum source — or, if generation proves heavier than checking, a check target fails on drift between schema and dataclasses — so it cannot rot either; **zero operator-visible behaviour change**: `--help`, the manual's option tables and `config/drs.example.yaml` values are byte-identical before and after, proven by the fixture and corpus checks running green untouched |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
@@ -3069,11 +3080,124 @@ never installable on the deployment target), and the fixture now binds CBC to th
 exhaustively-enumerated optimum alone. Phases 14 and 15 were added after the phase 13
 implementation by the twenty-eighth review pass (REVIEW.md section 56): 14 closes §10.1's own
 target design and is a behaviour change; 15 is a pure internal refactor with no behaviour to
-specify beyond §11.1's existing validation rules.
+specify beyond §11.1's existing validation rules. Phase 14's scope was then cut down by operator
+direction (REVIEW.md AL-04, §12.1): no p95 → p99 default change, and the saturation guard goes.
 
 Phase 11 is last only because it was found last — dogfooding the finished tool, where the noise on
 a clean run and the silence on an `auto` run are both obvious in a way they never were while the
 engine underneath was still being built.
+
+
+### 12.1 Phase 14 in detail
+
+Operator direction (2026-09-25): use forecasts of the VMs' I/O to place disks better. Do **not**
+model storage saturation around migrations — a migration may run at any time, capped by
+`migration.bwlimit_bytes_per_sec`, and that is the whole throttle. Keep it small; every item below
+that is not needed for that goal is out of scope.
+
+#### 14a — remove the §7.3 saturation guard (one commit)
+
+Why: it is the forecaster's only consumer today, it is inactive unless an operator sets
+`saturation_load` (which has no safe default, §7.3, and is set nowhere we know of), and all it can do
+is defer moves. `execute.py` already passes `bwlimit` to every `move_disk`; `max_single_move_duration`,
+the transient reserve invariant (§8.1) and `execution.cooldown_per_storage` stay as they are.
+
+Delete (use `git grep -n saturation` as the checklist; it must come back empty outside REVIEW.md,
+this plan's history notes, the schema's two deprecated keys, the deprecation warning and the
+committed `tests/corpus/*/config.yaml` inputs, which are captured data and stay untouched):
+
+- `payback.py`: `_saturation_deferred()`, `MoveCost.saturation_deferred`,
+  `PaybackResult.deferred_moves`, `compute_move_cost()`'s `target`/`l_hat_src`/`l_hat_dst`
+  parameters, and the module docstring's `headroom_*` and "mirroring-phase-only reading" bullets.
+- `cli.py`: `_saturation_forecast_inputs()`; `_compute_one_move_cost()` collapses to a plain
+  `compute_move_cost()` call; `saturation_deferred` leaves `excluded_disk_keys`; the deferred branch
+  of `_refused_move_outcomes()` and `_apply_payback_gate()`; the `saturation_ceiling` output line
+  (~l. 1150). **Keep** `_backtest_gated_forecaster()` — 14b rewrites and reuses it.
+- `forecast.storage_upper_bound()` and its tests.
+- `topology.Storage.saturation_load`, `config.StorageConfig.saturation_load`,
+  `MigrationConfig.saturation_ceiling`, `config._check_saturation_load()`.
+- `collect.py`: stop writing both keys into a new bundle's config.
+- `execute.py`: the docstring notes on the saturation check.
+- `config/drs.example.yaml`: both keys and their comments.
+- Docs: every manual/internals/`.agents` file `git grep -l saturation` lists. This plan: §7.1's
+  formula becomes `duration_mirror_d = z_d / bwlimit`; §7.3 loses the second hard rule and the
+  "Defining 'during the mirror'" text through the `N_s` paragraphs, and "the two rules that fire at
+  this gate" becomes one (`max_single_move_duration`); §10.1 loses the `L̂_s(Δ)` paragraph; §15.1
+  loses the knob rows. In their place one sentence in §7.3: migrations are throttled by `bwlimit`
+  only; the tool does not model storage saturation.
+
+Compatibility: `config_schema.json` **keeps** `groups[].storages[].saturation_load` and
+`migration.saturation_ceiling` — the schema is closed, so dropping them would turn every config
+that set them, and all three committed corpus bundles (`saturation_ceiling: 0.85`), into a
+validation error. `config.py` ignores them and warns once each, the same shape as the
+`snapshot_reserve.min_free_bytes` deprecation. `plan --json` loses `deferred_moves` and the per-move
+`saturation_deferred`; regenerate the fixture and corpus expected files and say so in the changelog.
+
+#### 14b — Holt-Winters-driven `ℓ_d` (one commit)
+
+This replaces REVIEW.md AL-01's original design (decision statistic → the forecaster's upper bound,
+default p95 → p99). That changed every plan on every cluster for no forecasting gain and is dropped.
+
+1. **What is forecast.** The decision statistic stays `window.quantile` (p95) of a disk's load. The
+   `quantile` model takes it over the *last* `W = window.lookback`; `holt_winters` predicts it over
+   the *next* `W`: fit the disk's series, forecast `ceil(W / metrics.step)` steps, take
+   `window.quantile` of that forecast path, clamp at 0. **Not** the last forecast point — today's
+   `HoltWintersForecaster.predict()` returns the single value at `now + horizon`, i.e. one sample at
+   the current hour of day, which says nothing about tomorrow's peak — and **no** `z·σ` band: a
+   forecast p95 is compared with its quantile-model peers' observed p95, and a residual band would
+   inflate exactly the disks that were forecast.
+
+2. **How it enters `ℓ_d`: a ratio, never a substitution.** `compute_disk_load_series()` normalizes
+   per timestamp while `compute_group_load()` normalizes over the window and also owns coverage
+   rejection and the `last_known_loads` fallback. So scale, do not replace:
+   `ℓ_d ← ℓ_d · f_d / h_d`, with `h_d` the `window.quantile` of the disk's own series over
+   `[now−W, now]` and `f_d` the forecast from point 1. Keep `ℓ_d` unchanged when `h_d = 0`, when the
+   disk carries a `DiskLoad.flagged_reason`, or when its fit fails (fewer than
+   `2 · seasonal_periods` samples, a constant series, any statsmodels exception or
+   `ConvergenceWarning`). One helper — e.g. `loadmodel.apply_forecast(group_load, factors) ->
+   GroupLoad` — called at **both** `compute_group_load()` sites in `cli.py` (show-load/explain
+   ~l. 1010, plan/apply ~l. 2474): a group's gates and its plan must see the same `ℓ`.
+
+3. **Gate: beat the baseline, no threshold.** Once per group, on `group_aggregate_series()`: fit on
+   `[now−2W, now−W)` and have both models predict the p95 of `[now−W, now]` (the quantile model's
+   prediction is the p95 of the fit half — persistence). `holt_winters` is used for this group iff
+   its absolute error is ≤ the quantile model's; otherwise quantile for this run, with the existing
+   `forecast_backtest_failed` warning. Less than `2W` of history → quantile, as today. This replaces
+   §10.2's comparison against `gates.imbalance_threshold` (an unrelated knob) and
+   `backtest_error()`'s point-at-horizon-versus-window-mean mismatch.
+
+4. **Fetch.** Only when `forecast.model == holt_winters`, via the existing (chunked)
+   `compute_disk_load_series()` over `max(required_range_seconds(...), 2·W)`. The default quantile
+   path issues no additional Prometheus query.
+
+5. **Drop `seasonal_naive`.** Its statistic is the same-hour-of-day median at `now` — not a forecast
+   over `W` — and after 14a nothing consumes it; Holt-Winters' seasonal term covers the diurnal case.
+   It leaves the schema enum (loud, like `cpsat`; changelog) and the corpus variant matrix. Likewise
+   delete `Forecast.upper_bound`, `holt_winters.residual_z` and the forecaster-side
+   `upper_quantile` if nothing reads them any more; a removed **config key** stays
+   accepted-and-ignored with a warning, as in 14a.
+
+6. **Output.** Holt-Winters' per-call fallback warning drops to DEBUG (one per disk would flood the
+   journal); instead one INFO per group, e.g. `group g: forecast holt_winters used (backtest err
+   0.08 vs baseline 0.14), 37 disks scaled, 5 kept`. `explain` and `plan --json`'s group report gain
+   `forecast: {model, used, backtest_error, baseline_error, disks_scaled, disks_kept}`.
+
+7. **Cost.** One statsmodels fit per disk with history, per group per run — order 0.1 s at 2016
+   samples (7 d at 5 min). Fine for a timer; no caching, no parallelism.
+
+**Done when:**
+
+- With `forecast.model: quantile`, `plan --json` for every fixture and quantile corpus variant is
+  identical to 14a's output.
+- Unit tests cover: the ratio (`h_d = 0`, flagged disk and failed fit keep `ℓ_d`); the p95-of-path
+  statistic on a synthetic diurnal series whose next-day peak is higher; the gate choosing
+  Holt-Winters on a seasonal-plus-trend series and quantile on white noise; the saturation keys
+  accepted with a warning; `seasonal_naive` rejected by the schema.
+- `bzed-dev-cluster-7d-holt-winters` replays with the forecast block populated; its regenerated
+  expected file is read by hand (which disks were scaled, by how much) before committing.
+- Manual: when `holt_winters` is worth selecting (diurnal or trending load), what the gate does,
+  and that it needs `python3-statsmodels`.
+- `make check` green.
 
 ---
 

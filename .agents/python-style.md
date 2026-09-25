@@ -41,7 +41,7 @@ is a long string or URL that a human should look at.
   aliasing bug that silently corrupts a migration plan.
 - **Units in names.** `size_bytes`, `size_tib`, `duration_seconds`, `load_inflight`,
   `throughput_bytes_per_sec`. A bare `size` or `load` in a signature is a review comment.
-  The plan mixes TiB (worked example), MiB (CP-SAT scaling) and bytes (API); the names are the
+  The plan mixes TiB (worked example), MiB (MILP conditioning) and bytes (API); the names are the
   only defence against a unit error, and a unit error here overfills a SAN.
 - **One implementation of every rule.** The MILP path and the heuristic path share the
   feasibility predicates and the objective function. If you need the reserve check in a second

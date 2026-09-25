@@ -12,8 +12,8 @@ For each group, `plan`:
 2. If the gate says `NO ACTION`, stops there for that group — no solver
    runs, nothing more to show.
 3. If it says `ACT`, solves it with whichever backend `solver.backend`
-   selects (see `docs/internals/91-optimize.md` for the CP-SAT/CBC
-   backends and `docs/internals/90-heuristic.md` for the dependency-free
+   selects (see `docs/internals/91-optimize.md` for the CBC
+   backend and `docs/internals/90-heuristic.md` for the dependency-free
    one) to compute a target assignment, orders its moves under the
    **transient reserve invariant** — while a move is in flight, the disk
    being migrated exists on *both* its source and target storage at once

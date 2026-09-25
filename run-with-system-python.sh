@@ -7,11 +7,8 @@
 # This is exactly the toolchain `make SYSTEM_TOOLS=1 <target>` and CI's own
 # "test" job use (python3-requests, python3-proxmoxer, python3-ruamel.yaml,
 # python3-jsonschema, python3-pulp + coinor-cbc); see AGENTS.md and
-# .agents/packaging.md. `ortools`/CP-SAT has no Debian package
-# (docs/internals/91-optimize.md) and is not installed here, so
-# `solver.backend: auto` falls back to CBC -- the same solver a real
-# Debian install of the package gets, and reproducing that here is the
-# point, not a limitation of this script.
+# .agents/packaging.md. `solver.backend: auto` resolves to CBC here --
+# the same solver a real Debian install of the package gets.
 #
 # Usage: ./run-with-system-python.sh [pve-storage-drs args...]
 #   ./run-with-system-python.sh -c config/drs.yaml plan

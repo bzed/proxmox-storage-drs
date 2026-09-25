@@ -366,7 +366,9 @@ hosts), and deduplicating `config.py`'s twin copies of every default (plus the J
 copy of the shape). Three findings (AL-01..AL-03): AL-01 schedules **phase 14** (a default-behaviour
 change, deliberately not implemented in the same changeset), AL-02 removes CP-SAT in this changeset
 (CBC through `python3-pulp` is the one MILP backend; the heuristic fallback is unchanged), and
-AL-03 schedules **phase 15** (a pure refactor). Section 57 records the resolutions.
+AL-03 schedules **phase 15** (a pure refactor). Section 57 records the resolutions. A follow-up
+operator review of that changeset added AL-04 (remove the §7.3 saturation guard) and narrowed
+AL-01's design; both are folded into phase 14 (plan §12.1).
 
 ---
 
@@ -7728,7 +7730,13 @@ are regenerated; `explain` reports which statistic and which forecaster produced
 implemented in this changeset — a default-behaviour change of that weight gets its own branch and
 its own corpus regeneration.
 
-**Status:** Open (scheduled: plan §12 phase 14).
+**Revised (operator review of this changeset):** the p95 → p99 default change is dropped — it
+changed every plan for no forecasting gain. The decision statistic stays `window.quantile`;
+`holt_winters` predicts that quantile over the next `W` and scales `ℓ_d` by forecast/observed per
+disk; the backtest gate compares against the quantile baseline instead of
+`gates.imbalance_threshold`; `seasonal_naive` is dropped. Plan §12.1 (14b) is the design of record.
+
+**Status:** Open (scheduled: plan §12 phase 14b).
 
 ### 56.2 AL-02 — the CP-SAT backend is unshippable on the deployment target, and half the optimizer exists only for it (Medium)
 
@@ -7780,6 +7788,25 @@ A pure refactor, deliberately not mixed into this changeset.
 
 **Status:** Open (scheduled: plan §12 phase 15).
 
+### 56.4 AL-04 — the §7.3 saturation guard is not worth its weight (Low)
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/payback.py`, `src/proxmox_storage_drs/cli.py`
+(`_saturation_forecast_inputs`, `_compute_one_move_cost`, `_refused_move_outcomes`),
+`src/proxmox_storage_drs/forecast.py` (`storage_upper_bound`), `config.py`, `topology.py`,
+`config_schema.json`, `IMPLEMENTATION_PLAN.md` §7.1, §7.3, §10.1
+
+Operator direction: migrations may happen at any time; `migration.bwlimit_bytes_per_sec` is the
+throttle, and nothing more is needed. The guard is inactive unless `saturation_load` is set, which
+has no safe default and is set on no known cluster; its only effect is deferring moves; and it kept
+a per-storage forecasting path (`L̂_s(Δ)`, the `ω_role` state table, the undefined `headroom_*`
+terms) alive for no placement benefit.
+
+**Recommendation:** delete it (plan §12.1, 14a). Keep both config keys accepted-and-ignored with a
+warning so existing configs and the committed bundles still validate.
+
+**Status:** Open (scheduled: plan §12 phase 14a).
+
 ---
 
 ## 57. Resolution of twenty-eighth-pass findings (AL-01..AL-03)
@@ -7806,6 +7833,10 @@ plan and this review agree on what "done" means before either is started.
 - **AL-03 → phase 15 (scheduled).** Phase row written: defaults once, on the dataclass; loader
   passes present keys only, through field-level converters; schema generated from or checked
   against the same source; zero behaviour change. Not started.
+- **AL-04 → phase 14a (scheduled).** Plan §12.1 lists what goes; §7.1/§7.3/§10.1 carry
+  "removed by phase 14a" notes until it lands. AL-01's design narrowed at the same time (14b).
+- **AL-02 follow-up.** Stale CP-SAT mentions the removal missed (`README.md` ×2,
+  `docs/manual/27-plan.md`, `run-with-system-python.sh`, `.agents/python-style.md`) fixed.
 
 ---
 
