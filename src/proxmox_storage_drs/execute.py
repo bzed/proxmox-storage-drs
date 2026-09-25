@@ -90,6 +90,13 @@ from proxmox_storage_drs.units import format_bytes
 logger = logging.getLogger(__name__)
 
 
+def _vm_label(disk: Disk) -> str:
+    """``"name(vmid)"`` for a VM-level log line -- the VM half of
+    `Disk.display_id`, so a lock warning names the VM the same way the
+    move records around it do."""
+    return f"{disk.vm_name}({disk.vmid})"
+
+
 def _real_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -334,7 +341,12 @@ def _check_lock_once(client: PveClient, node: str, vmid: int) -> str | None:
 
 
 def _wait_for_unlocked(
-    client: PveClient, node: str, vmid: int, locks: LocksConfig, clock: Clock
+    client: PveClient,
+    node: str,
+    vmid: int,
+    locks: LocksConfig,
+    clock: Clock,
+    vm_label: str | None = None,
 ) -> tuple[bool, str | None]:
     """Section 9.3.1: any non-empty ``lock`` means wait, never whitelist a
     value (`.agents/domain-invariants.md` rule 5). Returns ``(True, None)``
@@ -351,7 +363,7 @@ def _wait_for_unlocked(
         if not warned:
             logger.warning(
                 "VM %s is locked (%s); waiting up to %s",
-                vmid,
+                vm_label or vmid,
                 lock,
                 locks.wait_timeout_seconds,
                 extra={"event": "vm_locked", "vmid": vmid, "lock": lock},
@@ -378,17 +390,18 @@ def _is_task_lock_timeout(detail: str) -> bool:
 
 
 def _log_task_lock_retry(
-    disk_key: str, vmid: int, attempt: int, limit: int, detail: str, *, concurrent: bool
+    disk: Disk, attempt: int, limit: int, detail: str, *, concurrent: bool
 ) -> None:
     logger.warning(
-        "retrying move_disk after a task lock timeout (attempt %s/%s): %s",
+        "retrying move_disk of %s after a task lock timeout (attempt %s/%s): %s",
+        disk.display_id,
         attempt,
         limit,
         detail,
         extra={
             "event": "move_disk_task_lock_retry",
-            "disk_key": disk_key,
-            "vmid": vmid,
+            "disk_key": disk.key,
+            "vmid": disk.vmid,
             "attempt": attempt,
             "limit": limit,
             "concurrent": concurrent,
@@ -814,7 +827,7 @@ def _issue_move_disk_and_wait(
     # log back to the plan that decided to issue it.
     logger.info(
         "move started: %s %s -> %s (%s)",
-        move.disk_key,
+        disk.display_id,
         move.from_storage,
         move.to_storage,
         upid,
@@ -839,7 +852,7 @@ def _issue_move_disk_and_wait(
     )
     logger.info(
         "move finished: %s -> %s (%s)",
-        move.disk_key,
+        disk.display_id,
         status,
         upid,
         extra={
@@ -910,7 +923,7 @@ def _execute_one_move(
 
     if preflight.lock:
         cleared, last_lock = _wait_for_unlocked(
-            client, preflight.node, disk.vmid, execution.locks, clock
+            client, preflight.node, disk.vmid, execution.locks, clock, _vm_label(disk)
         )
         if not cleared:
             detail = (
@@ -977,8 +990,7 @@ def _execute_one_move(
         ):
             task_retries_used += 1
             _log_task_lock_retry(
-                move.disk_key,
-                disk.vmid,
+                disk,
                 task_retries_used,
                 execution.locks.task_retry_limit,
                 detail,
@@ -992,8 +1004,9 @@ def _execute_one_move(
         orphans = _detect_orphan_volumes(client, preflight.node, move.to_storage, disk.vmid)
         if orphans:
             logger.warning(
-                "orphaned volume(s) left on %s after a failed move: %s",
+                "orphaned volume(s) left on %s after the failed move of %s: %s",
                 move.to_storage,
+                disk.display_id,
                 ", ".join(orphans),
                 extra={"event": "orphaned_volumes", "storage": move.to_storage, "volumes": orphans},
             )
@@ -1471,7 +1484,7 @@ def _poll_inflight_once(
             on_inflight_finished(im.upid)
         logger.info(
             "move finished: %s -> %s (%s)",
-            im.move.disk_key,
+            im.disk.display_id,
             status,
             im.upid,
             extra={
@@ -1501,8 +1514,7 @@ def _poll_inflight_once(
         ):
             retries_used = im.task_retries_used + 1
             _log_task_lock_retry(
-                im.move.disk_key,
-                im.disk.vmid,
+                im.disk,
                 retries_used,
                 execution.locks.task_retry_limit,
                 detail,
@@ -1520,7 +1532,7 @@ def _poll_inflight_once(
                 on_inflight_started(new_upid)
             logger.info(
                 "move started: %s %s -> %s (%s)",
-                im.move.disk_key,
+                im.disk.display_id,
                 im.move.from_storage,
                 im.move.to_storage,
                 new_upid,
@@ -1551,8 +1563,9 @@ def _poll_inflight_once(
             orphans = _detect_orphan_volumes(client, im.node, im.move.to_storage, im.disk.vmid)
             if orphans:
                 logger.warning(
-                    "orphaned volume(s) left on %s after a failed move: %s",
+                    "orphaned volume(s) left on %s after the failed move of %s: %s",
                     im.move.to_storage,
+                    im.disk.display_id,
                     ", ".join(orphans),
                     extra={
                         "event": "orphaned_volumes",
@@ -1648,7 +1661,7 @@ def _launch_lock_decision(
     if not lock_wait.warned:
         logger.warning(
             "VM %s is locked (%s); waiting up to %s",
-            disk.vmid,
+            _vm_label(disk),
             lock,
             locks.wait_timeout_seconds,
             extra={"event": "vm_locked", "vmid": disk.vmid, "lock": lock},
@@ -1801,7 +1814,7 @@ def _advance_pending(
         # with its UPID.
         logger.info(
             "move started: %s %s -> %s (%s)",
-            candidate.disk_key,
+            disk.display_id,
             candidate.from_storage,
             candidate.to_storage,
             upid,
