@@ -164,8 +164,6 @@ every move a plan proposed).
 - **Cooldowns**, for the same reason `gates.py` doesn't implement them yet:
   `state.json` (section 11.2), which would record the timestamps a real
   cooldown check needs, does not exist.
-- **The section 7.3 saturation check** — belongs with `payback.py`
-  (implemented; see `96-payback.md` for why the check itself is deferred).
 
 ## Wired into `plan`, not yet into `apply`
 

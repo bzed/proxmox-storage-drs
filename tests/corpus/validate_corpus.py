@@ -29,8 +29,9 @@ plus every bundle found under the colon-separated ``DRS_CORPUS_DIR``:
    still behaves safely on this real, large instance" without needing a
    known-optimal answer (unlike ``tests/fixtures/*.yaml``, no bundle here
    is small enough to enumerate).
-3. **MILP vs. heuristic** -- run the same bundle through every available
-   ``solver.backend`` and compare the plan each produces; a heuristic that
+3. **MILP vs. heuristic** -- run the same bundle through both swept
+   ``solver.backend`` values (``cbc`` and ``heuristic``) and compare the
+   plan each produces; a heuristic that
    moves more disks or reaches a worse spread than the MILP means the two
    have drifted apart on the shared feasibility/objective functions.
 4. **Regression** -- ``<bundle>.expected.json`` records the ``plan --json``
@@ -509,19 +510,8 @@ def scrub_audit(bundle: Bundle) -> list[str]:
 # --------------------------------------------------------- variant matrix
 
 _SPREAD_METRICS = ("l1", "minmax")
-_FORECAST_MODELS = ("quantile", "seasonal_naive", "holt_winters")
+_FORECAST_MODELS = ("quantile", "holt_winters")
 _BETA_SWEEP = (0.0, 0.25, 1.0)
-
-
-def _available_backends() -> list[str]:
-    backends = ["heuristic", "cbc"]
-    try:
-        import ortools  # noqa: F401
-
-        backends.append("cpsat")
-    except ImportError:
-        pass
-    return backends
 
 
 @dataclass
@@ -570,53 +560,42 @@ def _run_plan(bundle_dir: Path, config_path: Path) -> dict[str, Any] | None:
     return result
 
 
+def _statsmodels_available() -> bool:
+    """Without it every holt_winters fit returns None, so the variant would
+    record a plan that quietly means "quantile only" -- skip it instead."""
+    import importlib.util
+
+    return importlib.util.find_spec("statsmodels") is not None
+
+
 def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]:
     import yaml
 
     raw_config = yaml.safe_load((bundle.directory / "config.yaml").read_text(encoding="utf-8"))
-    # X-10: `backends` (what this run actually sweeps) and `available`
-    # (what is actually importable) used to be conflated -- the narrow
-    # sweep hardcodes cpsat out regardless of whether ortools is
-    # installed, so every narrow run's `expected.json` claimed "cpsat not
-    # installed" even on a machine where it is, just not being swept.
-    # Y-02: naively computing the skip reason from `available` fixed that
-    # but reintroduced the same conflation from the other side -- see the
-    # reason line below.
-    available = _available_backends()
-    backends = available if full_matrix else ["heuristic", "cbc"]
+    # Both backends are always swept: the heuristic needs nothing
+    # importable, and a `cbc` variant whose pulp is missing degrades to
+    # the heuristic inside the run itself (`solver.backend`'s own
+    # fallback), exactly as a live `plan` would -- so there is no
+    # "not installed" skip for backends at all any more. The skip
+    # machinery this replaced existed for the former CP-SAT backend
+    # (REVIEW.md AL-02 removed it), whose availability was machine-
+    # dependent; X-10/Y-02's backends-vs-`available` distinction is why
+    # `VariantResult.skipped` stays a property of the sweep, recorded per
+    # variant, rather than of the machine that happened to regenerate the
+    # expected file.
+    backends = ["heuristic", "cbc"]
     spread_metrics = _SPREAD_METRICS if full_matrix else _SPREAD_METRICS[:1]
-    forecast_models = _FORECAST_MODELS if full_matrix else _FORECAST_MODELS[:1]
+    # The narrow sweep adds the bundle's own forecast.model to quantile, so a
+    # bundle captured for holt_winters exercises it under `make check` too,
+    # not only under --full-matrix.
+    configured_model = (raw_config.get("forecast") or {}).get("model", "quantile")
+    forecast_models = (
+        _FORECAST_MODELS if full_matrix else tuple(dict.fromkeys(("quantile", configured_model)))
+    )
     beta_sweep = _BETA_SWEEP if full_matrix else _BETA_SWEEP[:1]
 
     results = []
-    for backend in ("heuristic", "cbc", "cpsat"):
-        if backend not in backends:
-            # Y-02: the reason is a property of the *sweep*, not of this
-            # machine's solver set. In narrow mode `backends` hardcodes
-            # cpsat out regardless of availability, so "not installed"
-            # would be true on some machines and false on others for the
-            # very same run -- exactly what made the committed
-            # `expected.json` files flip between "cpsat not installed" and
-            # "not swept without --full-matrix" depending on which venv
-            # last regenerated them (reproduced: pulp-only vs. ortools
-            # venvs disagree on the narrow sweep's own expected file).
-            # `--full-matrix` sweeps every `available` backend, so a
-            # narrow-mode skip is always "not swept"; only a full-matrix
-            # skip is ever genuinely "not installed".
-            reason = (
-                f"{backend} not installed" if full_matrix else "not swept without --full-matrix"
-            )
-            for spread_metric in spread_metrics:
-                for forecast_model in forecast_models:
-                    for beta in beta_sweep:
-                        variant = {
-                            "solver_backend": backend,
-                            "spread_metric": spread_metric,
-                            "forecast_model": forecast_model,
-                            "beta": beta,
-                        }
-                        results.append(VariantResult(variant, None, skipped=reason))
-            continue
+    for backend in backends:
         for spread_metric in spread_metrics:
             for forecast_model in forecast_models:
                 for beta in beta_sweep:
@@ -626,6 +605,11 @@ def run_variant_matrix(bundle: Bundle, full_matrix: bool) -> list[VariantResult]
                         "forecast_model": forecast_model,
                         "beta": beta,
                     }
+                    if forecast_model == "holt_winters" and not _statsmodels_available():
+                        results.append(
+                            VariantResult(variant, None, skipped="statsmodels is not installed")
+                        )
+                        continue
                     merged = _merge(raw_config, _variant_config_overrides(variant))
                     tmp_config = bundle.directory.parent / f".{bundle.name}.variant.yaml"
                     tmp_config.write_text(yaml.safe_dump(merged), encoding="utf-8")
@@ -657,21 +641,20 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
        ``exceeds_max_duration: true`` -- the pipeline's own payback/
        scheduling stage must never hand ``order_moves()`` a move it has
        already flagged as exceeding ``migration.max_single_move_duration``.
-    3. **Section 7.3's saturation guard, structurally.** A disk payback
-       rejected or deferred must not also appear as an accepted move --
-       the two lists (``payback.rejected_moves``/``deferred_moves`` and
-       ``moves``) are supposed to partition the candidate set, never
-       overlap.
+    3. **Rejected moves are not accepted moves.** A disk payback
+       rejected must not also appear as an accepted move -- the two lists
+       (``payback.rejected_moves`` and ``moves``) are supposed to partition
+       the candidate set, never overlap.
     4. **The plan never worsens the reserve shortfall.** The payback
        block's ``reserve_shortfall_bytes_after`` (the final ``Sigma r_s``
        over the executed plan, section 9.5) must not exceed
-       ``..._before``. Deliberately *not* ``after == 0`` -- an oversized
-       ``min_free_bytes`` or a group with no feasible repair legitimately
+       ``..._before``. Deliberately *not* ``after == 0`` -- a group with
+       no feasible repair legitimately
        ends above zero. Why "never raised" holds depends on the backend
        and on ``hard`` (REVIEW.md AI-01):
 
-       * **cbc / cpsat**: the lexicographic solve (section 5.3's slack
-         ``r_s``, section 5.5's two-stage backends) minimises ``Sigma r_s``
+       * **cbc**: the lexicographic solve (section 5.3's slack
+         ``r_s``, section 5.5's two-stage backend) minimises ``Sigma r_s``
          alone in stage 1, so the *solver's endpoint* is never above the
          current assignment's.
        * **heuristic**: no such stage. ``_descend()`` optimises the whole
@@ -687,7 +670,7 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
          and the executed plan is what this check reads.
        * **``hard < soft``** (a deliberate dip, section 5.3.1): that
          scheduler guarantee no longer covers the endpoint, and a dropped
-         (rejected/deferred/deadlocked) move can leave a MILP endpoint
+         (rejected/deadlocked) move can leave a MILP endpoint
          higher than the solver's. A violation here is a real signal, not
          noise -- the heuristic trading reserve for balance is a known,
          documented limitation, not a bug in this check -- but it is the
@@ -722,15 +705,12 @@ def check_invariants(bundle: Bundle, results: list[VariantResult]) -> list[str]:
                         "migration.max_single_move_duration -- section 7.3's duration rule"
                     )
             payback = group_report.get("payback") or {}
-            rejected_or_deferred = set(payback.get("rejected_moves", [])) | set(
-                payback.get("deferred_moves", [])
-            )
-            overlap = accepted_keys & rejected_or_deferred
+            overlap = accepted_keys & set(payback.get("rejected_moves", []))
             if overlap:
                 violations.append(
                     f"{bundle.name} [{result.variant}]: group {group_report['name']!r} "
                     f"accepted move(s) {sorted(overlap)} also appear in payback's own "
-                    "rejected/deferred list"
+                    "rejected list"
                 )
             before = payback.get("reserve_shortfall_bytes_before")
             after = payback.get("reserve_shortfall_bytes_after")
@@ -756,10 +736,11 @@ def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> lis
     nothing, so a MILP reaching a far better spread with more moves than
     the heuristic is exactly the outcome this check exists to want, not
     flag. (Found for real on a 7-day holt_winters capture --
-    tests/corpus/bzed-dev-cluster-7d-holt-winters -- where the previous
-    move-count check flagged cpsat for using 13 moves against the
-    heuristic's 4, when cpsat's after_spread was ~0.00002 against the
-    heuristic's 0.41: strictly better, not worse.)
+    tests/corpus/bzed-dev-cluster-7d-holt-winters, since replaced by
+    bzed-dev-cluster-2d-holt-winters -- where the previous
+    move-count check flagged the then-CP-SAT backend for using 13 moves
+    against the heuristic's 4, when its after_spread was ~0.00002 against
+    the heuristic's 0.41: strictly better, not worse.)
 
     Section 12 added a second persistent-objective axis
     (``delta_capacity_spread``), and a solver can legitimately accept a
@@ -791,7 +772,7 @@ def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> lis
         by_key.setdefault(key, {})[result.variant["solver_backend"]] = result
     for key, by_backend in by_key.items():
         heuristic = by_backend.get("heuristic")
-        for backend_name in ("cbc", "cpsat"):
+        for backend_name in ("cbc",):
             milp = by_backend.get(backend_name)
             if heuristic is None or milp is None:
                 continue
@@ -832,7 +813,8 @@ def check_milp_vs_heuristic(bundle: Bundle, results: list[VariantResult]) -> lis
 
 
 # X-07: "both MILP backends agree to within the section 5.5 tolerance" (the
-# other half of check 3) does not have a cbc-vs-cpsat check here. A first
+# other half of check 3) never had a cbc-vs-cpsat check here, and now
+# cannot: the CP-SAT backend was removed (REVIEW.md AL-02). A first
 # attempt comparing `after_spread` against `solver.mip_gap` as a relative
 # tolerance produced real, non-spurious disagreement on a committed bundle
 # under --full-matrix: cbc 0.0016 vs cpsat 0.0034-0.0112 across several
@@ -882,7 +864,7 @@ def check_milp_objective_total(bundle: Bundle, results: list[VariantResult]) -> 
         by_key.setdefault(key, {})[result.variant["solver_backend"]] = result
     for key, by_backend in by_key.items():
         heuristic = by_backend.get("heuristic")
-        for backend_name in ("cbc", "cpsat"):
+        for backend_name in ("cbc",):
             milp = by_backend.get(backend_name)
             if heuristic is None or milp is None:
                 continue
@@ -960,7 +942,9 @@ def main(argv: list[str]) -> int:
                 bundle.expected.read_text(encoding="utf-8") if bundle.expected.is_file() else None
             )
             if current != text:
-                stale.append(bundle.expected.name)
+                skipped = sorted({r.skipped for r in results if r.skipped})
+                reason = f" (variants skipped: {'; '.join(skipped)})" if skipped else ""
+                stale.append(bundle.expected.name + reason)
         else:
             bundle.expected.write_text(text, encoding="utf-8")
             print(f"wrote {bundle.expected}")

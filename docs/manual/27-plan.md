@@ -12,8 +12,8 @@ For each group, `plan`:
 2. If the gate says `NO ACTION`, stops there for that group — no solver
    runs, nothing more to show.
 3. If it says `ACT`, solves it with whichever backend `solver.backend`
-   selects (see `docs/internals/91-optimize.md` for the CP-SAT/CBC
-   backends and `docs/internals/90-heuristic.md` for the dependency-free
+   selects (see `docs/internals/91-optimize.md` for the CBC
+   backend and `docs/internals/90-heuristic.md` for the dependency-free
    one) to compute a target assignment, orders its moves under the
    **transient reserve invariant** — while a move is in flight, the disk
    being migrated exists on *both* its source and target storage at once
@@ -45,11 +45,11 @@ Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the 
 ```
 
 The `solver:` line names whichever backend actually produced this plan --
-`heuristic`, `cpsat` or `cbc` -- plus, for a MILP backend, `(optimal)` or
+`heuristic` or `cbc` -- plus, for the MILP backend, `(optimal)` or
 `(feasible)` (the gap was not proven closed within `solver.time_limit_seconds`,
 but a solution was still found). It is not always what `solver.backend`
-says: `auto` tries CP-SAT then CBC before the heuristic, and even an
-explicitly forced `cpsat`/`cbc` falls back to the heuristic (logged as a
+says: `auto` tries CBC before the heuristic, and even an
+explicitly forced `cbc` falls back to the heuristic (logged as a
 warning in that case) rather than failing the whole run, if that library
 is not installed or cannot solve within the time limit -- see
 `docs/internals/91-optimize.md`.
@@ -189,16 +189,6 @@ and left for you to review, not silently adjusted. See
   per disk.
 - **No automatic re-solve-and-shrink on a failing payback test** (see
   above) — reported, not fixed for you.
-- **The section 7.3 saturation-ceiling defer check only covers the
-  mirroring phase**, not a second, separate check for the *draining*
-  phase a `saferemove` wipe holds a storage in afterward — that needs
-  `schedule.py` to reason about which moves actually overlap in time,
-  which it does not do. The check itself is otherwise active for any
-  storage that configures `saturation_load` (still none in this
-  project's own dogfooding cluster) — a deferred move is reported
-  separately from a hard-duration-rejected one (`deferred_moves`, not
-  `rejected_moves`) and excluded from `apply` the same way. See
-  `docs/internals/96-payback.md`.
 - **`plan` itself still only reads `state.json`, never writes it.** Its
   gate reads real `last_balance` history when a group has one recorded
   (see `docs/internals/15-state.md`), and a disk/storage cooldown pins or
@@ -221,8 +211,8 @@ and left for you to review, not silently adjusted. See
 
 `--json` emits `groups[]`, each with `gate` (identical shape to
 `show-load`'s), `solver_backend`/`solver_status` (`null`/`null` when the
-gate said `NO ACTION`; otherwise `"heuristic"`/`null`, or `"cpsat"`/
-`"cbc"` with `"optimal"`/`"feasible"` -- the same information the human
+gate said `NO ACTION`; otherwise `"heuristic"`/`null`, or `"cbc"`
+with `"optimal"`/`"feasible"` -- the same information the human
 output's `solver:` line names), `moves[]` (`disk_key`, `vmid`, `vm_name`, `device`,
 `from_storage`, `to_storage`, `size_bytes`, `imbalance_reduction`,
 `repair` (the section 7.3 revert-test marker — see "The `payback:` line"
@@ -243,7 +233,7 @@ full `.total`, `evaluate_assignment()` re-scored at the same true weights
 outcome trigger itself — see above), `reserve_shortfall_bytes_before`/
 `_after` (`Σ r_s` on the current assignment and on the plan's executed
 endpoint, what `repair_exempt` is decided from), `rejected_moves` (disk
-keys failing the hard duration rule), `deferred_moves` (disk keys deferred
-by the section 7.3 saturation guard — empty unless a storage in the group
-configures `saturation_load`) and `accepted` (`aggregate_ok` and neither
-list non-empty).
+keys failing the hard duration rule) and `accepted` (`aggregate_ok` and
+`rejected_moves` empty). Under `forecast.model: holt_winters` the group also
+has a `forecast` object: `model`, `used`, `backtest_error`, `baseline_error`,
+`disks_scaled`, `disks_kept` (absent under the default `quantile`).

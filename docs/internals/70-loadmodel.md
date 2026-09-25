@@ -42,7 +42,7 @@ cluster-wide aggregation, and Prometheus/gigapipe's own query evaluator
 timed out on it outright ("query timed out in expression evaluation") —
 not wasteful, broken. `metrics.group_query_selectors()` scopes every such
 query (this module's six raw quantities, `compute_disk_load_series()`'s
-own forecaster history fetch, and `metrics.compute_disk_coverage()`) to
+own forecast history fetch, and `metrics.compute_disk_coverage()`) to
 the calling group's own vmids, splitting into
 `metrics.VMID_QUERY_BATCH_SIZE`-sized batches (merged back into one
 logical result) when a single group itself is large enough that even its
@@ -131,7 +131,7 @@ storage a disk is currently on.
 
 `compute_group_load()` reduces each raw quantity to one already
 -quantile'd scalar per disk via `quantile_over_time` at query time.
-Section 10's forecaster needs the opposite: the *raw* per-disk `ℓ_d`
+Section 10's forecast needs the opposite: the *raw* per-disk `ℓ_d`
 signal, unreduced, over a range and step of its own choosing (typically
 `forecast.required_range_seconds()`, not `window.lookback` — section 10.1
 is explicit these are "genuinely different things"). `compute_disk_load_series()`
@@ -149,16 +149,23 @@ discipline `reserve.transient_charge_ok()`'s own extraction used.
 
 Every disk in the group gets an entry, even an empty one — unlike
 `compute_group_load()`, this function does not apply `window.min_coverage`
-at all: a forecaster's own `required_range()` is a much longer, coarser
+at all: the forecast history is a much longer, coarser
 signal than that rule was built to validate, and a sparse history is
-exactly what the forecaster itself needs to see to distrust its own fit.
-This is section 10's raw material for the section 7.3 saturation guard:
-`cli.py`'s `_saturation_forecast_inputs()` calls it once per group, then
-feeds the result through `forecast.storage_upper_bound()` to get each
-move's `l_hat_src`/`l_hat_dst` — see
-[`96-payback.md`](96-payback.md) for how `payback.py` uses those two
-figures to reject a move that would push a target storage's own forecast
-load past that storage's configured `saturation_load`.
+exactly what a fit needs to see to refuse to trust itself.
+This is section 10's raw material for a forecast of each disk's load; see
+[`20-forecasting.md`](20-forecasting.md) and `apply_forecast()` below.
+
+## `apply_forecast()`: scaling, never replacing
+
+`apply_forecast(group_load, group, factors)` multiplies each disk's `ℓ_d` by its
+factor `f_d / h_d` (forecast p95 over observed p95 of the same series — the
+per-timestamp series and `compute_group_load()`'s window-level `ℓ_d` are
+normalized differently, so only a ratio is meaningful) and rebuilds each
+storage's `L_s`/`u_s` and the group's `u*` from the scaled loads. A disk without
+a factor, and any disk with a `flagged_reason`, keeps its observed load exactly;
+`idle` and `no_series_matched` are untouched. `cli._compute_group_load()` calls it
+from both `show-load` and `plan`/`apply`, so a group's gates and its plan always
+see the same `ℓ`.
 
 ## What `loadmodel.py` is, and is not, responsible for
 
@@ -166,8 +173,8 @@ load past that storage's configured `saturation_load`.
 `compute_group_load()`'s `ℓ_d`/`L_s`/`u_s` feed `gates.py`'s drift/imbalance
 gates ([`80-gates.md`](80-gates.md); `reserve.py`'s reserve override is
 computed separately, straight from the group's disks/storages, not through
-this module), and `compute_disk_load_series()` feeds the section 7.3
-saturation guard above — but this module decides none of those verdicts
+this module), and `compute_disk_load_series()` feeds a section 10 forecast — but this
+module decides none of those verdicts
 itself. `pve-storage-drs show-load` reports `ℓ_d`/`L_s`/`u_s` directly;
 deciding whether a group should be re-balanced at all is `gates.py`'s job,
 not this one's.

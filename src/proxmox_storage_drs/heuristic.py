@@ -75,8 +75,8 @@ from proxmox_storage_drs.topology import Disk, Group, Storage, storage_accepts_f
 # Every byte-valued objective term (`gamma`, and `r_s` for reporting) is
 # expressed in TiB here, matching `objective.gamma_move_bytes_per_tib` and
 # the section 14 worked example's own units -- this is the plain,
-# floating-point heuristic objective, not CP-SAT's separately-scaled
-# integer one (section 5.5), so there is no reason to use anything but the
+# floating-point objective at true weights, not a solver's rescaled one
+# (section 5.5), so there is no reason to use anything but the
 # unit the config and the worked example already use.
 _BYTES_PER_TIB = 1 << 40
 
@@ -715,8 +715,8 @@ def _descend(
     storage, `kappa_vm_affinity` at its default `0.50`): without this
     candidate, `_descend()` found *zero* improving moves at all and left
     the cluster at its full initial imbalance, even though relocating that
-    one VM's disks together is a large, unambiguous improvement CP-SAT
-    finds immediately -- the "dependency-free ... path for very large
+    one VM's disks together is a large, unambiguous improvement a MILP
+    solver finds immediately -- the "dependency-free ... path for very large
     groups" the plan describes this heuristic as must not be able to get
     stuck this badly. Tried in the same "evaluate every candidate, apply
     the best one" step as single-disk moves and swaps, so it is scored by

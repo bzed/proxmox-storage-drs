@@ -358,6 +358,18 @@ central claim is **refuted** — the reflog shows all five commits were made on 
 graph only looked linear because two of them were merged as fast-forwards, which is a smaller,
 real deviation from AGENTS §4's `--no-ff` rule and is recorded as such.
 
+A **twenty-eighth pass** (sections 56-57) is operator-directed and reviews three decisions rather
+than a commit range: closing §10.1's own target design — the optimizer consuming the forecaster's
+upper bound, the tool's original product intent, annotated away as "future work" by T-03 —
+removing the CP-SAT backend (`ortools` is not packaged and will not be installed by hand on PVE
+hosts), and deduplicating `config.py`'s twin copies of every default (plus the JSON schema's third
+copy of the shape). Three findings (AL-01..AL-03): AL-01 schedules **phase 14** (a default-behaviour
+change, deliberately not implemented in the same changeset), AL-02 removes CP-SAT in this changeset
+(CBC through `python3-pulp` is the one MILP backend; the heuristic fallback is unchanged), and
+AL-03 schedules **phase 15** (a pure refactor). Section 57 records the resolutions. A follow-up
+operator review of that changeset added AL-04 (remove the §7.3 saturation guard) and narrowed
+AL-01's design; both are folded into phase 14 (plan §12.1).
+
 ---
 
 ## 0. Overall assessment
@@ -7683,6 +7695,152 @@ repair through the cooldown storage in that scenario — pinning the documented 
 heuristic instead of relying on prose alone. This is a test-coverage gap, not a correctness defect.
 
 **Status:** Open.
+
+---
+
+## 56. Twenty-eighth-pass review — the forecast-into-optimizer gap, the CP-SAT backend, and config-default duplication
+
+Operator-directed, following a design discussion of what the tool actually optimizes: the original
+idea was to forecast the I/O needs of VMs and balance with that knowledge, and the as-built tool
+balances on the trailing p95 instead (T-03, §19.5). Three findings, none a regression against a
+previous resolution; two are scheduling decisions, one is implemented in the same changeset.
+
+### 56.1 AL-01 — the optimizer still balances on the trailing p95; §10.1's target design remains unimplemented (Medium)
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/loadmodel.py` (`compute_group_load`), `src/proxmox_storage_drs/cli.py` (`_saturation_forecast_inputs`), `src/proxmox_storage_drs/forecast.py`, `IMPLEMENTATION_PLAN.md` §10.1
+
+T-03 corrected the *documentation* to match the code and left the design gap annotated as "future
+work". The gap is the product gap, not a wording problem. Every gate, the solver objective, the
+payback benefit and the move ordering are computed from the same backward-looking statistic
+(`window.quantile`, the p95 of the trailing window), so a VM whose demand is growing, or whose peak
+window is about to start, is invisible to a plan scored on yesterday — both sides of the payback
+comparison are evaluated on what already happened. The infrastructure the target design needs
+exists and is exercised (per-disk series fetch, three forecaster models, the §10.2 per-group
+backtest gate with quantile fallback in `cli._backtest_gated_forecaster()`), but its only consumer
+is the optional §7.3 saturation guard, and only for a group with `saturation_load` set.
+
+**Recommendation:** schedule it as **phase 14** with the design decisions recorded in the phase
+row: the decision statistic becomes the backtest-gated forecaster's upper bound û_d(W) with
+`W = window.lookback` (the same horizon the §10.2 backtest already validates); the existing
+backtest gate and quantile fallback are reused unchanged; the default change this implies for
+`forecast.model: quantile` (decision statistic p95 → `window.upper_quantile`, p99) is accepted and
+documented rather than papered over; the §14 fixtures and every committed corpus `expected.json`
+are regenerated; `explain` reports which statistic and which forecaster produced the run. Not
+implemented in this changeset — a default-behaviour change of that weight gets its own branch and
+its own corpus regeneration.
+
+**Revised (operator review of this changeset):** the p95 → p99 default change is dropped — it
+changed every plan for no forecasting gain. The decision statistic stays `window.quantile`;
+`holt_winters` predicts that quantile over the next `W` and scales `ℓ_d` by forecast/observed per
+disk; the backtest gate compares against the quantile baseline instead of
+`gates.imbalance_threshold`; `seasonal_naive` is dropped. Plan §12.1 (14b) is the design of record.
+
+**Status:** Fixed (phase 14b). `forecast.py` is rewritten around a backtest-gated Holt-Winters p95;
+`cli._compute_group_load()` feeds `show-load` and `plan`/`apply`; `seasonal_naive`, `Forecast.upper_bound`,
+`upper_quantile` and `residual_z` are gone (and the three config keys, deleted from the schema with no compatibility shim). One
+observation from the dev cluster is recorded in plan §12.1: forced open, the per-disk factors span
+0.00 – 39, so a damped trend is the first thing to try if a real gate opens and they look wild.
+
+### 56.2 AL-02 — the CP-SAT backend is unshippable on the deployment target, and half the optimizer exists only for it (Medium)
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/optimize.py`, `src/proxmox_storage_drs/cli.py`, `src/proxmox_storage_drs/config_schema.json`, `pyproject.toml`, `Makefile`, `.github/workflows/tests.yml`, `.agents/packaging.md`, `docs/internals/91-optimize.md`, `docs/manual/10-configuration.md`, `tests/unit/test_optimize.py`, `tests/corpus/validate_corpus.py`
+
+`ortools` is not in Debian (§2.1's own dependency table said so), is excluded from vendoring by
+§2.1's own rules (a large C++ extension), and — the operator's own direction — will not be
+installed manually on PVE hosts. On every real deployment `solver.backend: auto` therefore resolved
+to CBC, and the CP-SAT code path could never execute where the tool runs. What existed only for
+that unreachable path: roughly 480 of `optimize.py`'s 1121 lines (a second model builder, the
+`K`/`W` integral-scaling discipline, the S-09 int64 magnitude assertions), the `cpsat` arm of the
+CLI cascade and the `cpsat_available()` probe, the `cpsat` schema enum value, the deliberate
+`pip install ortools` exception in GitHub Actions that AGENTS §9.3 had to argue for, and the cpsat
+arm of the corpus sweep matrix. The one genuine technical loss — CP-SAT's stronger optimality
+proofs and integer determinism on large groups — was never available on the deployment target, and
+§14's exhaustively-enumerated fixtures already pin CBC to the true optimum on the scale the tool
+actually serves. No good reason to keep it was found.
+
+**Recommendation:** remove the backend. CBC through `python3-pulp` (both already `Depends:` in
+`debian/control`) is the single MILP backend, with the dependency-free heuristic as the unchanged
+fallback for solver failure, timeout and `solver.backend: heuristic`. `solver.backend: cpsat`
+becomes a schema-validation error — loud, by design, under §11.1's closed schema — and the release
+notes must say so. The committed bundles all carry `backend: auto`, so replay is unaffected.
+Implemented in this changeset; see §57.
+
+**Status:** Fixed in this changeset.
+
+### 56.3 AL-03 — every config default is written twice in `config.py`, and the JSON schema is a third copy of the shape (Low)
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/config.py` (~40 knobs, e.g. `model: str = "quantile"` on
+`ForecastConfig` beside `fc_raw.get("model", "quantile")` in the loader, and `backend` on
+`SolverConfig` beside `solver_raw.get("backend", "auto")`), `src/proxmox_storage_drs/config_schema.json`
+
+Every knob's default exists on the dataclass field *and* as a `.get(..., default)` fallback in the
+loader — and since the loader always passes the `.get` result to the constructor, the *dataclass*
+copy is the dead one: it exists only to mislead a reader (or a test constructing configs directly)
+when the two drift. The JSON schema restates the shape a third time, and nothing fails when any
+copy disagrees with the others.
+
+**Recommendation:** schedule as **phase 15**: defaults live exactly once, on the dataclass field;
+the loader constructs each config class by passing **only the keys the operator actually wrote**,
+through field-level converters (duration/byte/percent strings, list→tuple), never restating a
+default; `config_schema.json` is generated from the same field/type/enum source — or, if generation
+proves heavier than checking, a check target fails on drift between schema and dataclasses. Zero
+operator-visible behaviour change, proven by the fixture and corpus checks running green untouched.
+A pure refactor, deliberately not mixed into this changeset.
+
+**Status:** Open (scheduled: plan §12 phase 15).
+
+### 56.4 AL-04 — the §7.3 saturation guard is not worth its weight (Low)
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/payback.py`, `src/proxmox_storage_drs/cli.py`
+(`_saturation_forecast_inputs`, `_compute_one_move_cost`, `_refused_move_outcomes`),
+`src/proxmox_storage_drs/forecast.py` (`storage_upper_bound`), `config.py`, `topology.py`,
+`config_schema.json`, `IMPLEMENTATION_PLAN.md` §7.1, §7.3, §10.1
+
+Operator direction: migrations may happen at any time; `migration.bwlimit_bytes_per_sec` is the
+throttle, and nothing more is needed. The guard is inactive unless `saturation_load` is set, which
+has no safe default and is set on no known cluster; its only effect is deferring moves; and it kept
+a per-storage forecasting path (`L̂_s(Δ)`, the `ω_role` state table, the undefined `headroom_*`
+terms) alive for no placement benefit.
+
+**Recommendation:** delete it (plan §12.1, 14a). Delete both config keys outright
+(no compatibility shim; the only users are the maintainers).
+
+**Status:** Fixed (phase 14a). The guard, `storage_upper_bound()`, every config/topology field
+and both config keys are deleted; a config that sets them fails validation.
+
+---
+
+## 57. Resolution of twenty-eighth-pass findings (AL-01..AL-03)
+
+AL-02 is implemented in this changeset; AL-01 and AL-03 are scheduling decisions, recorded so the
+plan and this review agree on what "done" means before either is started.
+
+- **AL-01 → fixed (phase 14b, narrowed).** The original design (decision statistic → the upper
+  bound, p95 → p99) was dropped; the statistic stays `window.quantile`, forecast over the next `W`
+  and applied as a ratio, gated by a baseline comparison. Plan §10.1 and §12.1 are the design of
+  record; quantile-model fixtures and corpus expected files are byte-identical.
+- **AL-02 → fixed (this changeset).** `optimize.py` loses `_solve_cpsat()`, its five `_cpsat_*`
+  helpers, the `cpsat_available()` probe and the S-09 int64 assertions (CBC's model is continuous;
+  the assertions guarded CP-SAT's integer discipline alone); `solve()` dispatches `cbc` only;
+  `cli.py`'s cascade is `auto → cbc → heuristic`; `config_schema.json`'s `solver.backend` enum
+  drops `cpsat`; `pyproject.toml`'s `solver` extra is `pulp` alone and both `ortools` mypy
+  overrides are gone; the GitHub Actions `ortools` exception and the `.agents/packaging.md` row
+  are deleted; the corpus sweep drops its cpsat arm and the committed `expected.json` files are
+  regenerated; plan §2.1, §5.5, §7.3, §12 and §16.6 are updated (§5.5 rewritten CBC-only, the
+  removal recorded, and F-14's integral-scaling rules explicitly *not* inherited by any future
+  integer backend); manual, internals, example config and Makefile wording follow. The
+  `solver.backend: cpsat` → schema-rejection change is intentional and goes in the release notes.
+- **AL-03 → phase 15 (scheduled).** Phase row written: defaults once, on the dataclass; loader
+  passes present keys only, through field-level converters; schema generated from or checked
+  against the same source; zero behaviour change. Not started.
+- **AL-04 → fixed (phase 14a).** Plan §12.1 listed what went; §7.1/§7.3/§10.1/§15.1 are rewritten.
+  AL-01's design was narrowed at the same time (14b, still open).
+- **AL-02 follow-up.** Stale CP-SAT mentions the removal missed (`README.md` ×2,
+  `docs/manual/27-plan.md`, `run-with-system-python.sh`, `.agents/python-style.md`) fixed.
 
 ---
 

@@ -87,7 +87,7 @@ Individual targets: `make fmt`, `make lint`, `make typecheck`, `make test`, `mak
 dependencies; the Python tools are **not** installed system-wide on this host, so start there.
 `make typecheck` runs against a second, separate `.venv-typecheck/` (`make venv-typecheck`),
 not `.venv/` — `test`/`cov` install the optional `solver`/`forecast` extras into `.venv/` for
-full backend coverage, and a numpy those pull in ships stubs `mypy` cannot parse
+full backend coverage, and a numpy the `forecast` extra pulls in ships stubs `mypy` cannot parse
 (`docs/internals/91-optimize.md`); both `make check` and plain `make typecheck` create
 whichever venv they need on their own, so this is usually invisible. The paper toolchain
 (`pandoc`, `lualatex`) *is* system-wide and is not part of either venv.
@@ -394,9 +394,11 @@ The order of preference, and there is no fourth option:
 1. **In trixie** — add it to `debian/control` and to `pyproject.toml`, done.
 2. **Not in trixie, pure Python, small** — vendor it into our source package, with its licence
    recorded in `debian/copyright` and its provenance and version in `.agents/packaging.md`.
-3. **Not in trixie, and not vendorable** (a C extension, or simply too large — `ortools` is both) —
-   it must be **optional**, imported where it is used and never at module level, with a code path
-   that works without it. The autopkgtest of §9.2 is what enforces this.
+3. **Not in trixie, and not vendorable** (a C extension, or simply too large) — it must be
+   **optional**, imported where it is used and never at module level, with a code path
+   that works without it. The autopkgtest of §9.2 is what enforces this. (`ortools` was the
+   case that motivated this rule; its CP-SAT backend was later removed outright — REVIEW.md
+   AL-02 — precisely because "optional" still meant "never runs on any deployment".)
 
 ### 9.2 The Debian package is a deliverable
 
@@ -450,10 +452,9 @@ a missing Debian package would hide the day §9.1 stopped being true, which is t
 there to detect. `make SYSTEM_TOOLS=1 <target>` is the switch that runs the ordinary targets against
 the system toolchain.
 
-One deliberate, reviewable exception: GitHub Actions `pip install`s `ortools` (no Debian package
-exists) purely so `test_optimize.py`'s CP-SAT cases run in CI, after typecheck, never touching the
-packaged install/build path. See the `tests.yml` header comment and `.agents/packaging.md`'s
-`ortools` row for the reasoning.
+There is currently no pip exception: the one that used to exist (GitHub Actions `pip install`ing
+`ortools` for CP-SAT test coverage) was removed together with the CP-SAT backend (REVIEW.md AL-02
+— `ortools` has no Debian package and the backend could never run on the deployment target).
 
 The Salsa build has no network on purpose: that is what proves the package builds from trixie alone.
 If a module genuinely has to be fetched during a build, vendor it (§9.1 rule 2). Setting

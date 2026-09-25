@@ -1,36 +1,29 @@
 # SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The MILP solver backends. See proxmox_storage_drs/optimize.py.
+"""The MILP solver backend. See proxmox_storage_drs/optimize.py.
 
 Cross-checked against the same IMPLEMENTATION_PLAN.md section 14 worked
 example `test_heuristic.py` reproduces (the exact 3-move/2-move solutions
-and their objective totals) -- phase 6's own "done when" is "matches or
-beats the heuristic on the section 14 fixture; CP-SAT and CBC agree" --
+and their objective totals) -- phase 6's original "done when" was "matches
+or beats the heuristic on the section 14 fixture; CP-SAT and CBC agree"
+while both backends existed; with CP-SAT's removal (REVIEW.md AL-02) the
+same fixtures now bind CBC alone to the exhaustively-proven optimum --
 and against `tests/fixtures/reserve-tradeoff.yaml`'s exhaustively-proven
 lexicographic optimum, the one fixture built specifically to catch a
 solver that fell for the single-stage big-M trap the plan warns against.
 
-Every test that runs a real solve is parametrized over both backends
-(`cpsat`, `cbc`) and skips whichever one's library is not importable --
-`solver = ["ortools>=9.8", "pulp>=2.7"]` is an *optional* extra
+Every test that runs a real solve uses the `cbc` backend and skips when
+pulp is not importable -- `solver = ["pulp>=2.7"]` is an *optional* extra
 (pyproject.toml), and `make install`'s own `.[dev]` venv never pulls it
-in, so neither is present there. This mirrors `test_forecast.py`'s
-`pytest.importorskip("statsmodels")` for the same reason: a real, useful
-test suite for an optional dependency must still pass cleanly without it.
-Developing this module, both backends *were* installed and exercised for
-real (`pip install -e .[solver]`) -- every test here passed and
-reproduced the fixtures' exact numbers; see `docs/internals/91-optimize.md`.
-CI's own "test" job (`.github/workflows/tests.yml`) installs `ortools`
-(there is no Debian package for it) specifically so these cpsat-marked
-cases run there too, alongside `python3-pulp`/`coinor-cbc` from apt for
-the cbc ones -- both backends are exercised on every push, this project's
-own dev venv is just not one of the places that happens.
+in. This mirrors `test_forecast.py`'s `pytest.importorskip("statsmodels")`
+for the same reason: a real, useful test suite for an optional dependency
+must still pass cleanly without it. On a Debian install (and in CI, via
+`python3-pulp`/`coinor-cbc` from apt) CBC is always present.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import importlib
 import logging
 import sys
 
@@ -39,21 +32,15 @@ import pytest
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.optimize import (
     OptimizeResult,
-    _assert_nonzero_when_weighted,
-    _assert_objective_magnitude_within_int64,
     _pinned_by_storage,
     _relevant_vmids,
     cbc_available,
-    cpsat_available,
     solve,
 )
 from proxmox_storage_drs.topology import Disk, Group, Storage
 
 TIB = 1 << 40
 BACKENDS = [
-    pytest.param(
-        "cpsat", marks=pytest.mark.skipif(not cpsat_available(), reason="ortools not installed")
-    ),
     pytest.param("cbc", marks=pytest.mark.skipif(not cbc_available(), reason="pulp not installed")),
 ]
 
@@ -94,7 +81,6 @@ def make_storage(
         id=id_,
         capability_weight=capability_weight,
         reserve_factor=reserve_factor,
-        saturation_load=None,
         capacity_bytes=round(capacity_tib * TIB),
         used_bytes=0,
         foreign_used_bytes=round(foreign_used_tib * TIB),
@@ -145,21 +131,6 @@ def _solve(
 # --------------------------------------------------------------- availability
 
 
-def test_cpsat_available_is_false_when_ortools_is_not_importable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`cpsat_available()`'s own ``except ImportError: return False`` --
-    distinct from `test_solve_returns_none_when_the_library_is_unavailable`
-    below, which exercises `_solve_cpsat()`'s independent import attempt,
-    never this function. A plain ``import a.b.c`` statement raises
-    ``ImportError`` on its own once ``sys.modules["a.b.c"]`` is the ``None``
-    sentinel (no need for the ``delattr`` gymnastics the ``from ... import``
-    case below requires), so this is coverable in any environment,
-    `ortools` installed or not."""
-    monkeypatch.setitem(sys.modules, "ortools.sat.python.cp_model", None)
-    assert cpsat_available() is False
-
-
 def test_cbc_available_is_false_when_pulp_is_not_importable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -167,7 +138,7 @@ def test_cbc_available_is_false_when_pulp_is_not_importable(
     assert cbc_available() is False
 
 
-@pytest.mark.parametrize("backend", ["cpsat", "cbc"])
+@pytest.mark.parametrize("backend", ["cbc"])
 def test_solve_returns_none_when_the_library_is_unavailable(
     backend: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -176,19 +147,7 @@ def test_solve_returns_none_when_the_library_is_unavailable(
     path, which is exactly as meaningful (and exercised the same way, via
     `sys.modules`) whether or not the real library happens to be installed
     in this environment."""
-    if backend == "cpsat" and cpsat_available():
-        # `from ortools.sat.python import cp_model` resolves via
-        # `getattr(sys.modules["ortools.sat.python"], "cp_model")` first --
-        # a plain `sys.modules["...cp_model"] = None` alone is never
-        # consulted unless that cached attribute is *also* cleared.
-        # `importlib.import_module` (a runtime call, not a literal `import
-        # ortools...` statement) guarantees the attribute exists first,
-        # and gives mypy no static import of its own to resolve ortools's
-        # heavy, optional type stubs for.
-        importlib.import_module("ortools.sat.python.cp_model")
-        monkeypatch.setitem(sys.modules, "ortools.sat.python.cp_model", None)
-        monkeypatch.delattr(sys.modules["ortools.sat.python"], "cp_model", raising=False)
-    elif backend == "cbc" and cbc_available():
+    if cbc_available():
         monkeypatch.setitem(sys.modules, "pulp", None)
     # else: the library is already not installed in this environment --
     # solve() must still return None, which is exactly what is asserted
@@ -350,13 +309,14 @@ def test_delta_050_at_the_default_beta_reproduces_the_two_move_solution(backend:
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_delta_negligible_does_not_swamp_the_objective(backend: str) -> None:
-    """REVIEW.md AA-01: CP-SAT's (C7) linearization once built `d_s` on a
+    """REVIEW.md AA-01: the then-CP-SAT backend's (C7) linearization once
+    built `d_s` on a
     scale six orders of magnitude larger than every other term's, so even
     a negligible `delta_capacity_spread` acted, in effect, like ~100 --
     the exact "obvious formulation" trap section 5.5 warns the gamma term
     away from, reintroduced for (C7). At `delta=0.0001` the term's true
     contribution to the specified objective is ~3e-5, so the optimum is
-    the delta=0 optimum (the three-move plan) -- both backends' (C7)
+    the delta=0 optimum (the three-move plan) -- the model's own (C7)
     linearization must agree with that, not silently prefer the two-move
     plan by amplifying delta's weight internally."""
     objective = dataclasses.replace(DEFAULT_OBJECTIVE, delta_capacity_spread=0.0001)
@@ -377,8 +337,8 @@ def test_delta_negligible_does_not_swamp_the_objective(backend: str) -> None:
 def test_delta_zero_reproduces_the_beta_only_three_move_solution(backend: str) -> None:
     """The inverse check: explicitly disabling delta must restore beta's
     own three-move optimum exactly, confirming `delta_capacity_spread: 0`
-    "disables the term" (section 5.4) all the way through both MILP
-    backends, not just the heuristic."""
+    "disables the term" (section 5.4) all the way through the MILP
+    model, not just the heuristic."""
     objective = dataclasses.replace(DEFAULT_OBJECTIVE, delta_capacity_spread=0.0)
     result = _solve(section_14_group(), section_14_loads(), objective, backend)
 
@@ -699,78 +659,6 @@ def test_solve_never_places_a_disk_on_a_storage_that_cannot_hold_its_format(
     assert result.assignment["201:scsi0"] == "file"  # never the raw-only storage
 
 
-# ------------------------------------------------------- section 5.5 assertions
-
-
-def test_assert_nonzero_when_weighted_passes_for_a_disabled_weight() -> None:
-    _assert_nonzero_when_weighted(0.0, 0, "x")  # a deliberately disabled weight: no assertion
-
-
-def test_assert_nonzero_when_weighted_passes_when_both_are_nonzero() -> None:
-    _assert_nonzero_when_weighted(0.05, 500, "x")
-
-
-def test_assert_nonzero_when_weighted_raises_on_the_gamma_trap() -> None:
-    """Section 5.5's regression guard (REVIEW.md S-09): a non-zero
-    configured weight whose *scaled, rounded* coefficient collapsed to 0
-    is exactly the silent-drop failure `_cpsat_objective_terms()` would
-    otherwise ship."""
-    with pytest.raises(AssertionError, match="rounded to 0"):
-        _assert_nonzero_when_weighted(0.05, 0, "gamma_scaled[101:scsi0]")
-
-
-def test_assert_objective_magnitude_within_int64_passes_for_realistic_sizes() -> None:
-    _assert_objective_magnitude_within_int64(
-        beta_scaled=2_500_000,
-        gamma_scaled_values=[500_000, 500_000],
-        kappa_scaled_values=[5_000_000, 5_000_000],
-        alpha_scaled=10_000,
-        delta_scaled=5_000,
-        num_big_movable=2,
-        num_storages=3,
-        load_bound=10_000_000,
-        fill_bound_total=10_000_000,
-    )
-
-
-def test_assert_objective_magnitude_within_int64_raises_when_over_the_bound() -> None:
-    with pytest.raises(AssertionError, match=r"2\*\*62"):
-        _assert_objective_magnitude_within_int64(
-            beta_scaled=0,
-            gamma_scaled_values=[],
-            kappa_scaled_values=[],
-            alpha_scaled=2**60,
-            delta_scaled=0,
-            num_big_movable=0,
-            num_storages=1000,
-            load_bound=2**60,
-            fill_bound_total=0,
-        )
-
-
-@pytest.mark.skipif(not cpsat_available(), reason="ortools not installed")
-def test_gamma_trap_assertion_fires_end_to_end_for_a_sub_kilobyte_disk() -> None:
-    """A disk small enough that `gamma_move_bytes_per_tib`'s own folded
-    coefficient rounds to 0 despite a non-zero configured weight --
-    exactly the case section 5.5's assertion exists to catch, exercised
-    through the real `solve()` entry point rather than only the helper
-    directly."""
-    group = Group(
-        name="g",
-        storages=(make_storage("san-a"), make_storage("san-b")),
-        disks=(make_disk("101:scsi0", 1e-10, 1.0, "san-a"),),
-    )
-    with pytest.raises(AssertionError, match="rounded to 0"):
-        solve(
-            group,
-            {"101:scsi0": 1.0},
-            DEFAULT_OBJECTIVE,
-            "cpsat",
-            time_limit_seconds=5.0,
-            mip_gap=0.0,
-        )
-
-
 # ------------------------------------------- backend probing (section 2.3)
 
 
@@ -778,9 +666,10 @@ def test_a_missing_optional_solver_is_not_a_warning_under_auto(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The defect that prompted IMPLEMENTATION_PLAN.md section 2.3, in the
-    operator's own words: "solver.backend=cpsat requested but ortools is not
-    importable", at warning level, once per group, on every run of a cluster
-    whose config says `solver.backend: auto` and never mentioned cpsat.
+    operator's own words (of the then-CP-SAT backend): "solver.backend=cpsat
+    requested but ortools is not importable", at warning level, once per
+    group, on every run of a cluster whose config says `solver.backend:
+    auto` and never named a backend.
 
     Under `auto` this call is the cascade asking which optional dependency
     is installed, and "not this one" is the answer it exists to get.
@@ -788,7 +677,7 @@ def test_a_missing_optional_solver_is_not_a_warning_under_auto(
     from proxmox_storage_drs.optimize import _log_backend_unavailable
 
     with caplog.at_level(logging.DEBUG, logger="proxmox_storage_drs.optimize"):
-        _log_backend_unavailable("cpsat", "ortools is not importable", probing=True)
+        _log_backend_unavailable("cbc", "pulp is not importable", probing=True)
     record = caplog.records[-1]
     assert record.levelno == logging.DEBUG
     assert record.probing is True  # type: ignore[attr-defined]
@@ -799,12 +688,12 @@ def test_a_missing_optional_solver_is_not_a_warning_under_auto(
 def test_an_explicitly_configured_solver_that_is_missing_still_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The other half: an operator who wrote `solver.backend: cpsat` and is
-    silently not getting cpsat needs to hear about it."""
+    """The other half: an operator who wrote `solver.backend: cbc` and is
+    silently not getting cbc needs to hear about it."""
     from proxmox_storage_drs.optimize import _log_backend_unavailable
 
     with caplog.at_level(logging.DEBUG, logger="proxmox_storage_drs.optimize"):
-        _log_backend_unavailable("cpsat", "ortools is not importable", probing=False)
+        _log_backend_unavailable("cbc", "pulp is not importable", probing=False)
     record = caplog.records[-1]
     assert record.levelno == logging.WARNING
-    assert "solver.backend=cpsat" in record.getMessage()
+    assert "solver.backend=cbc" in record.getMessage()

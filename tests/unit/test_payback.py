@@ -21,7 +21,6 @@ from proxmox_storage_drs.payback import (
     compute_wipe_duration_seconds,
     evaluate_plan_payback,
     executed_assignment,
-    mirror_duration_seconds,
     repair_markers,
 )
 from proxmox_storage_drs.schedule import ScheduledMove
@@ -50,7 +49,6 @@ def no_saferemove_storage(id_: str) -> Storage:
         id=id_,
         capability_weight=1.0,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=8 * TIB,
         used_bytes=0,
         foreign_used_bytes=0,
@@ -168,7 +166,6 @@ def test_saferemove_wipe_is_included_when_enabled() -> None:
         id="san-a",
         capability_weight=1.0,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=8 * TIB,
         used_bytes=0,
         foreign_used_bytes=0,
@@ -205,7 +202,6 @@ def test_account_saferemove_wipe_false_disables_the_term_even_if_enabled_on_the_
         id="san-a",
         capability_weight=1.0,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=8 * TIB,
         used_bytes=0,
         foreign_used_bytes=0,
@@ -237,7 +233,6 @@ def test_saferemove_on_but_throughput_unknown_skips_the_wipe_term() -> None:
         id="san-a",
         capability_weight=1.0,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=8 * TIB,
         used_bytes=0,
         foreign_used_bytes=0,
@@ -288,7 +283,6 @@ def test_negative_throughput_cannot_cancel_the_mirror_and_hide_an_overlong_move(
         id="san-a",
         capability_weight=1.0,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=8 * TIB,
         used_bytes=0,
         foreign_used_bytes=0,
@@ -413,7 +407,6 @@ def test_move_cost_duration_seconds_is_mirror_plus_wipe() -> None:
         id="san-a",
         capability_weight=1.0,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=8 * TIB,
         used_bytes=0,
         foreign_used_bytes=0,
@@ -523,7 +516,6 @@ def test_repair_exempt_plan_still_blocked_by_the_hard_duration_rule() -> None:
         id="san-a",
         capability_weight=1.0,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=8 * TIB,
         used_bytes=0,
         foreign_used_bytes=0,
@@ -557,146 +549,13 @@ def test_repair_exempt_plan_still_blocked_by_the_hard_duration_rule() -> None:
     assert result.rejected_moves == ("101:scsi0",)
 
 
-def test_mirror_duration_seconds_matches_compute_move_cost() -> None:
-    """The one implementation both `compute_move_cost()` and a saturation
-    -guard caller (which needs the duration *before* calling that
-    function, to request a forecast at the right horizon) share."""
+def test_mirror_duration_is_size_over_bwlimit() -> None:
+    """Section 7.1: ``duration_mirror_d = z_d / bwlimit`` -- `bwlimit` is the
+    whole throttle, there is no per-storage headroom term."""
     m = move("101:scsi0", "san-a", "san-b", 1.5)
     migration = MigrationConfig(bwlimit_bytes_per_sec=200 * MIB)
     cost = compute_move_cost(m, no_saferemove_storage("san-a"), migration)
-    assert mirror_duration_seconds(m, migration) == pytest.approx(cost.duration_mirror_seconds)
-
-
-# --------------------------------------------------------- section 7.3 saturation guard
-
-
-def saturating_storage(id_: str, saturation_load: float | None) -> Storage:
-    return Storage(
-        id=id_,
-        capability_weight=1.0,
-        reserve_factor=2.0,
-        saturation_load=saturation_load,
-        capacity_bytes=8 * TIB,
-        used_bytes=0,
-        foreign_used_bytes=0,
-        saferemove=False,
-        saferemove_throughput_bytes_per_sec=None,
-        free_space_soft_bytes=0,
-        free_space_hard_bytes=0,
-        storage_type="dir",
-        allowed_formats=frozenset({"raw", "qcow2"}),
-    )
-
-
-SATURATION_MIGRATION = MigrationConfig(
-    bwlimit_bytes_per_sec=200 * MIB,
-    source_load_weight=1.0,
-    target_load_weight=1.0,
-    saturation_ceiling=0.85,
-    max_single_move_duration_seconds=999_999_999.0,
-)
-
-
-def test_saturation_check_is_inactive_without_a_target() -> None:
-    """The default call shape (every pre-existing call site) never sets
-    `saturation_deferred`, regardless of how extreme `l_hat_src`/
-    `l_hat_dst` would be if they were ever consulted -- the check is
-    opt-in, not opt-out."""
-    m = move("101:scsi0", "san-a", "san-b", 1.0)
-    source = saturating_storage("san-a", saturation_load=0.001)
-    cost = compute_move_cost(
-        m, source, SATURATION_MIGRATION, target=None, l_hat_src=1e9, l_hat_dst=1e9
-    )
-    assert not cost.saturation_deferred
-
-
-def test_saturation_check_skipped_for_an_endpoint_with_no_saturation_load() -> None:
-    m = move("101:scsi0", "san-a", "san-b", 1.0)
-    source = saturating_storage("san-a", saturation_load=None)
-    target = saturating_storage("san-b", saturation_load=None)
-    cost = compute_move_cost(
-        m, source, SATURATION_MIGRATION, target=target, l_hat_src=1e9, l_hat_dst=1e9
-    )
-    assert not cost.saturation_deferred
-
-
-def test_saturation_check_defers_when_the_source_endpoint_exceeds_the_ceiling() -> None:
-    m = move("101:scsi0", "san-a", "san-b", 1.0)
-    source = saturating_storage("san-a", saturation_load=10.0)  # ceiling: 0.85*10=8.5
-    target = saturating_storage("san-b", saturation_load=None)
-    # l_hat_src=8.0 + omega_src(1.0) = 9.0 > 8.5 -> deferred.
-    cost = compute_move_cost(
-        m, source, SATURATION_MIGRATION, target=target, l_hat_src=8.0, l_hat_dst=0.0
-    )
-    assert cost.saturation_deferred
-
-
-def test_saturation_check_defers_when_the_target_endpoint_exceeds_the_ceiling() -> None:
-    m = move("101:scsi0", "san-a", "san-b", 1.0)
-    source = saturating_storage("san-a", saturation_load=None)
-    target = saturating_storage("san-b", saturation_load=10.0)
-    cost = compute_move_cost(
-        m, source, SATURATION_MIGRATION, target=target, l_hat_src=0.0, l_hat_dst=8.0
-    )
-    assert cost.saturation_deferred
-
-
-def test_saturation_check_passes_comfortably_under_the_ceiling() -> None:
-    m = move("101:scsi0", "san-a", "san-b", 1.0)
-    source = saturating_storage("san-a", saturation_load=10.0)
-    target = saturating_storage("san-b", saturation_load=10.0)
-    cost = compute_move_cost(
-        m, source, SATURATION_MIGRATION, target=target, l_hat_src=1.0, l_hat_dst=1.0
-    )
-    assert not cost.saturation_deferred
-
-
-def test_saturation_check_charges_the_role_weight_on_top_of_the_forecast() -> None:
-    """L_during(s) = L_hat_s(duration_mirror) + omega_role(s) -- the
-    forecast alone sitting exactly at the ceiling still defers once the
-    move's own mirroring charge is added on top."""
-    m = move("101:scsi0", "san-a", "san-b", 1.0)
-    source = saturating_storage("san-a", saturation_load=10.0)  # ceiling 8.5
-    target = saturating_storage("san-b", saturation_load=None)
-    migration = MigrationConfig(
-        bwlimit_bytes_per_sec=200 * MIB,
-        source_load_weight=1.0,
-        target_load_weight=1.0,
-        saturation_ceiling=0.85,
-        max_single_move_duration_seconds=999_999_999.0,
-    )
-    # l_hat_src alone (8.5) is exactly at the ceiling -- not over it -- but
-    # + omega_src (1.0) pushes L_during to 9.5, over 8.5.
-    cost = compute_move_cost(m, source, migration, target=target, l_hat_src=8.5, l_hat_dst=0.0)
-    assert cost.saturation_deferred
-
-
-def test_evaluate_plan_payback_reports_deferred_moves_separately_from_rejected() -> None:
-    m1 = move("101:scsi0", "san-a", "san-b", 1.0)
-    m2 = move("102:scsi0", "san-a", "san-c", 1.0)
-    source = saturating_storage("san-a", saturation_load=10.0)  # ceiling 8.5
-    target_b = saturating_storage("san-b", saturation_load=None)
-    target_c = saturating_storage("san-c", saturation_load=None)
-    deferred_cost = compute_move_cost(
-        m1, source, SATURATION_MIGRATION, target=target_b, l_hat_src=20.0, l_hat_dst=0.0
-    )
-    normal_cost = compute_move_cost(
-        m2, source, SATURATION_MIGRATION, target=target_c, l_hat_src=0.0, l_hat_dst=0.0
-    )
-    assert deferred_cost.saturation_deferred
-    assert not normal_cost.saturation_deferred
-
-    result = evaluate_plan_payback(
-        [deferred_cost, normal_cost],
-        benefit_load_seconds=1e9,
-        payback_ratio=10.0,
-        current_shortfall_bytes=0,
-        final_shortfall_bytes=0,
-    )
-    assert result.deferred_moves == ("101:scsi0",)
-    assert result.rejected_moves == ()  # a defer is not a hard-duration rejection
-    assert result.aggregate_ok  # the economic test itself is unaffected
-    assert not result.accepted  # but a deferred move still blocks a clean accept
+    assert cost.duration_mirror_seconds == pytest.approx(1.5 * TIB / (200 * MIB))
 
 
 def test_negative_benefit_is_never_accepted() -> None:
@@ -840,7 +699,6 @@ def _revert_test_group() -> Group:
             id="a",
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=10 * TIB,
             used_bytes=0,
             foreign_used_bytes=0,
@@ -855,7 +713,6 @@ def _revert_test_group() -> Group:
             id="b",
             capability_weight=1.0,
             reserve_factor=2.0,
-            saturation_load=None,
             capacity_bytes=20 * TIB,
             used_bytes=0,
             foreign_used_bytes=0,
@@ -920,7 +777,6 @@ def test_repair_markers_marks_false_when_reverting_changes_nothing() -> None:
                 id="a",
                 capability_weight=1.0,
                 reserve_factor=2.0,
-                saturation_load=None,
                 capacity_bytes=10 * TIB,
                 used_bytes=0,
                 foreign_used_bytes=0,
@@ -935,7 +791,6 @@ def test_repair_markers_marks_false_when_reverting_changes_nothing() -> None:
                 id="b",
                 capability_weight=1.0,
                 reserve_factor=2.0,
-                saturation_load=None,
                 capacity_bytes=20 * TIB,
                 used_bytes=0,
                 foreign_used_bytes=0,

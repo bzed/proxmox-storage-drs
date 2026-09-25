@@ -18,13 +18,13 @@ pve-storage-drs --replay tests/corpus/<bundle-name> plan --json
 
 **Status: implemented** — phase 10 of section 12, section 16 is the specification.
 `bzed-dev-cluster-24h` is the first bundle, collected from the project's own dev cluster
-(see `bzed-dev-cluster-24h.submission.yaml`). `bzed-dev-cluster-7d-holt-winters` is the same
-cluster with a 7-day window, and `bzed-dev-cluster-free-space` is the first bundle captured
+(see `bzed-dev-cluster-24h.submission.yaml`). `bzed-dev-cluster-2d-holt-winters` is the same
+cluster under `forecast.model: holt_winters` at the shortest window its backtest can run
+with (2d, captured over 4d), and `bzed-dev-cluster-free-space` is the first bundle captured
 *after* phase 13 (section 5.3.1): all three shared storages in the group, a different resolved
-`free_space` soft/hard pair on each, and a plan that is a repair. The first two predate phase 13
-and still carry the deprecated `snapshot_reserve.min_free_bytes` scalar in their `config.yaml` —
-deliberately left as captured, since they are the proof that a bundle from before `free_space`
-existed still replays. An empty corpus is still a clean pass: the
+`free_space` soft/hard pair on each, and a plan that is a repair. `bzed-dev-cluster-24h` predates phase 13; its `config.yaml` has no `free_space` block, which is
+the default (`soft: 0`, `hard: null`).
+An empty corpus is still a clean pass: the
 test suite is green on a fresh clone even with no bundles in it, so a bundle here is
 additional coverage, not a dependency.
 
@@ -145,11 +145,10 @@ Four kinds of assertion, in the order they run:
 2. **Invariants, not optima.** The reserve is satisfied wherever a reserve-feasible
    assignment exists; section 8.1's transient predicate holds at every step of the emitted
    order; every move targets a storage (C2) permits for that disk; section 7.3's per-move
-   duration rule and saturation guard hold for every accepted move; the objective handed to
+   duration rule holds for every accepted move; the objective handed to
    the scheduler equals the objective recomputed from the final assignment.
-3. **MILP versus heuristic on real data.** CP-SAT, CBC and the heuristic solve the same
-   bundle; the MILP objective must be `<=` the heuristic's, and the two MILP backends must
-   agree within section 5.5's tolerance. A heuristic that beats the MILP means the shared
+3. **MILP versus heuristic on real data.** CBC and the heuristic solve the same
+   bundle; the MILP objective must be `<=` the heuristic's. A heuristic that beats the MILP means the shared
    feasibility or objective functions have drifted apart — the thing `AGENTS.md` section 5
    exists to prevent, and the thing only a large real instance can detect.
 4. **Regression.** `<bundle-name>.expected.json` records, per variant, the gate verdict, the
@@ -158,9 +157,11 @@ Four kinds of assertion, in the order they run:
    eventually be edited to match a bug.
 
 The variant matrix per bundle is `solver.backend` × `objective.spread_metric` ×
-`forecast.model` × a short `objective.beta_move_count` sweep. A variant whose backend or
-forecaster is not installed is **recorded as skipped**, never silently dropped — CP-SAT is an
-optional dependency, and a corpus result that quietly means "CBC only" is a corpus result
+`forecast.model` × a short `objective.beta_move_count` sweep. That full matrix is `make
+corpus`; `make check` runs the narrow sweep (both backends, the first spread metric and beta,
+and `forecast.model` ∈ {quantile, the bundle's own configured model}). A variant whose
+forecaster is not installed is **recorded as skipped**, never silently dropped — `statsmodels` is an
+optional dependency, and a corpus result that quietly means "quantile only" is a corpus result
 that lies.
 
 ## What a bundle does and does not hide

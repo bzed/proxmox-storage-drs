@@ -75,7 +75,7 @@ metrics:
   # PVE-side push cadence of pvestatd. The tool cannot read this from the API, so
   # declare it here; `pve-storage-drs verify-metrics` measures the real sample spacing of a
   # live series and errors if this value is wrong by more than 20%.
-  pvestatd_push_interval: 60s
+  pvestatd_push_interval: 10s   # pvestatd's own default
 
   # Every query is scoped automatically, so a Prometheus shared by more than
   # one PVE cluster cannot silently sum in a same-numbered vmid from
@@ -93,15 +93,7 @@ window:
   # The DECISION window: the period whose load we balance. This is NOT the same
   # as the history a forecaster needs -- see the forecast: block below.
   lookback: 24h
-  quantile: 0.95        # point estimate: the statistic every placement decision uses
-  upper_quantile: 0.99  # Upper bound on the same load; must be >= quantile. Consumed
-                        # ONLY by the saturation guard (migration.saturation_ceiling
-                        # below), and only for a storage that sets saturation_load: the
-                        # guard asks whether a move could push a storage past saturation
-                        # at its busiest rather than at its typical. Placement itself is
-                        # decided from the point estimate above, so raising this never
-                        # moves a disk somewhere else -- it only makes the guard more
-                        # cautious about starting a move now.
+  quantile: 0.95        # the statistic every placement decision uses (p95 of a disk's load)
   min_coverage: 0.80    # reject a disk's data if fewer than this fraction of
                         # expected samples are present
 
@@ -162,16 +154,6 @@ groups:
                                    # Only ratios within a group matter; the absolute
                                    # value is meaningless. Not a capacity.
         reserve_factor: null       # null = inherit global snapshot_reserve.factor
-        # Absolute number of concurrent I/O requests this array services before
-        # queueing delay dominates -- roughly its effective queue depth, in the same
-        # units as the load metric above. Used ONLY by the saturation guard
-        # (migration.saturation_ceiling). There is no safe default: leave it null and
-        # that advisory guard is skipped for this storage (the hard bounds --
-        # max_single_move_duration and the transient reserve invariant -- always
-        # apply). Do not guess it from
-        # observed load; take it from the array's documented queue depth, or measure
-        # the load at which latency starts climbing super-linearly.
-        saturation_load: null
         # Per-storage/per-pattern free_space.soft/hard override -- same shape as
         # the top-level free_space: block below, most specific wins. See that
         # section for the full semantics; not set here, so this entry inherits
@@ -187,7 +169,6 @@ groups:
     storages:
       - id: san-d
         capability_weight: 1.0
-        saturation_load: 64        # this array services ~64 concurrent I/Os
       - id: san-e
         capability_weight: 0.5     # half the spindles -> carries half the load
 
@@ -197,11 +178,6 @@ snapshot_reserve:
   # transiently during a migration. PVE 9 volume-chain snapshots allocate a new
   # full-size LV per snapshot, which is what this protects.
   factor: 2.0
-  # DEPRECATED: syntax for free_space.soft below. Still accepted -- folded in
-  # as a per-storage lower bound on top of the resolved free_space.soft, never
-  # as a substitute for it -- but new configs should set free_space.soft
-  # instead, which has per-storage and percentage forms this scalar never had.
-  min_free_bytes: 0
   # Count volumes not managed by DRS (templates, orphans, other clusters)
   # against capacity. Strongly recommended.
   count_foreign_volumes: true
@@ -267,15 +243,11 @@ migration:
   # from GET /storage/{id}. Only set false if you have verified saferemove is off
   # everywhere in the group.
   account_saferemove_wipe: true
-  # In-flight I/O charged to the SOURCE for the whole duration of that wipe -- both
-  # in the migration cost model and in the saturation guard, where a draining move
-  # charges this to its source and nothing to its target. The zeroing
-  # pass is one sequential writer, so 1.0 is the natural value; lower it only if you
-  # have measured that a throttled wipe does not disturb your array.
+  # In-flight I/O charged to the SOURCE for the whole duration of that wipe, in the
+  # migration cost model. The zeroing pass is one sequential writer, so 1.0 is the
+  # natural value; lower it only if you have measured that a throttled wipe does not
+  # disturb your array.
   wipe_load_weight: 1.0
-  # Fraction of a storage's saturation_load (NOT of capability_weight) that a move
-  # may drive it to. Inactive for any storage whose saturation_load is null.
-  saturation_ceiling: 0.85
   # Kept only so a config that spells it out still loads; `false` is refused. This tool
   # never considers over-provisioning -- disks count at their provisioned size, on
   # thin-provisioned storage (Ceph RBD, LVM-thin, ZFS) as much as on thick.
@@ -317,7 +289,7 @@ objective:
   reserve_violation_penalty: 1000.0
 
 solver:
-  backend: auto          # auto | cpsat | cbc | heuristic
+  backend: auto          # auto | cbc | heuristic
   time_limit_seconds: 60
   mip_gap: 0.02
   heuristic_iterations: 5000
@@ -396,20 +368,27 @@ state:
   path: /var/lib/pve-storage-drs/state.json
 
 forecast:
-  model: quantile        # quantile | seasonal_naive | holt_winters
-  # Each forecaster declares the HISTORY it needs, independent of
-  # window.lookback. Startup validation fails if Prometheus retention or the
-  # configured window cannot supply it, rather than silently degrading:
-  #   quantile        -> window.lookback                      (24h)
-  #   seasonal_naive  -> seasonal_lookback_days                (7d)
-  #   holt_winters    -> 2 * seasonal_periods * step           (48h)
-  # NOTE: with seasonal_periods=288 at a 5m step, holt_winters needs 48h. A 24h
-  # lookback alone can never satisfy it -- it would fall back to quantile forever.
+  # quantile      -> every disk's load is its p95 over the LAST window.lookback.
+  # holt_winters  -> every disk's load is scaled to a Holt-Winters forecast of its
+  #                  p95 over the NEXT window.lookback, so a disk whose load is
+  #                  rising, or has a daily peak the last window happened to miss,
+  #                  is placed for what it will do rather than what it did.
+  #
+  # holt_winters is only used for a group when a backtest says it would have
+  # predicted that group's own last window at least as well as simply repeating
+  # the window before it (no threshold to tune); otherwise the group falls back to
+  # quantile for that run, with a warning. That needs 2 * window.lookback of
+  # Prometheus history, and python3-statsmodels installed.
+  model: quantile        # quantile | holt_winters
+  # holt_winters also needs two full seasonal cycles inside window.lookback
+  # (2 * seasonal_periods * step); startup validation fails if window.lookback is
+  # shorter, rather than silently degrading. With seasonal_periods=288 at a 5m
+  # step that is 48h, so a 24h lookback can never satisfy it.
   #
   # To switch model to holt_winters with the daily-cycle default below, also
   # raise window.lookback (above) to at least 48h -- it stays the DECISION
-  # window (what load is balanced over), so most deployments just set it to
-  # match: 48h. Both plan/apply's saturation guard and collect-testdata
+  # window (what load is balanced over) -- and keep 96h of Prometheus history.
+  # Both plan/apply and collect-testdata
   # fetch this history in day-sized chunks regardless of how wide it gets
   # (see the RANGE_QUERY_CHUNK_SECONDS note in docs/internals/30-metrics.md),
   # so this is a Prometheus-request-count cost, never a backend point-per-
@@ -422,12 +401,10 @@ forecast:
   #     model: holt_winters
   #     holt_winters:
   #       seasonal_periods: 2016     # 7d at 5m step
-  seasonal_lookback_days: 7    # used by seasonal_naive; 0 disables
   holt_winters:
     seasonal_periods: 288      # 24h at 5m step
-    trend: add
+    trend: none                # add: extrapolates a trend over the whole window; ran away on real disks
     seasonal: add
-    residual_z: 2.0            # upper bound = point + z * sigma(residuals)
 
 support:
   # Diagnostic bundles: `pve-storage-drs collect-testdata` and the global
@@ -446,10 +423,9 @@ support:
   # series-sample count before fetching anything and refuses above this,
   # naming the --range/--step/--no-series flags that would bring it under.
   max_series_points: 5000000
-  # "auto" captures the union of every forecaster's required_range() (section
-  # 16.2), currently max(window.lookback, forecast.seasonal_lookback_days,
-  # 2 * holt_winters.seasonal_periods * metrics.step) -- the superset any
-  # supported config could need, not just the one active here. A duration
+  # "auto" captures what holt_winters needs (section 16.2), currently
+  # max(2 * window.lookback, 2 * holt_winters.seasonal_periods * metrics.step) --
+  # the superset any supported config could need, not just the one active here. A duration
   # (e.g. "14d") overrides it; --range on the command line overrides both.
   capture_range: auto
 

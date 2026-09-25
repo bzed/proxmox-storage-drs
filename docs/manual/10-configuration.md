@@ -296,7 +296,7 @@ query or `quantile_over_time` subquery once the query's own step reaches the
 function's range-vector duration, so this tool queries at half that step (or
 the largest whole-second step below it that divides `metrics.step` evenly,
 at a wider ratio) and reassembles the configured grid from the result. Every
-disk's coverage, load history and forecaster input comes back numerically
+disk's coverage, load history and forecast input comes back numerically
 identical to what a plain `metrics.step` query would have returned on an
 unaffected backend — except the `quantile_over_time` decision statistic
 itself, whose inner evaluation runs on the denser grid unconditionally, on
@@ -307,7 +307,7 @@ compares against — is correspondingly doubled (or more) at the same ratio.
 
 ### `metrics.pvestatd_push_interval`
 
-Duration, default `60s`.
+Duration, default `10s` (`pvestatd`'s own default).
 
 How often PVE's `pvestatd` pushes metrics — a PVE-side setting this tool
 cannot read from the API, so it must be declared here. `verify-metrics`
@@ -318,15 +318,16 @@ declaration from silently invalidating the `rate_window` rule above.
 ## `window` — the decision window
 
 This is the period whose load is balanced. It is **not** the amount of
-history a forecaster needs to fit — see `forecast.model` below and
+history a forecast needs to fit — see `forecast.model` below and
 `IMPLEMENTATION_PLAN.md` section 10.1.
 
 ### `window.lookback`
 
 Duration, default `24h`.
 
-The trailing window each disk's load is reduced over. Must be at least as
-long as the configured `forecast.model` needs (`forecast.model: holt_winters`
+The window each disk's load is reduced over: the last `window.lookback` under
+`forecast.model: quantile`, the next one (as forecast) under `holt_winters`.
+Must be at least as long as the configured `forecast.model` needs (`forecast.model: holt_winters`
 at its default `seasonal_periods` needs 48h, which a 24h lookback can never
 supply — this is rejected at startup, not silently degraded).
 
@@ -337,22 +338,6 @@ Fraction in (0, 1), default `0.95`.
 The point-estimate quantile: each disk's load is the p95 of its raw signal
 over `window.lookback`, not the mean, so one traffic spike neither triggers
 nor suppresses a migration.
-
-### `window.upper_quantile`
-
-Fraction in (0, 1), default `0.99`.
-
-The quantile the **saturation guard** actually consumes — must be
-`>= window.quantile`. (The saturation guard is the migration-time safety
-check, `migration.saturation_ceiling` below, that defers a move if it would
-push a storage's forecasted load past a configured ceiling; it runs only for
-a storage that sets `groups[].storages[].saturation_load`.) Being wrong in
-the direction of "busier than it looks" costs the guard deferring a move
-that was actually safe; the other direction risks the guard missing a
-mirror that pushes a storage past saturation. The optimizer itself still
-decides placement from `window.quantile`, the point estimate, not this
-upper bound; wiring the upper bound into the optimizer's own input remains
-future work. (`IMPLEMENTATION_PLAN.md` §10.1's "As built" note.)
 
 ### `window.min_coverage`
 
@@ -444,7 +429,7 @@ ends with `/` — matching one or more storage ids (`IMPLEMENTATION_PLAN.md`
 section 11.4). A pattern is matched with `re.fullmatch` (case-sensitive)
 against the live cluster's storage inventory on every run, so `/san-.*/`
 picks up a LUN added after the config was written with no edit needed; its
-own entry's `capability_weight`/`reserve_factor`/`saturation_load` apply to
+own entry's `capability_weight`/`reserve_factor` apply to
 every storage it matches. A literal entry always overrides a pattern that
 also matches its storage, so one member of a pattern-matched family can
 still be pinned to different options. A storage may belong to **at most
@@ -486,25 +471,6 @@ storages — `"10%"` demands different byte counts on a 20 TiB and a 2 TiB
 LUN, which is the point: "a tenth of the LUN free" is one policy applied
 per storage, not one number shared across the family.
 
-### `groups[].storages[].saturation_load`
-
-Positive number or `null`, default `null`.
-
-The storage's approximate queue depth — the number of concurrent I/O
-requests it services before latency climbs super-linearly — in the same
-units as the load model (average in-flight I/O). Used only by the
-saturation guard on a migration's mirror (see `window.upper_quantile`
-above). **Has no safe default**: an idle storage's observed load is not its
-capacity, so leaving this `null` (the default) simply disables that one
-advisory check for the storage; the hard bounds always apply regardless —
-`migration.max_single_move_duration`, and the **transient reserve
-invariant**: the `snapshot_reserve` floor (below) checked against the
-storage's actual state *while a migration is in flight*, when a moving
-disk's source and target copies are both briefly fully allocated at once,
-not merely before and after. Obtain a real value for `saturation_load` from
-the array's documented queue depth, or by observing where latency actually
-starts climbing.
-
 ## `snapshot_reserve` — the free-space floor
 
 ### `snapshot_reserve.factor`
@@ -516,21 +482,6 @@ including *during* a migration, not merely before and after — PVE 9's
 volume-chain snapshots allocate a new full-size volume per snapshot, which
 is what this protects against. This is the constraint the tool never trades
 against balance (`IMPLEMENTATION_PLAN.md` section 5.3, (C5)).
-
-### `snapshot_reserve.min_free_bytes`
-
-Size, default `0`. **Deprecated syntax for `free_space.soft` below.**
-
-An absolute floor, applied as `reserve = max(factor * largest_disk,
-min_free_bytes)`. Matters when a storage's largest disk is small: with
-`factor: 2.0` and a 10 GiB largest disk, the snapshot term alone would
-reserve only 20 GiB on a 20 TiB LUN — exactly what `free_space.soft` now
-expresses, with per-storage and percentage forms this scalar never had.
-Still accepted, and still works: if set alongside `free_space.soft` it is
-folded in as a floor on top of the resolved value (the larger of the two
-applies on every storage, never a "last one wins" substitution — a config
-warning names both keys when this happens), so upgrading is never a silent
-weakening. New configs should use `free_space.soft` instead.
 
 ### `snapshot_reserve.count_foreign_volumes`
 
@@ -607,10 +558,8 @@ Fraction, default `0.20`.
 The minimum relative spread across a group's storages before a plan is
 actually built. A group under this threshold is left alone even if it has
 drifted. Also, unrelatedly, this same value doubles as the backtest error
-ceiling a non-`quantile` `forecast.model` (`seasonal_naive`/`holt_winters`)
-must stay within before its forecast is trusted to drive the saturation
-guard for that group's run — see `forecast.model` below for how that
-backtest works.
+ceiling a non-`quantile` `forecast.model` must stay within — see
+`forecast.model` below.
 
 ### `gates.capacity_spread_threshold`
 
@@ -658,6 +607,11 @@ the API's own unit, never bytes/s). Also the divisor in the mirror-duration
 estimate the payback test uses: a move's mirror is assumed to take
 `disk_bytes / bwlimit_bytes_per_sec` seconds (see `migration.payback_ratio`
 below for the full cost/benefit comparison).
+
+This is the **whole** throttle on a migration: it may start at any time, and
+the tool does not model storage saturation. The other limits are
+`migration.max_single_move_duration` and the transient reserve invariant (see
+`snapshot_reserve.factor`).
 
 ### `migration.source_load_weight`
 
@@ -741,17 +695,8 @@ migration cost badly if that assumption is wrong.
 Weight, default `1.0`.
 
 In-flight I/O charged to the source for the whole `saferemove` wipe duration
-— both in the cost model and in the saturation guard, where a draining move
-charges this to its source and nothing to its target. The
-zeroing pass is one sequential writer, so `1.0` is the natural value.
-
-### `migration.saturation_ceiling`
-
-Fraction in (0, 1], default `0.85`.
-
-The fraction of a storage's `saturation_load` (not of `capability_weight`) a
-move may drive it to. Inactive for any storage whose `saturation_load` is
-`null` — the default, since there is no safe way to infer it.
+in the cost model. The zeroing pass is one sequential writer, so `1.0` is
+the natural value.
 
 ### `migration.assume_thick_provisioning`
 
@@ -788,8 +733,7 @@ Size, default `67108864` (64 MiB).
 A disk smaller than this carries zero `beta_move_count`/`gamma_move_bytes_per_tib`
 cost in the objective and zero `cost_d` in the payback model — it still
 counts as a scheduled move and every hard per-move safety rule
-(`max_single_move_duration`, the saturation guard, the transient reserve
-invariant) still applies to it exactly like any other move, but it needs no
+(`max_single_move_duration`, the transient reserve invariant) still applies to it exactly like any other move, but it needs no
 payback verdict and cannot make a plan fail the aggregate `payback_ratio`
 test. Together with `objective.kappa_vm_affinity`, this is what lets a tiny
 volume — an `efidisk0` var store or `tpmstate0`, both normally a few hundred
@@ -948,8 +892,8 @@ reserve_shortfall_tib`, one of the six terms `explain`'s `objective:`
 line prints. It is used exactly as configured — no floor, no automatic
 raise, no warning.
 
-The MILP backends (`solver.backend: cpsat`/`cbc`, and `auto` when either is
-available) solve the reserve **lexicographically** instead: the reserve is
+The MILP backend (`solver.backend: cbc`, and `auto`) solves the reserve
+**lexicographically** instead: the reserve is
 fixed as a hard constraint and solved for first, before the rest of the
 objective above is even considered, so no weight — this one included — can
 trade it away. A single-stage alternative exists on paper: computing a
@@ -957,22 +901,30 @@ provably-dominant penalty from the group's own load instead of taking this
 key at face value, with a `max(configured, computed)` floor. It is not
 implemented, so this key never gets raised automatically for any backend —
 what you set is exactly what the heuristic backend uses, and the MILP
-backends never consult it at all. (`IMPLEMENTATION_PLAN.md` section 5.3.)
+backend never consults it at all. (`IMPLEMENTATION_PLAN.md` section 5.3.)
 
 ## `solver` — which backend plans
 
 ### `solver.backend`
 
-One of `auto`, `cpsat`, `cbc`, `heuristic`; default `auto`.
+One of `auto`, `cbc`, `heuristic`; default `auto`.
 
-`auto` prefers CP-SAT (`pip install proxmox-storage-drs[solver]` -- not
-packaged for Debian), falls back to CBC (the packaged solver path via
-`python3-pulp` + `coinor-cbc`), then the dependency-free heuristic. `cpsat`/
-`cbc` force one specific backend, failing that group's solve back to the
-heuristic (never a silent substitution of the *other* MILP backend) if its
+`auto` uses CBC — the packaged solver path via `python3-pulp` +
+`coinor-cbc`, both hard dependencies of the Debian package — and falls
+back to the dependency-free heuristic if that library is not importable
+or its `cbc` binary cannot run (a plain `pip install` without the
+`solver` extra; never on a Debian install). `cbc` forces that one
+backend, failing that group's solve back to the
+heuristic if its
 library is not importable or it cannot solve within `solver.time_limit_seconds`
 -- force a specific backend only to reproduce or compare a result.
 `heuristic` skips the solver entirely. See `docs/internals/91-optimize.md`.
+
+(A `cpsat` value existed through release 0.1.8, selecting an optional
+`ortools`-based backend; it was removed — `ortools` has no Debian
+package and the backend could therefore never run on a PVE host — and a
+config that still names it now fails schema validation, loudly, as it
+should.)
 
 ### `solver.time_limit_seconds`
 
@@ -986,15 +938,9 @@ falls back cleanly instead.
 
 Fraction, default `0.02`.
 
-Acceptable optimality gap for the MILP solve: CP-SAT/CBC may stop once the
+Acceptable optimality gap for the MILP solve: CBC may stop once the
 best solution found is within this fraction of a proven lower bound, rather
-than solving to exact optimality. The CP-SAT backend must also convert
-every fractional weight and load value into an integer coefficient before
-solving, which introduces its own rounding error — worked out to roughly
-`5×10⁻⁴` of summed load-deviation units even for a 1,000-disk group, three
-orders of magnitude below this default `0.02` gap, so that rounding error
-cannot itself change which plan is selected or make CP-SAT and CBC
-disagree. (`IMPLEMENTATION_PLAN.md` section 5.5.)
+than solving to exact optimality. (`IMPLEMENTATION_PLAN.md` section 5.5.)
 
 ### `solver.heuristic_iterations`
 
@@ -1024,7 +970,7 @@ Integer `>= 1`, default `1`.
 How many moves may be in flight across the whole run at once, in `--mode
 auto` only (`dry-run`/`confirm` always run strictly sequentially
 regardless of this setting). Above `1` requires the *generalized* form of the transient reserve
-invariant (see `groups[].storages[].saturation_load` above for the
+invariant (see `snapshot_reserve.factor` above for the
 single-move definition): several disks can land on one storage at once, and
 none of their sources release space until each individually completes —
 `apply` re-checks it live before launching each move. Launch order stays strictly FIFO: `apply` never reorders the
@@ -1255,39 +1201,51 @@ gate's history; neither writes it, and a missing or unreadable file just
 means every group evaluates as if it had never been balanced before — see
 [`../internals/15-state.md`](../internals/15-state.md).
 
-## `forecast` — history beyond the plain quantile
+## `forecast` — placing disks for the load they will have
 
-See `IMPLEMENTATION_PLAN.md` section 10 and `proxmox_storage_drs/forecast.py`.
+See `IMPLEMENTATION_PLAN.md` sections 10 and 12.1 and `proxmox_storage_drs/forecast.py`.
 
 ### `forecast.model`
 
-One of `quantile`, `seasonal_naive`, `holt_winters`; default `quantile`.
+One of `quantile`, `holt_winters`; default `quantile`.
 
-`quantile` needs only `window.lookback` and no model fitting. `seasonal_naive`
-and `holt_winters` need more history than the decision window alone — see
-below — and `pve-storage-drs` refuses to start if `window.lookback` (or your
-Prometheus retention) cannot supply it, rather than silently falling back.
+`quantile`: each disk's load is the p95 (`window.quantile`) of its I/O over the
+**last** `window.lookback`. It needs no fitting, no extra history and no
+optional package, and it is what every plan used before `holt_winters`
+existed; with it nothing below applies and no extra Prometheus query is made.
 
-**Backtest-validated before use.** Only when the saturation guard is
-actually active (some `groups[].storages[].saturation_load` is set): a
-`seasonal_naive`/`holt_winters` model is fit on the older half of its own
-recent history and checked against what actually happened in the newer
-half, once per group, before it is trusted for that run. A model that
-misses by more than `gates.imbalance_threshold` — or that does not yet
-have enough history to backtest at all — falls back to `quantile` for that
-group's saturation guard this run, logged at warning. `quantile` itself is
-never backtested; there is nothing to validate and nothing more
-conservative to fall back to. (`IMPLEMENTATION_PLAN.md` section 10.2.)
+`holt_winters`: each disk's load is scaled to a Holt-Winters forecast of that
+same p95 over the **next** `window.lookback` — fit the disk's history, forecast
+`window.lookback` ahead, take `window.quantile` of the forecast path. The
+scaling is a ratio (forecast p95 ÷ the observed p95 of the same history), so
+the load stays on the scale the rest of the model is calibrated against; a
+disk whose load is rising, or that has a daily peak the last window happened
+to miss, is placed for what it is about to do. A disk that is flagged for low
+sample coverage, has no observed load, or whose model cannot be fitted keeps
+its observed load. Gates, solver, payback and ordering all see the same
+forecast load.
 
-### `forecast.seasonal_lookback_days`
+When `holt_winters` is worth selecting: a load that follows a daily (or
+weekly, see `seasonal_periods`) cycle, or that trends. On a load with no
+structure — noise around a constant — it has nothing to predict, and the gate
+below will say so.
 
-Days, default `7`.
+**The gate: it must beat doing nothing clever.** Once per group, the model is
+fit on the older half of its own recent history (`[now − 2·lookback, now −
+lookback)`) and both it and the `quantile` model predict the p95 of the newer
+half; `holt_winters` is used for the group only if its error is no larger than
+the `quantile` model's. There is no threshold to tune. If it loses — or there
+is not yet `2 · window.lookback` of history to check — the group uses
+`quantile` for that run, logged at warning. `explain` and `plan --json` show
+what happened per group: which model was used, both backtest errors, and how
+many disks were scaled or kept.
 
-History `seasonal_naive` needs: same-hour-of-day samples across this many
-days. `0` does not disable the model or fall back to anything — it simply
-stops requiring history beyond `window.lookback`, which for a lookback
-under 24h can leave no same-hour-of-day sample to match at all (predicting
-`0.0`, not a fallback).
+**Requirements.** `window.lookback` must span two seasonal cycles
+(`2 · seasonal_periods · metrics.step`; 48h at the defaults), which
+`pve-storage-drs` enforces at startup rather than silently degrading;
+Prometheus must hold `2 · window.lookback` of history for the gate to run at
+all; and `python3-statsmodels` must be installed (without it every disk keeps
+its observed load).
 
 ### `forecast.holt_winters.seasonal_periods`
 
@@ -1301,7 +1259,7 @@ To fit **weekly** seasonality instead of daily (e.g. weekends look
 different from weekdays), widen this together with `window.lookback`:
 `seasonal_periods: 2016` (7d at the default 5m step) needs
 `window.lookback` of at least 28 days (`2 * 2016 * 5m`). The fetch behind
-this — both the live `plan`/`apply` saturation guard and
+this — both a live `plan`/`apply` and
 `collect-testdata` — is chunked into day-sized requests regardless of how
 wide the range gets, so a large `seasonal_periods`/`window.lookback`
 combination no longer risks exceeding a Prometheus-compatible backend's
@@ -1313,26 +1271,21 @@ deliberately, not a reason to keep the range artificially small.
 
 ### `forecast.holt_winters.trend`
 
-One of `add`, `mul`, `none`; default `add`.
+One of `add`, `mul`, `none`; default `none`.
 
 The trend component passed to the underlying Holt-Winters fit
 (`statsmodels`, an optional dependency — see
-[`30-safety-and-status.md`](30-safety-and-status.md)).
+[`30-safety-and-status.md`](30-safety-and-status.md)). The forecast runs a whole
+`window.lookback` ahead, and a trend is extrapolated undamped over all of it: on a
+real cluster `add` scored no better in the backtest than `none` but forecast a
+single disk at 95% of its whole group's load. Enable a trend only for load that
+really grows steadily, and check the `forecast` block's scaled disks afterwards.
 
 ### `forecast.holt_winters.seasonal`
 
 One of `add`, `mul`, `none`; default `add`.
 
 The seasonal component passed to the same fit.
-
-### `forecast.holt_winters.residual_z`
-
-Weight, default `2.0`.
-
-The upper bound is `point_estimate + residual_z * stdev(residuals)` from the
-in-sample fit — this is what the saturation guard actually consumes (see
-`window.upper_quantile` above for the equivalent under the `quantile`
-model; the optimizer itself does not consume this).
 
 ## `support` — diagnostic bundles
 
@@ -1373,11 +1326,10 @@ bring the estimate under it.
 
 The literal string `"auto"`, or a duration, default `"auto"`.
 
-`"auto"` captures the union of every forecaster's `required_range()` —
-currently
-`max(window.lookback, forecast.seasonal_lookback_days, 2 * forecast.holt_winters.seasonal_periods * metrics.step)`
-— so a bundle can reproduce a forecaster the capturing operator never
-configured. An explicit duration (e.g. `14d`) overrides that; `--range` on
+`"auto"` captures what `holt_winters` needs — currently
+`max(2 * window.lookback, 2 * forecast.holt_winters.seasonal_periods * metrics.step)`
+(twice the window, for the backtest) — so a bundle can reproduce a model the
+capturing operator never configured. An explicit duration (e.g. `14d`) overrides that; `--range` on
 the command line overrides both.
 
 ## `monitoring` — telling your monitoring system what the last run did

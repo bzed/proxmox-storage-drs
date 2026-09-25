@@ -25,12 +25,10 @@ execution:
   time_windows: []
 forecast:
   holt_winters:
-    residual_z: 2.0
     seasonal: add
     seasonal_periods: 288
     trend: add
   model: quantile
-  seasonal_lookback_days: 7.0
 gates:
   capacity_spread_threshold: 0.25
   cooldown_per_disk: 86400.0
@@ -86,7 +84,6 @@ migration:
   max_single_move_duration: 21600.0
   payback_horizon: 31536000.0
   payback_ratio: 10.0
-  saturation_ceiling: 0.85
   source_load_weight: 1.0
   target_load_weight: 1.0
   wipe_load_weight: 1.0
@@ -124,4 +121,3 @@ window:
   lookback: 86400.0
   min_coverage: 0.8
   quantile: 0.95
-  upper_quantile: 0.99

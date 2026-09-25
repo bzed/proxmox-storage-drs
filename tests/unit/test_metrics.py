@@ -481,9 +481,7 @@ def test_compute_disk_coverage_applies_the_safe_step_and_decimates_back() -> Non
     300s one, matching expected_samples exactly (not capped at some
     inflated ratio)."""
     metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
-    window = WindowConfig(
-        lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
-    )
+    window = WindowConfig(lookback_seconds=300.0, quantile=0.95, min_coverage=0.8)
     dense_series = [
         {
             "metric": {"vmid": "101", "instance": "scsi0"},
@@ -506,9 +504,7 @@ def test_compute_disk_coverage_decimation_does_not_inflate_a_real_gap() -> None:
     inflated, wrong fraction relative to expected_samples (computed from
     the configured step, not the safe one)."""
     metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
-    window = WindowConfig(
-        lookback_seconds=600.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
-    )
+    window = WindowConfig(lookback_seconds=600.0, quantile=0.95, min_coverage=0.8)
     partial_series = [
         {
             "metric": {"vmid": "101", "instance": "scsi0"},
@@ -531,9 +527,7 @@ def test_compute_disk_coverage_retries_at_the_bundles_actual_captured_step() -> 
     ``compute_disk_coverage()`` retries with exactly it -- one retry,
     never a second guess -- rather than propagate the error."""
     metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
-    window = WindowConfig(
-        lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
-    )
+    window = WindowConfig(lookback_seconds=300.0, quantile=0.95, min_coverage=0.8)
     real_series = [
         {"metric": {"vmid": "101", "instance": "scsi0"}, "values": [[0, "0"], [300, "0"]]}
     ]
@@ -551,9 +545,7 @@ def test_compute_disk_coverage_reraises_bundle_error_when_the_query_was_never_ca
     for this query at all, the same "no recorded response" a genuinely
     wrong or corrupted bundle raises."""
     metrics = MetricsConfig(rate_window_seconds=600.0, step_seconds=300.0, labels=MetricLabels())
-    window = WindowConfig(
-        lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
-    )
+    window = WindowConfig(lookback_seconds=300.0, quantile=0.95, min_coverage=0.8)
     client = _StepAwareFakeClient(working_step=999.0, result=[], found=False)
 
     with pytest.raises(BundleError):
@@ -596,13 +588,14 @@ def test_verify_metrics_all_green() -> None:
             del timeout, auth, headers
             if url.endswith("/api/v1/label/__name__/values"):
                 return success(names)
+            if url.endswith("/api/v1/query") and "count_over_time" in params["query"]:
+                # The spacing probe: 20 samples in its 1200s window -> 60s.
+                return success({"result": [{"metric": sample, "value": [0.0, "20"]}]})
             if url.endswith("/api/v1/query"):
                 return success({"result": [{"metric": sample, "value": [0.0, "1.0"]}]})
             if url.endswith("/api/v1/query_range"):
-                # The coverage probe uses the configured step (300s); the
-                # spacing probe uses pvestatd_push_interval (60s).
-                step = 60.0 if params.get("step") == "60s" else 300.0
-                timestamps = [i * step for i in range(3)]
+                # The coverage probe, at the configured step (300s).
+                timestamps = [i * 300.0 for i in range(3)]
                 return success(
                     {
                         "result": [
@@ -638,7 +631,8 @@ def test_verify_metrics_applies_extra_selector_to_coverage_and_spacing_queries()
         {
             "/api/v1/query_range": success(
                 {"result": [{"metric": {"vmid": "1", "instance": "scsi0"}, "values": []}]}
-            )
+            ),
+            "/api/v1/query": success({"result": []}),
         }
     )
     client = PrometheusClient(PROM_CONFIG, session=session)
@@ -818,7 +812,7 @@ def test_verify_metrics_no_device_label_collision_when_not_instance() -> None:
     assert not any("collides" in f.message for f in report.findings)
 
 
-def test_coverage_and_spacing_use_absolute_not_relative_start_end() -> None:
+def test_coverage_uses_absolute_not_relative_start_end() -> None:
     """Regression: start/end must be real epoch timestamps, not `-lookback`.
 
     Prometheus's (and VictoriaMetrics's) query_range API takes absolute
@@ -828,7 +822,7 @@ def test_coverage_and_spacing_use_absolute_not_relative_start_end() -> None:
     misinterpreted, but the bug shipped past every prior mocked test because
     the fakes never checked what value was actually sent.
     """
-    from proxmox_storage_drs.metrics import _check_coverage, _check_observed_spacing
+    from proxmox_storage_drs.metrics import _check_coverage
 
     metrics = _full_metrics_config()
     window = WindowConfig(lookback_seconds=600)
@@ -842,12 +836,11 @@ def test_coverage_and_spacing_use_absolute_not_relative_start_end() -> None:
     client = PrometheusClient(PROM_CONFIG, session=session)
 
     _check_coverage(client, metrics, window)
-    _check_observed_spacing(client, metrics)
 
     # A timestamp from any time this test could plausibly run, not a small
     # offset like -600 or 0.
     year_2024_epoch = 1_700_000_000.0
-    assert len(session.calls) == 2
+    assert len(session.calls) == 1
     for _, params in session.calls:
         start, end = float(params["start"]), float(params["end"])
         assert start > year_2024_epoch, params
@@ -906,27 +899,45 @@ def test_low_coverage_is_a_warning() -> None:
     assert any("below window.min_coverage" in f.message for f in findings)
 
 
-def test_spacing_skips_series_with_fewer_than_two_samples() -> None:
+def _spacing_probe(counts: list[str], interval: float = 60.0) -> tuple[Any, float | None, str]:
     from proxmox_storage_drs.metrics import _check_observed_spacing
 
-    metrics = _full_metrics_config()
-
-    class RoutingSession(FakeSession):
-        def get(self, url, params, timeout, auth, headers):  # type: ignore[no-untyped-def]
-            del timeout, auth, headers, params
-            return success(
-                {
-                    "result": [
-                        {"metric": {}, "values": [[0.0, "1"]]},  # only one sample
-                        {"metric": {}, "values": [[0.0, "1"], [60.0, "1"]]},
-                    ]
-                }
-            )
-
-    client = PrometheusClient(PROM_CONFIG, session=RoutingSession({}))
+    metrics = replace(_full_metrics_config(), pvestatd_push_interval_seconds=interval)
+    session = FakeSession(
+        {"/api/v1/query": success({"result": [{"metric": {}, "value": [0.0, c]} for c in counts]})}
+    )
+    client = PrometheusClient(PROM_CONFIG, session=session)
     findings, spacing = _check_observed_spacing(client, metrics)
-    assert spacing == pytest.approx(60.0)
+    return findings, spacing, session.calls[0][1]["query"]
+
+
+def test_spacing_is_the_window_over_the_raw_sample_count() -> None:
+    """One instant count_over_time() over max(20 x interval, 600s) -- never a
+    query_range, whose points are one per step and would only echo the step."""
+    findings, spacing, query = _spacing_probe(["60"], interval=10.0)
+    assert query == "count_over_time(blockstat_rd_operations[600s])"
+    assert spacing == pytest.approx(10.0)
     assert findings == []
+
+
+def test_spacing_catches_a_declared_interval_the_samples_contradict() -> None:
+    """The bug the old query_range probe had: 10s samples under a declared 60s
+    were measured as 60s spacing. Counting samples sees the real 10s."""
+    findings, spacing, _ = _spacing_probe(["120"], interval=60.0)  # 1200s / 120
+    assert spacing == pytest.approx(10.0)
+    assert any("disagrees" in f.message for f in findings)
+
+
+def test_spacing_takes_the_median_and_skips_series_with_fewer_than_two_samples() -> None:
+    findings, spacing, _ = _spacing_probe(["1", "20", "19", "21", "garbage"])
+    assert spacing == pytest.approx(1200.0 / 20)
+    assert findings == []
+
+
+def test_spacing_without_any_countable_series_is_a_warning() -> None:
+    findings, spacing, _ = _spacing_probe(["1", "0"])
+    assert spacing is None
+    assert [f.level for f in findings] == ["warning"]
 
 
 def test_verify_metrics_spacing_disagreement_is_error() -> None:
@@ -939,13 +950,10 @@ def test_verify_metrics_spacing_disagreement_is_error() -> None:
             del timeout, auth, headers
             if url.endswith("__name__/values"):
                 return success(_all_metric_names(metrics))
-            if url.endswith("/api/v1/query_range") and "step" in params and params["step"] == "60s":
-                # spacing probe: actual spacing is 600s, wildly off from the
-                # configured 60s push interval.
-                timestamps = [0.0, 600.0, 1200.0]
-                return success(
-                    {"result": [{"metric": sample, "values": [[t, "1"] for t in timestamps]}]}
-                )
+            if url.endswith("/api/v1/query") and "count_over_time" in params["query"]:
+                # spacing probe: 2 samples in 1200s is 600s spacing, wildly
+                # off from the configured 60s push interval.
+                return success({"result": [{"metric": sample, "value": [0.0, "2"]}]})
             if url.endswith("/api/v1/query_range"):
                 return success({"result": []})
             if url.endswith("/api/v1/query"):

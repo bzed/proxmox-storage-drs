@@ -81,7 +81,6 @@
       "properties": {
         "lookback": { "type": ["string", "number"] },
         "quantile": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
-        "upper_quantile": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
         "min_coverage": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
       }
     },
@@ -116,7 +115,6 @@
                 "id": { "type": "string", "minLength": 1 },
                 "capability_weight": { "type": "number", "exclusiveMinimum": 0 },
                 "reserve_factor": { "type": ["number", "null"], "minimum": 0 },
-                "saturation_load": { "type": ["number", "null"], "exclusiveMinimum": 0 },
                 "free_space": {
                   "type": "object",
                   "additionalProperties": false,
@@ -136,7 +134,6 @@
       "additionalProperties": false,
       "properties": {
         "factor": { "type": "number", "minimum": 0 },
-        "min_free_bytes": { "type": ["string", "number"] },
         "count_foreign_volumes": { "type": "boolean" }
       }
     },
@@ -163,7 +160,6 @@
         "max_single_move_duration": { "type": ["string", "number"], "exclusiveMinimum": 0 },
         "account_saferemove_wipe": { "type": "boolean" },
         "wipe_load_weight": { "type": "number", "minimum": 0 },
-        "saturation_ceiling": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
         "assume_thick_provisioning": { "type": "boolean" },
         "tiny_disk_bytes": { "type": ["string", "number"], "minimum": 0 }
       }
@@ -186,7 +182,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "backend": { "type": "string", "enum": ["auto", "cpsat", "cbc", "heuristic"] },
+        "backend": { "type": "string", "enum": ["auto", "cbc", "heuristic"] },
         "time_limit_seconds": { "type": "number", "exclusiveMinimum": 0 },
         "mip_gap": { "type": "number", "minimum": 0, "maximum": 1 },
         "heuristic_iterations": { "type": "integer", "exclusiveMinimum": 0 }
@@ -274,16 +270,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "model": { "type": "string", "enum": ["quantile", "seasonal_naive", "holt_winters"] },
-        "seasonal_lookback_days": { "type": "number", "minimum": 0 },
+        "model": { "type": "string", "enum": ["quantile", "holt_winters"] },
         "holt_winters": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "seasonal_periods": { "type": "integer", "exclusiveMinimum": 0 },
             "trend": { "type": "string", "enum": ["add", "mul", "none"] },
-            "seasonal": { "type": "string", "enum": ["add", "mul", "none"] },
-            "residual_z": { "type": "number", "exclusiveMinimum": 0 }
+            "seasonal": { "type": "string", "enum": ["add", "mul", "none"] }
           }
         }
       }

@@ -36,11 +36,7 @@ implementing section 8.1's generalized transient invariant
 (`reserve.transient_charge_ok()`) and section 9.2's "poll all in-flight
 UPIDs, launch the next queued move as each slot frees" loop -- see
 `_execute_concurrent()`'s own docstring for exactly what it does and does
-not do (strict-FIFO launching; no *execution-time* re-check of section
-7.3's saturation ceiling against the live in-flight set, mirroring or
-draining phase, under either executor -- the planning-time defer check
-already excludes a flagged move from ever reaching here, see
-`docs/internals/96-payback.md`). `dry-run`/`confirm` never use it,
+not do (strict-FIFO launching). `dry-run`/`confirm` never use it,
 matching section 9.1's own per-mode description, which discusses
 concurrency only under `auto`.
 
@@ -1883,15 +1879,6 @@ def _execute_concurrent(
     reason about and to test exhaustively, and, like `schedule.py`'s own
     documented ordering-priority-2/staging gaps, this can only ever
     under-deliver on throughput, never produce an unsafe launch order.
-
-    **Section 7.3's saturation check is planning-time only, here as under
-    the sequential executor.** The defer check itself is enforced (a
-    flagged move is excluded from `schedule_result.order` before either
-    executor ever sees it, see `docs/internals/96-payback.md`); what
-    neither executor does is re-check the ceiling *during* execution
-    against the live in-flight set, so section 8.1 point 4 of
-    `concurrency_ok` (summing `ω_role` over everything actually in
-    flight right now, mirroring or draining) stays a documented gap.
 
     See `execute_plan()`'s own docstring for every parameter; this
     function implements the identical contract (budgets, drained-storage

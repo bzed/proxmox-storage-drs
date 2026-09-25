@@ -269,7 +269,7 @@ the only setting that distinguishes them.
 
 Implemented and dogfooded against a production cluster. All eleven phases of
 `IMPLEMENTATION_PLAN.md` §12 are done — from reading the cluster and Prometheus, through the
-gates, the solver (CP-SAT or CBC when installed, a dependency-free heuristic otherwise), move
+gates, the solver (CBC when installed, a dependency-free heuristic otherwise), move
 ordering and execution, to Debian packaging, the `collect-testdata` / `--replay` diagnostic-bundle
 subsystem and the §2.3 logging policy. Every command, including `apply`'s unattended `auto` mode
 and `explain`'s narration of the pins, fragmentation and payback arithmetic behind a plan, is
@@ -334,7 +334,7 @@ pve-storage-drs --replay /var/lib/pve-storage-drs/testdata/<bundle> explain
 
 `--replay` opens **no network connections at all** — not to PVE, not to Prometheus — and uses the
 bundle's own `config.yaml` unless you override it with `-c`, which lets you rerun somebody else's
-cluster through a different solver backend, spread metric or forecaster.
+cluster through a different solver backend, spread metric or forecast model.
 
 ### What a bundle does and does not hide
 
@@ -414,9 +414,9 @@ title page carries the SHA-256 of the Markdown it was built from.
 - `pandoc`, `lualatex` and `latexmk` — only needed to rebuild the PDFs. On Debian:
   `pandoc texlive-luatex texlive-latex-extra latexmk fonts-sil-gentiumplus fonts-dejavu-core
   fonts-dejavu-mono fonts-symbola`
-- `ortools` and/or `pulp` (with `coinor-cbc`) are optional `pip install .[solver]` extras for the
-  CP-SAT/CBC solver backends; the tool works fully without them, falling back to a dependency-free
-  heuristic (`solver.backend: auto`, the default, tries them in that order)
+- `pulp` (with `coinor-cbc`) is the optional `pip install .[solver]` extra for the CBC solver
+  backend; the tool works fully without it, falling back to a dependency-free heuristic
+  (`solver.backend: auto`, the default, tries CBC first)
 
 ## Packaging
 

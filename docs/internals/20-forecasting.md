@@ -1,162 +1,124 @@
-# Forecasting: the protocol and its three implementations
+# Forecasting: a Holt-Winters scaling of each disk's load
 
-**What does this page answer?** How does `forecast.py` decide how much
-history a model needs, and what does each of `quantile`/`seasonal_naive`/
-`holt_winters` actually compute? Describes `proxmox_storage_drs/forecast.py`.
+**What does this page answer?** How does `forecast.py` turn a disk's history into
+a load for the *next* window, when is that trusted, and where does it enter the
+model? Describes `proxmox_storage_drs/forecast.py` and its two callers,
+`cli._compute_group_load()` and `loadmodel.apply_forecast()`.
 
-## The one rule, in one place
+## What is forecast, and what is not
 
-Every model needs at least `window.lookback` seconds of history (the
-*decision* window, since a forecaster's point estimate is always over that
-window) — `quantile` needs nothing more than that. `seasonal_naive` needs
-whichever is larger of `window.lookback` and `forecast.seasonal_lookback_days`
-converted to seconds (`* 86400`): enough calendar days that every
-hour-of-day bucket (see `SeasonalNaiveForecaster` below) has actually been
-sampled at least once, not just the decision window itself. `holt_winters`
-needs whichever is larger of `window.lookback` and `2 *
-forecast.holt_winters.seasonal_periods * metrics.step` seconds — two full
-seasonal cycles' worth of samples at the configured scrape step, matching
-`statsmodels`'s own "needs at least two periods to fit a seasonal
-component at all" requirement (see its own fallback rule below). That rule
-has exactly one implementation: three small pure functions,
-`_quantile_required_range_seconds`, `_seasonal_naive_required_range_seconds`
-and `_holt_winters_required_range_seconds`, each called from **two** places —
-the free function `required_range_seconds()` that `config.py`'s startup
-validation uses (before any `Forecaster` is constructed), and the matching
-`Forecaster.required_range()` method on the concrete class. Duplicating the
-arithmetic between those two call sites, rather than sharing the pure
-function, is exactly the kind of "second copy of a rule" AGENTS.md section 5
-forbids — a change to the Holt-Winters requirement made in only one of them
-would silently desynchronize config validation from what the forecaster
-itself believes it needs. (`IMPLEMENTATION_PLAN.md` section 10.1 has the
-full per-model table this generalizes from.)
+The decision statistic behind every placement is `window.quantile` (p95) of a
+disk's load. `forecast.model: quantile` (the default) takes it over the **last**
+`W = window.lookback`; this module is only used for `holt_winters`, which
+predicts it over the **next** `W`: fit the disk's series, forecast
+`ceil(W / metrics.step)` steps, take `window.quantile` of that forecast path,
+clamp at 0 (`holt_winters_quantile()`).
 
-## Why the upper bound, never the point estimate
+Two things it deliberately is not:
 
-Every `Forecaster.predict()` returns a `Forecast(point_estimate,
-upper_bound)`. Nothing in this module enforces that callers use
-`upper_bound` — that discipline belongs to the caller: the section 7.3
-saturation guard (`payback.py`'s `compute_move_cost()`, via
-`storage_upper_bound()` below) already only ever reads `.upper_bound`;
-the optimizer does not consume a forecast at all yet. The asymmetry is
-stated in the module docstring and repeated here because it is easy to
-get backwards under time pressure: overestimating costs a slightly worse
-balance, underestimating risks scheduling a mirror onto a storage that is
-about to saturate.
+- **Not the last forecast point.** `fit.forecast(steps)[-1]` is one sample at
+  one hour of day; it says nothing about tomorrow's peak. The unit test builds a
+  series that *ends at its daily trough*: the last point is the trough, the p95
+  of the path is near the peak.
+- **No `z * sigma` band.** A forecast p95 is compared with its `quantile`-model
+  peers' observed p95; a residual band would inflate exactly the disks that were
+  forecast.
 
-## `storage_upper_bound()`: section 10.1's per-disk sum, not a per-storage forecast
+There is no forecaster protocol and no model registry any more: `quantile` needs
+no code here at all, `seasonal_naive` was removed (its statistic — the median of
+the same hour of day — was not a forecast over `W`), and everything that used an
+upper bound (the section 7.3 saturation guard) is gone.
 
-Section 10.1 is explicit that `L̂_s(Δ)` is `Σ_{d : x_{d,s}=1} û_d(Δ)` —
-every disk on `s` forecast **independently**, then summed — never the
-forecast of `s`'s own already-summed series. `storage_upper_bound()` is
-exactly that sum, given a `Forecaster`, `{disk_key: TimeSeries}` (typically
-`loadmodel.compute_disk_load_series()`'s own output), the disk keys
-currently on one storage, and a horizon. Summing upper bounds this way is
-deliberately conservative (it assumes every disk peaks together — the
-right direction for a guard whose failure mode is starting a mirror onto
-an already-busy array), and is real, measurable extra conservatism
-whenever a group's disks do not actually peak in lockstep: forecasting
-one already-summed series directly would let one disk's trough offset
-another's peak, understating the storage's own worst case. A disk key
-with no fetched series at all forecasts as an empty one (`0.0`), never a
-`KeyError` — this run may simply have no history for a disk yet.
+## A ratio, never a substitution
 
-## `QuantileForecaster`
+`loadmodel.compute_disk_load_series()` normalizes **per timestamp** while
+`compute_group_load()` normalizes over the whole window and also owns coverage
+rejection and the `last_known_loads` fallback, so the two numbers are on
+different scales. The forecast therefore scales, it does not replace:
 
-The default. `predict()` takes the `window.quantile`/`window.upper_quantile`
-percentiles of the raw series with no fitting at all. `_quantile()`
-implements linear-interpolation percentile matching `numpy.percentile`'s
-default method, by hand — deliberately not using numpy, since the tool must
-stay usable with only `requests` + `ruamel.yaml` + `jsonschema` installed
-(`IMPLEMENTATION_PLAN.md` section 2.1). `horizon` is accepted (to satisfy the
-`Forecaster` protocol) and immediately discarded: the quantile model has no
-notion of a horizon-dependent forecast.
+    l_d  <-  l_d * f_d / h_d
 
-## `SeasonalNaiveForecaster`
+with `h_d` the `window.quantile` of the disk's own series over `[now-W, now]`
+and `f_d` the forecast from above (`disk_factors()`). `loadmodel.apply_forecast()`
+applies the factors and rebuilds the per-storage `L_s`/`u_s` and `u*`. A disk
+keeps its observed `l_d` unchanged when
 
-Groups historical samples by hour-of-day (`int((ts // 3600) % 24)`) and takes
-the median as the point estimate, the configured upper quantile across the
-same bucket as the bound. `now_epoch_seconds` selects which hour-of-day
-bucket the *current* moment falls into; `predict()` ignores everything
-outside that bucket. A bucket with no samples returns `Forecast(0.0, 0.0)`
-rather than raising, matching `IMPLEMENTATION_PLAN.md` section 4's rule for
-an idle group's raw quantities: no data is zero, not an error, at this layer
-(the caller decides whether zero is trustworthy).
+- it is flagged for low coverage (`DiskLoad.flagged_reason`), or
+- it has no samples in the window, or `h_d = 0`, or
+- there is no trustworthy fit: fewer than `2 * seasonal_periods` samples, a
+  constant series, `statsmodels` not installed, any exception from the fit, a
+  `ConvergenceWarning` (turned into an error inside the fit), or a non-finite
+  forecast. `holt_winters_quantile()` returns `None` and the disk is left out.
 
-## `HoltWintersForecaster`
+`idle` and `no_series_matched` describe the observed window and are untouched: a
+forecast never wakes an idle group up.
 
-`statsmodels` is an optional dependency (`Suggests`, not `Depends` — see
-`debian/control`), so it is imported **only inside `predict()`**, never at
-module level; `debian/tests/import-all` is what would catch a regression
-here. Two situations fall back to `QuantileForecaster`, both logged at
-warning level rather than failing silently:
+**One call site rule.** `cli._compute_group_load()` is the only place either
+`show-load` or `plan`/`apply` gets a group's load from, so a group's gates and its
+plan (and its re-plans) always see the same `l`. Under `quantile` it is exactly
+`compute_group_load()`: no extra Prometheus query, no report.
 
-1. fewer than `2 * seasonal_periods` samples in the series (section 10.2's
-   own rule — a fit on too little data is worse than no fit);
-2. `statsmodels` is not importable at all.
+## The gate: beat the baseline, no threshold
 
-The upper bound is `point_estimate + residual_z * stdev(in-sample
-residuals)` — not derived from the model's own confidence interval, which
-`statsmodels`'s `ExponentialSmoothing.fit()` does not expose directly for
-every configuration. `residual_z` (`forecast.holt_winters.residual_z`,
-default `2.0`) is what an operator tunes if this bound turns out too tight
-or too loose in practice.
+Once per group (`forecast_group()`), on `group_aggregate_series()` (every disk's
+series summed at the union of their timestamps; a disk missing a sample counts as
+0, `loadmodel._blend_loads()`'s own convention): fit on `[now-2W, now-W)` and have
+both models predict the p95 of `[now-W, now]`. The `quantile` model's prediction
+is the p95 of the fit half — persistence. `holt_winters` is used for the group iff
+its absolute error is no larger than the baseline's (`Backtest.passed`); a tie
+passes. Otherwise the group runs on `quantile` for this run, with a
+`forecast_backtest_failed` warning. Less than `2W` of history (no non-empty half on
+each side of `now - W`) is a failed backtest too: a fresh deployment gets no free
+pass. A history query that fails outright (a `MetricsError`, or under `--replay` a
+`BundleError` for a bundle captured over less than `2W`) is handled the same way,
+with a `forecast_history_unavailable` warning: the group keeps its observed loads
+and is still planned.
 
-## The section 10.2 backtest validation gate (phase 9)
+This replaces the earlier comparison against `gates.imbalance_threshold` — an
+unrelated knob — and a point-at-horizon-versus-window-mean mismatch.
 
-Fitting successfully (`HoltWintersForecaster`'s own two fallback
-conditions above) is not the same question as fitting *accurately* —
-section 10.2's backtest is what actually answers the second one, once
-per group, before `seasonal_naive`/`holt_winters` is trusted to drive the
-section 7.3 saturation guard at all. `quantile` is never backtested: it
-does no fitting, so there is nothing to validate and nothing more
-conservative to fall back to.
+Because the backtest fits on a `W`-long half, `window.lookback` must hold
+`2 * seasonal_periods * step`; that is the same figure `required_range_seconds()`
+returns for `holt_winters`, and `config.py`'s startup validation uses it. The
+history actually fetched is `max(required_range_seconds(), 2W)`, via the chunked
+`compute_disk_load_series()` (`metrics.RANGE_QUERY_CHUNK_SECONDS`), and only for
+`holt_winters`.
 
-`backtest_error()` implements the plan's own recipe literally: fit the
-candidate forecaster on `[now-2W, now-W)`, predict `W` ahead (`W` is
-`window.lookback_seconds`, the same "decision window" every forecaster is
-already tied to for its point estimate), and compare that single point
-estimate against the *actual* mean observed over `[now-W, now]`. The
-result is a **relative** error — `|predicted - actual| / actual`,
-normalizing by `predicted` instead only when `actual` is exactly zero (a
-nonzero prediction against true silence then reads as a full, bounded
-miss, `1.0`, rather than a division by zero; two zeros, correctly
-predicted silence, score a perfect `0.0`) — so it is directly comparable
-against `gates.imbalance_threshold` (both plain fractions in `[0, 1]`,
-section 10.2's own choice of yardstick). `backtest_error()` returns
-`None`, not `0.0` or an exception, when `series` does not cover a full
-`2W` to split into two non-empty halves at all; `backtest_validated()`
-treats that exactly like a failed backtest — a fresh deployment with no
-track record yet does not get a free pass just because it has not been
-disproven, matching `HoltWintersForecaster`'s own existing "not enough
-samples yet → fall back" precedent rather than contradicting it.
+## Reporting
 
-**Validated once per group, against the group's own aggregate series, not
-once per disk.** `group_aggregate_series()` sums every disk's own series
-at the union of their timestamps (a disk missing a sample at some
-timestamp contributes `0`, the identical "absence means no I/O"
-convention `loadmodel._blend_loads()` already uses). `forecast.model` is
-a single, deployment-wide configuration choice — it cannot differ disk by
-disk — so validating it once, cheaply, against one representative series
-is the right granularity; backtesting separately per disk per move would
-be both more expensive and would raise an unanswerable question (use the
-fancier model for the disks it happens to fit and `quantile` for the rest,
-*within the same run*?) that the plan itself never poses.
+`forecast_group()` returns `({disk_key: f_d / h_d}, ForecastReport)`. `cli.py`
+logs one line per group (INFO `forecast_used`, WARNING `forecast_backtest_failed`
+or `forecast_history_unavailable`;
+the per-fit failures inside `holt_winters_quantile()` are DEBUG, one per disk
+would flood the journal), and `explain` and `plan --json` carry
+`forecast: {model, used, backtest_error, baseline_error, disks_scaled,
+disks_kept}` per group — present only under `holt_winters`, so `quantile` reports
+stay byte-identical.
 
-`cli._backtest_gated_forecaster()` is the one caller: built once per
-group inside `_saturation_forecast_inputs()`, right after
-`build_forecaster()` and `loadmodel.compute_disk_load_series()`, before
-either is used to derive any move's `l_hat_src`/`l_hat_dst`. A model that
-fails validation falls back to a fresh `QuantileForecaster` (routed
-through `build_forecaster()` again with `forecast.model` overridden to
-`"quantile"`, never hand-constructed — the one factory, see below), logged
-at warning with the model name that failed.
+## Initialization
 
-## `build_forecaster()`
+The fit uses `initialization_method="heuristic"`: the initial level, trend and
+seasonals come from a classical decomposition of the first (up to five) cycles,
+and only the smoothing parameters are optimized. `"estimated"` also optimizes
+every initial seasonal, and at the default 288 periods it did not converge on
+real data at all. The heuristic needs two full cycles, which the
+`window.lookback >= 2 * seasonal_periods * step` rule already guarantees for the
+backtest's fit half.
 
-The one factory function that turns a `ForecastConfig` plus the ambient
-`window`/`metrics` values into a live `Forecaster` instance. Nothing else in
-the codebase should construct a `QuantileForecaster`/`SeasonalNaiveForecaster`/
-`HoltWintersForecaster` directly once a caller exists that needs one from
-config — route it through here so the model-name-to-class mapping stays in
-one place.
+## Cost
+
+One `statsmodels` fit per disk with history, plus one for the backtest, per group
+per run: order 0.1 s each at a couple of thousand samples. No caching and no
+parallelism; fine for a timer.
+
+## `statsmodels` is optional
+
+It is imported only inside `holt_winters_quantile()`, never at module level —
+`debian/tests/import-all` is what catches a regression. Without it every fit
+returns `None`, the backtest cannot pass, and every group runs on `quantile`.
+
+## `_quantile()`
+
+Linear-interpolation percentile matching `numpy.percentile`'s default, written by
+hand so the default path needs only `requests` + `ruamel.yaml` + `jsonschema`
+(`IMPLEMENTATION_PLAN.md` section 2.1).

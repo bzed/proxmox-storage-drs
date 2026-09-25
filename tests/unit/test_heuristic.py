@@ -68,7 +68,6 @@ def make_storage(
         id=id_,
         capability_weight=capability_weight,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=round(capacity_tib * TIB),
         used_bytes=0,
         foreign_used_bytes=0,

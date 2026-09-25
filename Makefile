@@ -26,17 +26,16 @@ else
 VENV       := .venv
 VENVDEP    := venv
 # mypy runs against its own, separate venv -- never $(VENV) -- because
-# `ortools`/`statsmodels` (the `solver`/`forecast` extras `test`/`cov`
-# install into $(VENV), see below) pull in a numpy whose bundled stubs use
-# syntax mypy's `python_version = "3.11"` target cannot parse, a hard
-# stub-parse error no per-module mypy override can rescue (verified
-# directly; see pyproject.toml's own comment on the `mypy.overrides`
-# entry and docs/internals/91-optimize.md). Reinstalling/uninstalling
-# those extras around every `typecheck` run would dodge the crash but
-# make `$(VENV)` unreliable for actually running the tool with a real
-# solver backend in between -- a dedicated, permanently `.[dev]`-only
-# venv has no such churn and never needs to care what $(VENV) currently
-# has installed.
+# `statsmodels` (the `forecast` extra `test`/`cov` install into $(VENV),
+# see below) pulls in a numpy whose bundled stubs use syntax mypy's
+# `python_version = "3.11"` target cannot parse, a hard stub-parse error
+# no per-module mypy override can rescue (verified directly; see
+# pyproject.toml's own comment on the `mypy.overrides` entry and
+# docs/internals/91-optimize.md). Reinstalling/uninstalling those extras
+# around every `typecheck` run would dodge the crash but make `$(VENV)`
+# unreliable for actually running the tool with a real solver backend in
+# between -- a dedicated, permanently `.[dev]`-only venv has no such churn
+# and never needs to care what $(VENV) currently has installed.
 TCVENV     := .venv-typecheck
 TCVENVDEP  := venv-typecheck
 PY      := $(VENV)/bin/python
@@ -82,8 +81,8 @@ $(VENV)/bin/activate:
 		echo "WARNING: 'pip install -e .[dev,solver,forecast]' failed (see the actual error"; \
 		echo "WARNING: above -- network access, disk space, a wheel missing for this Python,"; \
 		echo "WARNING: ...). Falling back to dev tools only: this venv will NOT have"; \
-		echo "WARNING: ortools/pulp (plan/apply silently use the dependency-free heuristic,"; \
-		echo "WARNING: never CP-SAT/CBC) or statsmodels (forecast.model beyond 'quantile' is"; \
+		echo "WARNING: pulp (plan/apply silently use the dependency-free heuristic,"; \
+		echo "WARNING: never CBC) or statsmodels (forecast.model beyond 'quantile' is"; \
 		echo "WARNING: unavailable). Fix the error above and re-run 'make venv' to get them --"; \
 		echo "WARNING: 'rm -rf $(VENV)' first, since this target does not retry once its"; \
 		echo "WARNING: output file already exists."; \
@@ -121,18 +120,17 @@ typecheck: $(TCVENVDEP)
 	$(MYPY) $(SOURCES)
 
 # `solver`/`forecast` are optional at runtime (`solver.backend: auto` falls
-# back to `cbc`, then the heuristic; `forecast.model: quantile` needs
+# back from `cbc` to the heuristic; `forecast.model: quantile` needs
 # neither) and stay that way here: a failed install is loud, never fatal,
 # and never fails the target -- the packaged/heuristic-only path this
 # project explicitly supports is still fully tested either way, just not
-# the CP-SAT/Holt-Winters cases `test_optimize.py`/`test_forecast.py`
-# parametrize or skip over.
+# the Holt-Winters cases `test_forecast.py` parametrizes or skips over.
 SOLVER_EXTRAS := $(PIP) install -e ".[solver,forecast]" || { \
 	echo ""; \
 	echo "WARNING: 'pip install -e .[solver,forecast]' failed (see the actual error above --"; \
 	echo "WARNING: network access, disk space, a wheel missing for this Python, ...)."; \
-	echo "WARNING: Continuing without them: this run exercises the CBC/heuristic and quantile"; \
-	echo "WARNING: forecast paths only, skipping every cpsat-parametrized/statsmodels test --"; \
+	echo "WARNING: Continuing without them: this run exercises the heuristic and quantile"; \
+	echo "WARNING: forecast paths only, skipping every statsmodels-parametrized test --"; \
 	echo "WARNING: fix the error above and re-run to get full coverage."; \
 	echo ""; \
 	}
@@ -157,9 +155,10 @@ fixtures:
 corpus-check: $(VENVDEP)
 	$(PY) tests/corpus/validate_corpus.py --check
 
-# The full variant matrix (every solver backend x spread metric x forecast
-# model x beta sweep) over every committed bundle *and* every bundle found
-# under $DRS_CORPUS_DIR -- a CI job of its own, not part of `check`.
+# The full variant matrix (every spread metric x forecast model x beta
+# sweep, over the cbc and heuristic backends) over every committed bundle
+# *and* every bundle found under $DRS_CORPUS_DIR -- a CI job of its own,
+# not part of `check`.
 corpus: $(VENVDEP)
 	$(SOLVER_EXTRAS)
 	$(PY) tests/corpus/validate_corpus.py --full-matrix

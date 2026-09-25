@@ -333,7 +333,6 @@
               "accepted": true,
               "aggregate_ok": true,
               "benefit_load_seconds": 67325268.15628354,
-              "deferred_moves": [],
               "ratio": 4386.079531946007,
               "rejected_moves": [],
               "repair_exempt": true,
@@ -639,7 +638,6 @@
               "accepted": true,
               "aggregate_ok": true,
               "benefit_load_seconds": 125169746.7835838,
-              "deferred_moves": [],
               "ratio": 6886.539765822173,
               "rejected_moves": [],
               "repair_exempt": true,
@@ -658,16 +656,6 @@
         "beta": 0.0,
         "forecast_model": "quantile",
         "solver_backend": "cbc",
-        "spread_metric": "l1"
-      }
-    },
-    {
-      "report": null,
-      "skipped": "not swept without --full-matrix",
-      "variant": {
-        "beta": 0.0,
-        "forecast_model": "quantile",
-        "solver_backend": "cpsat",
         "spread_metric": "l1"
       }
     }

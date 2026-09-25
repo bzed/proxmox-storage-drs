@@ -150,7 +150,7 @@ Global options are accepted before the command.
 : Run against a **collect-testdata** bundle at *PATH* instead of the live cluster -- no network
   access at all. The bundle's own *config.yaml* is used unless **--config** is also given, in which
   case its knobs run against the bundle's data (a different solver backend, spread metric or
-  forecaster than the operator who captured it selected). **apply** and any **--mode** above
+  forecast model than the operator who captured it selected). **apply** and any **--mode** above
   *dry-run* are a usage error under **--replay**; so is **collect-testdata** itself, which needs a
   live cluster.
 
@@ -171,7 +171,7 @@ Accepted only after the **collect-testdata** command. No other subcommand takes 
 
 **--range** *DURATION*
 : Range of the series capture, overriding *support.capture_range*. The default captures the
-  superset every supported forecaster could need, not only the configured one.
+  what *holt_winters* needs (twice *window.lookback*), not only what the configured model needs.
 
 **--step** *DURATION*
 : Resolution of the series capture, overriding *metrics.step*. Coarsening this is the other way to
@@ -179,7 +179,7 @@ Accepted only after the **collect-testdata** command. No other subcommand takes 
 
 **--no-series**
 : Capture topology, instant queries and findings only. Much smaller, but the bundle cannot exercise
-  a seasonal forecaster. This is the form to send if the cluster's load shape is confidential.
+  the *holt_winters* forecast. This is the form to send if the cluster's load shape is confidential.
 
 **--no-archive**
 : Write the bundle directory only, skipping the deterministic *.tar.gz*.

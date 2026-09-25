@@ -24,8 +24,9 @@ classifiers = [
 ]
 
 # Runtime dependencies, per IMPLEMENTATION_PLAN.md section 2.1.
-# The heuristic fallback path must stay importable with no solver installed —
-# `ortools` and `pulp` are therefore optional extras, not hard requirements.
+# The heuristic fallback path must stay importable with no solver installed
+# -- `pulp` is therefore an optional extra, not a hard requirement (REVIEW.md
+# AL-02 removed the former `ortools` CP-SAT extra together with its backend).
 dependencies = [
   "requests>=2.31",
   "proxmoxer>=2.0",
@@ -34,7 +35,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-solver = ["ortools>=9.8", "pulp>=2.7"]
+solver = ["pulp>=2.7"]
 forecast = ["statsmodels>=0.14", "numpy>=1.26"]
 dev = [
   "black>=24.1",
@@ -89,31 +90,23 @@ warn_unreachable = true
 # Third-party stubs we do not control. jsonschema and proxmoxer are hard
 # dependencies (both in Debian trixie) but ship no py.typed marker and Debian
 # has no types- packages for either, so they are treated the same as the
-# optional solvers here.
+# optional solver here.
 [[tool.mypy.overrides]]
-module = ["jsonschema.*", "proxmoxer.*", "ortools.*", "pulp.*", "statsmodels.*"]
+module = ["jsonschema.*", "proxmoxer.*", "pulp.*", "statsmodels.*"]
 ignore_missing_imports = true
-# `ortools` (unlike the others here) ships real, typed source that mypy will
-# otherwise analyze when it happens to be installed -- this skips a
-# genuinely-present ortools from being followed into at all, matching how it
-# is already treated everywhere else (an optional dependency this project
-# never type-checks the inside of). It does not fully insulate against
-# `ortools`'s own numpy dependency: numpy ships its stubs using syntax newer
-# than `python_version` above (a hard parse error, not a type error, so no
-# per-module mypy option rescues it -- verified directly, extending this
-# very override to `pulp.*`/`statsmodels.*`/`numpy.*` itself still crashes
-# identically), and pytest's own optional numpy-aware assertion rewriting
-# reaches numpy directly, bypassing this override entirely, whenever numpy
-# happens to be installed in the checking venv -- e.g. after `pip install
-# -e .[solver]` or `.[forecast]`. This is why `make typecheck` runs mypy
-# against its own dedicated `.venv-typecheck` (`.[dev]` only, never
-# `solver`/`forecast`), not the same venv `make test` installs those extras
+# `statsmodels` (the `forecast` extra) pulls in numpy, and numpy ships its
+# stubs using syntax newer than `python_version` above (a hard parse error,
+# not a type error, so no per-module mypy option rescues it -- verified
+# directly, extending this override to `pulp.*`/`statsmodels.*`/`numpy.*`
+# itself still crashes identically), and pytest's own optional numpy-aware
+# assertion rewriting reaches numpy directly, bypassing this override
+# entirely, whenever numpy happens to be installed in the checking venv
+# -- e.g. after `pip install -e .[forecast]`. This is why `make typecheck`
+# runs mypy against its own dedicated `.venv-typecheck` (`.[dev]` only,
+# never `forecast`), not the same venv `make test` installs those extras
 # into -- see the `Makefile`'s own comment on `TCVENV` and
 # `docs/internals/91-optimize.md` for what this looks like when a numpy
 # with incompatible stubs does end up in the venv mypy runs against.
-[[tool.mypy.overrides]]
-module = ["ortools.*"]
-follow_imports = "skip"
 
 # ---------------------------------------------------------------------------
 # Tests. The 85 % floor is enforced here, not by convention — see

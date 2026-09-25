@@ -97,7 +97,7 @@ class MetricsConfig:
     labels: MetricLabels = field(default_factory=MetricLabels)
     rate_window_seconds: float = 300.0
     step_seconds: float = 300.0
-    pvestatd_push_interval_seconds: float = 60.0
+    pvestatd_push_interval_seconds: float = 10.0
     extra_selector: str | None = None
 
 
@@ -105,7 +105,6 @@ class MetricsConfig:
 class WindowConfig:
     lookback_seconds: float = 86400.0
     quantile: float = 0.95
-    upper_quantile: float = 0.99
     min_coverage: float = 0.80
 
 
@@ -138,7 +137,6 @@ class StorageConfig:
     id: str
     capability_weight: float = 1.0
     reserve_factor: float | None = None
-    saturation_load: float | None = None
     # None means inherit the group's free_space.soft/.hard -- the same
     # per-storage-null-means-inherit rule reserve_factor already has
     # (section 5.3.1).
@@ -199,7 +197,6 @@ class GroupConfig:
 @dataclass(frozen=True, slots=True)
 class SnapshotReserveConfig:
     factor: float = 2.0
-    min_free_bytes: int = 0
     count_foreign_volumes: bool = True
 
 
@@ -235,7 +232,6 @@ class MigrationConfig:
     max_single_move_duration_seconds: float = 21600.0  # 6h
     account_saferemove_wipe: bool = True
     wipe_load_weight: float = 1.0
-    saturation_ceiling: float = 0.85
     assume_thick_provisioning: bool = True
     # Below this size, a disk carries zero beta/gamma and needs no payback
     # verdict (section 5.4 D^big, section 7.1/7.3) -- comfortably above an
@@ -334,15 +330,13 @@ class StateConfig:
 @dataclass(frozen=True, slots=True)
 class HoltWintersConfig:
     seasonal_periods: int = 288
-    trend: str = "add"
+    trend: str = "none"
     seasonal: str = "add"
-    residual_z: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)
 class ForecastConfig:
     model: str = "quantile"
-    seasonal_lookback_days: float = 7.0
     holt_winters: HoltWintersConfig = field(default_factory=HoltWintersConfig)
 
 
@@ -351,7 +345,7 @@ class SupportConfig:
     """Section 16.7. Diagnostic-bundle support: the anonymization salt, the
     default ``collect-testdata`` output directory, the hard refusal ceiling
     on a series capture, and the capture range (``"auto"`` for section 16.2's
-    computed maximum over every forecaster's ``required_range()``, or an
+    computed maximum of what ``holt_winters`` needs, or an
     explicit ``units.parse_duration_seconds()``-parseable duration)."""
 
     salt_path: str = "/var/lib/pve-storage-drs/anonymization-salt"
@@ -481,9 +475,7 @@ def load_config(
 
     _validate_schema(raw)
     config = _build_config(raw, environ)
-    warnings = _validate_semantics(
-        config, require_connection=require_connection, free_space_written=_free_space_written(raw)
-    )
+    warnings = _validate_semantics(config, require_connection=require_connection)
 
     return ResolvedConfig(config=config, path=path, sha256=sha256, warnings=tuple(warnings))
 
@@ -571,7 +563,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         rate_window_seconds=parse_duration_seconds(metrics_raw.get("rate_window", "5m")),
         step_seconds=parse_duration_seconds(metrics_raw.get("step", "5m")),
         pvestatd_push_interval_seconds=parse_duration_seconds(
-            metrics_raw.get("pvestatd_push_interval", "60s")
+            metrics_raw.get("pvestatd_push_interval", "10s")
         ),
         extra_selector=metrics_raw.get("extra_selector"),
     )
@@ -580,7 +572,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
     window = WindowConfig(
         lookback_seconds=parse_duration_seconds(window_raw.get("lookback", "24h")),
         quantile=window_raw.get("quantile", 0.95),
-        upper_quantile=window_raw.get("upper_quantile", 0.99),
         min_coverage=window_raw.get("min_coverage", 0.80),
     )
 
@@ -601,7 +592,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
                     id=s["id"],
                     capability_weight=s.get("capability_weight", 1.0),
                     reserve_factor=s.get("reserve_factor"),
-                    saturation_load=s.get("saturation_load"),
                     free_space_soft=_parse_free_space_value(
                         s.get("free_space", {}).get("soft"),
                         where=f"groups[{g['name']!r}].storages[{s['id']!r}].free_space.soft",
@@ -620,7 +610,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
     sr_raw = raw.get("snapshot_reserve", {})
     snapshot_reserve = SnapshotReserveConfig(
         factor=sr_raw.get("factor", 2.0),
-        min_free_bytes=parse_size_bytes(sr_raw.get("min_free_bytes", 0)),
         count_foreign_volumes=sr_raw.get("count_foreign_volumes", True),
     )
 
@@ -654,7 +643,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         ),
         account_saferemove_wipe=mig_raw.get("account_saferemove_wipe", True),
         wipe_load_weight=mig_raw.get("wipe_load_weight", 1.0),
-        saturation_ceiling=mig_raw.get("saturation_ceiling", 0.85),
         assume_thick_provisioning=mig_raw.get("assume_thick_provisioning", True),
         tiny_disk_bytes=parse_size_bytes(mig_raw.get("tiny_disk_bytes", 67_108_864)),
     )
@@ -739,13 +727,11 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
     hw_raw = fc_raw.get("holt_winters", {})
     holt_winters = HoltWintersConfig(
         seasonal_periods=hw_raw.get("seasonal_periods", 288),
-        trend=hw_raw.get("trend", "add"),
+        trend=hw_raw.get("trend", "none"),
         seasonal=hw_raw.get("seasonal", "add"),
-        residual_z=hw_raw.get("residual_z", 2.0),
     )
     forecast = ForecastConfig(
         model=fc_raw.get("model", "quantile"),
-        seasonal_lookback_days=fc_raw.get("seasonal_lookback_days", 7.0),
         holt_winters=holt_winters,
     )
 
@@ -784,41 +770,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
 
 
 # ------------------------------------------------------------ semantic rules
-
-
-def _free_space_written(raw: dict[str, Any]) -> bool:
-    """Whether the operator wrote a ``free_space`` block anywhere -- the
-    top-level knob or any ``groups[].storages[].free_space`` entry. Used
-    only to decide whether the deprecation warning below fires: folding
-    ``snapshot_reserve.min_free_bytes`` in as a per-storage floor (section
-    5.3.1) is silent and correct with no ``free_space`` written at all
-    (the deprecated key alone still works), so the warning is reserved for
-    the case both keys actually say something.
-    """
-    if "free_space" in raw:
-        return True
-    return any("free_space" in s for g in raw.get("groups", []) for s in g.get("storages", []))
-
-
-def _check_free_space_deprecation(
-    config: Config, warnings: list[str], *, free_space_written: bool
-) -> None:
-    """Resolution rule, section 11.1 (warn and continue): both
-    ``snapshot_reserve.min_free_bytes`` and ``free_space.soft`` express the
-    same quantity -- a minimum-free floor -- so ``topology.py`` folds them
-    with ``max()`` per storage rather than picking a "winner": a winner rule
-    could silently lower a configured floor on upgrade, which ``max()``
-    never can.
-    """
-    if config.snapshot_reserve.min_free_bytes > 0 and free_space_written:
-        warnings.append(
-            "both snapshot_reserve.min_free_bytes and free_space are configured -- "
-            "snapshot_reserve.min_free_bytes is deprecated syntax for free_space.soft "
-            "and is folded in as a lower bound on every storage's resolved free_space.soft "
-            "(the larger of the two applies), never as a substitute for it; migrate the "
-            "value into free_space.soft and remove snapshot_reserve.min_free_bytes once "
-            "its floor is reflected there"
-        )
 
 
 def _check_schema_version(config: Config, errors: list[str]) -> None:
@@ -895,15 +846,6 @@ def _check_group_size(config: Config, errors: list[str]) -> None:
             )
 
 
-def _check_window(config: Config, errors: list[str]) -> None:
-    if config.window.upper_quantile < config.window.quantile:
-        errors.append(
-            "window.upper_quantile "
-            f"({config.window.upper_quantile}) must be >= window.quantile "
-            f"({config.window.quantile})"
-        )
-
-
 def _check_thick_provisioning(config: Config, errors: list[str]) -> None:
     """``migration.assume_thick_provisioning`` survives only so an existing
     config that spells it out still loads. Over-provisioning is never
@@ -943,7 +885,7 @@ def _check_metrics(config: Config, errors: list[str]) -> None:
 
 
 def _check_forecast_window(config: Config, errors: list[str]) -> None:
-    """window.lookback must cover what the configured forecaster needs."""
+    """window.lookback must cover what the configured forecast model needs."""
     from proxmox_storage_drs.forecast import required_range_seconds
 
     required = required_range_seconds(
@@ -956,26 +898,6 @@ def _check_forecast_window(config: Config, errors: list[str]) -> None:
             "either lengthen window.lookback or Prometheus retention, or choose a "
             "less demanding forecast.model"
         )
-
-
-def _check_saturation_load(config: Config, warnings: list[str]) -> None:
-    """Warn (never error) where section 7.3's saturation guard is inactive.
-
-    The warning text itself names no section: a plain-language explanation
-    plus the exact config key to set is something an operator who has
-    never opened IMPLEMENTATION_PLAN.md can act on; a bare "section 7.3"
-    citation is not (the user's own words: "a normal user will not
-    understand" it, and "error messages must point to the instructions
-    with a wording" they can follow)."""
-    for group in config.groups:
-        for storage in group.storages:
-            if storage.saturation_load is None:
-                warnings.append(
-                    f"group {group.name!r} storage {storage.id!r}: no saturation_load "
-                    "configured, so migrations onto it are never checked against its I/O "
-                    "capacity before starting -- set groups[].storages[].saturation_load "
-                    "for it if you know the storage's queue-depth limit"
-                )
 
 
 def _check_payback_horizon(config: Config, warnings: list[str]) -> None:
@@ -1052,9 +974,7 @@ def _check_connection_config(config: Config, errors: list[str]) -> None:
         errors.append("prometheus.url is required")
 
 
-def _validate_semantics(
-    config: Config, *, require_connection: bool = True, free_space_written: bool = False
-) -> list[str]:
+def _validate_semantics(config: Config, *, require_connection: bool = True) -> list[str]:
     """Section 11.1 rules that jsonschema cannot express (cross-field, or need
     a value computed from two independently-optional settings). Returns
     non-fatal warnings; raises :class:`ConfigError` (with every error found,
@@ -1069,16 +989,13 @@ def _validate_semantics(
     _check_group_storage_membership(config, errors)
     _check_storage_patterns_compile(config, errors)
     _check_group_size(config, errors)
-    _check_window(config, errors)
     _check_thick_provisioning(config, errors)
     _check_metrics(config, errors)
     _check_forecast_window(config, errors)
-    _check_saturation_load(config, warnings)
     _check_payback_horizon(config, warnings)
     _check_objective_weights(config, warnings)
     _check_time_windows(config, errors)
     _check_support(config, errors)
-    _check_free_space_deprecation(config, warnings, free_space_written=free_space_written)
 
     if errors:
         raise ConfigError("config validation failed:\n  " + "\n  ".join(errors))

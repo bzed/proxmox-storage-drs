@@ -135,8 +135,8 @@ The join between them is the disk identity `(vmid, device)`, which both sides ex
 | `pve.py` | API client: auth, topology, storage status, `move_disk`, task polling |
 | `topology.py` | Build the disk/storage/group model, eligibility rules, storage-pattern expansion (§11.4) |
 | `loadmodel.py` | Reduce raw series to the scalar load vector `ℓ` |
-| `forecast.py` | Pluggable forecaster (quantile, seasonal-naive, Holt-Winters) |
-| `optimize.py` | MILP formulation (CP-SAT / CBC) |
+| `forecast.py` | Holt-Winters forecast of a disk's p95 over the next window, and its backtest gate (§10, §12.1) |
+| `optimize.py` | MILP formulation (CBC via `pulp`) |
 | `heuristic.py` | Dependency-free greedy + local search fallback |
 | `payback.py` | Migration cost model and acceptance test |
 | `schedule.py` | Ordering under the transient reserve invariant |
@@ -155,8 +155,8 @@ moves guests between nodes (§1), and a shorter name would suggest this tool rep
 
 ### 2.1 Implementation, deployment and operations
 
-**Language: Python 3.11+.** The decision is driven by the solver and forecasting libraries — OR-Tools
-CP-SAT and `statsmodels` have no usable equivalent in Go or Rust without substantial
+**Language: Python 3.11+.** The decision is driven by the solver and forecasting libraries — `pulp`
+driving CBC, and `statsmodels`, have no usable equivalent in Go or Rust without substantial
 reimplementation, and PVE hosts already ship Python, so operators can read and patch the tool.
 Single-binary deployment is not a requirement here; if it ever becomes one, the dependency-free
 heuristic path (§5.5) is the portable subset worth porting.
@@ -177,17 +177,17 @@ without it.
 | `jsonschema` | Config validation (§11.1) | `python3-jsonschema` 4.19 |
 | `pulp` | MILP via CBC — **the default, packaged solver path** | `python3-pulp` 2.7 + `coinor-cbc` 2.10 (both `Depends`) |
 | `statsmodels` | Holt-Winters, optional | `python3-statsmodels` 0.14 |
-| `ortools` | CP-SAT, optional and unpackaged | **not in Debian** |
 | `pytest`, `pytest-cov`, `pytest-xdist` | Tests; groups are independent so they parallelize | `python3-pytest*` |
 
-`ortools` is the one dependency Debian does not carry, and it is not a candidate for vendoring: it
-is a large C++ extension, not a pure-Python module. It therefore stays a **pip-only optional
-extra**, and CP-SAT is a bonus for whoever installs it rather than the assumed backend. §5.5 must
-be read accordingly: on a Debian install the MILP is solved by **CBC through `python3-pulp`**, with
-the dependency-free heuristic below that.
+**There is deliberately no `ortools` row.** A CP-SAT backend built on it was specified here once,
+and removed (REVIEW.md AL-02): Debian does not carry `ortools`, it is not a candidate for vendoring
+(a large C++ extension, not a pure-Python module), and it would not be installed by hand on PVE
+hosts — so on every deployment `solver.backend: auto` resolved to CBC regardless, and a second
+model builder existed only for a backend production could never run. The MILP is solved by
+**CBC through `python3-pulp`**, with the dependency-free heuristic below that.
 
-Make `ortools` and `statsmodels` **optional extras** in `pyproject.toml`; `pulp` stays one there
-too, for a plain `pip install` outside Debian, but `debian/control` treats it differently: `pulp`
+Make `statsmodels` an **optional extra** in `pyproject.toml`; `pulp` stays one too, for a plain
+`pip install` outside Debian, but `debian/control` treats it differently: `pulp`
 and `coinor-cbc` are `Depends`, not `Recommends`, so `apt install pve-storage-drs` always gets a
 real MILP solver by default — CBC-through-`pulp` is the primary solver on the deployment target,
 not a bonus for whoever remembers to add it. This is a packaging default, not a claim that the
@@ -197,12 +197,10 @@ solver extra, or a broken one), whenever a solve fails or times out, or whenever
 `solver.backend: heuristic` is configured explicitly — and the code path that reaches it is
 still tested (`test_heuristic.py`, and `test_optimize.py`'s own "solver unavailable" branches),
 just no longer by installing the Debian package without its `Depends`, since that configuration no
-longer exists. `ortools` (CP-SAT) is the one solver that stays a true opt-in extra: not in Debian
-at all, `solver.backend: auto` prefers it over CBC only when a motivated admin has `pip install`ed
-it by hand. The autopkgtest in §2.2 still imports every module of the installed package with only
+longer exists. The autopkgtest in §2.2 still imports every module of the installed package with only
 the binary package's `Depends` present — now including `pulp`/`coinor-cbc` — so it verifies the
 tool's real, default solver path rather than proving heuristic-only operation; an optional
-dependency (`ortools`, `statsmodels`) imported at module level still fails it.
+dependency (`statsmodels`) imported at module level still fails it.
 
 **Licence and contribution rules.** The project is **AGPL-3.0-or-later**, copyright
 Bernd Zeimetz <bernd@bzed.de>; every source file carries the two-line SPDX header. `AGENTS.md` and
@@ -269,8 +267,8 @@ own report:
 
 ```
 {"event": "config_loaded", "level": "INFO", ...}
-{"event": "config_warning", "level": "WARNING", ... "no saturation_load configured ..."}
-{"event": "config_warning", "level": "WARNING", ... "no saturation_load configured ..."}
+{"event": "config_warning", "level": "WARNING", ... "migration.payback_horizon (…s) is below 30 days ..."}
+{"event": "config_warning", "level": "WARNING", ... "migration.payback_horizon (…s) is below 30 days ..."}
 {"event": "storage_pattern_expanded", "level": "INFO", ...}
 {"event": "optimize_backend_unavailable", "level": "WARNING", ... "solver.backend=cpsat requested but ortools is not importable"}
 ```
@@ -384,11 +382,14 @@ call site cannot silently add an unnameable member.
 | `replan` | INFO | Section 9.2's re-plan loop fired: which group, which attempt, why | built |
 | `deadlock` | WARNING | Section 8's scheduler could not order a move set | built |
 | `mode_override` | INFO / WARNING | `--mode` differs from the config; WARNING when it escalates (section 11.3) | as built, correct |
-| `config_warning` | INFO | Configuration advisories (e.g. a storage with no `saturation_load`) | built: INFO |
+| `config_warning` | INFO | Configuration advisories (e.g. a `payback_horizon` under 30 days) | built: INFO |
 | `storage_pattern_expanded` | DEBUG | A `/regex/` storage id matched a set | built: DEBUG |
 | `optimize_backend_unavailable` | DEBUG under `auto`, WARNING when that backend was explicitly configured | An optional solver dependency is not importable | built: DEBUG under `auto`, WARNING otherwise |
 | `solver_fallback` | WARNING | A configured backend produced no plan and the heuristic took over | as built, correct |
-| `forecast_fallback`, `forecast_backtest_failed` | WARNING | Section 10's forecaster degraded to the quantile | as built, correct |
+| `forecast_backtest_failed` | WARNING | `holt_winters` did not beat the quantile baseline for a group (or there is too little history to check); the group ran on `quantile` | built (phase 14b) |
+| `forecast_history_unavailable` | WARNING | The `holt_winters` history query failed (`MetricsError`, or a `--replay` bundle captured over less than `2W`); the group ran on `quantile` | built (phase 14b) |
+| `forecast_used` | INFO | `holt_winters` drove a group's loads: both backtest errors and how many disks were scaled or kept | built (phase 14b) |
+| `forecast_fit_failed`, `forecast_fit_skipped` | DEBUG | One disk's fit failed, or `statsmodels` is missing | built (phase 14b) |
 | `vm_locked`, `orphaned_volumes`, `orphan_check_failed` | WARNING | Section 9.4's hazards | as built, correct |
 | `state_corrupt`, `state_read_failed` | WARNING | Section 11.2's state file is unusable | as built, correct |
 | `inflight_found`, `inflight_reconciled`, `inflight_check_failed`, `cluster_task_scan_failed` | WARNING (INFO for `inflight_reconciled`) | Section 13's crash recovery | as built, correct |
@@ -401,15 +402,16 @@ Three level corrections deserve their reasons stated, since each one is a judgem
 otherwise be quietly reverted:
 
 - **`optimize_backend_unavailable` under `auto` is not a warning.** `solver.backend: auto` *means*
-  "use the best solver installed here"; probing for CP-SAT and not finding it is that option
-  working, not degrading. Today it logs at WARNING once per group per run, forever, on every
-  cluster that did not install the optional dependency — and its message says
-  `solver.backend=cpsat requested`, which is false: `auto` requested it, not the operator.
+  "use the best solver installed here"; probing for an optional solver and not finding it (when
+  this was written, CP-SAT; today CBC on a plain `pip install` without the `solver` extra) is that
+  option working, not degrading. It then logged at WARNING once per group per run, forever, on
+  every cluster that did not install the optional dependency — and its message said
+  `solver.backend=cpsat requested`, which was false: `auto` requested it, not the operator.
   `cli._solve_group()` already suppresses its *own* fallback warning under `auto`; the inner probe
   must learn the same distinction, and must say `not available` rather than `requested but ...`
   when nobody requested it.
-- **`config_warning` is an advisory about a file, not an event in a run.** "Storage X has no
-  `saturation_load`" is equally true on every run until someone edits the config; repeating it at
+- **`config_warning` is an advisory about a file, not an event in a run.** "`payback_horizon` is
+  below 30 days" is equally true on every run until someone edits the config; repeating it at
   WARNING every 15 minutes trains operators to ignore warnings. It drops to INFO (so the audit
   trail still records what configuration was in force) and `verify-storages` — the command whose
   entire job is auditing storage configuration — reports it where an operator will act on it.
@@ -618,8 +620,9 @@ else. It shall:
    Prometheus's own scrape-target `instance` label**, and many Telegraf configurations rename or
    overwrite it. The implementer must confirm the real label name here before proceeding;
 5. report per-disk sample coverage over the configured window, so gaps are visible up front;
-6. measure the **observed sample spacing** of a live series (the modal delta between consecutive
-   timestamps in a short `query_range`) and compare it against `metrics.pvestatd_push_interval`.
+6. measure the **observed sample spacing** (the median over series of a short window divided by
+   that window's `count_over_time()` -- never a `query_range`, whose points are one per *step*,
+   so it would only ever echo the step it was asked for) and compare it against `metrics.pvestatd_push_interval`.
    That interval is a PVE-side setting the tool cannot read from the API, so it is declared in
    config; this step is what stops a stale declaration from silently invalidating the
    `rate_window ≥ 4 × interval` rule of §11.1. Error if the two disagree by more than 20%, and
@@ -832,8 +835,7 @@ expansion of every `/…/` storage pattern (§11.4) — the entry and the storag
 lists cluster storages matched by no group, so an over-broad or dead pattern is visible before any
 plan relies on it. The resolved requirement is there for the same reason the pattern expansion is:
 a percentage resolves against *each* LUN's own capacity, a pattern entry's `free_space` lands on
-every storage it matched, and the deprecated `min_free_bytes` folds in as a per-storage floor on
-top of all of it (§5.3.1) — three ways for one line of config to mean a different number per
+every storage it matched — two ways for one line of config to mean a different number per
 storage, and this is the one command where that derivation is visible before a plan depends on it.
 Since `soft_s` now drives §6's override, §7.3's exemption and §9.5's shortfall lines, an operator
 who cannot predict it cannot predict the balancer. This is the command that
@@ -1167,7 +1169,7 @@ same physical unit as `raw_t`. Under the default weights the rescale is an exact
   left normalized to sum to 1, `ω = 1.0` would silently be `T_g` times too large — on a busy group
   with `T_g ≈ 20` every migration would look twenty times more expensive than it is and the payback
   test of §7.3 would reject almost everything.
-- §7.3's saturation guard and §5.3's big-M bound both need an absolute load scale.
+- §5.3's big-M bound needs an absolute load scale.
 - The worked example in §14 uses raw loads (`Σℓ = 7.4`, not 1.0) and is self-consistent only under
   this definition.
 
@@ -1236,7 +1238,6 @@ four groups is four small problems, not one large one.
 | `f_s` | snapshot reserve factor for `s` (default 2.0) |
 | `soft_s` | configured free-space requirement for `s`, in bytes — the plan endpoint (§5.3.1) |
 | `hard_s` | transient free-space floor for `s`, in bytes, `≤ soft_s` (§5.3.1, §8.1) |
-| `N_s` | saturation load of `s`, in in-flight I/O requests; optional, §7.3 only — not part of the MILP |
 
 **Provisioned size, never allocated size — on every storage type.** `z_d` is what the volume was
 *provisioned* at, and `Σ_d z_d·x_{d,s} + Uˢᵉˣᵗ` is what a storage is counted as holding, including on
@@ -1358,7 +1359,7 @@ Two one-sided bounds are exact for `R_s = max(f_s·Z_s, soft_s)` because (C5) pu
 free" rule, and (C4) is what makes it expressible in a linear model at all. `soft_s` is the storage's
 **configured free-space requirement** (§5.3.1): the number of bytes that must be free on `s` when the
 plan has fully run, whether the operator asked for it as an absolute byte count or as a percentage of
-the storage's capacity. It generalizes the old `min_free_bytes` floor — a storage whose largest disk
+the storage's capacity. It replaces the old global `min_free_bytes` floor (removed, no compatibility shim) — a storage whose largest disk
 is small needed one (with `f=2` and a 10 GiB largest disk, the snapshot term alone would reserve only
 20 GiB on a 20 TiB LUN), but so does a storage that must keep headroom for reasons the snapshot rule
 cannot see: a thin-provisioning safety margin, a quota for volumes this tool does not manage, or the
@@ -1441,64 +1442,12 @@ for the one exception. `null` at the global level means *no free-space requireme
 (the snapshot reserve may still impose one); `null` at the per-storage level means *inherit the
 global value*, the same inheritance `reserve_factor` already has.
 
-`snapshot_reserve.min_free_bytes` is **deprecated syntax for `free_space.soft`** — and it was
-never more than a global scalar: the built `config.py` carries it as one number on the
-`snapshot_reserve` block, with no per-storage form (unlike `reserve_factor`). `config.py` accepts
-it, warns, and folds it in **per storage, after percent-to-bytes conversion**:
-`soft_s = max(soft_s_resolved, min_free_bytes)` for every storage, where `soft_s_resolved` is
-what the inheritance above produced. Per storage, because that is what the key means in the
-built code — `reserve.py` applies it as a floor on *every* storage
-(`required = max(round(f_s·largest), min_free_bytes)`), and the built transient check charges it
-on every in-flight state the same way — and because a percentage has no global value to fold
-into: `"10%"` resolves to 2 TiB on a 20 TiB LUN and 200 GiB on a 2 TiB one, so a single global
-`max()` has no answer. Folded per storage, the deprecated floor cannot be lowered **as a
-plan-endpoint requirement** by the new knob — not by a smaller global `soft`, not by a
-per-storage override, not by a percentage landing on a small LUN — and the warning says exactly
-that: both keys are named, and the deprecated one is reported as a lower bound on every storage
-rather than as one resolved number. The transient floor is the one place the new knob may move
-it, deliberately and explicitly: see the `hard` sentence below.
-Two keys carrying different values are two requirements, and the union is the only resolution
-that cannot reduce safety — `max()` can only raise a floor, while any "winner" rule is a guess
-that can silently lower one. That is not hypothetical: an operator who adopts the new example
-config (which spells out `free_space: soft: 0`) while keeping an old `min_free_bytes: 1 TiB`
-hits the both-set case **on upgrade**, and a "soft wins" rule would drop a configured 1 TiB
-floor to zero behind a warning that reads like a deprecation notice. The transient side needs
-no rule of its own: `hard: null` (the default) means `hard_s = soft_s`, so the folded floor
-keeps the §8.1 predicate exactly as strong as the built `max(f_b·max(Z_b,z_d), min_free_bytes)`
-check, and an operator who then sets `hard` below it is using the new knob for the dip it exists
-to allow, on top of a floor the warning still names.
-
-**Validate as written, then fold.** The fold is the *last* step of resolution: inheritance
-first, then percent-to-bytes conversion, then §11.1's two `free_space` checks against the values
-the operator actually wrote, and only then `soft_s = max(soft_s_resolved, min_free_bytes)`. The
-order matters in both directions, which is why it is stated rather than left to the
-implementation.
-
-- `hard_s ≤ soft_s` checked *after* the fold would be checked against a propped-up `soft_s`: a
-  config whose written `hard` exceeds its written `soft` would pass for as long as a large
-  `min_free_bytes` stayed in the file, and deleting the deprecated key — exactly what the
-  warning asks the operator to do — would turn a running configuration into a startup failure.
-  The typo has to be caught when it is written, not when the prop is removed.
-- `soft_s < C_s` checked after the fold would error on an oversized *deprecated* floor, and that
-  is the one deliberate non-promotion here: a `min_free_bytes` above some storage's capacity has
-  never been a startup failure (the built code reports it as that storage's permanent shortfall,
-  §9.5), and "the old key keeps working" cannot mean a running config refuses to start on
-  upgrade. The error applies to the new knob's own value; an oversized deprecated floor warns and
-  reports as the unfixable shortfall it always was.
-
-The order has a third consequence, and it is the one an implementation gets wrong by following the
-list above too literally (REVIEW.md AH-01): the two validations run on *written* values, but a
-**null** `hard` is not a written value — it is defined as `hard_s = soft_s`, and that `soft_s` is the
-*folded* one. A null `hard` is therefore settled **after** the fold, from the folded `soft_s`;
-resolving it before the fold (to `soft_s_resolved`) would leave `hard_s = 0` for a config carrying
-only `min_free_bytes` and drop the floor from §8.1's transient charge — silently, since that config
-gets no deprecation warning. A **written** `hard` stays as written: it is the operator's explicit
-dip, validated against the written `soft` and never raised by the fold.
-
-No `schema_version` bump: the old key keeps working, and the new block is additive — but the
-block is only *reachable* once `config_schema.json` carries it, because that schema is closed
-(`additionalProperties: false` throughout, deliberately: §11.1's structural pass is where a
-typo'd key is caught). §12's phase-13 row lists it first for that reason.
+`snapshot_reserve.min_free_bytes` — a global scalar with no per-storage form and no percentages — was
+the built predecessor of `free_space.soft`. It has been **removed** outright (no fold, no warning; the
+schema is closed, so a config that still sets it fails validation). `soft_s` is exactly what the
+inheritance above produced, converted from a percentage where needed, and validated as written:
+`hard_s ≤ soft_s` and `soft_s < C_s` are §11.1 startup errors, checked against that resolved pair.
+`hard: null` means `hard_s = soft_s`.
 
 **Soft is the plan endpoint; hard is the floor at every instant.** `soft_s` is the requirement the
 finished plan must satisfy — (C5) enforces it, the lexicographic stage repairs it, and §6's override
@@ -1539,8 +1488,8 @@ the model infeasible and the tool useless exactly when it is most needed. Two wa
 effectively hard:
 
 1. **Lexicographic, preferred and provably correct.** Solve in two stages: minimize `Σ_s r_s`
-   alone; then fix `Σ_s r_s` to that minimum as a constraint and minimize the §5.4 objective. Both
-   CP-SAT and CBC support this by re-solving. The reserve is then never traded against balance at
+   alone; then fix `Σ_s r_s` to that minimum as a constraint and minimize the §5.4 objective. CBC
+   supports this by re-solving. The reserve is then never traded against balance at
    any weight, and `Σ r_s > 0` provably means *physically impossible*, not merely *unattractive*.
 2. **Single-stage big-M**, simpler but requiring calibration: keep `P · Σ_s r_s` in the objective
    with `P` large enough that no achievable gain from the other terms can pay for a violation worth
@@ -1704,85 +1653,29 @@ applying the weights, so the defaults in the example config are meaningful.
 
 ### 5.5 Solver backends
 
-**CP-SAT (preferred).** All variables and coefficients must be integral. The single most important
-observation is that `ℓ_d`, `z_d`, `c_s`, `C_s` and `Uˢᵉˣᵗ` are **data, not variables** — every one of
-them appears only as a coefficient multiplying a binary. So they never need a shared scale factor of
-their own: fold each of them into its coefficient *once*, at full precision, and round the finished
-coefficient. Doing that removes both classes of scaling error that a naive "scale everything by `K`"
-approach introduces.
+**CBC via PuLP — the one MILP backend.** Direct transcription of §5.3's constraint set and §5.4's
+objective; continuous `e_s`, `Z_s`, `r_s` are fine, so there is no scaling discipline at all. Two
+unit rules still apply, both for conditioning rather than correctness: size-valued quantities are
+expressed in whole MiB (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`, `Uˢᵉˣᵗ`, `soft_s`) and loads in average
+in-flight I/O requests (§4), so raw bytes (~10¹²-10¹⁴) never sit next to load values (~1-10) in the
+LP matrix — CBC's simplex does not error on a badly conditioned matrix, it silently returns a
+numerically poor "optimal" (confirmed on a real corpus bundle, where an unscaled model made CBC's
+own post-plan spread almost 100× worse than the heuristic's on the same weights).
 
-Two scales are needed, one for quantities that appear as *variables* and one for the objective:
+Assert after solving that the unscaled objective recomputed in floating point from the returned
+assignment — `heuristic.evaluate_assignment()`, the one objective implementation every backend
+reports through — agrees with what the solve was told it achieved; a cheap guard against a modeling
+mistake silently producing wrong plans.
 
-| Scale | Applies to | Value |
-|---|---|---|
-| `K` | the load-valued variables `e_s`, `t`, the fill-deviation variables `d_s`, and the constants `u*`, `L_s`, `b̄` they are compared against | `10⁶` (micro-units) |
-| — | the size-valued variables `Z_s`, `R_s`, `r_s` and the constants `z_d`, `C_s`, `Uˢᵉˣᵗ`, `soft_s` | MiB (integers already) |
-| `W` | every objective weight, so `α`, `β`, `γ`, `κ`, `P` keep four decimals | `10⁴` |
-
-**Constraint coefficients.** In (C6) the storage load enters as `Σ_d ℓ_d·x_{d,s} / c_s`. Do *not*
-compute `round(K/c_s)` and multiply — that rounds the capability weight itself and makes CP-SAT and
-CBC disagree for non-binary `c_s`. Fold both constants into one per-(disk, storage) coefficient:
-
-```
-a_{d,s} = round(K · ℓ_d / c_s)          →   Σ_d a_{d,s}·x_{d,s} − round(K·u*) ≤ e_s^int  (and the
-                                                                                mirror image)
-```
-
-The error is then a single rounding of the finished product: `|a_{d,s} − K·ℓ_d/c_s| ≤ 0.5`, i.e.
-`≤ 5×10⁻⁷` in load units per disk, **independent of `c_s`**. Summed over a group of even 1 000 disks
-that is `< 5×10⁻⁴` — three orders below the solver's `mip_gap` of 0.02, so it cannot change the
-selected plan and the two backends stay directly comparable. (C4)/(C5) are already integral in MiB,
-and (C7) folds exactly like (C6): the per-(disk, storage) coefficient is
-`round(K · z_d / (b̄·C_s))`, with the constant `K·(1 − Uˢᵉˣᵗ/(C_s·b̄))` rounded once — one rounding
-error per coefficient, independent of `C_s` and `b̄`.
-
-**Objective coefficients.** Same rule — `z_d` is a constant, so the `γ` term's coefficient is
-per-disk and needs no separate `γ_scaled`:
-
-```
-min   Σ_s round(α·W)              · e_s^int                     (imbalance)
-    + Σ_d round(β·W·K)            · (1 − x_{d,σ₀(d)})           (number of migrations, d ∈ D^big)
-    + Σ_d round(γ·W·K·z_d^TiB)    · (1 − x_{d,σ₀(d)})           (bytes migrated, d ∈ D^big)
-    + Σ_v round(κ·W·K·w_v)        · (Σ_s y_{v,s} − 1)           (fragmentation, I/O-weighted)
-    + Σ_s round(δ·W)              · d_s^int                     (data spread)
-    + Σ_s round(P·W·K / 2²⁰)      · r_s^MiB                     (reserve violation)
-```
-
-`w_v` folds like any other constant (§5.4), and the `d`-sums are over `D^big`, whose tiny members
-deliberately carry zero `β`/`γ` coefficients.
-
-The `·K` on the count-valued terms puts them on the same footing as `α·W·e_s^int`, which already
-carries a factor `K` inside `e_s^int`.
-
-**Why this matters — the trap in the obvious formulation.** Factoring `γ` out as a standalone
-per-MiB integer, `γ_scaled = round(γ · K / 2²⁰)`, silently **zeroes the bytes-migrated term at the
-default weight**:
-
-```
-γ = 0.05/TiB,  K = 10⁶   →   round(0.05 · 10⁶ / 2²⁰) = round(0.0477) = 0
-```
-
-CP-SAT would then ignore disk size entirely when choosing what to move, diverging from CBC and the
-heuristic, which use continuous coefficients — and doing so with no error and no warning. Raising
-`K` is not a fix worth making: `γ·K/2²⁰ ≥ 0.5` requires `K ≥ 2²⁰/(2·0.05) ≈ 1.05×10⁷`, so even
-`K = 10⁷` still rounds to zero, and the first `K` that works yields `γ_scaled = 1` — a 100 %
-quantization error on the coefficient. Folding `z_d` in instead gives, for the §14 fixture's 0.5 TiB
-disk, `round(0.05 · 10⁴ · 10⁶ · 0.5) = 2.5×10⁸`: exact, with no minimum-`γ` restriction at all.
-
-**Magnitudes.** The largest coefficient is the reserve term, `round(P·W·K/2²⁰) ≈ 9.5×10⁶` per MiB at
-`P = 1000`; a 1 TiB shortfall gives ≈ 10¹³. The imbalance term reaches `α·W·K·Σe_s ≈ 1.5×10¹¹` for
-`Σe_s = 15`. Both are comfortably inside int64, which is what CP-SAT requires. Assert at model-build
-time that every coefficient is a non-zero integer wherever its unscaled weight is non-zero — the
-regression test for the `γ` trap above — with one deliberate exception: the `β`/`γ` coefficients
-of a disk below `migration.tiny_disk_bytes` are exactly zero by design (§5.4), and the assertion
-must expect that. Assert also that the maximum objective magnitude is below 2⁶².
-
-Warm-start from the current assignment via `AddHint(x[d, σ₀(d)], 1)`, which typically finds the
-incumbent immediately and spends the rest of the time limit proving the gap. Assert after solving
-that the unscaled objective recomputed in floating point agrees with the solver's value to within
-the rounding bound — a cheap guard against a scaling mistake silently producing wrong plans.
-
-**CBC via PuLP.** Direct transcription; continuous `e_s`, `Z_s`, `r_s` are fine.
+A **CP-SAT (`ortools`) backend was specified here once and removed** (REVIEW.md AL-02): not in
+Debian, excluded from vendoring by this section's own dependency rules, and not something operators
+install by hand on PVE hosts, so `solver.backend: auto` resolved to CBC on every deployment — the
+second model builder, its integral-coefficient discipline (per-coefficient constant folding, the
+`K`/`W` scales, the `γ`-quantization trap of REVIEW.md F-14, the int64 magnitude assertions) and
+its CI/packaging exceptions existed only for a backend production could never run. Those rules are
+CP-SAT's own and were removed with it; a future integer backend must re-earn F-14's analysis rather
+than inherit it. The §14 fixture agreement that once read "CP-SAT and CBC agree on every `β` case"
+now binds CBC to the exhaustively-enumerated optimum alone.
 
 **Heuristic fallback (no dependency, and the path for very large groups).**
 
@@ -1912,8 +1805,10 @@ comparable to `ℓ`, which is measured in the same units (§4). `cost_d` is ther
 **load-seconds**. The wipe is charged to the source only, because it is a sequential write over the
 old volume with nothing happening on the target; `ω_wipe` (`migration.wipe_load_weight`, default
 1.0) is its own weight so an operator who knows their array shrugs off a throttled zeroing pass can
-lower it without touching the mirror weights. §7.3 charges the same quantity to the saturation guard
-for the whole `draining` window.
+lower it without touching the mirror weights. **The mirror duration is `z_d / bwlimit`, full stop:
+`migration.bwlimit_bytes_per_sec` is the only throttle a migration needs, and this tool does not model
+storage saturation while one runs (§12.1; REVIEW.md AL-04).** An earlier draft's `headroom_src`/
+`headroom_dst` terms were never defined and never built.
 
 **A disk below `migration.tiny_disk_bytes` costs nothing.** `cost_d = 0` when
 `z_d < tiny_disk_bytes` (default 64 MiB — comfortably above an EFI var store or TPM state, and far
@@ -2037,9 +1932,6 @@ verdict, while every hard rule below applies to it exactly as to any other move.
 test:
 
 - `duration_d > migration.max_single_move_duration` (default 6h) → reject the move;
-- the move would push either endpoint above `migration.saturation_ceiling · saturation_load` during
-  the mirror → defer the move to a later run rather than reject the plan (see below); skipped for a
-  storage with no `saturation_load` configured;
 - the move violates the transient reserve invariant of section 8 → reject.
 
 **A plan that repairs is exempt from the aggregate test.** The trigger is the plan's *outcome*:
@@ -2051,15 +1943,15 @@ benefit already draws (`cli.py` evaluates its `final_breakdown` against it, not 
 solver's aspirational target): a partially deadlocked plan is scored on what it will really
 run, and a plan whose *target* repairs but whose schedule never gets there is not exempt.
 **"What it will really run" means after the hard per-move rules below have taken their moves
-out, not merely after ordering.** The two rules that fire at this gate rather than during
-scheduling — the `max_single_move_duration` rejection and the saturation-ceiling deferral —
-drop moves from what is executed but not from `schedule_result.order`, so a repair move either
-of them refuses would otherwise sit in the order, satisfy the trigger, and buy a **plan-level
+out, not merely after ordering.** The one rule that fires at this gate rather than during
+scheduling — the `max_single_move_duration` rejection —
+drops moves from what is executed but not from `schedule_result.order`, so a repair move it
+refuses would otherwise sit in the order, satisfy the trigger, and buy a **plan-level
 exemption for the balance moves that survive it** — the economic test skipped on a plan that no
 longer repairs, and whose shortfall §9.5 then reports as unmet. Take both sums over the move set
-the gate will actually execute (the order minus the refused and deferred moves), which is
-well-defined because neither refusal depends on the exemption: both are per-move verdicts on
-`cost_d`/`duration_d` alone, computed before the aggregate test is consulted. §8.1's transient
+the gate will actually execute (the order minus the refused moves), which is
+well-defined because the refusal does not depend on the exemption: it is a per-move verdict on
+`duration_d` alone, computed before the aggregate test is consulted. §8.1's transient
 invariant needs no such treatment — `order_moves()` enforces it while building the order, so a
 breaching move never reaches it in the first place. The
 outcome trigger, not a per-move flag, is what makes the mandate
@@ -2146,8 +2038,9 @@ any other kind of move*, and a defect in it surfaces directly as migrations that
 Exactly that happened. With §5.3 (C3)'s affinity term excluding pinned disks — the pre-fix default,
 see §3.6 — two 528 KiB `efidisk0` moves on a real cluster scored a κ gain of precisely zero and
 were emitted anyway on a `3.6 × 10⁻⁷` capacity-spread difference, a relative improvement of about
-`6 × 10⁻⁸`, on which the three solver backends did not even agree (CP-SAT emitted two moves, CBC
-none). Each was a live migration with a VM lock, a PVE task and a `saferemove` wipe, and each burned
+`6 × 10⁻⁸`, on which the three then-existing solver backends did not even agree (CP-SAT emitted
+two moves, CBC none; the CP-SAT backend has since been removed — AL-02). Each was a live migration
+with a VM lock, a PVE task and a `saferemove` wipe, and each burned
 `gates.cooldown_per_storage` on its target. Correcting (C3)'s default turned the same two moves into
 genuine reunifications worth a discrete `1.0` of objective, and the three backends into agreement.
 
@@ -2158,76 +2051,18 @@ a future bundle showing tiny moves emitted with `A_before = A_after` is evidence
 narrowest available fix being to require `A_before > A_after` for a zero-cost plan, which needs no
 threshold because the affinity debt moves in discrete steps.
 
-**Defining "during the mirror".** `u_s` as used everywhere else is a p95 over the lookback window —
-a robust *statistic*, not an instantaneous reading — so adding an instantaneous `ω` to it would mix
-two different kinds of quantity. Define the check explicitly:
+**Migrations are throttled by `bwlimit`, and by nothing else.** A migration may run at any time. The
+tool does not model storage saturation — no per-storage queue depth, no forecast of the load a mirror
+would meet, no deferral. `migration.bwlimit_bytes_per_sec` is passed to every `move_disk` call and is
+the whole throttle; `max_single_move_duration`, the transient reserve invariant of §8.1 and
+`execution.cooldown_per_storage` (sized against the wipe time, §9.3) are the only per-move and
+per-storage limits. Earlier revisions carried a best-effort `saturation_load`/`saturation_ceiling`
+guard here; it was inactive unless an operator set a number that has no safe default, could only
+defer moves, and was removed by phase 14a (§12.1, REVIEW.md AL-04). Both config keys were deleted
+outright: the schema is closed, so a config that still sets them fails validation.
 
-```
-L_during(s)  =  L̂_s(duration_d)  +  Σ_{m in flight at s} ω_role(m,s)
-
-check:  L_during(s)  ≤  saturation_ceiling · N_s        for s ∈ {src, dst}
-```
-
-where `L̂_s(Δ)` is the **forecaster's upper bound on `L_s`** — the storage's *aggregate* load over a
-horizon equal to the move's expected duration (§10), in average in-flight I/O requests, the same
-units as `ℓ` (§4) and as `ω`. It is **not** the capability-normalized `u_s`; mixing the two here was
-the original defect in this rule.
-
-**`ω_role(m,s)` depends on the move's *state*, not only on its endpoints.** A move stays in the
-in-flight set `M` until it reaches `done` (§8.2). That is right for capacity, but a *fixed* role
-charge would be wrong for load: once the mirror has switched over, this move writes nothing more to
-the target, while the source is being **zeroed** for as long as `saferemove` takes. So:
-
-```
-state        charge on src(m)     charge on dst(m)
------------  -------------------  -----------------
-mirroring    ω_src                ω_dst
-draining     ω_wipe               0
-done         0                    0
-```
-
-`ω_wipe` is `migration.wipe_load_weight`, default 1.0 — the zeroing pass is one sequential writer,
-so 1.0 is the natural value and it is the same quantity §7.1 charges for `duration_wipe_d`. With
-this, a 44-hour wipe on a busy source stays visible to the saturation guard for its whole duration
-instead of vanishing from the check the moment `move_disk` reports OK, which is the only way the
-guard can protect the *next* move scheduled onto that storage. The capacity invariant of §8.1 needs
-no change: it already holds the move in `M` until `done`, and the source-side byte accounting of
-`mirroring` and `draining` is identical.
-
-Two honest caveats. The wipe is throttled by construction (10 MiB/s by default), so charging it a
-full `ω` is conservative — deliberately so, because the alternative is to under-count a storage that
-is busy zeroing 1.5 TiB. And this remains a best-effort guard: a deployment with no
-`saturation_load` set skips it entirely, and there `execution.cooldown_per_storage`, sized against
-the wipe time (§9.3), is the blunter mitigation that still works.
-
-**`N_s` is what the check is measured against, and it is not `c_s`.** `c_s` is a *relative*
-capability weight whose default is 1.0 and whose absolute value is meaningless — only the ratios
-between storages in a group affect the balance objective, so `saturation_ceiling · c_s` compares a
-physical queue depth against a dimensionless preference. That is dimensionally wrong in both
-directions: with `c_s = 1.0` a storage carrying an entirely healthy `L_s = 6.5` would fail a 0.85
-ceiling outright, and a storage weighted `c_s = 0.5` would be held to half the ceiling of its peer
-purely for being labelled less capable. Instead:
-
-```
-N_s = storages[].saturation_load     — the number of concurrent I/O requests storage s services
-                                       before queueing delay dominates. An absolute, physical
-                                       property of the array (roughly its effective queue depth).
-```
-
-`N_s` has **no safe default and is `null` unless the operator sets it**, in which case the check is
-skipped for that storage and `pve-storage-drs explain` says so. We cannot infer it: the observed peak `L_s` is
-not a capacity (an idle storage would get a tiny `N_s` and reject every migration onto it, which is
-exactly backwards), and neither `c_s` nor the LUN size tells us anything about queue depth. Obtain
-it from the array's documented queue depth, or empirically as the `L_s` at which measured latency
-starts climbing super-linearly. Sizing `N_s` in the same units as `ℓ` is straightforward because
-both come from the same Little's-law quantity.
-
-This is deliberately a **best-effort guard**, not a physical limit: even with `N_s` set we have no
-model of the array's true saturation point, only the load we can attribute to guests.
-`max_single_move_duration` and the transient reserve invariant of §8.1 are the hard bounds and are
-always active; this one exists to avoid the obviously bad case of starting a long mirror onto a
-storage that is already close to its service limit. A deployment that leaves every `saturation_load`
-unset is fully supported and loses only this one advisory check.
+The `draining` state below still matters, to capacity (§8.1) and ordering (§8.2): a move stays in
+`M` until its source volume is gone.
 
 If the plan fails the aggregate test, re-solve with `β` and `γ` doubled and retry, up to three times.
 This naturally converges on the smaller subset of high-value moves rather than abandoning the run —
@@ -2317,10 +2152,7 @@ version of this rule in the codebase.
 2. keeps `|M| ≤ max_concurrent_migrations`;
 3. keeps the count of in-flight moves touching any single storage — **as either source or target** —
    at or below `max_concurrent_per_storage`;
-4. respects the saturation check of §7.3, which sums `ω_role(m,s)` over **every** move still in
-   `M` at that storage — including moves in `draining`, whose source is charged `ω_wipe` and whose
-   target is charged nothing;
-5. violates no per-disk or per-storage cooldown.
+4. violates no per-disk or per-storage cooldown.
 
 With the default `max_concurrent_per_storage: 1`, two moves targeting the same storage serialize
 automatically and the generalized form collapses to the single-move form. That is the recommended
@@ -2374,11 +2206,7 @@ done:       source volume absent from /storage/{a}/content
 
 For the generalized transient invariant of §8.1 the *source-side* accounting of `mirroring` and
 `draining` is identical, so keep a move in `M` until it reaches `done` and the invariant needs no
-change at all. The *load* charge is not identical across the two states, and §7.3's `ω_role(m,s)`
-table is what distinguishes them: a draining move charges `ω_wipe` to its source and nothing to its
-target. Keeping the move in `M` is therefore what makes the wipe visible to the saturation guard as
-well as to the capacity check — which is the point, since the wipe is by far the longer of the two
-windows on a large disk. What does change is that ordering rule 2 — "moves that free space a later move needs"
+change at all. What does change is that ordering rule 2 — "moves that free space a later move needs"
 — cannot be satisfied within a run when the source wipes slowly. The scheduler must therefore treat a
 predicted free-space release as **unrealised until observed**, and a plan whose feasibility depends on
 one is split rather than executed on faith (§8.3, option 2).
@@ -2745,60 +2573,46 @@ narration for a human, not a machine-checked verdict.
 
 ## 10. Forecasting
 
-The default decision statistic is the p95 of the trailing window, which is deliberately conservative
-and needs no model fitting. Forecasting is behind an interface so it can be strengthened without
-touching the optimizer:
+The decision statistic behind every placement is `window.quantile` (p95) of a disk's load, which
+the default `quantile` model takes over the **last** `W = window.lookback`. It is deliberately
+conservative and needs no fitting. `forecast.model: holt_winters` instead predicts that same
+statistic over the **next** `W`, so a disk whose load is rising, or has a daily peak the last window
+missed, is placed for what it will do. The mechanism is §12.1's; this section states what it is and
+what it needs.
 
-```python
-class Forecaster(Protocol):
-    def required_range(self) -> timedelta:
-        """How much history this model needs. metrics.py serves exactly this."""
-
-    def predict(self, series: TimeSeries, horizon: timedelta) -> Forecast:
-        """Returns point estimate and an upper bound for the horizon."""
-```
-
-### 10.1 Each forecaster owns its data range
+### 10.1 What is forecast, and what history it needs
 
 `window.lookback` is the **decision** window — the period whose load we are balancing. It is *not*
-the amount of history a forecaster needs, and conflating the two makes the seasonal models
-unreachable: Holt-Winters with `seasonal_periods = 288` (24 h at a 5 m step) needs `2 × 288 = 576`
-samples, i.e. **48 h**, which a 24 h window can never supply. It would silently fall back to
-`quantile` forever.
+the amount of history the model needs, and conflating the two makes Holt-Winters unreachable:
+`seasonal_periods = 288` (24 h at a 5 m step) needs `2 × 288 = 576` samples, i.e. **48 h**, which a
+24 h window can never supply. Config validation (§11.1) therefore **rejects** a `window.lookback`
+below `2 · seasonal_periods · metrics.step` under `holt_winters`, rather than silently degrading;
+the backtest of §10.2 additionally needs `2W` of Prometheus history, and `metrics.py` exposes
+`query_range` over an arbitrary range for it.
 
-So `metrics.py` must expose `query_range` over an **arbitrary** range, not just `window.lookback`,
-and each forecaster declares what it needs:
+| `forecast.model` | History it needs | The per-disk statistic |
+|---|---|---|
+| `quantile` *(default)* | `window.lookback` | `window.quantile` over the last `W` (no fitting, no extra query) |
+| `holt_winters` | `max(lookback, 2 · seasonal_periods · step)` (48 h), and `2W` for the backtest | `window.quantile` of the fitted forecast path over the next `W` |
 
-| Implementation | `required_range()` | Point estimate | Upper bound |
-|---|---|---|---|
-| `quantile` *(default)* | `window.lookback` (24 h) | p95 over `W` | `quantile_over_time(upper_quantile)`, default p99 |
-| `seasonal_naive` | `max(lookback, seasonal_lookback_days)` (7 d) | median across same-hour-of-day samples | p95 across those samples |
-| `holt_winters` | `max(lookback, 2 · seasonal_periods · step)` (48 h) | fitted forecast at `horizon` | point + `z·σ` of in-sample residuals, `z = 2` |
+The forecast is **not** the last forecast point (one sample at one hour of day says nothing about
+tomorrow's peak) and carries **no** `z · σ` band: a forecast p95 is compared with its
+`quantile`-model peers' observed p95, and a residual band would inflate exactly the disks that were
+forecast. There is no upper bound and nothing consumes one (REVIEW.md T-03, AL-01; the §7.3
+saturation guard that did was removed by phase 14a). `seasonal_naive` was removed for the same
+reason — its statistic (the median of the same hour of day) is not a forecast over `W`. The removed
+config keys `window.upper_quantile`, `forecast.seasonal_lookback_days` and
+`forecast.holt_winters.residual_z` were deleted with it; a config that sets one fails validation.
 
-The optimizer consumes the **upper bound**, never the point estimate. Being wrong in the direction of
-"this disk is busier than it looks" costs a slightly suboptimal balance; being wrong the other way
-migrates a disk onto a storage that is about to be saturated. For the default `quantile` forecaster
-this makes the distinction concrete rather than vacuous: the point estimate is `window.quantile`
-(p95) and the bound is `window.upper_quantile` (p99), so the optimizer sees p99.
+The forecast never replaces a load, it **scales** it: `ℓ_d ← ℓ_d · f_d / h_d`, with `f_d` the
+forecast p95 and `h_d` the observed p95 of the same per-timestamp series (`loadmodel.
+apply_forecast()`). A disk keeps its observed `ℓ_d` when it is flagged for low coverage, has
+`h_d = 0`, or has no trustworthy fit. Forecasts are produced **per disk**, at the one point every
+consumer (gates, solver, payback, ordering, `show-load`) reads `ℓ` from.
 
-**As built (REVIEW.md T-03):** the decision statistic that actually drives the gates, solver,
-payback and ordering is `window.quantile` (the point estimate), computed once per group by
-`loadmodel.compute_group_load()`. The upper bound described above is real and exercised, but its
-only consumer is §7.3's saturation-ceiling guard, and only for a storage that configures
-`saturation_load` — the guard calls a `Forecaster` (built here, gated by the §10.2 backtest below)
-to get `L̂_s(Δ)`. Wiring the upper bound into the optimizer's own input, as this section describes,
-remains future work; until then, treat every occurrence of "the optimizer consumes the upper bound"
-in this document as the target design, not the current behaviour.
-
-Forecasts are produced **per disk**. Where §7.3 needs a per-*storage* bound `L̂_s(Δ)`, it is the sum
-of the per-disk upper bounds over the disks assigned to `s` in the state being evaluated:
-`L̂_s(Δ) = Σ_{d : x_{d,s}=1} û_d(Δ)`. Summing upper bounds is conservative — it assumes the disks peak
-together — which is the right direction for a guard whose failure mode is starting a mirror onto an
-already-busy array.
-
-Config validation (§11.1) must **reject** a configuration whose Prometheus retention or whose
-selected forecaster and window are mutually inconsistent, rather than silently degrading. Enabling a
-seasonal model is a statement that the history exists to support it.
+**As built (phase 14b):** `forecast.py` is pure — `holt_winters_quantile()`, `backtest()`,
+`disk_factors()`, `forecast_group()` and `ForecastReport`; `cli._compute_group_load()` is the single
+caller-side wiring, used by both `show-load` and `plan`/`apply`.
 
 ### 10.2 Implementation warnings
 
@@ -2810,10 +2624,12 @@ seasonal model is a statement that the history exists to support it.
   `query_range`.
 - Require at least `2 × seasonal_periods` samples before trusting a Holt-Winters fit, and fall back to
   `quantile` otherwise — with a **logged warning**, since a silent fallback hides a misconfiguration.
-- Validate by backtesting: fit on `[t−2T, t−T]`, predict `[t−T, t]`, compare against actual. Refuse
-  to let a model whose backtest error exceeds the imbalance threshold drive migrations.
+- Validate by backtesting: fit on `[t−2T, t−T)`, predict the p95 of `[t−T, t]`, compare against
+  actual — and against the trivial baseline (persist the fit half's p95). Refuse to let a model that
+  does not beat the baseline drive placement. **As built (phase 14b, §12.1 point 3):** no threshold;
+  this replaced a comparison against `gates.imbalance_threshold`, an unrelated knob.
 
-**As built (bug fix):** the live §7.3 saturation-guard fetch (`cli.py`'s
+**As built (bug fix):** the live per-disk forecast-history fetch (formerly `cli.py`'s
 `_saturation_forecast_inputs()`, via `loadmodel.compute_disk_load_series()`) used to issue one
 **unchunked** `query_range` over its whole computed range — `2 · window.lookback` from §10.2's own
 backtest-gate floor above, combined with a fine `metrics.step`, confirmed live to exceed a
@@ -2881,7 +2697,7 @@ requirement-to-setting mapping:
 |---|---|
 | Storage groups VMs may not leave | `groups[].storages[]` — literal ids or `/regex/` patterns (§11.4) |
 | 2× largest disk free for snapshots | `snapshot_reserve.factor` (default `2.0`), per-storage override |
-| Keep N bytes / N% of each storage free | `free_space.soft` — global, per-storage or per-pattern (§5.3.1); `snapshot_reserve.min_free_bytes` is deprecated syntax for it |
+| Keep N bytes / N% of each storage free | `free_space.soft` — global, per-storage or per-pattern (§5.3.1) |
 | Min % changed traffic before migrating | `gates.drift_threshold` (default `0.10`) |
 | % I/O difference across the group | `gates.imbalance_threshold` |
 | Timeframe considered | `window.lookback` (default `24h`) |
@@ -2911,22 +2727,20 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | Every `/…/` pattern compiles as a Python regular expression, checked at load time | A malformed pattern must fail with the compiler's own message, not crash at match time (§11.4) |
 | Within a group, no storage is matched by two pattern entries | Which entry's options apply would be arbitrary; a literal entry overriding a pattern is allowed and is not this error (§11.4) |
 | `capability_weight > 0` | Appears in a denominator |
-| `reserve_factor ≥ 0`, `min_free_bytes ≥ 0` | Negative reserve is meaningless; `min_free_bytes` is accepted as deprecated `free_space.soft` syntax (§5.3.1) |
-| `free_space.soft/hard`: absolute values `≥ 0` and parseable (bytes or byte-unit string); percentages `"N%"` with `0 ≤ N < 100`; `hard ≤ soft` **after** per-storage resolution and percent-to-bytes conversion, and **before** the deprecated `min_free_bytes` fold | §5.3.1. A `hard` above `soft` makes every plan for a compliant storage infeasible; a percentage of 100 or more is a typo, not a policy. Before the fold, because the fold can only raise `soft_s`: checked after it, a written `hard > soft` would hide behind a large `min_free_bytes` and surface as a startup failure the moment the operator deletes the deprecated key (§5.3.1, "validate as written, then fold") |
-| `free_space.soft < C_s` for every storage, after resolution — the `free_space` value's own, **not** the folded `min_free_bytes` (see the resolution rules below) | A requirement no disk could leave room for is a typo; caught only once the inventory is loaded, like the pattern rules of §11.4 |
+| `reserve_factor ≥ 0` | Negative reserve is meaningless |
+| `free_space.soft/hard`: absolute values `≥ 0` and parseable (bytes or byte-unit string); percentages `"N%"` with `0 ≤ N < 100`; `hard ≤ soft` after per-storage resolution and percent-to-bytes conversion | §5.3.1. A `hard` above `soft` makes every plan for a compliant storage infeasible; a percentage of 100 or more is a typo, not a policy |
+| `free_space.soft < C_s` for every storage, after resolution | A requirement no disk could leave room for is a typo; caught only once the inventory is loaded, like the pattern rules of §11.4 |
 | `0 ≤ drift_threshold ≤ 1`, `0 ≤ imbalance_threshold ≤ 1` | They are ratios |
-| `quantile ∈ (0,1)`, `upper_quantile ∈ (0,1)`, `upper_quantile ≥ quantile` | The bound must not sit below the point estimate |
+| `quantile ∈ (0,1)` | A fraction; the decision statistic |
 | `min_coverage ∈ (0,1]` | A ratio; 0 would accept a disk with no data |
 | Metric names non-empty; label names non-empty and pairwise distinct | A duplicated label name silently collapses series |
-| `rate_window ≥ 4 × metrics.pvestatd_push_interval` | Below this, `rate()` sees too few points. The interval is a PVE-side setting the tool cannot read, so it is declared in config (default `60s`, PVE's own default) and `verify-metrics` cross-checks it against the observed sample spacing of a live series, erroring if the two disagree by more than 20% |
+| `rate_window ≥ 4 × metrics.pvestatd_push_interval` | Below this, `rate()` sees too few points. The interval is a PVE-side setting the tool cannot read, so it is declared in config (default `10s`, PVE's own default) and `verify-metrics` cross-checks it against the observed sample spacing of a live series, erroring if the two disagree by more than 20% |
 | `window.lookback ≥ forecaster.required_range()` | See §10.1 — otherwise the model can never run |
 | `payback_ratio > 0`, `payback_horizon > 0` | Zero disables the safety test |
 | `payback_horizon ≥ 30d` (warn, not error) | A horizon of days rejects slow-accruing but real benefits; it should approximate VM lifetime, not operator patience (§7.2) |
 | `tiny_disk_bytes ≥ 0` | The size below which a disk moves free of `β`, `γ` and the payback test (§5.4, §7); `0` restores the old accounting |
 | `delta_capacity_spread ≥ 0`; warn when `> alpha_spread` | A negative weight would reward concentration; above `α`, data evenness outweighs I/O evenness in every comparison and the tool is no longer an I/O balancer first |
 | `capacity_spread_threshold > 0` where set, `null` disables | A ratio of fill fractions to the mean fill; it can legitimately exceed 1 (§14.2 measures 1.85) |
-| `saturation_ceiling ∈ (0,1]` | A fraction of `saturation_load`, not of `capability_weight` |
-| `saturation_load > 0` where set; warn once per run for each storage where it is unset | §7.3's guard is silently inactive without it |
 | `max_concurrent_* ≥ 1` | Zero would deadlock the scheduler |
 | `execution.locks.wait_timeout > 0`, `on_timeout ∈ {skip, abort}` | A zero timeout turns every ordinary backup window into a failed run |
 | `execution.source_release.timeout ≥ z_max / saferemove_throughput` for every storage where saferemove is on | Otherwise every large move times out into `draining` (§9.3) |
@@ -2934,20 +2748,6 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `report.warn_pinned_load_fraction ∈ (0,1]` | A ratio |
 | Time windows: `start ≠ end`; crossing midnight allowed and explicit | Ambiguity here silently disables `auto` |
 | `execution.mode ∈ {dry-run, confirm, auto}` | Typo must not silently fall back to acting |
-
-**Resolution rules (warn and continue).** Everything above is a hard error. Two load-time
-situations are not errors but *resolutions* of a config that says two things at once, and they
-warn and continue by design — an implementer must not read them into the table above:
-
-- `snapshot_reserve.min_free_bytes` and `free_space.soft` both set → `soft_s =
-  max(soft_s_resolved, min_free_bytes)` per storage, after percent-to-bytes conversion, with a
-  warning naming both keys and stating that the deprecated one applies as a lower bound on every
-  storage. §5.3.1: both keys express the same quantity — a minimum-free floor — so the union is
-  the only resolution that cannot silently lower a configured floor on upgrade; a "winner" rule
-  is a guess. The `free_space` rows above that *are* errors stay errors.
-- `min_free_bytes` above some storage's capacity → warn, do not error: the storage reports a
-  permanent unfixable shortfall (§9.5), exactly as the built code treats it today. The
-  `soft_s < C_s` error applies to the new knob's own value only (§5.3.1).
 
 ### 11.2 `state.json`
 
@@ -3045,7 +2845,7 @@ nothing at all — stays checkable instead of silent:
   suffix after the closing slash.
 - **The entry's options apply to every storage it matches.** A pattern entry accepts the same
   per-storage options as a literal one (`capability_weight`, `reserve_factor`,
-  `saturation_load`, `free_space`), and every matched storage inherits them. This is the point of
+  `free_space`), and every matched storage inherits them. This is the point of
   the feature: one entry weights or reserves a whole LUN family. A pattern-level `free_space` is
   resolved per matched storage — a `"10%"` demands a tenth of *each* LUN's own capacity (§5.3.1).
 - **A literal entry beats a pattern.** Within one group, a storage named by a literal entry uses
@@ -3112,13 +2912,160 @@ Each phase is independently testable and useful on its own.
 | 11 | Logging policy (§2.3) | **Done.** A clean read-only run prints nothing on stderr; `apply --mode auto` logs the full §2.3 audit trail (gate, load, plan, payback, every UPID) without being asked; `--log-format`/`--log-level` behave as specified; the verification tests of §2.3 pass |
 | 12 | Capacity-spread objective and gate, one-year payback horizon (§5.3 (C7), §5.4 `δ`, §6, §7.2) | **Done.** Fixtures regenerated with the `delta_values` sweep and the 365d horizon; a replayed bundle shows the capacity gate deciding; `explain` reports the fill deviation; the manual documents `objective.delta_capacity_spread`, `gates.capacity_spread_threshold` and the new `payback_horizon` default (the manpage documents no individual knob, by §11's own established convention) |
 | 13 | Free-space requirements (§5.3.1, §5.3 (C5), §6 override, §7.3 repair exemption, §8.1 hard floor) **and the (C2) format-compatibility eligibility it needs** | `config_schema.json` gains the block **first** — the schema is closed (`additionalProperties: false` throughout, deliberately: it is where a typo'd key is caught, §11.1's structural pass), so a `free_space:` key is rejected before `config.py` ever sees it: a top-level `free_space` object and a `free_space` property on `groups[].storages[]`, each with `soft`/`hard` typed `["string", "number", "null"]` for §5.3.1's grammar (integer bytes, byte-unit string, `"N%"`, and `null` with its two by-level meanings); `config.py` then resolves `free_space.soft/hard` per storage (bytes, byte-unit strings, percentages; global, per-storage, per-pattern; the global `snapshot_reserve.min_free_bytes` scalar deprecated, folded in per storage after percent conversion as `soft_s = max(soft_s_resolved, min_free_bytes)` — §5.3.1), validates `hard ≤ soft` and `soft < C_s` **on the written values, before that fold** (§5.3.1, "validate as written, then fold"); the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py`, `execute.py`'s live execution-time re-check and every `cli.py` call site that threads the scalar today, and `collect.py`'s bundle manifest (which serialises the scalar, so a replayed bundle carries the pair instead — §16); `topology.Storage` gains the type/format fields (C2) needs and both solver backends fix `x_{d,s}=0` for format-incompatible targets; `payback.py`'s repair detection (`ScheduledMove.resolves_reserve_violation`, set by `schedule.py`'s "source presently violating" test) is replaced by §7.3's outcome trigger (exempt iff the plan's final `Σ r_s` is strictly below the current assignment's) plus a per-move `repair` marker computed by the revert test — re-scoring `Σ r_s` on the final assignment with one `x` held — while `order_moves()`'s internal priority-1 test keeps §8.2's "source currently violating" form (a current-state rule, not a plan-outcome one); the outcome trigger is a **signature and data-flow change**, not a flag swap: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s`, so the current and final slack are threaded in from its sole production caller (`cli.py`'s plan builder, `evaluate_plan_payback()`'s only call site outside tests) — both sums already exist there as `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses` (`solve_outcome.initial_breakdown` and the R-02 `final_breakdown` are in hand at the call site), so the change is two sums over objects already passed to the benefit computation, no new plumbing through the solver — with one sequencing constraint the signature change must respect: the final sum is taken over the move set the gate will actually execute, i.e. **after** the per-move duration rejections and saturation deferrals are known and their moves removed (§7.3), so the refusal computation that today lives inside `evaluate_plan_payback()` has to produce its verdicts before the trigger's sums are taken rather than alongside them, and `_execute_group_plan()`'s `excluded_keys` filtering stops being the only place the drop is applied; the exemption also gains a `--json` surface it has never had — `repair_exempt` plus `reserve_shortfall_bytes_before`/`_after` in the payback block (§9.5), without which an exempt plan and one accepted on merit are the same object to `validate_corpus.py`'s expected files (§16.6 checks 2 and 4); the sweep is defined by grep, not by enumeration — every file matching `git grep -l resolves_reserve_violation` (today: `payback.py`, `schedule.py`, `cli.py`, `test_schedule.py`, `test_cli.py`, `test_payback.py`, `test_execute.py`, both `tests/corpus/*.expected.json` bundles, `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, plus the plan and REVIEW.md) is updated with it, and every file matching `git grep -l evaluate_plan_payback` (which adds `test_affinity_repair_fixture.py`, whose positional three-argument call breaks on the signature change without ever naming the flag, and `docs/internals/00-overview.md`) with the signature change — the manual's `resolves_reserve_violation` prose must be *split*, not renamed: its scheduling half (§8.2 priority 1) keeps the current-state form, its exemption half becomes the plan-level outcome trigger; the §14.8 fixture (which requires the format rule, landed in the same commit — so it carries no `requires_format_eligibility` marker, see §14.8's AH-03 note) proves the mandate, the exemption and both `hard`-sweep orders; the manual documents the block, and `config/drs.example.yaml` gains it in **phase 13's own commit** as `soft: 0` / `hard: null` (it is a shipped artefact, §8, and today carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all) — `hard: null` there is load-bearing rather than cosmetic: any spelled-out `hard` below the folded floor would weaken §8.1's transient charge for exactly the operators the fold protects, because the built check charges `min_free_bytes` on every in-flight state and `hard_s` is what replaces it, while `hard: null` (= `soft`) leaves an upgrading deprecated-key config exactly as strong as it is today; and the scalar → pair replacement gets the same grep treatment as the flag, because it deprecates a **documented config key** and reaches further than the code: every file matching `git grep -l min_free_bytes` (today 30 — the `src/` files named above plus `config_schema.json`, seven test modules, both `tests/corpus/*/config.yaml` replay inputs (**left as captured** — AH-06: a committed bundle is real captured data, and a pre-`free_space` bundle is the compatibility case replay must keep serving), `config/drs.example.yaml`, `docs/manual/10-configuration.md` — whose `### snapshot_reserve.min_free_bytes` reference section becomes the deprecation notice and the `free_space` documentation — `docs/manual/00-installation.md`, `docs/manual/27-plan.md`, `docs/manual/30-safety-and-status.md`, `docs/internals/60-topology.md`, `docs/internals/91-optimize.md`, `docs/internals/95-schedule.md` — which documents the built fold of the scalar into the transient check — `.agents/domain-invariants.md`, whose invariant 2 is written `used + max(f·Z_s, min_free_bytes) ≤ C_s` and becomes `soft_s`, `.agents/testing.md`, plus the plan and REVIEW.md) is updated with it; **one file the sweep does not name still needs the same treatment**: `verify-storages` gains the resolved `soft_s`/`hard_s` per storage, with the level each came from (§3.5 — the derivation an operator cannot otherwise predict, and the same argument that put the pattern expansion there), so `docs/manual/25-show-load-and-verify-storages.md` joins the phase's file set even though it matches none of the three greps today |
+| 14 | Holt-Winters-driven placement; §7.3 saturation guard removed (§12.1; REVIEW.md T-03, AL-01, AL-04) | Two commits, in order. **14a** deletes the saturation guard — `migration.bwlimit_bytes_per_sec` is the only throttle a migration needs — deleting `saturation_load`/`saturation_ceiling` from the schema outright (no compatibility shim: a config that sets them fails validation, and the committed bundles' `config.yaml` were edited). **14b** scales each disk's `ℓ_d` by a backtest-validated Holt-Winters forecast of its p95 over the next `window.lookback`, at the one point gates, solver, payback and ordering all read it. The default `forecast.model: quantile` is unchanged: §14 fixtures and quantile corpus variants byte-identical apart from the removed saturation fields. Done when §12.1's checklist holds |
+| 15 | Single-source configuration defaults (§11.1; REVIEW.md AL-03) | Every default exists **exactly once, on the dataclass field**; the loader constructs each config class from the raw mapping by passing **only the keys the operator actually wrote**, through field-level converters (duration/byte/percent strings, list→tuple), so no `.get(key, default)` ever restates a default — today's twin copies in `config.py` (e.g. `model: str = "quantile"` on `ForecastConfig` beside `fc_raw.get("model", "quantile")` in the loader, and the same shape for every other knob) are gone; `config_schema.json`, the third copy of the shape, is generated from the same field/type/enum source — or, if generation proves heavier than checking, a check target fails on drift between schema and dataclasses — so it cannot rot either; **zero operator-visible behaviour change**: `--help`, the manual's option tables and `config/drs.example.yaml` values are byte-identical before and after, proven by the fixture and corpus checks running green untouched |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
 
+Phase 6's done-when said "CP-SAT and CBC agree on every `β` case"; that agreement was proven while
+both backends existed. The CP-SAT backend has since been removed (REVIEW.md AL-02 — not in Debian,
+never installable on the deployment target), and the fixture now binds CBC to the
+exhaustively-enumerated optimum alone. Phases 14 and 15 were added after the phase 13
+implementation by the twenty-eighth review pass (REVIEW.md section 56): 14 closes §10.1's own
+target design and is a behaviour change; 15 is a pure internal refactor with no behaviour to
+specify beyond §11.1's existing validation rules. Phase 14's scope was then cut down by operator
+direction (REVIEW.md AL-04, §12.1): no p95 → p99 default change, and the saturation guard goes. Also after phase 14, and by the same direction (no compatibility shims: the only users are the maintainers), `snapshot_reserve.min_free_bytes` and its fold into `free_space.soft` were removed; phase 13's row above describes the fold as it was built.
+
 Phase 11 is last only because it was found last — dogfooding the finished tool, where the noise on
 a clean run and the silence on an `auto` run are both obvious in a way they never were while the
 engine underneath was still being built.
+
+
+### 12.1 Phase 14 in detail
+
+Operator direction (2026-09-25): use forecasts of the VMs' I/O to place disks better. Do **not**
+model storage saturation around migrations — a migration may run at any time, capped by
+`migration.bwlimit_bytes_per_sec`, and that is the whole throttle. Keep it small; every item below
+that is not needed for that goal is out of scope.
+
+#### 14a — remove the §7.3 saturation guard (one commit) — **done**
+
+Why: it is the forecaster's only consumer today, it is inactive unless an operator sets
+`saturation_load` (which has no safe default, §7.3, and is set nowhere we know of), and all it can do
+is defer moves. `execute.py` already passes `bwlimit` to every `move_disk`; `max_single_move_duration`,
+the transient reserve invariant (§8.1) and `execution.cooldown_per_storage` stay as they are.
+
+Delete (use `git grep -n saturation` as the checklist; it must come back empty outside REVIEW.md
+and this plan's history notes):
+
+- `payback.py`: `_saturation_deferred()`, `MoveCost.saturation_deferred`,
+  `PaybackResult.deferred_moves`, `compute_move_cost()`'s `target`/`l_hat_src`/`l_hat_dst`
+  parameters, and the module docstring's `headroom_*` and "mirroring-phase-only reading" bullets.
+- `cli.py`: `_saturation_forecast_inputs()`; `_compute_one_move_cost()` collapses to a plain
+  `compute_move_cost()` call; `saturation_deferred` leaves `excluded_disk_keys`; the deferred branch
+  of `_refused_move_outcomes()` and `_apply_payback_gate()`; the `saturation_ceiling` output line
+  (~l. 1150). **Keep** `_backtest_gated_forecaster()` — 14b rewrites and reuses it.
+- `forecast.storage_upper_bound()` and its tests.
+- `topology.Storage.saturation_load`, `config.StorageConfig.saturation_load`,
+  `MigrationConfig.saturation_ceiling`, `config._check_saturation_load()`.
+- `collect.py`: stop writing both keys into a new bundle's config.
+- `execute.py`: the docstring notes on the saturation check.
+- `config/drs.example.yaml`: both keys and their comments.
+- Docs: every manual/internals/`.agents` file `git grep -l saturation` lists. This plan: §7.1's
+  formula becomes `duration_mirror_d = z_d / bwlimit`; §7.3 loses the second hard rule and the
+  "Defining 'during the mirror'" text through the `N_s` paragraphs, and "the two rules that fire at
+  this gate" becomes one (`max_single_move_duration`); §10.1 loses the `L̂_s(Δ)` paragraph; §15.1
+  loses the knob rows. In their place one sentence in §7.3: migrations are throttled by `bwlimit`
+  only; the tool does not model storage saturation.
+
+No compatibility shim (operator direction: the only users are the maintainers): `config_schema.json`
+drops `groups[].storages[].saturation_load` and `migration.saturation_ceiling`, so a config that still
+sets either fails validation. The three committed corpus bundles' `config.yaml` had `saturation_ceiling`
+(and, for 14b, `upper_quantile`, `seasonal_lookback_days`, `residual_z`); those lines were removed and
+each bundle's `SHA256SUMS` entry updated. `plan --json` loses `deferred_moves` and the per-move
+`saturation_deferred`; the fixture and corpus expected files are regenerated.
+
+#### 14b — Holt-Winters-driven `ℓ_d` (one commit) — **done**
+
+This replaces REVIEW.md AL-01's original design (decision statistic → the forecaster's upper bound,
+default p95 → p99). That changed every plan on every cluster for no forecasting gain and is dropped.
+
+1. **What is forecast.** The decision statistic stays `window.quantile` (p95) of a disk's load. The
+   `quantile` model takes it over the *last* `W = window.lookback`; `holt_winters` predicts it over
+   the *next* `W`: fit the disk's series, forecast `ceil(W / metrics.step)` steps, take
+   `window.quantile` of that forecast path, clamp at 0. **Not** the last forecast point — today's
+   `HoltWintersForecaster.predict()` returns the single value at `now + horizon`, i.e. one sample at
+   the current hour of day, which says nothing about tomorrow's peak — and **no** `z·σ` band: a
+   forecast p95 is compared with its quantile-model peers' observed p95, and a residual band would
+   inflate exactly the disks that were forecast.
+
+2. **How it enters `ℓ_d`: a ratio, never a substitution.** `compute_disk_load_series()` normalizes
+   per timestamp while `compute_group_load()` normalizes over the window and also owns coverage
+   rejection and the `last_known_loads` fallback. So scale, do not replace:
+   `ℓ_d ← ℓ_d · f_d / h_d`, with `h_d` the `window.quantile` of the disk's own series over
+   `[now−W, now]` and `f_d` the forecast from point 1. Keep `ℓ_d` unchanged when `h_d = 0`, when the
+   disk carries a `DiskLoad.flagged_reason`, or when its fit fails (fewer than
+   `2 · seasonal_periods` samples, a constant series, any statsmodels exception or
+   `ConvergenceWarning`). One helper — e.g. `loadmodel.apply_forecast(group_load, factors) ->
+   GroupLoad` — called at **both** `compute_group_load()` sites in `cli.py` (show-load/explain
+   ~l. 1010, plan/apply ~l. 2474): a group's gates and its plan must see the same `ℓ`.
+
+3. **Gate: beat the baseline, no threshold.** Once per group, on `group_aggregate_series()`: fit on
+   `[now−2W, now−W)` and have both models predict the p95 of `[now−W, now]` (the quantile model's
+   prediction is the p95 of the fit half — persistence). `holt_winters` is used for this group iff
+   its absolute error is ≤ the quantile model's; otherwise quantile for this run, with the existing
+   `forecast_backtest_failed` warning. Less than `2W` of history → quantile, as today. This replaces
+   §10.2's comparison against `gates.imbalance_threshold` (an unrelated knob) and
+   `backtest_error()`'s point-at-horizon-versus-window-mean mismatch.
+
+4. **Fetch.** Only when `forecast.model == holt_winters`, via the existing (chunked)
+   `compute_disk_load_series()` over `max(required_range_seconds(...), 2·W)`. The default quantile
+   path issues no additional Prometheus query.
+
+5. **Drop `seasonal_naive`.** Its statistic is the same-hour-of-day median at `now` — not a forecast
+   over `W` — and after 14a nothing consumes it; Holt-Winters' seasonal term covers the diurnal case.
+   It leaves the schema enum (loud, like `cpsat`; changelog) and the corpus variant matrix. Likewise
+   delete `Forecast.upper_bound`, `holt_winters.residual_z` and the forecaster-side
+   `upper_quantile` if nothing reads them any more; a removed **config key** is
+   deleted from the schema too — no compatibility shim, as in 14a.
+
+6. **Output.** Holt-Winters' per-call fallback warning drops to DEBUG (one per disk would flood the
+   journal); instead one INFO per group, e.g. `group g: forecast holt_winters used (backtest err
+   0.08 vs baseline 0.14), 37 disks scaled, 5 kept`. `explain` and `plan --json`'s group report gain
+   `forecast: {model, used, backtest_error, baseline_error, disks_scaled, disks_kept}`.
+
+7. **Cost.** One statsmodels fit per disk with history, per group per run — order 0.1 s at 2016
+   samples (7 d at 5 min). Fine for a timer; no caching, no parallelism.
+
+**As built and observed (2026-09-25, dev cluster, `window.lookback: 3d`, 1 h step, 35 disks):**
+with 7 d of history a `7d` window has no `2W` to backtest (fit half: 10 samples), and the report says
+so (`backtest_error: null`). With `3d`, Holt-Winters fitted (error 6.5) but lost to the baseline (3.6),
+so the group stayed on `quantile` — the gate doing its job on a noisy cluster. Forcing the gate open
+to look at the factors gave median `f_d/h_d` 1.37 but a range of 0.00 – 39: an additive trend
+extrapolated over a whole window is undamped, and a disk with a tiny observed p95 can be scaled by a
+large ratio. No clamp was added (it would be a magic number the plan forbids); if a real cluster's
+gate opens and the factors look wild, a damped trend (`statsmodels`' `damped_trend`) is the first
+thing to try.
+
+**Follow-up sweep (same day, 5 m step, ~7.5 d of retention).** At the default 288 periods
+`initialization_method="estimated"` never converged (it optimizes all 288 initial seasonals as
+well), so every fit was rejected; the fit now uses `"heuristic"` (initial states from a classical
+decomposition of the first cycles, only the smoothing parameters optimized). A rolling-origin
+backtest (every 6 h back through the retention) over step × lookback × trend × seasonal found:
+`seasonal: none` always loses; a 1 h or 15 min step is worse than 5 min (each point is one 5-min
+`rate()` sample, not an average over the step, so a coarse step aliases); 5 min with `3d` beat
+persistence at 4 of 5 origins with or without trend. `trend: add` produced the runaway factors
+above (one disk forecast at 95 % of the whole group's load); `trend: none` kept the worst
+single-disk shift at 23 % for the same score, so `trend` now defaults to `none`. With 5 min / `3d` / `trend: none` the live gate
+opened (`used: true`, 1.43 against 2.26, 35 of 39 disks scaled) — the first real run on
+Holt-Winters.
+
+**Done when:**
+
+- With `forecast.model: quantile`, `plan --json` for every fixture and quantile corpus variant is
+  identical to 14a's output.
+- Unit tests cover: the ratio (`h_d = 0`, flagged disk and failed fit keep `ℓ_d`); the p95-of-path
+  statistic on a synthetic diurnal series whose next-day peak is higher; the gate choosing
+  Holt-Winters on a seasonal-plus-trend series and quantile on white noise; the removed keys and
+  `seasonal_naive` rejected by the schema.
+- `bzed-dev-cluster-2d-holt-winters` (replacing the 7d bundle, whose capture held only `W`, not the
+  backtest's `2W`) replays with the forecast block populated; its regenerated expected file is
+  read by hand before committing. As captured, the backtest runs and Holt-Winters loses to the
+  baseline (`used: false`), so `used: true` is covered by unit tests only.
+- Manual: when `holt_winters` is worth selecting (diurnal or trending load), what the gate does,
+  and that it needs `python3-statsmodels`.
+- `make check` green.
 
 ---
 
@@ -3495,7 +3442,7 @@ plus foreign volumes — the admin's new VMs, which DRS does not manage — of 6
 
 Loads read 2.05/2.05/2.05 — `E = 0`, the drift and imbalance gates shut — and the snapshot
 reserve alone is satisfied everywhere (`packed`: 7.5 + 2.0 = 9.5 ≤ 10). Only the configured free
-space is violated, by 0.5 TiB, on `packed` alone. This is the case the old `min_free_bytes` could
+space is violated, by 0.5 TiB, on `packed` alone. This is the case the removed `min_free_bytes` could
 not express as a *per-storage policy* and could not *repair*: nothing distinguishes it from a
 healthy cluster except the requirement. (The gate's ACT is what lets the engine plan — see the
 capacity-gate prerequisite above — and the requirement is what makes the solver *move*. The
@@ -3616,12 +3563,11 @@ bug waiting to happen; this table is the audit.
 | `load_weights.iotime/ops/bytes` | §4, `ℓ_d` |
 | `load_weights.read_factor/write_factor` | §4, `raw_X(d)`, applied engine-side before normalization |
 | `window.lookback` | §3.4 reduction range |
-| `window.quantile` / `upper_quantile` | §10.1, point estimate (the actual decision statistic) vs. the bound (§7.3 saturation guard only — see the "As built" note in §10.1) |
+| `window.quantile` | §10.1, the decision statistic |
 | `window.min_coverage` | §3.4, disk data rejection |
 | `groups[].storages[].id` in pattern form (`/…/`) | §11.4 expansion into group membership; the entry's options apply to every matched storage |
 | `groups[].storages[].capability_weight` | §4, `u_s = L_s / c_s` |
 | `snapshot_reserve.factor` | §5.3 (C5), `R_s ≥ f_s·Z_s` |
-| `snapshot_reserve.min_free_bytes` | §5.3 (C5), `R_s ≥ soft_s` — deprecated syntax for `free_space.soft` (§5.3.1) |
 | `free_space.soft` (global, per-storage, per-pattern) | §5.3 (C5), `R_s ≥ soft_s`; §6 reserve override; §7.3 repair exemption |
 | `free_space.hard` (global, per-storage, per-pattern) | §8.1 transient invariant, `max(f_b·…, hard_b)` floor |
 | `snapshot_reserve.count_foreign_volumes` | §5.1.1, `Uˢᵉˣᵗ` |
@@ -3642,8 +3588,6 @@ bug waiting to happen; this table is the audit.
 | `exclude.skip_vms_with_snapshots` | §3.7, §5.3 (C2) pinning |
 | `objective.affinity_counts_pinned_disks` | §5.3 (C3) range: all of `D` (default) or `D^mov` |
 | `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
-| `migration.saturation_ceiling` | §7.3 `L_during(s) ≤ saturation_ceiling · N_s` |
-| `groups[].storages[].saturation_load` | §7.3 `N_s`; guard skipped when unset |
 | `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity/delta_capacity_spread` | §5.4 (the `δ` term and the I/O-weighted `κ` term also enter §7.2's benefit) |
 | `objective.reserve_violation_penalty` | §5.3 (C5), *floor* for the single-stage `P` alternative |
 | `metrics.pvestatd_push_interval` | §11.1 `rate_window` validation; §3.3 `verify-metrics` |
@@ -3755,26 +3699,22 @@ a multiple of it. The write path is never touched: this command has no code path
 
 - the instant query `verify-metrics` issues, so a bundle reproduces §3.3's own checks;
 - `label_values` for each of the three configured labels;
-- the `quantile_over_time` reductions of §3.4 that `loadmodel.compute_group_load()` consumes, for
-  both `window.quantile` and `window.upper_quantile`;
+- the `quantile_over_time` reduction of §3.4 that `loadmodel.compute_group_load()` consumes, for
+  `window.quantile`;
 - the `sum by (vmid, device) (rate(...))` **range** query of §3.4 over the **capture range**:
 
 ```
-capture_range = max(  over every registered forecaster of required_range(),
-                       2 · window.lookback )
-              = max(window.lookback,
-                    forecast.seasonal_lookback_days,
+capture_range = max(window.lookback,
                     2 · holt_winters.seasonal_periods · metrics.step,
                     2 · window.lookback)
 ```
 
-at `metrics.step` resolution — the union of §10.1's table, not the row the operator happens to have
-selected, **plus** `2 · window.lookback`: §10.2's backtest gate fits on `[now-2W, now-W)` and checks
-against `[now-W, now]` for whichever of `seasonal_naive`/`holt_winters` a bundle is replayed with,
-so a capture sized only to a forecaster's own minimum (which can equal `window.lookback` exactly,
-e.g. `holt_winters` tuned so `2 · seasonal_periods · metrics.step == window.lookback`) would replay
-the backtest gate as permanently "not enough history", independent of how much real history
-Prometheus actually had. With the defaults that is `max(24h, 7d, 48h, 48h) = 7d`.
+at `metrics.step` resolution — what `holt_winters` needs, not the model the operator happens to have
+selected, **plus** `2 · window.lookback`: §10.2's backtest fits on `[now-2W, now-W)` and checks
+against `[now-W, now]`, so a capture sized only to a model's own minimum (which can equal
+`window.lookback` exactly, e.g. `holt_winters` tuned so `2 · seasonal_periods · metrics.step ==
+window.lookback`) would replay the backtest as permanently "not enough history", independent of how
+much real history Prometheus actually had. With the defaults that is `max(24h, 48h, 48h) = 48h`.
 
 This is cheap in *queries* and expensive in *bytes*, which is the right way round. Each range query
 returns every disk in the group as one response, so the query count is
@@ -3943,7 +3883,7 @@ between it and the recorded responses shows up as a key miss (§16.5) rather tha
 
 Everything else — `window`, `snapshot_reserve`, `free_space`, `gates`, `migration`, `objective`,
 `solver`, `execution`, `forecast`, `report`, the per-storage `capability_weight`/`reserve_factor`/
-`saturation_load`/`free_space` — is carried **verbatim**. Those knobs are the test case.
+`free_space` — is carried **verbatim**. Those knobs are the test case.
 
 #### What is deliberately preserved
 
@@ -4080,26 +4020,26 @@ Four kinds of assertion that do hold:
 2. **Invariants, not optima** — reconstructed from what `plan --json`'s own group report already
    records per variant (X-07): every move in the plan is to a storage (C2) permits for that group;
    no accepted move carries `exceeds_max_duration: true` (§7.3's duration rule); a disk payback
-   rejected or deferred never also appears as an accepted move (§7.3's saturation guard,
-   structurally). These are checkable without knowing the optimum, and they are what
+   rejected never also appears as an accepted move (structurally). These are checkable without knowing the optimum, and they are what
    `check_invariants()` actually asserts. Three properties this bullet used to claim as checked and
    is not: §8.1's per-step transient predicate needs the emitted *order*, which no `plan --json`
    field carries (the `Σ r_s` half of this gap is closed as of phase 13 — the payback block's
    `reserve_shortfall_bytes_before`/`_after` are the current and final `Σ r_s`, and
    `check_invariants()` asserts the part of it that is an invariant: the plan never *raises* the
-   shortfall. Not `= 0`: an oversized deprecated `min_free_bytes`, or a group with no feasible
-   repair, legitimately ends above zero); "the objective the scheduler was handed
+   shortfall. Not `= 0`: a group with no feasible
+   repair legitimately ends above zero); "the objective the scheduler was handed
    equals the objective recomputed from the final assignment" needs the six-term breakdown, which
    today only `explain --json` emits. A real and deliberate gap, named here rather than discovered
    later (the same shape as this section's own pattern-expansion gap above) — either sweep
    `explain --json` too or add the missing fields to `plan --json`'s group report to close it.
-3. **MILP versus heuristic, on real data.** Run the same bundle through CP-SAT, CBC and the
-   heuristic and assert neither MILP backend's `after_spread` (`plan --json`'s already-computed
-   post-plan spread fraction) is worse than the heuristic's. This is the cross-check §14 can only
+3. **MILP versus heuristic, on real data.** Run the same bundle through CBC and the
+   heuristic and assert the MILP backend's `after_spread` (`plan --json`'s already-computed
+   post-plan spread fraction) is not worse than the heuristic's. This is the cross-check §14 can only
    perform on six disks, and it is the single highest-value thing a real bundle buys: a heuristic
    that beats the MILP means the two have drifted apart on the shared feasibility or objective
    functions, which `AGENTS.md` §5 exists to prevent and which no synthetic fixture of this size
-   can detect. **CBC-versus-CP-SAT agreement is not checked** (X-07): a first attempt comparing
+   can detect. **CBC-versus-CP-SAT agreement was never checked, and is now uncheckable** (X-07; the
+   CP-SAT backend was removed, AL-02): a first attempt comparing
    `after_spread` against `solver.mip_gap` as a relative tolerance produced real disagreement on a
    committed bundle under `--full-matrix` (cbc 0.0016 vs. cpsat 0.0034-0.0112 across several
    variants) that was legitimate under `mip_gap` on the *objective* the solvers actually optimize —
@@ -4118,13 +4058,15 @@ Four kinds of assertion that do hold:
 
 #### The variant matrix
 
-Per bundle, the matrix the generator sweeps: `solver.backend` ∈ {cp-sat, cbc, heuristic} ×
-`objective.spread_metric` ∈ {l1, minmax} × `forecast.model` ∈ {quantile, seasonal_naive,
+Per bundle, the matrix the generator sweeps: `solver.backend` ∈ {cbc, heuristic} ×
+`objective.spread_metric` ∈ {l1, minmax} × `forecast.model` ∈ {quantile,
 holt_winters} × `objective.beta_move_count` over a small sweep, with everything else from the
-bundle's own `config.yaml`. A variant whose backend or forecaster is unavailable in the running
-environment is **skipped and recorded as skipped**, never silently dropped: CP-SAT is an optional
-dependency (`AGENTS.md` §9.1) and a corpus result that quietly means "CBC only" is a corpus result
-that lies.
+bundle's own `config.yaml`. `--check` (part of `make check`) runs a narrow sweep instead: both
+backends, the first spread metric and beta, and `forecast.model` ∈ {quantile, the bundle's own
+configured model}. A variant whose forecaster is unavailable in the running
+environment is **skipped and recorded as skipped**, never silently dropped: `statsmodels` is an
+optional dependency (`AGENTS.md` §9.1) and a corpus result that quietly means "quantile only" is a
+corpus result that lies.
 
 #### Size, and bundles too big to commit
 

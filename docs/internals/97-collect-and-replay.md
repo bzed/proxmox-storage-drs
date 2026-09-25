@@ -163,7 +163,7 @@ requested `start`/`end`: see "Range queries" above for why a bundle stores
 one superset span per query text, and
 [`replay.py`](../../src/proxmox_storage_drs/replay.py)'s own module
 docstring for the trimming logic that serves a narrower request (a
-different forecaster's own, smaller `required_range()`) out of it. A
+different model's own, smaller history requirement) out of it. A
 request outside the stored span, or at a different `step`, is a
 `BundleError` naming the query and both ranges — never a silent empty
 result.

@@ -321,28 +321,18 @@ entry applies to every storage it matches, a literal entry overrides it,
 and only a real storage's `capacity_bytes` (known here, not in `config.py`)
 can resolve a percentage. The mandated order is inheritance, then
 percent-to-bytes conversion, then the two section 11.1 hard rules against
-the *written* values (`hard_s <= soft_s`, `soft_s < C_s` -- both raise
+the resolved values (`hard_s <= soft_s`, `soft_s < C_s` -- both raise
 `TopologyError`, exactly like the pattern-expansion rules above, since both
-need the cluster inventory config.py never has), and only then the
-deprecated `snapshot_reserve.min_free_bytes` fold (`soft_s = max(soft_s,
-min_free_bytes)`) -- "validate as written, then fold": folding first would
-let a written `hard > soft` hide behind a large `min_free_bytes` and
-surface as a startup failure only once the operator deletes the deprecated
-key, exactly the upgrade path the fold exists to keep safe. A *null* `hard` is
-not a written value, so it is the one thing that is **not** settled before
-the fold: it means `hard_s = soft_s`, and that is the *folded* `soft_s`. Read
-before the fold it would leave `hard_s = 0` for a config carrying only
-`min_free_bytes` and drop the deprecated floor from section 8.1's transient
-charge without a word (a `min_free_bytes`-only config gets no deprecation
-warning); a *written* `hard` stays as written. `_resolve_free_space()` returns
+need the cluster inventory config.py never has). A *null* `hard` means
+`hard_s = soft_s`. `_resolve_free_space()` returns
 a `ResolvedFreeSpace`: the pair plus two display-only strings naming the level
-each half came from (global, storage entry, `pattern /re/`, percent-converted,
-folded), carried on `Storage.free_space_soft_source`/`_hard_source` for
+each half came from (global, storage entry, `pattern /re/`, percent-converted),
+carried on `Storage.free_space_soft_source`/`_hard_source` for
 `verify-storages` and read by nothing else. By the time
 `compute_reserve_status()` reads `storage.free_space_soft_bytes`, or
 `schedule.transient_invariant_ok()` reads `.free_space_hard_bytes`, both
 are plain, already-resolved byte constants -- section 5.3.1's own grammar
-(percentages, patterns, the deprecated key) is never seen again past this
+(percentages, patterns) is never seen again past this
 module.
 
 ## (C2) format eligibility: `storage_type`/`allowed_formats`

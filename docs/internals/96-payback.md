@@ -21,8 +21,8 @@ migration itself imposes on the source and the target while the mirror
 runs, plus, for as long as the old volume takes to be zeroed, the extra
 load a running `saferemove` wipe imposes on the source alone. It is zero
 below `migration.tiny_disk_bytes` (section 5.4/7.1) — `duration_mirror`/
-`duration_wipe` are still the real numbers, so `exceeds_max_duration`/
-`saturation_deferred` still fire normally for a tiny disk that happens to
+`duration_wipe` are still the real numbers, so `exceeds_max_duration`
+still fires normally for a tiny disk that happens to
 be throttled hard enough; only the economic charge is waived.
 
 `compute_benefit_load_seconds()` implements section 7.2's `benefit =
@@ -104,18 +104,14 @@ a negative number never exceeds a positive threshold. It printed
 downstream noticed. Found by replaying a corpus bundle from a cluster
 whose three LVM storages all carry `saferemove_throughput -1073741824`.
 
-## `headroom_src`/`headroom_dst`: a plan formula this project cannot fill in
+## The mirror duration is `z_d / bwlimit`, and nothing else
 
-Section 7.1 writes `duration_mirror_d = z_d / min(bwlimit, headroom_src,
-headroom_dst)`. Neither `headroom_src` nor `headroom_dst` is defined
-anywhere else in `IMPLEMENTATION_PLAN.md`, and no config field or
-`topology.Storage` attribute represents a per-storage effective throughput
-ceiling distinct from the one global `migration.bwlimit_bytes_per_sec`.
-`compute_move_cost()` uses `z_d / bwlimit` only — exactly what the
-formula reduces to whenever neither storage's own throughput is the
-binding constraint, which is the case `bwlimit` exists to enforce in the
-first place. This is recorded as a known simplification of the plan's own
-underspecified formula, not silently worked around.
+Section 7.1's `duration_mirror_d = z_d / bwlimit`. An earlier draft of the
+plan wrote `min(bwlimit, headroom_src, headroom_dst)` with the two headroom
+terms never defined; they are gone. `migration.bwlimit_bytes_per_sec` is
+the only throttle a migration needs — this tool does not model how busy a
+storage is while a mirror runs, and `execute.py` passes the limit to every
+`move_disk` call.
 
 ## The reserve-override exemption
 
@@ -168,8 +164,8 @@ function's sole production caller — from objects it already has in hand:
 current assignment (`group.disks`' own `current_storage`);
 `final_shortfall_bytes` is the same sum over `payback.
 executed_assignment()`'s result, `schedule_result.final_assignment` with
-every disk a hard per-move rule excluded (`exceeds_max_duration` or
-`saturation_deferred`, both already known from `move_costs` by then) held
+every disk the hard per-move duration rule excluded
+(`exceeds_max_duration`, already known from `move_costs` by then) held
 back at its current storage — "what the plan will really run," not merely
 what got scheduled, so a repair a hard rule then blocks is correctly
 *not* exempt.
@@ -204,66 +200,6 @@ move from `executed_assignment()`, the plan is *not* `repair_exempt`
 either in that second case, even though the plan's aspirational target
 would have repaired the violation.
 
-## The section 7.3 saturation guard: `compute_move_cost()`'s optional `target`
-
-The guard defers a move (never rejects it outright) when the load it
-would add to either endpoint, forecast over the mirror, would push that
-storage past an operator-declared ceiling: a move is deferred whenever
-`L_during(s) > saturation_ceiling * N_s` for either endpoint `s`. `N_s`
-is that storage's own `storages[].saturation_load` — an operator-supplied
-number, in the same average-in-flight-I/O-requests unit every other load
-figure in this codebase uses, above which the operator judges the
-storage should not run for a sustained period; it is optional, and a
-storage that never sets it is never checked at all (below).
-`saturation_ceiling` is `migration.saturation_ceiling` (default `0.85`),
-the fraction of `N_s` a move's own forecast load is allowed to reach.
-`L_during(s) = L_hat_s(duration_mirror) + omega_role(s)`: `L_hat_s
-(duration_mirror)` is the forecast upper bound of `s`'s own load over the
-move's mirror duration — `forecast.storage_upper_bound()`, section 10.1,
-summed over the disks *currently* resident on that storage, not the
-moving disk's own hypothetical arrival, since during mirroring it is
-still served from `src` — and `omega_role(s)` is the same per-role load
-charge the cost formula itself uses for a mirroring move,
-`migration.source_load_weight` (`ω_src`) when `s` is the source or
-`migration.target_load_weight` (`ω_dst`) when `s` is the target (never
-both on the same endpoint).
-
-`compute_move_cost()` stays pure (the module docstring's own promise:
-"nothing fetches anything") by taking the guard's inputs already
-computed, rather than fetching a forecast itself: `target`, and
-`l_hat_src`/`l_hat_dst` — the caller's own already-computed
-`L_hat_s(duration_mirror)` for each endpoint, per the formula above (its
-`ω_dst` charge below already accounts for the moving disk's own
-mirror-write traffic to `dst` separately, so `l_hat_dst` itself must
-never double-count it). Left at their
-defaults (`target=None`, both `0.0`) the check is simply inactive — every
-call site written before this existed, and `cli.py`'s own `dry-run`/
-`plan` paths that have not been updated to compute a forecast, keep
-working unchanged.
-
-`mirror_duration_seconds()` is `compute_move_cost()`'s own
-`duration_mirror_d` arithmetic, factored out so a caller can learn it
-*before* calling `compute_move_cost()` — a genuine ordering dependency:
-the guard's forecast horizon is this move's own mirror duration, but
-`compute_move_cost()` is also what turns that forecast into the
-`saturation_deferred` verdict. A caller wanting the check active must:
-call `mirror_duration_seconds()`, use it as the horizon for
-`forecast.storage_upper_bound()` against each endpoint's own resident
-disks, then call `compute_move_cost()` with the results.
-
-`_saturation_deferred()` is where `L_during(s) > saturation_ceiling * N_s`
-above is actually evaluated per endpoint — the same two `ω_src`/`ω_dst`
-config values `compute_move_cost()`'s own cost formula already uses, not
-a second pair invented for this check (AGENTS.md section 5).
-`MoveCost.saturation_deferred`/`PaybackResult.deferred_moves`
-mirror `exceeds_max_duration`/`rejected_moves`'s existing shape exactly,
-but are kept as distinct fields — section 7.3 itself draws the same
-distinction ("reject the move" vs. "defer the move to a later run"), and
-a report should be able to say which of the two happened, one hard and
-always active, the other best-effort and silently inactive wherever
-`saturation_load` is unset. `PaybackResult.accepted` now requires
-neither being non-empty.
-
 ## What this pass deliberately does not do
 
 - **Any materiality floor on the benefit.** A plan of nothing but tiny
@@ -286,7 +222,7 @@ neither being non-empty.
   count, and a VM's pinned disks exerted no pull on its movable ones — two
   528 KiB `efidisk0` moves on a real cluster were emitted on a `3.6e-7`
   capacity-spread difference — a relative improvement of `6e-8`, on which
-  CP-SAT and CBC did not even agree — with a `kappa` gain of exactly
+  the then-two MILP backends (CP-SAT and CBC) did not even agree — with a `kappa` gain of exactly
   zero, each one a live migration holding a VM lock and burning
   `gates.cooldown_per_storage` on its target. Correcting that default
   turned the same two moves into genuine reunifications worth a discrete
@@ -314,36 +250,13 @@ neither being non-empty.
   (`MoveCost.exceeds_max_duration`, `PaybackResult.rejected_moves`) — the
   same "report, never force" choice `schedule.py`'s deadlock reporting
   already makes for an unschedulable move.
-- **The section 7.3 saturation-ceiling defer check beyond its mirroring
-  -phase reading.** `compute_move_cost()` now implements `L_during(s) <=
-  saturation_ceiling * N_s` for each endpoint (see the section above),
-  but only at the mirroring-phase horizon the section's own
-  header names ("push either endpoint above ... during *the mirror*") —
-  not a second, separate check for the *draining* phase (`ω_wipe` —
-  `migration.wipe_load_weight`, the same weight the cost formula above
-  charges for a running wipe — over `duration_wipe_seconds`), which the
-  full generalized in-flight-set
-  model implies but which needs `schedule.py` to reason about overlapping
-  moves, something it does not do (`95-schedule.md`). `N_s` unset on a
-  storage still skips the check for that endpoint entirely, exactly as
-  the plan's own words allow ("fully supported... loses only this one
-  advisory check").
-
 ## Wired into `plan` and `apply` alike, via `_plan_group()`
 
 `cli.py`'s `_plan_group()` (`docs/internals/92-execute.md`'s "one planning
 pipeline, shared by `plan` and `apply`") computes a `PaybackResult` for
 every group the gate acts on, right after scheduling its moves, and both
 `plan`'s render functions and `apply`'s payback gate
-(`_apply_payback_gate()`) consume it — a rejected or deferred move never
-reaches `execute.py` regardless of mode. `_saturation_forecast_inputs()`
-is what builds the saturation guard's own forecaster and per-disk load
-history, once per group, only when at least one of its storages
-configures `saturation_load` — skipped entirely otherwise, so a cluster
-that never sets it pays no Prometheus cost for a check it cannot use.
-`_compute_one_move_cost()` then derives each move's own
-`l_hat_src`/`l_hat_dst` (`forecast.storage_upper_bound()` over each
-endpoint's *currently* resident disks, at that move's own mirror
-duration) before calling `compute_move_cost()`. `compute_wipe_duration_seconds()`
+(`_apply_payback_gate()`) consume it — a rejected move never
+reaches `execute.py` regardless of mode. `compute_wipe_duration_seconds()`
 is also used by `verify-storages`'s existing wipe-time warning — one
 implementation of the formula, not two (AGENTS.md section 5).

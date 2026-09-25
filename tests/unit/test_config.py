@@ -104,6 +104,8 @@ def test_defaults_are_applied(tmp_path: Path) -> None:
     resolved = config.load_config(str(path), env={})
     cfg = resolved.config
     assert cfg.window.lookback_seconds == 86400.0
+    assert cfg.metrics.pvestatd_push_interval_seconds == 10.0  # pvestatd's own default
+    assert cfg.forecast.holt_winters.trend == "none"
     assert cfg.gates.drift_threshold == 0.10
     assert cfg.execution.mode == "dry-run"
     assert cfg.groups[0].storages[0].capability_weight == 1.0
@@ -292,11 +294,11 @@ def test_malformed_storage_pattern_is_rejected_at_load_time(tmp_path: Path) -> N
         config.load_config(str(path), env={})
 
 
-def test_upper_quantile_below_quantile_is_rejected(tmp_path: Path) -> None:
+def test_seasonal_naive_is_rejected_by_the_schema(tmp_path: Path) -> None:
     data = minimal_config_dict()
-    data["window"] = {"quantile": 0.95, "upper_quantile": 0.90}
+    data["forecast"] = {"model": "seasonal_naive"}
     path = write_config(tmp_path, data)
-    with pytest.raises(ConfigError, match="upper_quantile"):
+    with pytest.raises(ConfigError, match="seasonal_naive"):
         config.load_config(str(path), env={})
 
 
@@ -376,21 +378,37 @@ def test_time_window_start_equals_end_is_rejected(tmp_path: Path) -> None:
         config.load_config(str(path), env={})
 
 
-def test_missing_saturation_load_is_a_warning_not_an_error(tmp_path: Path) -> None:
-    path = write_config(tmp_path, minimal_config_dict())
-    resolved = config.load_config(str(path), env={})
-    assert any("saturation_load" in w for w in resolved.warnings)
+@pytest.mark.parametrize(
+    "section, key, value",
+    [
+        ("migration", "saturation_ceiling", 0.85),
+        ("window", "upper_quantile", 0.99),
+        ("forecast", "seasonal_lookback_days", 7),
+    ],
+)
+def test_removed_config_keys_are_rejected(
+    tmp_path: Path, section: str, key: str, value: object
+) -> None:
+    data = minimal_config_dict()
+    data[section] = {**data.get(section, {}), key: value}
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match=key):
+        config.load_config(str(path), env={})
 
 
-def test_configured_saturation_load_silences_the_warning(tmp_path: Path) -> None:
+def test_removed_storage_and_holt_winters_keys_are_rejected(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["groups"][0]["storages"] = [
         {"id": "san-a", "saturation_load": 64},
-        {"id": "san-b", "saturation_load": 64},
+        {"id": "san-b"},
     ]
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert resolved.warnings == ()
+    with pytest.raises(ConfigError, match="saturation_load"):
+        config.load_config(str(write_config(tmp_path, data)), env={})
+    data = minimal_config_dict()
+    data["window"] = {"lookback": "48h"}
+    data["forecast"] = {"model": "holt_winters", "holt_winters": {"residual_z": 2.0}}
+    with pytest.raises(ConfigError, match="residual_z"):
+        config.load_config(str(write_config(tmp_path, data)), env={})
 
 
 def test_payback_horizon_default_is_365d(tmp_path: Path) -> None:
@@ -554,53 +572,21 @@ def test_free_space_soft_percentage_above_100_is_rejected(tmp_path: Path) -> Non
         config.load_config(str(path), env={})
 
 
-def test_free_space_deprecation_warning_fires_only_with_both_keys_written(
-    tmp_path: Path,
-) -> None:
-    data = minimal_config_dict()
-    data["snapshot_reserve"] = {"min_free_bytes": "1GiB"}
-    data["free_space"] = {"soft": "2GiB"}
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert any("min_free_bytes" in w and "free_space" in w for w in resolved.warnings)
-
-
-def test_free_space_deprecation_warning_silent_with_only_min_free_bytes(tmp_path: Path) -> None:
+def test_min_free_bytes_is_rejected_in_favour_of_free_space(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["snapshot_reserve"] = {"min_free_bytes": "1GiB"}
     path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert not any("min_free_bytes" in w and "deprecated" in w for w in resolved.warnings)
-
-
-def test_free_space_deprecation_warning_silent_with_only_free_space(tmp_path: Path) -> None:
-    data = minimal_config_dict()
-    data["free_space"] = {"soft": "2GiB"}
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert not any("min_free_bytes" in w and "deprecated" in w for w in resolved.warnings)
-
-
-def test_free_space_deprecation_warning_fires_for_a_per_storage_only_override(
-    tmp_path: Path,
-) -> None:
-    """``_free_space_written()``'s other branch: no top-level ``free_space``
-    block at all, but a ``groups[].storages[].free_space`` entry counts too."""
-    data = minimal_config_dict()
-    data["snapshot_reserve"] = {"min_free_bytes": "1GiB"}
-    data["groups"][0]["storages"][0]["free_space"] = {"soft": "2GiB"}
-    path = write_config(tmp_path, data)
-    resolved = config.load_config(str(path), env={})
-    assert any("min_free_bytes" in w and "free_space" in w for w in resolved.warnings)
+    with pytest.raises(ConfigError, match="min_free_bytes"):
+        config.load_config(str(path), env={})
 
 
 def test_multiple_errors_are_all_reported(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["schema_version"] = 2
-    data["window"] = {"quantile": 0.95, "upper_quantile": 0.5}
+    data["migration"] = {"assume_thick_provisioning": False}
     path = write_config(tmp_path, data)
     with pytest.raises(ConfigError) as excinfo:
         config.load_config(str(path), env={})
     message = str(excinfo.value)
     assert "schema_version" in message
-    assert "upper_quantile" in message
+    assert "assume_thick_provisioning" in message

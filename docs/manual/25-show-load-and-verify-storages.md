@@ -202,8 +202,7 @@ outright rather than merely running slowly.
 Reports the resolved `free_space.soft`/`.hard` bytes for each storage,
 each with the level it came from (`IMPLEMENTATION_PLAN.md` section 5.3.1) —
 the derivation an operator cannot otherwise predict, once inheritance,
-`/…/` patterns, percentages and the deprecated
-`snapshot_reserve.min_free_bytes` fold are all in play — plus `saferemove`
+`/…/` patterns and percentages are all in play — plus `saferemove`
 and the wipe time it implies for the largest disk on each storage, warning
 when your configured cooldown or move-duration limits are shorter than that implied wipe — the condition
 `IMPLEMENTATION_PLAN.md` section 9.3 describes as "the next run plans onto a
@@ -231,8 +230,7 @@ Group fc-tier1
 
 `free_space.soft`/`.hard` read `0 B` here because the fixture sets no
 `free_space` knob at all — the pre-section-5.3.1 default, unchanged. A
-config with a non-zero `free_space.soft` (or the deprecated
-`snapshot_reserve.min_free_bytes`, folded in) shows the resolved byte
+config with a non-zero `free_space.soft` shows the resolved byte
 count here, the same value `plan`/`explain`/`show-load` all enforce.
 
 The parenthesis after each value says where it came from, which is the part
@@ -245,8 +243,7 @@ per LUN:
 | `storage entry` | written on this storage's own `groups[].storages[]` entry |
 | `pattern /re/` | supplied by the `/…/` pattern entry that matched this storage |
 | `…, 10% of 30.00 TiB` | appended when the value was a percentage: the capacity it was converted against |
-| `folded from snapshot_reserve.min_free_bytes` | (soft only) the deprecated key was larger than the value written, so it raised the floor |
-| `= soft (no dip)` | (hard only) `hard` is null, so it equals the resolved soft — including a folded one |
+| `= soft (no dip)` | (hard only) `hard` is null, so it equals the resolved soft |
 
 `--json` carries the same strings as `free_space_soft_source` and
 `free_space_hard_source` beside the two byte counts.

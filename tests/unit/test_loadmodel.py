@@ -31,9 +31,12 @@ from proxmox_storage_drs.config import (
 )
 from proxmox_storage_drs.exceptions import BundleError, RangeStepMismatch
 from proxmox_storage_drs.loadmodel import (
+    DiskLoad,
     GroupLoad,
+    StorageLoad,
     _fetch_raw_quantity_series,
     _is_metrics_expected_absent,
+    apply_forecast,
     compute_disk_load_series,
     compute_group_load,
 )
@@ -70,7 +73,6 @@ def make_storage(id_: str, *, capability_weight: float = 1.0) -> Storage:
         id=id_,
         capability_weight=capability_weight,
         reserve_factor=2.0,
-        saturation_load=None,
         capacity_bytes=round(8.0 * TIB),
         used_bytes=0,
         foreign_used_bytes=0,
@@ -91,7 +93,7 @@ def make_storage(id_: str, *, capability_weight: float = 1.0) -> Storage:
 # workaround -- exercised on its own in test_metrics.py/test_loadmodel.py's
 # dedicated tests below -- stays a no-op here and every fixture below can
 # keep assuming the plain, unmodified query text/step.
-WINDOW = WindowConfig(lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.80)
+WINDOW = WindowConfig(lookback_seconds=300.0, quantile=0.95, min_coverage=0.80)
 METRICS = MetricsConfig(rate_window_seconds=600.0, step_seconds=300.0, labels=MetricLabels())
 PROM_CONFIG = PrometheusConfig(url="http://prom.example.com:9090")
 
@@ -1059,3 +1061,79 @@ def test_load_by_disk_key_matches_disks_tuple() -> None:
     result = compute_group_load(client, METRICS, WINDOW, LoadWeights(), group)
 
     assert result.load_by_disk_key() == {d.disk_key: d.load for d in result.disks}
+
+
+# ------------------------------------------------------------ apply_forecast
+
+
+def _forecast_fixture() -> tuple[Group, GroupLoad]:
+    group = Group(
+        name="g",
+        storages=(make_storage("san-a"), make_storage("san-b", capability_weight=2.0)),
+        disks=(
+            make_disk("101:scsi0", "san-a"),
+            make_disk("102:scsi0", "san-a"),
+            make_disk("103:scsi0", "san-b"),
+            make_disk("104:scsi0", "san-b"),
+        ),
+    )
+    load = GroupLoad(
+        group_name="g",
+        idle=False,
+        average_utilization=1.0,
+        disks=(
+            DiskLoad("101:scsi0", 2.0, None),
+            DiskLoad("102:scsi0", 1.0, None),
+            DiskLoad("103:scsi0", 3.0, None),
+            DiskLoad("104:scsi0", 4.0, "sample coverage 40% is below window.min_coverage (80%)"),
+        ),
+        storages=(
+            StorageLoad("san-a", 3.0, 3.0),
+            StorageLoad("san-b", 7.0, 3.5),
+        ),
+    )
+    return group, load
+
+
+def test_apply_forecast_scales_only_disks_with_a_factor_and_rebuilds_the_totals() -> None:
+    group, load = _forecast_fixture()
+    result = apply_forecast(load, group, {"101:scsi0": 1.5, "103:scsi0": 0.5})
+    assert result.load_by_disk_key() == {
+        "101:scsi0": 3.0,  # scaled
+        "102:scsi0": 1.0,  # no factor: unchanged
+        "103:scsi0": 1.5,  # scaled down
+        "104:scsi0": 4.0,  # flagged: unchanged
+    }
+    assert [(s.storage_id, s.load, s.utilization) for s in result.storages] == [
+        ("san-a", 4.0, 4.0),
+        ("san-b", 5.5, 2.75),  # capability_weight 2.0
+    ]
+    assert result.average_utilization == pytest.approx(9.5 / 3.0)
+
+
+def test_apply_forecast_never_scales_a_flagged_disk_even_if_a_factor_is_given() -> None:
+    group, load = _forecast_fixture()
+    result = apply_forecast(load, group, {"104:scsi0": 9.0})
+    assert result.load_by_disk_key()["104:scsi0"] == 4.0
+    assert result.disks[3].flagged_reason is not None
+
+
+def test_apply_forecast_with_no_factors_is_the_identity() -> None:
+    group, load = _forecast_fixture()
+    result = apply_forecast(load, group, {})
+    assert result.load_by_disk_key() == load.load_by_disk_key()
+    assert result.storages == load.storages
+
+
+def test_apply_forecast_leaves_idle_and_no_series_matched_alone() -> None:
+    group, load = _forecast_fixture()
+    idle = GroupLoad(
+        group_name=load.group_name,
+        idle=True,
+        average_utilization=load.average_utilization,
+        disks=load.disks,
+        storages=load.storages,
+        no_series_matched=True,
+    )
+    result = apply_forecast(idle, group, {"101:scsi0": 2.0})
+    assert result.idle and result.no_series_matched

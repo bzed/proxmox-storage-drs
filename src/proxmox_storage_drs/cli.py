@@ -26,7 +26,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -37,7 +37,6 @@ from proxmox_storage_drs.config import (
     ENV_CONFIG_VAR,
     ExcludeConfig,
     ExecutionConfig,
-    ForecastConfig,
     GatesConfig,
     MetricsConfig,
     MigrationConfig,
@@ -46,7 +45,7 @@ from proxmox_storage_drs.config import (
     load_config,
 )
 from proxmox_storage_drs.crashrecovery import reconcile_inflight
-from proxmox_storage_drs.exceptions import ConfigError, DrsError, MetricsError
+from proxmox_storage_drs.exceptions import BundleError, ConfigError, DrsError, MetricsError
 from proxmox_storage_drs.execute import (
     ConfirmCallback,
     ExecutionResult,
@@ -54,15 +53,7 @@ from proxmox_storage_drs.execute import (
     MoveOutcome,
     execute_plan,
 )
-from proxmox_storage_drs.forecast import (
-    Forecaster,
-    TimeSeries,
-    backtest_validated,
-    build_forecaster,
-    group_aggregate_series,
-    required_range_seconds,
-    storage_upper_bound,
-)
+from proxmox_storage_drs.forecast import ForecastReport, forecast_group, required_range_seconds
 from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
 from proxmox_storage_drs.heuristic import (
     Assignment,
@@ -76,7 +67,12 @@ from proxmox_storage_drs.heuristic import (
     raw_spread,
     run_heuristic,
 )
-from proxmox_storage_drs.loadmodel import GroupLoad, compute_disk_load_series, compute_group_load
+from proxmox_storage_drs.loadmodel import (
+    GroupLoad,
+    apply_forecast,
+    compute_disk_load_series,
+    compute_group_load,
+)
 from proxmox_storage_drs.logging_setup import (
     LOG_FORMATS,
     LOG_LEVELS,
@@ -98,7 +94,6 @@ from proxmox_storage_drs.payback import (
     compute_wipe_duration_seconds,
     evaluate_plan_payback,
     executed_assignment,
-    mirror_duration_seconds,
     repair_markers,
 )
 from proxmox_storage_drs.pve import PveClient
@@ -137,7 +132,6 @@ from proxmox_storage_drs.timewindow import current_deadline
 from proxmox_storage_drs.topology import (
     Disk,
     Group,
-    Storage,
     Topology,
     build_topology,
     format_disk_id,
@@ -1007,15 +1001,13 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
     load_errors: dict[str, str] = {}
     for group in topology.groups:
         try:
-            group_loads[group.name] = compute_group_load(
+            group_loads[group.name], _ = _compute_group_load(
                 prom_client,
-                resolved.config.metrics,
-                resolved.config.window,
-                resolved.config.load_weights,
+                resolved,
                 group,
-                last_known_loads=last_loads_by_group.get(group.name),
-                node_selector=node_selector,
-                now=now.timestamp(),
+                last_loads_by_group.get(group.name),
+                node_selector,
+                now,
             )
         except MetricsError as exc:
             # Section 4's load numbers are not safety-critical the way (C4)/
@@ -1142,15 +1134,6 @@ def _render_plan_payback_lines(
             + ", ".join(
                 format_disk_id(key, _vm_name_for(vm_name_by_key, key))
                 for key in payback_result.rejected_moves
-            )
-        )
-    if payback_result.deferred_moves:
-        lines.append(
-            "  ⚠ deferred: would push a target storage's I/O over migration."
-            "saturation_ceiling: "
-            + ", ".join(
-                format_disk_id(key, _vm_name_for(vm_name_by_key, key))
-                for key in payback_result.deferred_moves
             )
         )
     return lines
@@ -1335,6 +1318,7 @@ def _render_group_plan_json(
     group_load: GroupLoad | None,
     final_breakdown: ObjectiveBreakdown | None,
     load_error: str | None,
+    forecast: ForecastReport | None = None,
 ) -> dict[str, object]:
     """One group's worth of ``_render_plan_json()``'s report -- shared
     with ``_render_apply_json()`` (AGENTS.md section 5), which adds its
@@ -1424,13 +1408,12 @@ def _render_group_plan_json(
             "ratio": payback_result.ratio,
             "aggregate_ok": payback_result.aggregate_ok,
             "rejected_moves": list(payback_result.rejected_moves),
-            "deferred_moves": list(payback_result.deferred_moves),
             "accepted": payback_result.accepted,
             "repair_exempt": payback_result.repair_exempt,
             "reserve_shortfall_bytes_before": payback_result.reserve_shortfall_bytes_before,
             "reserve_shortfall_bytes_after": payback_result.reserve_shortfall_bytes_after,
         }
-    return {
+    out: dict[str, object] = {
         "name": group.name,
         "load_error": load_error,
         "gate": gate_out,
@@ -1447,6 +1430,9 @@ def _render_group_plan_json(
         "after_objective_total": after_objective_total,
         "payback": payback_out,
     }
+    if forecast is not None:
+        out["forecast"] = forecast.as_dict()
+    return out
 
 
 def _render_plan_json(
@@ -1458,6 +1444,7 @@ def _render_plan_json(
     payback_results: dict[str, PaybackResult],
     final_breakdowns: dict[str, ObjectiveBreakdown],
     load_errors: dict[str, str],
+    forecasts: dict[str, ForecastReport] | None = None,
 ) -> dict[str, object]:
     groups_out = [
         _render_group_plan_json(
@@ -1469,6 +1456,7 @@ def _render_plan_json(
             group_loads.get(group.name),
             final_breakdowns.get(group.name),
             load_errors.get(group.name),
+            (forecasts or {}).get(group.name),
         )
         for group in topology.groups
     ]
@@ -1745,6 +1733,21 @@ def _render_explain_data_source_line(resolved: ResolvedConfig, node_selector: st
     )
 
 
+def _render_forecast_line(report: ForecastReport) -> str:
+    """``explain``'s one line on what the forecast did to this group's loads."""
+    if not report.used:
+        return (
+            f"  forecast: {report.model} not used -- it did not beat the quantile baseline "
+            "on this group's recent history (or there is not enough of it yet); "
+            "loads are as observed"
+        )
+    return (
+        f"  forecast: {report.model} used (backtest error {report.backtest_error:.3g} vs "
+        f"baseline {report.baseline_error:.3g}): {report.disks_scaled} disks scaled to their "
+        f"forecast p95, {report.disks_kept} kept as observed"
+    )
+
+
 def _render_group_explain_human(
     group: Group, group_plan: "_GroupPlan", resolved: ResolvedConfig
 ) -> list[str]:
@@ -1768,6 +1771,8 @@ def _render_group_explain_human(
     load_by_key = group_plan.group_load.load_by_disk_key() if group_plan.group_load else {}
     assignment = group_plan.schedule_result.final_assignment if group_plan.schedule_result else None
     extra: list[str] = []
+    if group_plan.forecast is not None:
+        extra.append(_render_forecast_line(group_plan.forecast))
     if group_plan.final_breakdown is not None:
         extra.append(_render_objective_breakdown_line(group_plan.final_breakdown))
         if group_plan.decision.act and not group_plan.final_breakdown.moved_disk_keys:
@@ -1851,6 +1856,7 @@ def _render_group_explain_json(
         group_plan.group_load,
         group_plan.final_breakdown,
         group_plan.load_error,
+        group_plan.forecast,
     )
     load_by_key = group_plan.group_load.load_by_disk_key() if group_plan.group_load else {}
     # The measured load every other field above derives from -- identical
@@ -2047,6 +2053,7 @@ def _render_apply_json(
     final_breakdowns: dict[str, ObjectiveBreakdown],
     load_errors: dict[str, str],
     execution_results: dict[str, ExecutionResult],
+    forecasts: dict[str, ForecastReport] | None = None,
 ) -> dict[str, object]:
     """``plan``'s own JSON shape (section 9.5: "every mode emits the same
     machine-readable plan") plus one ``"execution"`` key per group --
@@ -2062,6 +2069,7 @@ def _render_apply_json(
             group_loads.get(group.name),
             final_breakdowns.get(group.name),
             load_errors.get(group.name),
+            (forecasts or {}).get(group.name),
         )
         group_out["execution"] = _render_execution_json(
             execution_results.get(group.name), _vm_name_map(group)
@@ -2083,7 +2091,7 @@ class _SolveOutcome:
 
     assignment: Assignment
     initial_breakdown: ObjectiveBreakdown
-    backend: str  # "cpsat" | "cbc" | "heuristic"
+    backend: str  # "cbc" | "heuristic"
     status: str | None  # "optimal" | "feasible" for a MILP backend, None for the heuristic
 
 
@@ -2094,7 +2102,7 @@ def _solve_group(
     cooldown_storages: frozenset[str],
 ) -> _SolveOutcome:
     """Section 5.5's backend dispatch. ``solver.backend: auto`` cascades
-    CP-SAT, then CBC, then the heuristic; an explicitly forced backend that
+    CBC, then the heuristic; an explicitly forced backend that
     cannot produce a plan (library not importable, or no feasible solution
     within ``solver.time_limit_seconds``) falls back to the heuristic too
     -- section 13's failure-mode table says plainly "solver infeasible or
@@ -2103,14 +2111,13 @@ def _solve_group(
     explicitly named (`docs/manual/10-configuration.md`'s own
     `solver.backend` text: forcing one is "to reproduce or compare a
     result", not to disable this safety net). A forced backend that falls
-    back anyway is logged at warning -- an operator who asked for `cpsat`
+    back anyway is logged at warning -- an operator who asked for `cbc`
     specifically should not have to diff `--json` output to notice `auto`
     quietly happened instead.
     """
     solver = resolved.config.solver
     cascade = {
-        "auto": ("cpsat", "cbc"),
-        "cpsat": ("cpsat",),
+        "auto": ("cbc",),
         "cbc": ("cbc",),
         "heuristic": (),
     }[solver.backend]
@@ -2190,147 +2197,127 @@ class _GroupPlan:
     # run's plan has run -- or as things stand now when the gate decided not to
     # act. Only the monitoring status file reads it (section 2.4).
     shortfall_bytes: int = 0
+    # Section 12.1 point 6: what the Holt-Winters forecast did to this group's
+    # loads. ``None`` under the default ``quantile`` model (nothing was forecast)
+    # and for an idle group, so those reports stay byte-identical.
+    forecast: ForecastReport | None = None
 
 
-def _saturation_forecast_inputs(
+def _note_forecast(
+    forecasts: dict[str, ForecastReport], group: Group, group_plan: _GroupPlan
+) -> None:
+    """Remember a group's forecast report, if it has one, for the JSON report."""
+    if group_plan.forecast is not None:
+        forecasts[group.name] = group_plan.forecast
+
+
+def _log_forecast(group: Group, report: ForecastReport) -> None:
+    """Section 12.1 point 6: one line per group, not one per disk. A failed
+    backtest is a WARNING (an operator who selected ``holt_winters`` should know
+    it is not being used); a used forecast is INFO, part of the audit trail."""
+    extra: dict[str, object] = {"group": group.name, **report.as_dict()}
+    if report.used:
+        logger.info(
+            "group %s: forecast %s used (backtest err %.3g vs baseline %.3g), "
+            "%d disks scaled, %d kept",
+            group.name,
+            report.model,
+            report.backtest_error,
+            report.baseline_error,
+            report.disks_scaled,
+            report.disks_kept,
+            extra={"event": "forecast_used", **extra},
+        )
+        return
+    logger.warning(
+        "group %s: forecast.model %r did not beat the quantile baseline on this group's own "
+        "recent history (or there is not enough history yet to check); using the quantile "
+        "model for this run",
+        group.name,
+        report.model,
+        extra={"event": "forecast_backtest_failed", **extra},
+    )
+
+
+def _compute_group_load(
     prom_client: PrometheusClient,
     resolved: ResolvedConfig,
     group: Group,
-    now: datetime,
+    last_known_loads: Mapping[str, float] | None,
     node_selector: str | None,
-) -> tuple[Forecaster, dict[str, TimeSeries]] | None:
-    """Section 7.3's saturation guard needs a forecaster and every disk's
-    own load history -- but only when at least one storage in ``group``
-    actually configures ``saturation_load``. Returns ``None`` to skip the
-    guard entirely otherwise, matching the plan's own words literally: a
-    group that leaves it unset everywhere "loses only this one advisory
-    check", at no Prometheus cost -- fetching a history no storage in
-    this group could ever use would contradict that.
-
-    ``range_seconds`` is at least the *configured forecaster's* own
-    requirement (``forecast.required_range_seconds()``), not ``window.lookback``
-    -- section 10.1's own "genuinely different things"
-    (`docs/internals/20-forecasting.md`) -- but, for a model
-    ``_backtest_gated_forecaster()`` below actually backtests
-    (``seasonal_naive``/``holt_winters``; ``quantile`` never is), never less
-    than ``2 * window.lookback_seconds`` either: the backtest fits on
-    ``[now-2W, now-W)`` and checks against ``[now-W, now]`` (section 10.2),
-    so it needs a full ``2W`` of history regardless of how little the
-    forecaster itself demands. A model tuned to the plan's own minimum --
-    ``required_range_seconds() == window.lookback_seconds``, e.g.
-    ``holt_winters`` with ``2 * seasonal_periods * step == lookback`` --
-    would otherwise have its backtest fit half fall entirely outside the
-    fetched series every single run, `backtest_error()` always returning
-    `None` for "not enough history" regardless of how much real history
-    Prometheus actually has. ``quantile`` is left alone: widening it would
-    only add Prometheus cost this model never spends.
-    """
-    if not any(s.saturation_load is not None for s in group.storages):
-        return None
-    forecast_config = resolved.config.forecast
-    window = resolved.config.window
-    metrics = resolved.config.metrics
-    range_seconds = required_range_seconds(
-        forecast_config, window.lookback_seconds, metrics.step_seconds
-    )
-    if forecast_config.model != "quantile":
-        range_seconds = max(range_seconds, 2 * window.lookback_seconds)
-    now_epoch = now.timestamp()
-    forecaster = build_forecaster(
-        forecast_config,
-        window.lookback_seconds,
-        metrics.step_seconds,
-        now_epoch,
-        window.quantile,
-        window.upper_quantile,
-    )
-    disk_series = compute_disk_load_series(
+    now: datetime,
+) -> tuple[GroupLoad, ForecastReport | None]:
+    """``compute_group_load()``, then -- only for ``forecast.model:
+    holt_winters`` -- each disk's ``l_d`` scaled by its Holt-Winters forecast
+    (section 12.1). The one place both ``show-load`` and ``plan``/``apply`` get a
+    group's load from, so a group's gates and its plan see the same ``l``. The
+    default ``quantile`` model issues exactly the queries it always did and
+    returns no report; an idle group is not forecast (nothing to scale)."""
+    config = resolved.config
+    group_load = compute_group_load(
         prom_client,
-        metrics,
-        resolved.config.load_weights,
+        config.metrics,
+        config.window,
+        config.load_weights,
         group,
-        range_seconds,
-        metrics.step_seconds,
-        now_epoch,
+        last_known_loads=last_known_loads,
         node_selector=node_selector,
+        now=now.timestamp(),
     )
-    forecaster = _backtest_gated_forecaster(
-        forecaster, forecast_config, resolved, disk_series, now_epoch, window.lookback_seconds
+    if config.forecast.model != "holt_winters" or group_load.idle:
+        return group_load, None
+    window_seconds = config.window.lookback_seconds
+    step_seconds = config.metrics.step_seconds
+    # The backtest fits on [now-2W, now-W), so 2W is a floor whatever the
+    # model's own requirement is.
+    range_seconds = max(
+        required_range_seconds(config.forecast, window_seconds, step_seconds), 2 * window_seconds
     )
-    return forecaster, disk_series
-
-
-def _backtest_gated_forecaster(
-    forecaster: Forecaster,
-    forecast_config: ForecastConfig,
-    resolved: ResolvedConfig,
-    disk_series: dict[str, TimeSeries],
-    now_epoch: float,
-    window_seconds: float,
-) -> Forecaster:
-    """Section 10.2/phase 9's backtest validation gate: ``quantile``
-    itself is never backtested (no fitting occurs, so there is nothing to
-    validate and nothing more conservative to fall back to);
-    ``seasonal_naive``/``holt_winters`` must have actually predicted the
-    group's own recent past accurately (``forecast.backtest_validated()``,
-    within ``gates.imbalance_threshold``) before section 7.3's saturation
-    guard trusts them at all. A model that fails -- or that cannot yet be
-    validated for lack of history -- falls back to ``quantile`` for this
-    run, logged once at warning; a fresh deployment is not given a free
-    pass just because it has no track record yet
-    (`forecast.backtest_validated()`'s own docstring)."""
-    if forecast_config.model == "quantile":
-        return forecaster
-    aggregate = group_aggregate_series(disk_series)
-    threshold = resolved.config.gates.imbalance_threshold
-    if backtest_validated(forecaster, aggregate, now_epoch, window_seconds, threshold):
-        return forecaster
-    logger.warning(
-        "forecast.model %r did not accurately predict this group's own recent history (or "
-        "there is not enough history yet to check); using the simpler quantile model for "
-        "this run's saturation guard instead",
-        forecast_config.model,
-        extra={"event": "forecast_backtest_failed", "model": forecast_config.model},
-    )
-    window = resolved.config.window
-    return build_forecaster(
-        dataclasses.replace(forecast_config, model="quantile"),
+    try:
+        disk_series = compute_disk_load_series(
+            prom_client,
+            config.metrics,
+            config.load_weights,
+            group,
+            range_seconds,
+            step_seconds,
+            now.timestamp(),
+            node_selector=node_selector,
+        )
+    except (MetricsError, BundleError) as exc:
+        # The observed load is already in hand; a forecast that cannot be
+        # fetched (the widest-range query this tool issues, so the likeliest
+        # to time out) degrades to the quantile model like any other failed
+        # forecast, never to "no plan for this group". BundleError is the
+        # --replay counterpart of a Prometheus with less than 2W of history:
+        # a bundle captured over less than the backtest needs.
+        report = ForecastReport(
+            model=config.forecast.model,
+            used=False,
+            backtest_error=None,
+            baseline_error=None,
+            disks_scaled=0,
+            disks_kept=len(group_load.disks),
+        )
+        logger.warning(
+            "group %s: forecast history unavailable (%s); using the quantile model for this run",
+            group.name,
+            exc,
+            extra={"event": "forecast_history_unavailable", "group": group.name},
+        )
+        return group_load, report
+    flagged = {d.disk_key for d in group_load.disks if d.flagged_reason is not None}
+    factors, report = forecast_group(
+        disk_series,
+        flagged,
+        config.forecast,
+        now.timestamp(),
         window_seconds,
-        resolved.config.metrics.step_seconds,
-        now_epoch,
-        window.quantile,
-        window.upper_quantile,
+        step_seconds,
+        config.window.quantile,
     )
-
-
-def _compute_one_move_cost(
-    move: ScheduledMove,
-    storages_by_id: dict[str, Storage],
-    group: Group,
-    migration: MigrationConfig,
-    saturation_inputs: tuple[Forecaster, dict[str, TimeSeries]] | None,
-) -> MoveCost:
-    """One move's section 7.1 cost, plus (only when ``saturation_inputs``
-    is not ``None``) section 7.3's saturation defer check -- computing
-    each endpoint's own ``L_hat_s(duration_mirror)`` from its *currently*
-    resident disks (`payback.compute_move_cost()`'s own docstring on why
-    not the moving disk's hypothetical arrival) before handing off to the
-    pure cost function. Factored out of `_plan_group()`'s own list
-    comprehension purely to stay within this project's flake8 complexity
-    limit."""
-    source = storages_by_id[move.from_storage]
-    if saturation_inputs is None:
-        return compute_move_cost(move, source, migration)
-    forecaster, disk_series = saturation_inputs
-    target = storages_by_id[move.to_storage]
-    horizon = timedelta(seconds=mirror_duration_seconds(move, migration))
-    src_keys = [d.key for d in group.disks if d.current_storage == move.from_storage]
-    dst_keys = [d.key for d in group.disks if d.current_storage == move.to_storage]
-    l_hat_src = storage_upper_bound(forecaster, disk_series, src_keys, horizon)
-    l_hat_dst = storage_upper_bound(forecaster, disk_series, dst_keys, horizon)
-    return compute_move_cost(
-        move, source, migration, target=target, l_hat_src=l_hat_src, l_hat_dst=l_hat_dst
-    )
+    _log_forecast(group, report)
+    return apply_forecast(group_load, group, factors), report
 
 
 def _log_load_digest(group: Group, group_load: GroupLoad) -> None:
@@ -2448,7 +2435,6 @@ def _log_payback_verdict(group: Group, payback: PaybackResult, required_ratio: f
             "ratio": payback.ratio,
             "required_ratio": required_ratio,
             "rejected_moves": list(payback.rejected_moves),
-            "deferred_moves": list(payback.deferred_moves),
             "repair_exempt": payback.repair_exempt,
             "reserve_shortfall_bytes_before": payback.reserve_shortfall_bytes_before,
             "reserve_shortfall_bytes_after": payback.reserve_shortfall_bytes_after,
@@ -2472,15 +2458,13 @@ def _plan_group(
     invocation by the caller (a live PVE client is not otherwise needed
     here)."""
     try:
-        group_load = compute_group_load(
+        group_load, forecast = _compute_group_load(
             prom_client,
-            resolved.config.metrics,
-            resolved.config.window,
-            resolved.config.load_weights,
+            resolved,
             group,
-            last_known_loads=last_loads_by_group.get(group.name),
-            node_selector=node_selector,
-            now=now.timestamp(),
+            last_loads_by_group.get(group.name),
+            node_selector,
+            now,
         )
     except MetricsError as exc:
         # Section 6: gating (and so planning) cannot proceed without a
@@ -2511,6 +2495,7 @@ def _plan_group(
             group_load=group_load,
             decision=decision,
             shortfall_bytes=total_shortfall_bytes(group.storages, group.disks),
+            forecast=forecast,
         )
 
     cooldown_storages = frozenset(
@@ -2546,20 +2531,8 @@ def _plan_group(
     )
 
     storages_by_id = {s.id: s for s in group.storages}
-    # Only when there is a move to cost (REVIEW.md T-07): a fully
-    # deadlocked plan (`order` empty) has no `_compute_one_move_cost()`
-    # call to feed, so skip the guard's own `query_range` fetches
-    # entirely rather than pay for up to 7 days of history at a 5-minute
-    # step and throw the result away unused.
-    saturation_inputs = (
-        _saturation_forecast_inputs(prom_client, resolved, group, now, node_selector)
-        if schedule_result.order
-        else None
-    )
     move_costs = [
-        _compute_one_move_cost(
-            move, storages_by_id, group, resolved.config.migration, saturation_inputs
-        )
+        compute_move_cost(move, storages_by_id[move.from_storage], resolved.config.migration)
         for move in schedule_result.order
     ]
     spread_metric = resolved.config.objective.spread_metric
@@ -2577,13 +2550,11 @@ def _plan_group(
     )
     # Section 7.3's outcome trigger and revert test both score the plan's
     # *executed* endpoint -- final_assignment with every disk a hard
-    # per-move rule has taken out (exceeds_max_duration/saturation_deferred,
-    # both already known from move_costs) held back at its current storage
+    # per-move rule has taken out (exceeds_max_duration, already
+    # known from move_costs) held back at its current storage
     # -- not the solver's raw target. "What it will really run", not merely
     # "what got ordered".
-    excluded_disk_keys = frozenset(
-        mc.disk_key for mc in move_costs if mc.exceeds_max_duration or mc.saturation_deferred
-    )
+    excluded_disk_keys = frozenset(mc.disk_key for mc in move_costs if mc.exceeds_max_duration)
     executed_final_assignment = executed_assignment(
         group, schedule_result.final_assignment, excluded_disk_keys
     )
@@ -2612,6 +2583,7 @@ def _plan_group(
         final_breakdown=final_breakdown,
         payback_result=payback_result,
         shortfall_bytes=final_shortfall_bytes,
+        forecast=forecast,
     )
 
 
@@ -2638,6 +2610,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
     payback_results: dict[str, PaybackResult] = {}
     final_breakdowns: dict[str, ObjectiveBreakdown] = {}
     load_errors: dict[str, str] = {}
+    forecasts: dict[str, ForecastReport] = {}
 
     for group in topology.groups:
         group_plan = _plan_group(
@@ -2655,6 +2628,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
         assert group_plan.group_load is not None and group_plan.decision is not None
         group_loads[group.name] = group_plan.group_load
         gate_decisions[group.name] = group_plan.decision
+        _note_forecast(forecasts, group, group_plan)
         if not group_plan.decision.act:
             continue
         assert (
@@ -2680,6 +2654,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                     payback_results,
                     final_breakdowns,
                     load_errors,
+                    forecasts,
                 ),
             )
         )
@@ -2829,25 +2804,16 @@ def _make_inflight_callbacks(
 def _refused_move_outcomes(
     order: tuple[ScheduledMove, ...], payback: PaybackResult
 ) -> list[MoveOutcome]:
-    """The two section 7.3 per-move exclusions -- the hard duration rule
-    (``rejected_moves``) and the best-effort saturation guard
-    (``deferred_moves``) -- rendered as ``"skipped"`` outcomes, in that
-    priority order for a move flagged by both (the hard rule is the more
-    definitive reason). Factored out of :func:`_apply_payback_gate` purely
-    to stay within this project's flake8 complexity limit."""
+    """Section 7.3's hard per-move duration rule (``rejected_moves``)
+    rendered as ``"skipped"`` outcomes. Factored out of
+    :func:`_apply_payback_gate` purely to stay within this project's flake8
+    complexity limit."""
     rejected_keys = set(payback.rejected_moves)
-    deferred_keys = set(payback.deferred_moves)
     outcomes: list[MoveOutcome] = []
     for m in order:
-        if m.disk_key in rejected_keys:
-            detail = "refused: would take longer than migration.max_single_move_duration allows"
-        elif m.disk_key in deferred_keys:
-            detail = (
-                "deferred: would push a target storage's I/O over migration."
-                "saturation_ceiling -- re-evaluate on a later run"
-            )
-        else:
+        if m.disk_key not in rejected_keys:
             continue
+        detail = "refused: would take longer than migration.max_single_move_duration allows"
         outcomes.append(MoveOutcome(m.disk_key, m.from_storage, m.to_storage, "skipped", detail))
     return outcomes
 
@@ -2869,8 +2835,7 @@ def _apply_payback_gate(
 ) -> ExecutionResult:
     """Section 7.3's payback verdict gates *execution*, not merely the
     report (REVIEW.md S-02): a move `rejected_moves` names (the hard
-    per-move `migration.max_single_move_duration` rule) or `deferred_moves`
-    names (the best-effort saturation guard) must never reach `execute.py`
+    per-move `migration.max_single_move_duration` rule) must never reach `execute.py`
     regardless of the plan's aggregate economics, and a plan that fails
     the aggregate economic test (``not aggregate_ok``) must not be
     executed at all. This is the same "report, never force" policy
@@ -2905,7 +2870,7 @@ def _apply_payback_gate(
     assert group_plan.schedule_result is not None and group_plan.payback_result is not None
     order = group_plan.schedule_result.order
     payback = group_plan.payback_result
-    excluded_keys = set(payback.rejected_moves) | set(payback.deferred_moves)
+    excluded_keys = set(payback.rejected_moves)
     refused = _refused_move_outcomes(order, payback)
 
     if not payback.aggregate_ok:
@@ -3342,6 +3307,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
     final_breakdowns: dict[str, ObjectiveBreakdown] = {}
     load_errors: dict[str, str] = {}
     execution_results: dict[str, ExecutionResult] = {}
+    forecasts: dict[str, ForecastReport] = {}
 
     try:
         client = _pve_client_for(resolved, args)
@@ -3384,6 +3350,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
             assert group_plan.group_load is not None and group_plan.decision is not None
             group_loads[group.name] = group_plan.group_load
             gate_decisions[group.name] = group_plan.decision
+            _note_forecast(forecasts, group, group_plan)
             _note_shortfall_for_status(args, group, group_plan)
             if not group_plan.decision.act:
                 continue
@@ -3502,6 +3469,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     final_breakdowns,
                     load_errors,
                     execution_results,
+                    forecasts,
                 ),
             )
         )

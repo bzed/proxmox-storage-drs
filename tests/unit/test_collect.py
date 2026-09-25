@@ -190,37 +190,32 @@ def capture(tmp_path: Path, **config_overrides: Any) -> collect.Bundle:
 # --------------------------------------------------------------------- estimate
 
 
-def test_capture_range_seconds_auto_is_the_union_maximum(tmp_path: Path) -> None:
+def test_capture_range_seconds_auto_covers_what_holt_winters_needs(tmp_path: Path) -> None:
+    """Even when the configured model is ``quantile``, the bundle is captured
+    with what ``holt_winters`` would need (2 * seasonal_periods * step here),
+    so a bundle can be replayed under either model."""
     resolved = make_config(
         tmp_path,
-        window={"lookback": "24h"},
-        forecast={
-            "model": "quantile",
-            "seasonal_lookback_days": 7,
-            "holt_winters": {"seasonal_periods": 288},
-        },
+        window={"lookback": "12h"},
+        forecast={"model": "quantile", "holt_winters": {"seasonal_periods": 288}},
     )
     seconds = collect.capture_range_seconds(resolved.config, None)
-    assert seconds == 7 * 86400.0  # seasonal_lookback_days dominates here
+    assert seconds == 2 * 288 * 300.0
 
 
-def test_capture_range_seconds_covers_twice_the_lookback_for_the_backtest_gate(
+def test_capture_range_seconds_covers_twice_the_lookback_for_the_backtest(
     tmp_path: Path,
 ) -> None:
-    """Section 10.2's backtest gate fits on ``[now-2W, now-W)`` and checks
-    against ``[now-W, now]`` for whichever of ``seasonal_naive``/
-    ``holt_winters`` a bundle is replayed with -- a capture sized only to
-    each forecaster's own (smaller) minimum would leave that fit half
-    permanently outside the captured series, so ``2 * window.lookback``
-    must be one of the terms in the union regardless of the *configured*
-    model, the same "superset, not the configured path" reasoning that
-    already governs every other term here."""
+    """Section 10.2's backtest fits on ``[now-2W, now-W)`` and checks against
+    ``[now-W, now]`` -- a capture sized only to the model's own (smaller)
+    minimum would leave that fit half permanently outside the captured series,
+    so ``2 * window.lookback`` must be one of the terms in the union
+    regardless of the *configured* model."""
     resolved = make_config(
         tmp_path,
         window={"lookback": "50h"},  # 180000s
         forecast={
             "model": "quantile",
-            "seasonal_lookback_days": 1,  # 86400s
             "holt_winters": {"seasonal_periods": 10},  # 2*10*300 = 6000s
         },
     )

@@ -192,7 +192,6 @@ class Storage:
     id: str
     capability_weight: float
     reserve_factor: float
-    saturation_load: float | None
     capacity_bytes: int
     used_bytes: int
     foreign_used_bytes: int  # U^ext, section 5.1.1
@@ -200,7 +199,7 @@ class Storage:
     saferemove_throughput_bytes_per_sec: float | None
     # soft_s / hard_s (section 5.3.1), resolved per storage at run start:
     # plain byte constants, already through pattern-inheritance, percent
-    # conversion and the deprecated min_free_bytes fold -- nothing
+    # conversion -- nothing
     # downstream (reserve.py, the solver, the scheduler, execute.py's live
     # re-check) ever looks at free_space config again.
     free_space_soft_bytes: int
@@ -302,27 +301,17 @@ def _resolve_free_space(
     entry_level: str,
     config: Config,
     capacity_bytes: int,
-    warnings: list[str],
 ) -> ResolvedFreeSpace:
     """Section 5.3.1: resolve ``soft_s``/``hard_s`` for one storage.
 
-    The mandated order -- inheritance, then percent-to-bytes conversion,
-    then section 11.1's two hard rules against the *written* values, and
-    only then the deprecated ``min_free_bytes`` fold ("validate as written,
-    then fold"): checking ``hard <= soft`` after the fold would let a
-    written ``hard > soft`` hide behind a large ``min_free_bytes`` and
-    surface as a startup failure only once the operator deletes the
-    deprecated key; checking ``soft < C_s`` after the fold would turn an
-    oversized *deprecated* floor -- never a startup failure, section 9.5's
-    permanent shortfall today -- into a new one.
+    The mandated order -- inheritance, then percent-to-bytes conversion, then
+    section 11.1's two hard rules against the resolved values.
 
     Raises :class:`TopologyError` for either hard rule; both need ``C_s``,
     so -- like section 11.4's pattern rules -- they live here, once the
-    cluster inventory is loaded, not in ``config.py``. The oversized-
-    deprecated-floor case is a warning, appended to ``warnings`` in place,
-    never an error (section 11.1's resolution rules). A null ``hard`` (the
-    global default) resolves to the *folded* ``soft_s``, so the deprecated
-    floor stays charged on every in-flight state (section 8.1).
+    cluster inventory is loaded, not in ``config.py``. A null ``hard`` (the
+    global default) resolves to ``soft_s``, so the requirement stays charged
+    on every in-flight state (section 8.1).
 
     ``entry_level`` names the config entry that supplied a per-storage
     value -- ``"storage entry"`` or ``"pattern /re/"`` -- for the
@@ -338,9 +327,7 @@ def _resolve_free_space(
     hard_level = _free_space_level(hard_value, entry_level)
     if hard_value is None:
         hard_value = config.free_space.hard
-    # ``None`` here is the *global* null -- "no dip below soft" -- and is
-    # settled after the fold below, so it tracks the folded soft rather than
-    # the pre-fold one. A written ``hard`` is validated and kept as written.
+    # ``None`` here is the *global* null -- "no dip below soft".
     hard_written = (
         None if hard_value is None else _resolve_free_space_value(hard_value, capacity_bytes)
     )
@@ -358,25 +345,10 @@ def _resolve_free_space(
             "could ever leave room for"
         )
 
-    soft_bytes = max(soft_written, config.snapshot_reserve.min_free_bytes)
-    if soft_bytes >= capacity_bytes and soft_written < capacity_bytes:
-        warnings.append(
-            f"storage {storage_cfg.id!r}: snapshot_reserve.min_free_bytes "
-            f"({config.snapshot_reserve.min_free_bytes} bytes) exceeds its capacity "
-            f"({capacity_bytes} bytes) once folded into free_space.soft -- this storage "
-            "will report a permanent unfixable shortfall every run until the deprecated "
-            "key is lowered or removed"
-        )
-    soft_source = (
-        "folded from snapshot_reserve.min_free_bytes"
-        if soft_bytes > soft_written
-        else _free_space_source(soft_value, soft_level, capacity_bytes)
-    )
+    soft_bytes = soft_written
+    soft_source = _free_space_source(soft_value, soft_level, capacity_bytes)
     if hard_written is None:
-        # Section 5.3.1: ``hard: null`` means ``hard_s = soft_s`` -- the
-        # *folded* soft, so a deprecated-key-only config keeps section
-        # 8.1's transient charge as strong as the built
-        # ``max(f*max(Z,z), min_free_bytes)``.
+        # Section 5.3.1: ``hard: null`` means ``hard_s = soft_s``.
         return ResolvedFreeSpace(soft_bytes, soft_bytes, soft_source, "= soft (no dip)")
     assert hard_value is not None
     return ResolvedFreeSpace(
@@ -482,7 +454,6 @@ def _match_pattern_entries(
                 id=sid,
                 capability_weight=storage_cfg.capability_weight,
                 reserve_factor=storage_cfg.reserve_factor,
-                saturation_load=storage_cfg.saturation_load,
                 free_space_soft=storage_cfg.free_space_soft,
                 free_space_hard=storage_cfg.free_space_hard,
             )
@@ -1065,7 +1036,7 @@ def _build_storages(
         throughput = definition.get("saferemove_throughput")
         capacity_bytes = int(status["total"])
         free_space = _resolve_free_space(
-            storage_cfg, _entry_level(group_cfg, sid), config, capacity_bytes, warnings
+            storage_cfg, _entry_level(group_cfg, sid), config, capacity_bytes
         )
         storage_type = str(definition.get("type", ""))
         storages.append(
@@ -1073,7 +1044,6 @@ def _build_storages(
                 id=sid,
                 capability_weight=storage_cfg.capability_weight,
                 reserve_factor=_resolve_reserve_factor(storage_cfg, config),
-                saturation_load=storage_cfg.saturation_load,
                 capacity_bytes=capacity_bytes,
                 used_bytes=int(status["used"]),
                 foreign_used_bytes=foreign_bytes,

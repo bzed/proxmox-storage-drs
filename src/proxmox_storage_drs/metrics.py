@@ -572,7 +572,7 @@ def parse_disk_range_series(
     ``query_range`` ``result`` list (each series carrying ``values``, a
     ``[[timestamp, value_str], ...]`` matrix, rather than one ``value``)
     into ``{DiskKey: TimeSeries}`` -- section 10's raw material for a
-    :class:`~proxmox_storage_drs.forecast.Forecaster`, and
+    Holt-Winters forecast (:mod:`~proxmox_storage_drs.forecast`), and
     ``loadmodel.compute_disk_load_series()``'s own input before its section
     4 blend. Skips a series missing either label, identically to
     :func:`parse_disk_series` and for the same reason."""
@@ -933,61 +933,67 @@ def _check_observed_spacing(
     client: PrometheusClient,
     metrics: MetricsConfig,
     selector: str | None = None,
-    now: float | None = None,
 ) -> tuple[list[Finding], float | None]:
     """Section 3.3 step 6: observed sample spacing vs. ``pvestatd_push_interval``.
 
-    Measures the modal delta between consecutive timestamps of one live
-    series over a short recent range, since that is what the ``rate_window
-    >= 4x`` rule (section 11.1) is actually protecting.
+    Counts the raw samples of every ``read_ops`` series over a short recent
+    window with one instant ``count_over_time()`` query, and takes the median
+    of ``window / count`` across series. Not a ``query_range`` at some step:
+    that returns one point per *step* (each filled from the latest sample
+    within the staleness window), so the "spacing" it shows is just the step
+    asked for, and a probe stepped at ``pvestatd_push_interval`` could never
+    disagree with it. Not a raw range vector either: gigapipe returns a
+    thinned-out set of points for ``metric[window]`` (300s apart against a
+    real 10s push, confirmed live), while its ``count_over_time()`` over the
+    same window counts every sample.
 
-    ``now`` defaults to the real wall clock (``time.time()``), correct for
-    the live ``verify-metrics`` command; ``collect.py`` passes its own
-    controlled capture instant instead, so this probe's window -- and thus
-    the bundle byte it produces -- does not depend on the real time a
-    capture happened to run at (section 16.1's determinism requirement).
+    The spacing is what the ``rate_window >= 4x`` rule (section 11.1) is
+    actually protecting.
     """
-    metric_name = metrics.read_ops
-    if selector:
-        metric_name = f"{metric_name}{{{selector}}}"
-    probe_window_seconds = max(metrics.pvestatd_push_interval_seconds * 20, 600.0)
-    end = now if now is not None else time.time()
-    start = end - probe_window_seconds
+    window_seconds = max(metrics.pvestatd_push_interval_seconds * 20, 600.0)
+    scope = f"{{{selector}}}" if selector else ""
+    promql = (
+        f"count_over_time({metrics.read_ops}{scope}" f"[{_format_promql_duration(window_seconds)}])"
+    )
     try:
-        result = client.range_query(metric_name, start, end, metrics.pvestatd_push_interval_seconds)
+        result = client.instant_query(promql)
     except MetricsError as exc:
         return [Finding("error", f"spacing check failed: {exc}")], None
 
+    spacings = []
     for series in result:
-        timestamps = [point[0] for point in series.get("values", [])]
-        if len(timestamps) < 2:
+        try:
+            count = float(series.get("value", [0.0, "0"])[1])
+        except (IndexError, TypeError, ValueError):
             continue
-        deltas = [b - a for a, b in zip(timestamps, timestamps[1:])]
-        spacing = statistics.mode(deltas)
-        findings: list[Finding] = []
-        configured = metrics.pvestatd_push_interval_seconds
-        relative_diff = abs(spacing - configured) / configured if configured else float("inf")
-        if relative_diff > 0.20:
-            findings.append(
-                Finding(
-                    "error",
-                    f"observed sample spacing {spacing:g}s disagrees with "
-                    f"metrics.pvestatd_push_interval ({configured:g}s) by more than 20%",
-                )
-            )
-        if metrics.rate_window_seconds < 4 * spacing:
-            findings.append(
-                Finding(
-                    "error",
-                    f"metrics.rate_window ({metrics.rate_window_seconds:g}s) is below 4x "
-                    f"the observed sample spacing ({spacing:g}s)",
-                )
-            )
-        return findings, spacing
+        if count >= 2:
+            spacings.append(window_seconds / count)
+    if not spacings:
+        return [
+            Finding("warning", f"{metrics.read_ops}: no series with >=2 samples to measure spacing")
+        ], None
 
-    return [
-        Finding("warning", f"{metric_name}: no series with >=2 samples to measure spacing")
-    ], None
+    spacing = statistics.median(spacings)
+    findings: list[Finding] = []
+    configured = metrics.pvestatd_push_interval_seconds
+    relative_diff = abs(spacing - configured) / configured if configured else float("inf")
+    if relative_diff > 0.20:
+        findings.append(
+            Finding(
+                "error",
+                f"observed sample spacing {spacing:g}s disagrees with "
+                f"metrics.pvestatd_push_interval ({configured:g}s) by more than 20%",
+            )
+        )
+    if metrics.rate_window_seconds < 4 * spacing:
+        findings.append(
+            Finding(
+                "error",
+                f"metrics.rate_window ({metrics.rate_window_seconds:g}s) is below 4x "
+                f"the observed sample spacing ({spacing:g}s)",
+            )
+        )
+    return findings, spacing
 
 
 def verify_metrics(
@@ -1001,8 +1007,8 @@ def verify_metrics(
 
     Must be run before relying on any plan (section 3.3); ``cli.py``'s
     ``verify-metrics`` command is this function plus formatting. ``now``
-    is forwarded to :func:`_check_observed_spacing` -- see its docstring;
-    the live command leaves it as the real wall clock.
+    is forwarded to :func:`_check_coverage`'s range probe; the live command
+    leaves it as the real wall clock.
     """
     # `verify-metrics` never talks to the PVE API (`resolve_node_selector()`'s
     # own docstring), so only an explicit `metrics.extra_selector` narrows
@@ -1021,7 +1027,7 @@ def verify_metrics(
         client, metrics, window, selector=selector, now=now
     )
     findings.extend(coverage_findings)
-    spacing_findings, spacing = _check_observed_spacing(client, metrics, selector=selector, now=now)
+    spacing_findings, spacing = _check_observed_spacing(client, metrics, selector=selector)
     findings.extend(spacing_findings)
 
     return VerifyMetricsReport(
