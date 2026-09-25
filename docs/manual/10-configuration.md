@@ -1271,11 +1271,15 @@ deliberately, not a reason to keep the range artificially small.
 
 ### `forecast.holt_winters.trend`
 
-One of `add`, `mul`, `none`; default `add`.
+One of `add`, `mul`, `none`; default `none`.
 
 The trend component passed to the underlying Holt-Winters fit
 (`statsmodels`, an optional dependency — see
-[`30-safety-and-status.md`](30-safety-and-status.md)).
+[`30-safety-and-status.md`](30-safety-and-status.md)). The forecast runs a whole
+`window.lookback` ahead, and a trend is extrapolated undamped over all of it: on a
+real cluster `add` scored no better in the backtest than `none` but forecast a
+single disk at 95% of its whole group's load. Enable a trend only for load that
+really grows steadily, and check the `forecast` block's scaled disks afterwards.
 
 ### `forecast.holt_winters.seasonal`
 

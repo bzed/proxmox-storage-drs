@@ -28,7 +28,7 @@ from proxmox_storage_drs.forecast import (
 
 DAY = 86400.0
 STEP = 3600.0
-HW = HoltWintersConfig(seasonal_periods=24)  # a daily cycle at a 1h step
+HW = HoltWintersConfig(seasonal_periods=24)  # a daily cycle at a 1h step, no trend
 
 
 def series_of(n: int, fn: Any) -> TimeSeries:
@@ -128,7 +128,8 @@ def test_holt_winters_quantile_follows_a_rising_trend_above_the_observed_p95() -
         24 * 6, lambda i: 10 + 0.1 * i + 3 * math.sin(2 * math.pi * i / 24) + rng.uniform(-0.2, 0.2)
     )
     observed = _quantile([v for _, v in series[-24:]], 0.95)
-    result = holt_winters_quantile(series, HW, STEP, DAY, 0.95)
+    hw = HoltWintersConfig(seasonal_periods=24, trend="add")  # the default is "none"
+    result = holt_winters_quantile(series, hw, STEP, DAY, 0.95)
     assert result is not None and result > observed
 
 
@@ -333,7 +334,8 @@ NOW = 96 * STEP
 
 def test_backtest_passes_on_a_seasonal_series_with_a_trend() -> None:
     pytest.importorskip("statsmodels")
-    result = backtest(_trend_series(), NOW, W2, STEP, HW, 0.95)
+    hw = HoltWintersConfig(seasonal_periods=24, trend="add")
+    result = backtest(_trend_series(), NOW, W2, STEP, hw, 0.95)
     assert result is not None and result.passed
     assert result.hw_error is not None and result.hw_error < result.baseline_error
 

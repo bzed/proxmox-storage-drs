@@ -403,7 +403,7 @@ forecast:
   #       seasonal_periods: 2016     # 7d at 5m step
   holt_winters:
     seasonal_periods: 288      # 24h at 5m step
-    trend: add
+    trend: none                # add: extrapolates a trend over the whole window; ran away on real disks
     seasonal: add
 
 support:

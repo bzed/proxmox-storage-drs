@@ -330,7 +330,7 @@ class StateConfig:
 @dataclass(frozen=True, slots=True)
 class HoltWintersConfig:
     seasonal_periods: int = 288
-    trend: str = "add"
+    trend: str = "none"
     seasonal: str = "add"
 
 
@@ -727,7 +727,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
     hw_raw = fc_raw.get("holt_winters", {})
     holt_winters = HoltWintersConfig(
         seasonal_periods=hw_raw.get("seasonal_periods", 288),
-        trend=hw_raw.get("trend", "add"),
+        trend=hw_raw.get("trend", "none"),
         seasonal=hw_raw.get("seasonal", "add"),
     )
     forecast = ForecastConfig(

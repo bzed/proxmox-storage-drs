@@ -3047,7 +3047,7 @@ backtest (every 6 h back through the retention) over step × lookback × trend �
 `rate()` sample, not an average over the step, so a coarse step aliases); 5 min with `3d` beat
 persistence at 4 of 5 origins with or without trend. `trend: add` produced the runaway factors
 above (one disk forecast at 95 % of the whole group's load); `trend: none` kept the worst
-single-disk shift at 23 % for the same score. With 5 min / `3d` / `trend: none` the live gate
+single-disk shift at 23 % for the same score, so `trend` now defaults to `none`. With 5 min / `3d` / `trend: none` the live gate
 opened (`used: true`, 1.43 against 2.26, 35 of 39 disks scaled) — the first real run on
 Holt-Winters.
 
