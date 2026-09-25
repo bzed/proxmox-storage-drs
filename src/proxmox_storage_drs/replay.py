@@ -17,10 +17,10 @@ cannot fall back to a live cluster").
 
 **Range queries and the trimming design.** A bundle captures exactly one
 range file per (group, raw metric) pair, spanning ``support.capture_range``
--- the union of every forecaster's own ``required_range()``, not just the
-one the operator had configured (section 16.2). A live replay run may ask
+-- what ``holt_winters`` needs (twice ``window.lookback``, for its backtest),
+not just the model the operator had configured (section 16.2). A live replay run may ask
 for a *narrower* window of that same series (a different, smaller
-``required_range()`` from a forecaster selected via ``-c``, section 16.5),
+history requirement from a model selected via ``-c``, section 16.5),
 always ending at this bundle's own fixed :func:`bundle_reference_now`.
 :meth:`ReplayPrometheusClient._get` therefore does not key a range lookup on
 the literal requested start/end at all -- it looks up the one stored series

@@ -81,7 +81,7 @@
       "properties": {
         "lookback": { "type": ["string", "number"] },
         "quantile": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
-        "upper_quantile": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "upper_quantile": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "deprecated": true },
         "min_coverage": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
       }
     },
@@ -274,8 +274,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "model": { "type": "string", "enum": ["quantile", "seasonal_naive", "holt_winters"] },
-        "seasonal_lookback_days": { "type": "number", "minimum": 0 },
+        "model": { "type": "string", "enum": ["quantile", "holt_winters"] },
+        "seasonal_lookback_days": { "type": "number", "minimum": 0, "deprecated": true },
         "holt_winters": {
           "type": "object",
           "additionalProperties": false,
@@ -283,7 +283,7 @@
             "seasonal_periods": { "type": "integer", "exclusiveMinimum": 0 },
             "trend": { "type": "string", "enum": ["add", "mul", "none"] },
             "seasonal": { "type": "string", "enum": ["add", "mul", "none"] },
-            "residual_z": { "type": "number", "exclusiveMinimum": 0 }
+            "residual_z": { "type": "number", "exclusiveMinimum": 0, "deprecated": true }
           }
         }
       }

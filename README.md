@@ -334,7 +334,7 @@ pve-storage-drs --replay /var/lib/pve-storage-drs/testdata/<bundle> explain
 
 `--replay` opens **no network connections at all** — not to PVE, not to Prometheus — and uses the
 bundle's own `config.yaml` unless you override it with `-c`, which lets you rerun somebody else's
-cluster through a different solver backend, spread metric or forecaster.
+cluster through a different solver backend, spread metric or forecast model.
 
 ### What a bundle does and does not hide
 

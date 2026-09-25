@@ -296,7 +296,7 @@ query or `quantile_over_time` subquery once the query's own step reaches the
 function's range-vector duration, so this tool queries at half that step (or
 the largest whole-second step below it that divides `metrics.step` evenly,
 at a wider ratio) and reassembles the configured grid from the result. Every
-disk's coverage, load history and forecaster input comes back numerically
+disk's coverage, load history and forecast input comes back numerically
 identical to what a plain `metrics.step` query would have returned on an
 unaffected backend — except the `quantile_over_time` decision statistic
 itself, whose inner evaluation runs on the denser grid unconditionally, on
@@ -318,15 +318,16 @@ declaration from silently invalidating the `rate_window` rule above.
 ## `window` — the decision window
 
 This is the period whose load is balanced. It is **not** the amount of
-history a forecaster needs to fit — see `forecast.model` below and
+history a forecast needs to fit — see `forecast.model` below and
 `IMPLEMENTATION_PLAN.md` section 10.1.
 
 ### `window.lookback`
 
 Duration, default `24h`.
 
-The trailing window each disk's load is reduced over. Must be at least as
-long as the configured `forecast.model` needs (`forecast.model: holt_winters`
+The window each disk's load is reduced over: the last `window.lookback` under
+`forecast.model: quantile`, the next one (as forecast) under `holt_winters`.
+Must be at least as long as the configured `forecast.model` needs (`forecast.model: holt_winters`
 at its default `seasonal_periods` needs 48h, which a 24h lookback can never
 supply — this is rejected at startup, not silently degraded).
 
@@ -338,14 +339,13 @@ The point-estimate quantile: each disk's load is the p95 of its raw signal
 over `window.lookback`, not the mean, so one traffic spike neither triggers
 nor suppresses a migration.
 
-### `window.upper_quantile`
+### `window.upper_quantile` (deprecated)
 
-Fraction in (0, 1), default `0.99`.
-
-Read by nothing any more. It was the quantile a migration-time saturation
-guard consumed; that guard is gone (a migration is throttled by
-`migration.bwlimit_bytes_per_sec` alone), and the key is kept only so an
-existing config still loads. Must be `>= window.quantile`.
+Fraction in (0, 1). **Accepted and ignored**, with one warning per run when
+it is written. It was the quantile a migration-time saturation guard
+consumed; that guard is gone (a migration is throttled by
+`migration.bwlimit_bytes_per_sec` alone) and no placement decision reads an
+upper bound. Delete the key.
 
 ### `window.min_coverage`
 
@@ -1238,37 +1238,59 @@ gate's history; neither writes it, and a missing or unreadable file just
 means every group evaluates as if it had never been balanced before — see
 [`../internals/15-state.md`](../internals/15-state.md).
 
-## `forecast` — history beyond the plain quantile
+## `forecast` — placing disks for the load they will have
 
-See `IMPLEMENTATION_PLAN.md` section 10 and `proxmox_storage_drs/forecast.py`.
+See `IMPLEMENTATION_PLAN.md` sections 10 and 12.1 and `proxmox_storage_drs/forecast.py`.
 
 ### `forecast.model`
 
-One of `quantile`, `seasonal_naive`, `holt_winters`; default `quantile`.
+One of `quantile`, `holt_winters`; default `quantile`.
 
-`quantile` needs only `window.lookback` and no model fitting. `seasonal_naive`
-and `holt_winters` need more history than the decision window alone — see
-below — and `pve-storage-drs` refuses to start if `window.lookback` (or your
-Prometheus retention) cannot supply it, rather than silently falling back.
+`quantile`: each disk's load is the p95 (`window.quantile`) of its I/O over the
+**last** `window.lookback`. It needs no fitting, no extra history and no
+optional package, and it is what every plan used before `holt_winters`
+existed; with it nothing below applies and no extra Prometheus query is made.
 
-**Backtest-validated before use.** A `seasonal_naive`/`holt_winters` model is
-fit on the older half of its own recent history and checked against what
-actually happened in the newer half, once per group, before it is trusted
-for that run. A model that misses by more than `gates.imbalance_threshold`
-— or that does not yet have enough history to backtest at all — falls back
-to `quantile` for that group this run, logged at warning. `quantile` itself
-is never backtested; there is nothing to validate and nothing more
-conservative to fall back to. (`IMPLEMENTATION_PLAN.md` section 10.2.)
+`holt_winters`: each disk's load is scaled to a Holt-Winters forecast of that
+same p95 over the **next** `window.lookback` — fit the disk's history, forecast
+`window.lookback` ahead, take `window.quantile` of the forecast path. The
+scaling is a ratio (forecast p95 ÷ the observed p95 of the same history), so
+the load stays on the scale the rest of the model is calibrated against; a
+disk whose load is rising, or that has a daily peak the last window happened
+to miss, is placed for what it is about to do. A disk that is flagged for low
+sample coverage, has no observed load, or whose model cannot be fitted keeps
+its observed load. Gates, solver, payback and ordering all see the same
+forecast load.
 
-### `forecast.seasonal_lookback_days`
+When `holt_winters` is worth selecting: a load that follows a daily (or
+weekly, see `seasonal_periods`) cycle, or that trends. On a load with no
+structure — noise around a constant — it has nothing to predict, and the gate
+below will say so.
 
-Days, default `7`.
+**The gate: it must beat doing nothing clever.** Once per group, the model is
+fit on the older half of its own recent history (`[now − 2·lookback, now −
+lookback)`) and both it and the `quantile` model predict the p95 of the newer
+half; `holt_winters` is used for the group only if its error is no larger than
+the `quantile` model's. There is no threshold to tune. If it loses — or there
+is not yet `2 · window.lookback` of history to check — the group uses
+`quantile` for that run, logged at warning. `explain` and `plan --json` show
+what happened per group: which model was used, both backtest errors, and how
+many disks were scaled or kept.
 
-History `seasonal_naive` needs: same-hour-of-day samples across this many
-days. `0` does not disable the model or fall back to anything — it simply
-stops requiring history beyond `window.lookback`, which for a lookback
-under 24h can leave no same-hour-of-day sample to match at all (predicting
-`0.0`, not a fallback).
+**Requirements.** `window.lookback` must span two seasonal cycles
+(`2 · seasonal_periods · metrics.step`; 48h at the defaults), which
+`pve-storage-drs` enforces at startup rather than silently degrading;
+Prometheus must hold `2 · window.lookback` of history for the gate to run at
+all; and `python3-statsmodels` must be installed (without it every disk keeps
+its observed load).
+
+### `forecast.seasonal_lookback_days` (deprecated)
+
+**Accepted and ignored**, with one warning per run when written: `seasonal_naive`
+was removed (`holt_winters`' seasonal term covers a daily cycle, and
+`seasonal_naive` was never a forecast over the next window). A config that
+selects `forecast.model: seasonal_naive` fails validation; choose `holt_winters`
+or `quantile`.
 
 ### `forecast.holt_winters.seasonal_periods`
 
@@ -1306,12 +1328,10 @@ One of `add`, `mul`, `none`; default `add`.
 
 The seasonal component passed to the same fit.
 
-### `forecast.holt_winters.residual_z`
+### `forecast.holt_winters.residual_z` (deprecated)
 
-Weight, default `2.0`.
-
-The upper bound is `point_estimate + residual_z * stdev(residuals)` from the
-in-sample fit. Nothing consumes it any more; phase 14b removes the key.
+**Accepted and ignored**, with one warning per run when written. The forecast is
+its own p95 over the next window with no residual band; delete the key.
 
 ## `support` — diagnostic bundles
 
@@ -1352,11 +1372,10 @@ bring the estimate under it.
 
 The literal string `"auto"`, or a duration, default `"auto"`.
 
-`"auto"` captures the union of every forecaster's `required_range()` —
-currently
-`max(window.lookback, forecast.seasonal_lookback_days, 2 * forecast.holt_winters.seasonal_periods * metrics.step)`
-— so a bundle can reproduce a forecaster the capturing operator never
-configured. An explicit duration (e.g. `14d`) overrides that; `--range` on
+`"auto"` captures what `holt_winters` needs — currently
+`max(2 * window.lookback, 2 * forecast.holt_winters.seasonal_periods * metrics.step)`
+(twice the window, for the backtest) — so a bundle can reproduce a model the
+capturing operator never configured. An explicit duration (e.g. `14d`) overrides that; `--range` on
 the command line overrides both.
 
 ## `monitoring` — telling your monitoring system what the last run did

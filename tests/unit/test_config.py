@@ -292,11 +292,26 @@ def test_malformed_storage_pattern_is_rejected_at_load_time(tmp_path: Path) -> N
         config.load_config(str(path), env={})
 
 
-def test_upper_quantile_below_quantile_is_rejected(tmp_path: Path) -> None:
+def test_removed_forecast_keys_are_accepted_ignored_and_warn(tmp_path: Path) -> None:
     data = minimal_config_dict()
-    data["window"] = {"quantile": 0.95, "upper_quantile": 0.90}
+    data["window"] = {"lookback": "48h", "quantile": 0.95, "upper_quantile": 0.99}
+    data["forecast"] = {
+        "model": "holt_winters",
+        "seasonal_lookback_days": 7,
+        "holt_winters": {"residual_z": 2.0},
+    }
     path = write_config(tmp_path, data)
-    with pytest.raises(ConfigError, match="upper_quantile"):
+    resolved = config.load_config(str(path), env={})
+    for key in ("window.upper_quantile", "forecast.seasonal_lookback_days"):
+        assert sum(f"{key} is ignored" in w for w in resolved.warnings) == 1
+    assert sum("forecast.holt_winters.residual_z is ignored" in w for w in resolved.warnings) == 1
+
+
+def test_seasonal_naive_is_rejected_by_the_schema(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["forecast"] = {"model": "seasonal_naive"}
+    path = write_config(tmp_path, data)
+    with pytest.raises(ConfigError, match="seasonal_naive"):
         config.load_config(str(path), env={})
 
 
@@ -605,10 +620,10 @@ def test_free_space_deprecation_warning_fires_for_a_per_storage_only_override(
 def test_multiple_errors_are_all_reported(tmp_path: Path) -> None:
     data = minimal_config_dict()
     data["schema_version"] = 2
-    data["window"] = {"quantile": 0.95, "upper_quantile": 0.5}
+    data["migration"] = {"assume_thick_provisioning": False}
     path = write_config(tmp_path, data)
     with pytest.raises(ConfigError) as excinfo:
         config.load_config(str(path), env={})
     message = str(excinfo.value)
     assert "schema_version" in message
-    assert "upper_quantile" in message
+    assert "assume_thick_provisioning" in message

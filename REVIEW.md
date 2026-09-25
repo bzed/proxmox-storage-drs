@@ -7736,7 +7736,11 @@ changed every plan for no forecasting gain. The decision statistic stays `window
 disk; the backtest gate compares against the quantile baseline instead of
 `gates.imbalance_threshold`; `seasonal_naive` is dropped. Plan §12.1 (14b) is the design of record.
 
-**Status:** Open (scheduled: plan §12 phase 14b).
+**Status:** Fixed (phase 14b). `forecast.py` is rewritten around a backtest-gated Holt-Winters p95;
+`cli._compute_group_load()` feeds `show-load` and `plan`/`apply`; `seasonal_naive`, `Forecast.upper_bound`,
+`upper_quantile` and `residual_z` are gone (the last three stay as accepted-and-ignored keys). One
+observation from the dev cluster is recorded in plan §12.1: forced open, the per-disk factors span
+0.00 – 39, so a damped trend is the first thing to try if a real gate opens and they look wild.
 
 ### 56.2 AL-02 — the CP-SAT backend is unshippable on the deployment target, and half the optimizer exists only for it (Medium)
 
@@ -7815,11 +7819,10 @@ are deleted; `saturation_load`/`saturation_ceiling` stay in the schema, are igno
 AL-02 is implemented in this changeset; AL-01 and AL-03 are scheduling decisions, recorded so the
 plan and this review agree on what "done" means before either is started.
 
-- **AL-01 → phase 14 (scheduled).** Plan §10.1's as-built annotation now points at the phase row,
-  and the phase row carries the design: û_d(W) with `W = window.lookback`; the existing backtest
-  gate reused unchanged; the deliberate p95 → `window.upper_quantile` default change accepted and
-  documented; §14 fixtures and corpus expected files regenerated as part of the phase; `explain`
-  reporting the statistic and forecaster that produced the run. Not started.
+- **AL-01 → fixed (phase 14b, narrowed).** The original design (decision statistic → the upper
+  bound, p95 → p99) was dropped; the statistic stays `window.quantile`, forecast over the next `W`
+  and applied as a ratio, gated by a baseline comparison. Plan §10.1 and §12.1 are the design of
+  record; quantile-model fixtures and corpus expected files are byte-identical.
 - **AL-02 → fixed (this changeset).** `optimize.py` loses `_solve_cpsat()`, its five `_cpsat_*`
   helpers, the `cpsat_available()` probe and the S-09 int64 assertions (CBC's model is continuous;
   the assertions guarded CP-SAT's integer discipline alone); `solve()` dispatches `cbc` only;

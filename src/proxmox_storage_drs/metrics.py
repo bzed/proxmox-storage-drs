@@ -572,7 +572,7 @@ def parse_disk_range_series(
     ``query_range`` ``result`` list (each series carrying ``values``, a
     ``[[timestamp, value_str], ...]`` matrix, rather than one ``value``)
     into ``{DiskKey: TimeSeries}`` -- section 10's raw material for a
-    :class:`~proxmox_storage_drs.forecast.Forecaster`, and
+    Holt-Winters forecast (:mod:`~proxmox_storage_drs.forecast`), and
     ``loadmodel.compute_disk_load_series()``'s own input before its section
     4 blend. Skips a series missing either label, identically to
     :func:`parse_disk_series` and for the same reason."""

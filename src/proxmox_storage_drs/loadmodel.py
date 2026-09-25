@@ -15,6 +15,7 @@ everything downstream (the big-M bound, the objective weights) is calibrated aga
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -274,7 +275,7 @@ def _fetch_raw_quantity_series(
 ) -> dict[DiskKey, _RawTimeSeries]:
     """One of the six section 3.4 raw quantities as a raw time series over
     ``[start, end]`` at ``step`` -- section 10's own material for a
-    :class:`~proxmox_storage_drs.forecast.Forecaster`, as opposed to
+    Holt-Winters forecast (:mod:`~proxmox_storage_drs.forecast`), as opposed to
     :func:`_fetch_raw_quantity`'s single quantile-reduced scalar for the
     decision statistic. The identical ``rate(...)`` expression
     :func:`_fetch_raw_quantity` builds, `query_range`'d instead of wrapped
@@ -578,6 +579,40 @@ def compute_group_load(
     )
 
 
+def apply_forecast(group_load: GroupLoad, group: Group, factors: Mapping[str, float]) -> GroupLoad:
+    """Section 12.1 point 2: scale each disk's ``l_d`` by its forecast factor
+    ``f_d / h_d`` and rebuild the per-storage ``L_s``/``u_s`` and ``u*`` from the
+    scaled loads. A disk without a factor, and any disk flagged for low coverage,
+    keeps its observed load exactly. ``idle`` and ``no_series_matched`` are facts
+    about the observed window and are left alone: a forecast never wakes an idle
+    group up. One function, called wherever ``compute_group_load()`` is, so a
+    group's gates and its plan always see the same ``l``."""
+    disks = tuple(
+        (
+            d
+            if d.flagged_reason is not None or d.disk_key not in factors
+            else dataclasses.replace(d, load=d.load * factors[d.disk_key])
+        )
+        for d in group_load.disks
+    )
+    load_by_key = {d.disk_key: d.load for d in disks}
+    storages: list[StorageLoad] = []
+    total_load = 0.0
+    total_capability = 0.0
+    for storage in group.storages:
+        load = sum(load_by_key[d.key] for d in group.disks if d.current_storage == storage.id)
+        utilization = load / storage.capability_weight if storage.capability_weight else 0.0
+        storages.append(StorageLoad(storage_id=storage.id, load=load, utilization=utilization))
+        total_load += load
+        total_capability += storage.capability_weight
+    return dataclasses.replace(
+        group_load,
+        average_utilization=total_load / total_capability if total_capability else 0.0,
+        disks=disks,
+        storages=tuple(storages),
+    )
+
+
 def _per_disk_lookup(disk_key: DiskKey, raw: _RawSeriesQuantities) -> dict[str, dict[float, float]]:
     """One disk's six raw series, each turned into a ``{timestamp: value}``
     lookup for :func:`compute_disk_load_series`'s per-timestamp blend --
@@ -604,35 +639,27 @@ def compute_disk_load_series(
     node_selector: str | None = None,
 ) -> dict[str, TimeSeries]:
     """Section 4's `ℓ_d` blend, as a time series per disk over
-    ``[now - range_seconds, now]`` at ``step_seconds`` -- the raw material
-    a section 10 :class:`~proxmox_storage_drs.forecast.Forecaster` needs,
-    as opposed to :func:`compute_group_load`'s single p95-reduced scalar
-    per disk for the decision statistic. ``range_seconds``/``step_seconds``
-    are the caller's own choice (typically
-    ``forecast.required_range_seconds()``/``metrics.step_seconds`` -- see
-    the section 10 forecast, when one is used),
-    not fixed to ``window.lookback`` the way :func:`compute_group_load`
-    is: section 10.1 is explicit that a forecaster's own history
-    requirement and the decision window are "genuinely different things."
-    ``node_selector`` is :func:`compute_group_load`'s own parameter of the
-    same name and meaning; ``group.disks``'s own vmids scope every query
-    the same way :func:`compute_group_load` now does (REVIEW.md Q-02) --
-    the forecaster's own history fetch is the widest-range query this
-    module issues (up to 7 days for ``seasonal_naive``), so it is also the
-    one most likely to time out unscoped against a large cluster.
+    ``[now - range_seconds, now]`` at ``step_seconds`` -- the raw material a
+    Holt-Winters forecast (:mod:`~proxmox_storage_drs.forecast`) needs, as
+    opposed to :func:`compute_group_load`'s single p95-reduced scalar per disk
+    for the decision statistic. ``range_seconds``/``step_seconds`` are the
+    caller's own choice (``cli.py`` passes ``max(forecast.required_range_seconds(),
+    2 * window.lookback)`` -- the backtest fits on ``[now-2W, now-W)``), not fixed
+    to ``window.lookback`` the way :func:`compute_group_load` is.
+    ``node_selector`` is :func:`compute_group_load`'s own parameter of the same
+    name and meaning; ``group.disks``'s own vmids scope every query the same way
+    :func:`compute_group_load` does (REVIEW.md Q-02) -- this is the widest-range
+    query this module issues, so it is also the one most likely to time out
+    unscoped against a large cluster.
 
-    Every disk in ``group`` gets an entry, even one with no samples at all
-    (an empty series -- every :class:`~proxmox_storage_drs.forecast.Forecaster`
-    already handles that, returning a zero forecast, per its own
-    docstring), never a ``KeyError`` for a caller iterating ``group.disks``.
+    Every disk in ``group`` gets an entry, even one with no samples at all (an
+    empty series), never a ``KeyError`` for a caller iterating ``group.disks``.
     Deliberately **not** filtered by ``window.min_coverage`` the way
-    :func:`compute_group_load`'s decision-window scalar is: a forecaster's
-    own ``required_range()`` is typically a much longer, coarser signal
-    (up to 7 days for ``seasonal_naive``) than that coverage rule was
-    designed to validate over one 24h decision window, and a genuinely
-    sparse history is exactly what a forecaster needs to see for itself in
-    order to decide it cannot trust its own fit -- silently dropping those
-    samples here would hide that from it instead.
+    :func:`compute_group_load`'s decision-window scalar is: the forecast history
+    is a much longer, coarser signal than that rule was designed to validate over
+    one decision window, and a genuinely sparse history is exactly what a fit
+    needs to see for itself in order to refuse to trust it -- silently dropping
+    those samples here would hide that from it instead.
     """
     if not group.disks:
         return {}

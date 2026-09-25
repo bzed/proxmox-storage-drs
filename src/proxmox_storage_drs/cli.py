@@ -37,7 +37,6 @@ from proxmox_storage_drs.config import (
     ENV_CONFIG_VAR,
     ExcludeConfig,
     ExecutionConfig,
-    ForecastConfig,
     GatesConfig,
     MetricsConfig,
     MigrationConfig,
@@ -54,13 +53,7 @@ from proxmox_storage_drs.execute import (
     MoveOutcome,
     execute_plan,
 )
-from proxmox_storage_drs.forecast import (
-    Forecaster,
-    TimeSeries,
-    backtest_validated,
-    build_forecaster,
-    group_aggregate_series,
-)
+from proxmox_storage_drs.forecast import ForecastReport, forecast_group, required_range_seconds
 from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
 from proxmox_storage_drs.heuristic import (
     Assignment,
@@ -74,7 +67,12 @@ from proxmox_storage_drs.heuristic import (
     raw_spread,
     run_heuristic,
 )
-from proxmox_storage_drs.loadmodel import GroupLoad, compute_group_load
+from proxmox_storage_drs.loadmodel import (
+    GroupLoad,
+    apply_forecast,
+    compute_disk_load_series,
+    compute_group_load,
+)
 from proxmox_storage_drs.logging_setup import (
     LOG_FORMATS,
     LOG_LEVELS,
@@ -1003,15 +1001,13 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
     load_errors: dict[str, str] = {}
     for group in topology.groups:
         try:
-            group_loads[group.name] = compute_group_load(
+            group_loads[group.name], _ = _compute_group_load(
                 prom_client,
-                resolved.config.metrics,
-                resolved.config.window,
-                resolved.config.load_weights,
+                resolved,
                 group,
-                last_known_loads=last_loads_by_group.get(group.name),
-                node_selector=node_selector,
-                now=now.timestamp(),
+                last_loads_by_group.get(group.name),
+                node_selector,
+                now,
             )
         except MetricsError as exc:
             # Section 4's load numbers are not safety-critical the way (C4)/
@@ -1322,6 +1318,7 @@ def _render_group_plan_json(
     group_load: GroupLoad | None,
     final_breakdown: ObjectiveBreakdown | None,
     load_error: str | None,
+    forecast: ForecastReport | None = None,
 ) -> dict[str, object]:
     """One group's worth of ``_render_plan_json()``'s report -- shared
     with ``_render_apply_json()`` (AGENTS.md section 5), which adds its
@@ -1416,7 +1413,7 @@ def _render_group_plan_json(
             "reserve_shortfall_bytes_before": payback_result.reserve_shortfall_bytes_before,
             "reserve_shortfall_bytes_after": payback_result.reserve_shortfall_bytes_after,
         }
-    return {
+    out: dict[str, object] = {
         "name": group.name,
         "load_error": load_error,
         "gate": gate_out,
@@ -1433,6 +1430,9 @@ def _render_group_plan_json(
         "after_objective_total": after_objective_total,
         "payback": payback_out,
     }
+    if forecast is not None:
+        out["forecast"] = forecast.as_dict()
+    return out
 
 
 def _render_plan_json(
@@ -1444,6 +1444,7 @@ def _render_plan_json(
     payback_results: dict[str, PaybackResult],
     final_breakdowns: dict[str, ObjectiveBreakdown],
     load_errors: dict[str, str],
+    forecasts: dict[str, ForecastReport] | None = None,
 ) -> dict[str, object]:
     groups_out = [
         _render_group_plan_json(
@@ -1455,6 +1456,7 @@ def _render_plan_json(
             group_loads.get(group.name),
             final_breakdowns.get(group.name),
             load_errors.get(group.name),
+            (forecasts or {}).get(group.name),
         )
         for group in topology.groups
     ]
@@ -1731,6 +1733,21 @@ def _render_explain_data_source_line(resolved: ResolvedConfig, node_selector: st
     )
 
 
+def _render_forecast_line(report: ForecastReport) -> str:
+    """``explain``'s one line on what the forecast did to this group's loads."""
+    if not report.used:
+        return (
+            f"  forecast: {report.model} not used -- it did not beat the quantile baseline "
+            "on this group's recent history (or there is not enough of it yet); "
+            "loads are as observed"
+        )
+    return (
+        f"  forecast: {report.model} used (backtest error {report.backtest_error:.3g} vs "
+        f"baseline {report.baseline_error:.3g}): {report.disks_scaled} disks scaled to their "
+        f"forecast p95, {report.disks_kept} kept as observed"
+    )
+
+
 def _render_group_explain_human(
     group: Group, group_plan: "_GroupPlan", resolved: ResolvedConfig
 ) -> list[str]:
@@ -1754,6 +1771,8 @@ def _render_group_explain_human(
     load_by_key = group_plan.group_load.load_by_disk_key() if group_plan.group_load else {}
     assignment = group_plan.schedule_result.final_assignment if group_plan.schedule_result else None
     extra: list[str] = []
+    if group_plan.forecast is not None:
+        extra.append(_render_forecast_line(group_plan.forecast))
     if group_plan.final_breakdown is not None:
         extra.append(_render_objective_breakdown_line(group_plan.final_breakdown))
         if group_plan.decision.act and not group_plan.final_breakdown.moved_disk_keys:
@@ -1837,6 +1856,7 @@ def _render_group_explain_json(
         group_plan.group_load,
         group_plan.final_breakdown,
         group_plan.load_error,
+        group_plan.forecast,
     )
     load_by_key = group_plan.group_load.load_by_disk_key() if group_plan.group_load else {}
     # The measured load every other field above derives from -- identical
@@ -2033,6 +2053,7 @@ def _render_apply_json(
     final_breakdowns: dict[str, ObjectiveBreakdown],
     load_errors: dict[str, str],
     execution_results: dict[str, ExecutionResult],
+    forecasts: dict[str, ForecastReport] | None = None,
 ) -> dict[str, object]:
     """``plan``'s own JSON shape (section 9.5: "every mode emits the same
     machine-readable plan") plus one ``"execution"`` key per group --
@@ -2048,6 +2069,7 @@ def _render_apply_json(
             group_loads.get(group.name),
             final_breakdowns.get(group.name),
             load_errors.get(group.name),
+            (forecasts or {}).get(group.name),
         )
         group_out["execution"] = _render_execution_json(
             execution_results.get(group.name), _vm_name_map(group)
@@ -2175,49 +2197,104 @@ class _GroupPlan:
     # run's plan has run -- or as things stand now when the gate decided not to
     # act. Only the monitoring status file reads it (section 2.4).
     shortfall_bytes: int = 0
+    # Section 12.1 point 6: what the Holt-Winters forecast did to this group's
+    # loads. ``None`` under the default ``quantile`` model (nothing was forecast)
+    # and for an idle group, so those reports stay byte-identical.
+    forecast: ForecastReport | None = None
 
 
-def _backtest_gated_forecaster(
-    forecaster: Forecaster,
-    forecast_config: ForecastConfig,
-    resolved: ResolvedConfig,
-    disk_series: dict[str, TimeSeries],
-    now_epoch: float,
-    window_seconds: float,
-) -> Forecaster:
-    """Section 10.2/phase 9's backtest validation gate: ``quantile``
-    itself is never backtested (no fitting occurs, so there is nothing to
-    validate and nothing more conservative to fall back to);
-    ``seasonal_naive``/``holt_winters`` must have actually predicted the
-    group's own recent past accurately (``forecast.backtest_validated()``,
-    within ``gates.imbalance_threshold``) before anything trusts them at
-    all. A model that fails -- or that cannot yet be
-    validated for lack of history -- falls back to ``quantile`` for this
-    run, logged once at warning; a fresh deployment is not given a free
-    pass just because it has no track record yet
-    (`forecast.backtest_validated()`'s own docstring)."""
-    if forecast_config.model == "quantile":
-        return forecaster
-    aggregate = group_aggregate_series(disk_series)
-    threshold = resolved.config.gates.imbalance_threshold
-    if backtest_validated(forecaster, aggregate, now_epoch, window_seconds, threshold):
-        return forecaster
+def _note_forecast(
+    forecasts: dict[str, ForecastReport], group: Group, group_plan: _GroupPlan
+) -> None:
+    """Remember a group's forecast report, if it has one, for the JSON report."""
+    if group_plan.forecast is not None:
+        forecasts[group.name] = group_plan.forecast
+
+
+def _log_forecast(group: Group, report: ForecastReport) -> None:
+    """Section 12.1 point 6: one line per group, not one per disk. A failed
+    backtest is a WARNING (an operator who selected ``holt_winters`` should know
+    it is not being used); a used forecast is INFO, part of the audit trail."""
+    extra: dict[str, object] = {"group": group.name, **report.as_dict()}
+    if report.used:
+        logger.info(
+            "group %s: forecast %s used (backtest err %.3g vs baseline %.3g), "
+            "%d disks scaled, %d kept",
+            group.name,
+            report.model,
+            report.backtest_error,
+            report.baseline_error,
+            report.disks_scaled,
+            report.disks_kept,
+            extra={"event": "forecast_used", **extra},
+        )
+        return
     logger.warning(
-        "forecast.model %r did not accurately predict this group's own recent history (or "
-        "there is not enough history yet to check); using the simpler quantile model for "
-        "this run instead",
-        forecast_config.model,
-        extra={"event": "forecast_backtest_failed", "model": forecast_config.model},
+        "group %s: forecast.model %r did not beat the quantile baseline on this group's own "
+        "recent history (or there is not enough history yet to check); using the quantile "
+        "model for this run",
+        group.name,
+        report.model,
+        extra={"event": "forecast_backtest_failed", **extra},
     )
-    window = resolved.config.window
-    return build_forecaster(
-        dataclasses.replace(forecast_config, model="quantile"),
+
+
+def _compute_group_load(
+    prom_client: PrometheusClient,
+    resolved: ResolvedConfig,
+    group: Group,
+    last_known_loads: Mapping[str, float] | None,
+    node_selector: str | None,
+    now: datetime,
+) -> tuple[GroupLoad, ForecastReport | None]:
+    """``compute_group_load()``, then -- only for ``forecast.model:
+    holt_winters`` -- each disk's ``l_d`` scaled by its Holt-Winters forecast
+    (section 12.1). The one place both ``show-load`` and ``plan``/``apply`` get a
+    group's load from, so a group's gates and its plan see the same ``l``. The
+    default ``quantile`` model issues exactly the queries it always did and
+    returns no report; an idle group is not forecast (nothing to scale)."""
+    config = resolved.config
+    group_load = compute_group_load(
+        prom_client,
+        config.metrics,
+        config.window,
+        config.load_weights,
+        group,
+        last_known_loads=last_known_loads,
+        node_selector=node_selector,
+        now=now.timestamp(),
+    )
+    if config.forecast.model != "holt_winters" or group_load.idle:
+        return group_load, None
+    window_seconds = config.window.lookback_seconds
+    step_seconds = config.metrics.step_seconds
+    # The backtest fits on [now-2W, now-W), so 2W is a floor whatever the
+    # model's own requirement is.
+    range_seconds = max(
+        required_range_seconds(config.forecast, window_seconds, step_seconds), 2 * window_seconds
+    )
+    disk_series = compute_disk_load_series(
+        prom_client,
+        config.metrics,
+        config.load_weights,
+        group,
+        range_seconds,
+        step_seconds,
+        now.timestamp(),
+        node_selector=node_selector,
+    )
+    flagged = {d.disk_key for d in group_load.disks if d.flagged_reason is not None}
+    factors, report = forecast_group(
+        disk_series,
+        flagged,
+        config.forecast,
+        now.timestamp(),
         window_seconds,
-        resolved.config.metrics.step_seconds,
-        now_epoch,
-        window.quantile,
-        window.upper_quantile,
+        step_seconds,
+        config.window.quantile,
     )
+    _log_forecast(group, report)
+    return apply_forecast(group_load, group, factors), report
 
 
 def _log_load_digest(group: Group, group_load: GroupLoad) -> None:
@@ -2358,15 +2435,13 @@ def _plan_group(
     invocation by the caller (a live PVE client is not otherwise needed
     here)."""
     try:
-        group_load = compute_group_load(
+        group_load, forecast = _compute_group_load(
             prom_client,
-            resolved.config.metrics,
-            resolved.config.window,
-            resolved.config.load_weights,
+            resolved,
             group,
-            last_known_loads=last_loads_by_group.get(group.name),
-            node_selector=node_selector,
-            now=now.timestamp(),
+            last_loads_by_group.get(group.name),
+            node_selector,
+            now,
         )
     except MetricsError as exc:
         # Section 6: gating (and so planning) cannot proceed without a
@@ -2397,6 +2472,7 @@ def _plan_group(
             group_load=group_load,
             decision=decision,
             shortfall_bytes=total_shortfall_bytes(group.storages, group.disks),
+            forecast=forecast,
         )
 
     cooldown_storages = frozenset(
@@ -2484,6 +2560,7 @@ def _plan_group(
         final_breakdown=final_breakdown,
         payback_result=payback_result,
         shortfall_bytes=final_shortfall_bytes,
+        forecast=forecast,
     )
 
 
@@ -2510,6 +2587,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
     payback_results: dict[str, PaybackResult] = {}
     final_breakdowns: dict[str, ObjectiveBreakdown] = {}
     load_errors: dict[str, str] = {}
+    forecasts: dict[str, ForecastReport] = {}
 
     for group in topology.groups:
         group_plan = _plan_group(
@@ -2527,6 +2605,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
         assert group_plan.group_load is not None and group_plan.decision is not None
         group_loads[group.name] = group_plan.group_load
         gate_decisions[group.name] = group_plan.decision
+        _note_forecast(forecasts, group, group_plan)
         if not group_plan.decision.act:
             continue
         assert (
@@ -2552,6 +2631,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                     payback_results,
                     final_breakdowns,
                     load_errors,
+                    forecasts,
                 ),
             )
         )
@@ -3204,6 +3284,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
     final_breakdowns: dict[str, ObjectiveBreakdown] = {}
     load_errors: dict[str, str] = {}
     execution_results: dict[str, ExecutionResult] = {}
+    forecasts: dict[str, ForecastReport] = {}
 
     try:
         client = _pve_client_for(resolved, args)
@@ -3246,6 +3327,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
             assert group_plan.group_load is not None and group_plan.decision is not None
             group_loads[group.name] = group_plan.group_load
             gate_decisions[group.name] = group_plan.decision
+            _note_forecast(forecasts, group, group_plan)
             _note_shortfall_for_status(args, group, group_plan)
             if not group_plan.decision.act:
                 continue
@@ -3364,6 +3446,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                     final_breakdowns,
                     load_errors,
                     execution_results,
+                    forecasts,
                 ),
             )
         )

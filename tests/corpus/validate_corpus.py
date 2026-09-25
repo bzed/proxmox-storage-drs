@@ -510,7 +510,7 @@ def scrub_audit(bundle: Bundle) -> list[str]:
 # --------------------------------------------------------- variant matrix
 
 _SPREAD_METRICS = ("l1", "minmax")
-_FORECAST_MODELS = ("quantile", "seasonal_naive", "holt_winters")
+_FORECAST_MODELS = ("quantile", "holt_winters")
 _BETA_SWEEP = (0.0, 0.25, 1.0)
 
 

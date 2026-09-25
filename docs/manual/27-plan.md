@@ -234,4 +234,6 @@ outcome trigger itself — see above), `reserve_shortfall_bytes_before`/
 `_after` (`Σ r_s` on the current assignment and on the plan's executed
 endpoint, what `repair_exempt` is decided from), `rejected_moves` (disk
 keys failing the hard duration rule) and `accepted` (`aggregate_ok` and
-`rejected_moves` empty).
+`rejected_moves` empty). Under `forecast.model: holt_winters` the group also
+has a `forecast` object: `model`, `used`, `backtest_error`, `baseline_error`,
+`disks_scaled`, `disks_kept` (absent under the default `quantile`).

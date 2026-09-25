@@ -17,8 +17,8 @@ This is **read-only and dry-run-only** by construction: it never issues
 `move_disk`, and `--mode confirm`/`--mode auto` alongside it is a usage
 error (exit `2`), not a silently ignored flag. It captures the *superset* of
 what any supported configuration could need — every raw metric over the
-union of every forecaster's own history requirement, not just the one
-`forecast.model` you have configured — so a bundle captured today can still
+history `holt_winters` needs (twice `window.lookback`, for its backtest),
+not just what the `forecast.model` you have configured needs — so a bundle captured today can still
 reproduce a Holt-Winters misfit tomorrow.
 
 `--estimate` sizes the capture first: it reads the full PVE inventory (the
@@ -58,7 +58,7 @@ refuses outright, naming the flags that bring it under the limit:
 | `--estimate` | Read the full PVE inventory (one planning run's worth of API calls), print the estimate above, and exit; fetches nothing from Prometheus. |
 | `--range DURATION` | Override the series capture range (default `support.capture_range`). |
 | `--step DURATION` | Override the series resolution (default `metrics.step`). |
-| `--no-series` | Topology, instant queries and findings only — no per-disk time series, so the bundle cannot exercise a seasonal forecaster, but is much smaller. |
+| `--no-series` | Topology, instant queries and findings only — no per-disk time series, so the bundle cannot exercise the `holt_winters` forecast, but is much smaller. |
 | `--no-archive` | Write the directory only, skip the `.tar.gz`. |
 | `--salt-file PATH` | Use a different anonymization salt (default `support.salt_path`). |
 | `--new-salt` | Generate a fresh salt first. Logged at warning level: bundles made before and after no longer share a pseudonym mapping. |
@@ -116,7 +116,7 @@ as — `tar -xzf drs-testdata-cluster-3f8a91c2.tar.gz` first.
 
 - The configuration is the bundle's own `config.yaml`, unless `-c` is also
   given — that is how you run the operator's cluster through a solver
-  backend, a `spread_metric`, or a forecaster they never selected
+  backend, a `spread_metric`, or a forecast model they never selected
   themselves.
 - **`apply` is refused**, and so is any `--mode` above `dry-run` — exit `2`
   either way. A replay can never issue a write.
@@ -133,7 +133,7 @@ as — `tar -xzf drs-testdata-cluster-3f8a91c2.tar.gz` first.
   This is the failure mode to expect if you hand-edit a bundle's
   `config.yaml` to a `window.lookback`/`metrics.step` combination the
   capture never anticipated, or if `--step` was overridden at capture time
-  to something a replayed forecaster does not expect.
+  to something a replayed forecast does not expect.
 - `state.json` is read from the bundle if present, and never written —
   a replay never touches the host's real state.
 

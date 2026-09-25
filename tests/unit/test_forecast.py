@@ -1,29 +1,38 @@
 # SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Forecasters and the section 10.1 required-range rule."""
+"""Holt-Winters forecasting, its backtest gate, and the required-range rule."""
 
 from __future__ import annotations
 
-import logging
 import math
-from datetime import timedelta
+import random
+import sys
+import warnings
+from typing import Any
 
 import pytest
 
 from proxmox_storage_drs.config import ForecastConfig, HoltWintersConfig
 from proxmox_storage_drs.forecast import (
-    HoltWintersForecaster,
-    QuantileForecaster,
-    SeasonalNaiveForecaster,
+    Backtest,
+    ForecastReport,
+    TimeSeries,
     _quantile,
-    backtest_error,
-    backtest_validated,
-    build_forecaster,
+    backtest,
+    disk_factors,
+    forecast_group,
     group_aggregate_series,
+    holt_winters_quantile,
     required_range_seconds,
 )
 
 DAY = 86400.0
+STEP = 3600.0
+HW = HoltWintersConfig(seasonal_periods=24)  # a daily cycle at a 1h step
+
+
+def series_of(n: int, fn: Any) -> TimeSeries:
+    return tuple((i * STEP, float(fn(i))) for i in range(n))
 
 
 # --------------------------------------------------------------- required range
@@ -34,18 +43,17 @@ def test_quantile_required_range_is_the_lookback() -> None:
     assert required_range_seconds(fc, lookback_seconds=DAY, step_seconds=300) == DAY
 
 
-def test_seasonal_naive_required_range_is_the_larger_of_the_two() -> None:
-    fc = ForecastConfig(model="seasonal_naive", seasonal_lookback_days=7)
-    assert required_range_seconds(fc, lookback_seconds=DAY, step_seconds=300) == 7 * DAY
-    assert required_range_seconds(fc, lookback_seconds=10 * DAY, step_seconds=300) == 10 * DAY
-
-
 def test_holt_winters_required_range_matches_plan_worked_example() -> None:
     # section 10.1: seasonal_periods=288 at a 5m step needs 2*288*300s = 48h,
     # which a 24h lookback can never supply.
     fc = ForecastConfig(model="holt_winters", holt_winters=HoltWintersConfig(seasonal_periods=288))
     required = required_range_seconds(fc, lookback_seconds=DAY, step_seconds=300)
     assert required == 48 * 3600
+
+
+def test_holt_winters_required_range_is_the_lookback_when_that_is_longer() -> None:
+    fc = ForecastConfig(model="holt_winters", holt_winters=HoltWintersConfig(seasonal_periods=24))
+    assert required_range_seconds(fc, lookback_seconds=10 * DAY, step_seconds=300) == 10 * DAY
 
 
 def test_required_range_unknown_model_raises() -> None:
@@ -69,121 +77,188 @@ def test_quantile_of_empty_sequence_raises() -> None:
         _quantile([], 0.5)
 
 
-def test_quantile_forecaster_point_and_upper_bound() -> None:
-    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
-    series = [(float(i), float(i)) for i in range(1, 11)]  # values 1..10
-    forecast = forecaster.predict(series, timedelta(hours=1))
-    assert forecast.point_estimate == pytest.approx(5.5)
-    assert forecast.upper_bound == pytest.approx(10.0)
+# ------------------------------------------------------ holt_winters_quantile
 
 
-def test_quantile_forecaster_empty_series_is_zero() -> None:
-    forecaster = QuantileForecaster(lookback_seconds=DAY)
-    forecast = forecaster.predict([], timedelta(hours=1))
-    assert forecast.point_estimate == 0.0
-    assert forecast.upper_bound == 0.0
-
-
-def test_quantile_forecaster_required_range() -> None:
-    forecaster = QuantileForecaster(lookback_seconds=DAY)
-    assert forecaster.required_range() == timedelta(seconds=DAY)
-
-
-# ------------------------------------------------------------- seasonal naive
-
-
-def test_seasonal_naive_groups_by_hour_of_day() -> None:
-    # Two samples at hour 3 (values 10, 20) on different days, one at hour 9.
-    hour3_day1 = 3 * 3600
-    hour3_day2 = hour3_day1 + int(DAY)
-    hour9 = 9 * 3600
-    series = [(hour3_day1, 10.0), (hour3_day2, 20.0), (hour9, 999.0)]
-    forecaster = SeasonalNaiveForecaster(
-        lookback_seconds=DAY, seasonal_lookback_days=7, now_epoch_seconds=hour3_day2
+def test_holt_winters_quantile_is_the_p95_of_the_forecast_path_not_its_last_point() -> None:
+    """A diurnal series that *ends at its trough*: the last forecast point (one
+    day ahead, same phase) is the trough again, but the p95 of the whole next day
+    is near the peak -- which is what tomorrow's placement should be based on."""
+    pytest.importorskip("statsmodels")
+    rng = random.Random(1)
+    n = 24 * 8 + 13  # the last sample sits at the cosine's minimum
+    series = series_of(
+        n, lambda i: 10 + 5 * math.cos(2 * math.pi * i / 24) + rng.uniform(-0.2, 0.2)
     )
-    forecast = forecaster.predict(series, timedelta(hours=1))
-    assert forecast.point_estimate == pytest.approx(15.0)  # median of [10, 20]
-    assert forecast.upper_bound >= 15.0
+    assert series[-1][1] < 6  # ends at the trough
+    result = holt_winters_quantile(series, HW, STEP, DAY, 0.95)
+    assert result is not None
+    assert 13.5 < result < 15.5  # ~ 10 + 5 * cos(pi * 0.05)
 
 
-def test_seasonal_naive_no_matching_hour_is_zero() -> None:
-    forecaster = SeasonalNaiveForecaster(
-        lookback_seconds=DAY, seasonal_lookback_days=7, now_epoch_seconds=0
+def test_holt_winters_quantile_follows_a_rising_trend_above_the_observed_p95() -> None:
+    pytest.importorskip("statsmodels")
+    rng = random.Random(2)
+    series = series_of(
+        24 * 6, lambda i: 10 + 0.1 * i + 3 * math.sin(2 * math.pi * i / 24) + rng.uniform(-0.2, 0.2)
     )
-    forecast = forecaster.predict([], timedelta(hours=1))
-    assert forecast.point_estimate == 0.0
-    assert forecast.upper_bound == 0.0
+    observed = _quantile([v for _, v in series[-24:]], 0.95)
+    result = holt_winters_quantile(series, HW, STEP, DAY, 0.95)
+    assert result is not None and result > observed
 
 
-def test_seasonal_naive_required_range() -> None:
-    forecaster = SeasonalNaiveForecaster(
-        lookback_seconds=DAY, seasonal_lookback_days=7, now_epoch_seconds=0
-    )
-    assert forecaster.required_range() == timedelta(seconds=7 * DAY)
+def test_holt_winters_quantile_is_none_with_too_few_samples() -> None:
+    assert holt_winters_quantile(series_of(47, lambda i: i % 5), HW, STEP, DAY, 0.95) is None
 
 
-# ------------------------------------------------------------------ holt-winters
+def test_holt_winters_quantile_is_none_for_a_constant_series() -> None:
+    assert holt_winters_quantile(series_of(96, lambda i: 3.0), HW, STEP, DAY, 0.95) is None
 
 
-def test_holt_winters_falls_back_when_too_few_samples(caplog: pytest.LogCaptureFixture) -> None:
-    forecaster = HoltWintersForecaster(
-        lookback_seconds=48 * 3600, seasonal_periods=288, step_seconds=300
-    )
-    series = [(float(i) * 300, float(i % 5)) for i in range(10)]  # far below 2*288
-    with caplog.at_level(logging.WARNING):
-        forecast = forecaster.predict(series, timedelta(hours=1))
-    assert any("fall" in r.message for r in caplog.records)
-    assert forecast.upper_bound >= forecast.point_estimate
+def test_holt_winters_quantile_is_none_when_statsmodels_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "statsmodels.tsa.holtwinters", None)
+    series = series_of(96, lambda i: i % 7)
+    assert holt_winters_quantile(series, HW, STEP, DAY, 0.95) is None
 
 
-def test_holt_winters_required_range() -> None:
-    forecaster = HoltWintersForecaster(
-        lookback_seconds=48 * 3600, seasonal_periods=288, step_seconds=300
-    )
-    assert forecaster.required_range() == timedelta(hours=48)
+def test_holt_winters_quantile_is_none_when_the_fit_raises() -> None:
+    pytest.importorskip("statsmodels")
+    # A multiplicative model cannot be fitted to data containing zeros.
+    hw = HoltWintersConfig(seasonal_periods=24, trend="mul", seasonal="mul")
+    series = series_of(96, lambda i: i % 5)  # contains 0.0
+    assert holt_winters_quantile(series, hw, STEP, DAY, 0.95) is None
 
 
-def test_holt_winters_fits_a_seasonal_series() -> None:
-    statsmodels = pytest.importorskip("statsmodels")
-    del statsmodels
-    seasonal_periods = 24
-    step_seconds = 3600.0
-    n = 4 * seasonal_periods
-    series = [
-        (i * step_seconds, 10.0 + 5.0 * math.sin(2 * math.pi * i / seasonal_periods))
-        for i in range(n)
-    ]
-    forecaster = HoltWintersForecaster(
-        lookback_seconds=n * step_seconds,
-        seasonal_periods=seasonal_periods,
-        step_seconds=step_seconds,
-    )
-    forecast = forecaster.predict(series, timedelta(hours=1))
-    assert forecast.upper_bound >= forecast.point_estimate
-    # A reasonable fit stays in the neighbourhood of the series' own range.
-    assert -5.0 <= forecast.point_estimate <= 25.0
+def test_holt_winters_quantile_is_none_on_a_convergence_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sm = pytest.importorskip("statsmodels.tsa.holtwinters")
+    from statsmodels.tools.sm_exceptions import ConvergenceWarning
+
+    class _Warns:
+        def __init__(self, *_a: object, **_k: object) -> None:
+            pass
+
+        def fit(self) -> object:
+            warnings.warn("did not converge", ConvergenceWarning, stacklevel=2)
+            raise AssertionError("unreachable: the warning is an error")
+
+    monkeypatch.setattr(sm, "ExponentialSmoothing", _Warns)
+    series = series_of(96, lambda i: i % 7)
+    assert holt_winters_quantile(series, HW, STEP, DAY, 0.95) is None
 
 
-# --------------------------------------------------------------- build_forecaster
+def test_holt_winters_quantile_is_none_for_a_non_finite_forecast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sm = pytest.importorskip("statsmodels.tsa.holtwinters")
+
+    class _Nan:
+        def __init__(self, *_a: object, **_k: object) -> None:
+            pass
+
+        def fit(self) -> "_Nan":
+            return self
+
+        def forecast(self, steps: int) -> list[float]:
+            return [float("nan")] * steps
+
+    monkeypatch.setattr(sm, "ExponentialSmoothing", _Nan)
+    assert holt_winters_quantile(series_of(96, lambda i: i % 7), HW, STEP, DAY, 0.95) is None
 
 
-def test_build_forecaster_selects_the_right_class() -> None:
-    quantile_fc = ForecastConfig(model="quantile")
-    seasonal_fc = ForecastConfig(model="seasonal_naive")
-    hw_fc = ForecastConfig(model="holt_winters")
+def test_holt_winters_quantile_clamps_at_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    sm = pytest.importorskip("statsmodels.tsa.holtwinters")
 
-    assert isinstance(build_forecaster(quantile_fc, DAY, 300, 0, 0.95, 0.99), QuantileForecaster)
-    assert isinstance(
-        build_forecaster(seasonal_fc, DAY, 300, 0, 0.95, 0.99), SeasonalNaiveForecaster
-    )
-    assert isinstance(build_forecaster(hw_fc, DAY, 300, 0, 0.95, 0.99), HoltWintersForecaster)
+    class _Negative:
+        def __init__(self, *_a: object, **_k: object) -> None:
+            pass
+
+        def fit(self) -> "_Negative":
+            return self
+
+        def forecast(self, steps: int) -> list[float]:
+            return [-4.0] * steps
+
+    monkeypatch.setattr(sm, "ExponentialSmoothing", _Negative)
+    assert holt_winters_quantile(series_of(96, lambda i: i % 7), HW, STEP, DAY, 0.95) == 0.0
 
 
-def test_build_forecaster_unknown_model_raises() -> None:
-    fc = ForecastConfig(model="quantile")
-    object.__setattr__(fc, "model", "bogus")
-    with pytest.raises(ValueError):
-        build_forecaster(fc, DAY, 300, 0, 0.95, 0.99)
+def test_holt_winters_quantile_forecasts_ceil_window_over_step_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sm = pytest.importorskip("statsmodels.tsa.holtwinters")
+    asked: list[int] = []
+
+    class _Recorder:
+        def __init__(self, *_a: object, **_k: object) -> None:
+            pass
+
+        def fit(self) -> "_Recorder":
+            return self
+
+        def forecast(self, steps: int) -> list[float]:
+            asked.append(steps)
+            return [1.0] * steps
+
+    monkeypatch.setattr(sm, "ExponentialSmoothing", _Recorder)
+    holt_winters_quantile(series_of(96, lambda i: i % 7), HW, 300.0, 1000.0, 0.95)
+    assert asked == [4]  # ceil(1000 / 300)
+
+
+# ----------------------------------------------------------------- disk_factors
+
+
+def _factor_series(window_values: list[float]) -> TimeSeries:
+    """96 hourly samples whose last 24 are ``window_values`` (repeated)."""
+    older = [1.0 + (i % 3) for i in range(72)]
+    return tuple((i * STEP, v) for i, v in enumerate(older + window_values))
+
+
+class _FixedForecast:
+    """Patches ``holt_winters_quantile`` to a constant so the ratio is exact."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, value: float | None) -> None:
+        monkeypatch.setattr(
+            "proxmox_storage_drs.forecast.holt_winters_quantile", lambda *a, **k: value
+        )
+
+
+def test_disk_factors_is_forecast_over_observed_p95(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FixedForecast(monkeypatch, 8.0)
+    series = _factor_series([4.0] * 24)  # observed p95 over the last window: 4.0
+    now = 95 * STEP
+    factors = disk_factors({"101:scsi0": series}, set(), now, DAY, STEP, HW, 0.95)
+    assert factors == {"101:scsi0": pytest.approx(2.0)}
+
+
+def test_disk_factors_leaves_out_a_zero_observed_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FixedForecast(monkeypatch, 8.0)
+    series = _factor_series([0.0] * 24)
+    assert disk_factors({"101:scsi0": series}, set(), 95 * STEP, DAY, STEP, HW, 0.95) == {}
+
+
+def test_disk_factors_leaves_out_a_skipped_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FixedForecast(monkeypatch, 8.0)
+    series = _factor_series([4.0] * 24)
+    assert disk_factors({"101:scsi0": series}, {"101:scsi0"}, 95 * STEP, DAY, STEP, HW, 0.95) == {}
+
+
+def test_disk_factors_leaves_out_a_failed_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FixedForecast(monkeypatch, None)
+    series = _factor_series([4.0] * 24)
+    assert disk_factors({"101:scsi0": series}, set(), 95 * STEP, DAY, STEP, HW, 0.95) == {}
+
+
+def test_disk_factors_leaves_out_a_disk_with_no_samples_in_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FixedForecast(monkeypatch, 8.0)
+    assert disk_factors({"101:scsi0": ()}, set(), 95 * STEP, DAY, STEP, HW, 0.95) == {}
+    stale = series_of(10, lambda i: 4.0)  # ends long before the window
+    assert disk_factors({"101:scsi0": stale}, set(), 95 * STEP, DAY, STEP, HW, 0.95) == {}
 
 
 # --------------------------------------------------------- group_aggregate_series
@@ -214,87 +289,123 @@ def test_group_aggregate_series_empty_input_is_empty() -> None:
 
 # ------------------------------------------------------------------- backtest gate
 
-# window_seconds=100, now=200: the fit half covers [0, 100), the actual
-# half covers [100, 200] -- every test below places its points squarely
-# inside one half or the other so there is no ambiguity about which side
-# of the split they land on.
-BACKTEST_WINDOW = 100.0
-BACKTEST_NOW = 200.0
+
+def _trend_series(seed: int = 2) -> TimeSeries:
+    rng = random.Random(seed)
+    return series_of(
+        97, lambda i: 10 + 0.15 * i + 3 * math.sin(2 * math.pi * i / 24) + rng.uniform(-0.2, 0.2)
+    )
 
 
-def test_backtest_error_is_zero_for_a_perfect_prediction() -> None:
-    """A constant series: the median of the fit half exactly matches the
-    mean of the actual half."""
-    series = tuple((float(ts), 5.0) for ts in (10, 30, 50, 70, 90, 110, 130, 150, 170, 190))
-    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
-    error = backtest_error(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW)
-    assert error == pytest.approx(0.0)
+def _noise_series(seed: int = 3) -> TimeSeries:
+    rng = random.Random(seed)
+    return series_of(97, lambda i: 10 + rng.uniform(-3, 3))
 
 
-def test_backtest_error_detects_a_real_miss() -> None:
-    fit = tuple((float(ts), 1.0) for ts in (10, 30, 50, 70, 90))
-    actual = tuple((float(ts), 10.0) for ts in (110, 130, 150, 170, 190))
-    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
-    error = backtest_error(forecaster, fit + actual, BACKTEST_NOW, BACKTEST_WINDOW)
-    assert error == pytest.approx(0.9)  # |1 - 10| / 10
+W2 = 48 * STEP  # a two-day window: each backtest half holds two seasonal cycles
+NOW = 96 * STEP
 
 
-def test_backtest_error_both_halves_idle_is_a_perfect_score() -> None:
-    """Zero predicted, zero actual -- correctly forecasting silence is not
-    a division-by-zero, it is the best possible score."""
-    series = tuple((float(ts), 0.0) for ts in (10, 30, 50, 70, 90, 110, 130, 150, 170, 190))
-    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
-    error = backtest_error(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW)
-    assert error == pytest.approx(0.0)
+def test_backtest_passes_on_a_seasonal_series_with_a_trend() -> None:
+    pytest.importorskip("statsmodels")
+    result = backtest(_trend_series(), NOW, W2, STEP, HW, 0.95)
+    assert result is not None and result.passed
+    assert result.hw_error is not None and result.hw_error < result.baseline_error
 
 
-def test_backtest_error_nonzero_prediction_against_true_silence_is_bounded() -> None:
-    """actual == 0 with a nonzero prediction falls back to normalizing by
-    the prediction itself, rather than raising -- a full, bounded miss
-    (1.0), not an unbounded ratio."""
-    fit = tuple((float(ts), 5.0) for ts in (10, 30, 50, 70, 90))
-    actual = tuple((float(ts), 0.0) for ts in (110, 130, 150, 170, 190))
-    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
-    error = backtest_error(forecaster, fit + actual, BACKTEST_NOW, BACKTEST_WINDOW)
-    assert error == pytest.approx(1.0)
+def test_backtest_fails_on_white_noise() -> None:
+    pytest.importorskip("statsmodels")
+    result = backtest(_noise_series(), NOW, W2, STEP, HW, 0.95)
+    assert result is not None and not result.passed
 
 
-def test_backtest_error_returns_none_without_a_full_fit_half() -> None:
-    """Every point falls in the *actual* half only -- there is nothing
-    old enough to fit on yet."""
-    series = tuple((float(ts), 1.0) for ts in (110, 130, 150))
-    forecaster = QuantileForecaster(lookback_seconds=DAY)
-    assert backtest_error(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW) is None
+def test_backtest_hw_error_is_none_when_the_fit_half_is_too_short() -> None:
+    """Fewer than 2 * seasonal_periods samples before now - W: Holt-Winters cannot
+    be fitted, so it cannot pass."""
+    result = backtest(_trend_series(), NOW, W2, STEP, HoltWintersConfig(seasonal_periods=48), 0.95)
+    assert result is not None
+    assert result.hw_error is None and not result.passed
 
 
-def test_backtest_error_returns_none_without_a_full_actual_half() -> None:
-    """Every point falls in the *fit* half only -- nothing recent enough
-    to compare a prediction against."""
-    series = tuple((float(ts), 1.0) for ts in (10, 30, 50))
-    forecaster = QuantileForecaster(lookback_seconds=DAY)
-    assert backtest_error(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW) is None
+def test_backtest_is_none_without_a_fit_half() -> None:
+    series = series_of(10, lambda i: 1.0)  # everything inside the actual half
+    assert backtest(series, 9 * STEP, 20 * STEP, STEP, HW, 0.95) is None
 
 
-def test_backtest_error_returns_none_for_a_completely_empty_series() -> None:
-    forecaster = QuantileForecaster(lookback_seconds=DAY)
-    assert backtest_error(forecaster, (), BACKTEST_NOW, BACKTEST_WINDOW) is None
+def test_backtest_is_none_without_an_actual_half() -> None:
+    series = series_of(10, lambda i: 1.0)  # everything inside the fit half
+    assert backtest(series, 100 * STEP, 50 * STEP, STEP, HW, 0.95) is None
 
 
-def test_backtest_validated_true_when_error_is_within_the_threshold() -> None:
-    series = tuple((float(ts), 5.0) for ts in (10, 30, 50, 70, 90, 110, 130, 150, 170, 190))
-    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
-    assert backtest_validated(forecaster, series, BACKTEST_NOW, BACKTEST_WINDOW, 0.20)
+def test_backtest_is_none_for_an_empty_series() -> None:
+    assert backtest((), NOW, W2, STEP, HW, 0.95) is None
 
 
-def test_backtest_validated_false_when_error_exceeds_the_threshold() -> None:
-    fit = tuple((float(ts), 1.0) for ts in (10, 30, 50, 70, 90))
-    actual = tuple((float(ts), 10.0) for ts in (110, 130, 150, 170, 190))
-    forecaster = QuantileForecaster(lookback_seconds=DAY, quantile=0.5, upper_quantile=1.0)
-    assert not backtest_validated(forecaster, fit + actual, BACKTEST_NOW, BACKTEST_WINDOW, 0.20)
+def test_backtest_passed_needs_a_holt_winters_error_not_worse_than_the_baseline() -> None:
+    assert Backtest(hw_error=0.1, baseline_error=0.1).passed  # a tie passes
+    assert Backtest(hw_error=0.0, baseline_error=0.1).passed
+    assert not Backtest(hw_error=0.2, baseline_error=0.1).passed
+    assert not Backtest(hw_error=None, baseline_error=0.1).passed
 
 
-def test_backtest_validated_false_without_enough_history() -> None:
-    """Not yet validated is treated the same as failed validation, not a
-    free pass for a fresh deployment."""
-    forecaster = QuantileForecaster(lookback_seconds=DAY)
-    assert not backtest_validated(forecaster, (), BACKTEST_NOW, BACKTEST_WINDOW, 0.20)
+# ---------------------------------------------------------------- forecast_group
+
+
+def _group_series(base: TimeSeries) -> dict[str, TimeSeries]:
+    return {
+        "101:scsi0": base,
+        "102:scsi0": tuple((ts, v / 2) for ts, v in base),
+        "103:scsi0": tuple((ts, 0.0) for ts, _v in base),  # idle: nothing to scale
+    }
+
+
+def test_forecast_group_scales_disks_when_the_backtest_passes() -> None:
+    pytest.importorskip("statsmodels")
+    fc = ForecastConfig(model="holt_winters", holt_winters=HW)
+    factors, report = forecast_group(
+        _group_series(_trend_series()), {"102:scsi0"}, fc, NOW, W2, STEP, 0.95
+    )
+    assert set(factors) == {"101:scsi0"}  # 102 is skipped, 103 has h_d = 0
+    assert report.used and report.model == "holt_winters"
+    assert report.disks_scaled == 1 and report.disks_kept == 2
+    assert report.backtest_error is not None and report.baseline_error is not None
+    assert report.backtest_error <= report.baseline_error
+
+
+def test_forecast_group_keeps_every_load_when_the_backtest_fails() -> None:
+    pytest.importorskip("statsmodels")
+    fc = ForecastConfig(model="holt_winters", holt_winters=HW)
+    factors, report = forecast_group(_group_series(_noise_series()), set(), fc, NOW, W2, STEP, 0.95)
+    assert factors == {}
+    assert not report.used
+    assert report.disks_scaled == 0 and report.disks_kept == 3
+    assert report.backtest_error is not None and report.baseline_error is not None
+    assert report.backtest_error > report.baseline_error
+
+
+def test_forecast_group_without_enough_history_reports_no_errors() -> None:
+    fc = ForecastConfig(model="holt_winters", holt_winters=HW)
+    factors, report = forecast_group(
+        _group_series(series_of(10, lambda i: 1.0)), set(), fc, NOW, W2, STEP, 0.95
+    )
+    assert factors == {}
+    assert report == ForecastReport(
+        model="holt_winters",
+        used=False,
+        backtest_error=None,
+        baseline_error=None,
+        disks_scaled=0,
+        disks_kept=3,
+    )
+
+
+def test_forecast_report_as_dict_has_the_documented_keys() -> None:
+    report = ForecastReport("holt_winters", True, 0.08, 0.14, 37, 5)
+    assert report.as_dict() == {
+        "model": "holt_winters",
+        "used": True,
+        "backtest_error": 0.08,
+        "baseline_error": 0.14,
+        "disks_scaled": 37,
+        "disks_kept": 5,
+    }

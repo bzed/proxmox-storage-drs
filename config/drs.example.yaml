@@ -93,9 +93,7 @@ window:
   # The DECISION window: the period whose load we balance. This is NOT the same
   # as the history a forecaster needs -- see the forecast: block below.
   lookback: 24h
-  quantile: 0.95        # point estimate: the statistic every placement decision uses
-  upper_quantile: 0.99  # Upper bound on the same load; must be >= quantile. Read by
-                        # nothing any more; kept so an existing config still loads.
+  quantile: 0.95        # the statistic every placement decision uses (p95 of a disk's load)
   min_coverage: 0.80    # reject a disk's data if fewer than this fraction of
                         # expected samples are present
 
@@ -375,20 +373,27 @@ state:
   path: /var/lib/pve-storage-drs/state.json
 
 forecast:
-  model: quantile        # quantile | seasonal_naive | holt_winters
-  # Each forecaster declares the HISTORY it needs, independent of
-  # window.lookback. Startup validation fails if Prometheus retention or the
-  # configured window cannot supply it, rather than silently degrading:
-  #   quantile        -> window.lookback                      (24h)
-  #   seasonal_naive  -> seasonal_lookback_days                (7d)
-  #   holt_winters    -> 2 * seasonal_periods * step           (48h)
-  # NOTE: with seasonal_periods=288 at a 5m step, holt_winters needs 48h. A 24h
-  # lookback alone can never satisfy it -- it would fall back to quantile forever.
+  # quantile      -> every disk's load is its p95 over the LAST window.lookback.
+  # holt_winters  -> every disk's load is scaled to a Holt-Winters forecast of its
+  #                  p95 over the NEXT window.lookback, so a disk whose load is
+  #                  rising, or has a daily peak the last window happened to miss,
+  #                  is placed for what it will do rather than what it did.
+  #
+  # holt_winters is only used for a group when a backtest says it would have
+  # predicted that group's own last window at least as well as simply repeating
+  # the window before it (no threshold to tune); otherwise the group falls back to
+  # quantile for that run, with a warning. That needs 2 * window.lookback of
+  # Prometheus history, and python3-statsmodels installed.
+  model: quantile        # quantile | holt_winters
+  # holt_winters also needs two full seasonal cycles inside window.lookback
+  # (2 * seasonal_periods * step); startup validation fails if window.lookback is
+  # shorter, rather than silently degrading. With seasonal_periods=288 at a 5m
+  # step that is 48h, so a 24h lookback can never satisfy it.
   #
   # To switch model to holt_winters with the daily-cycle default below, also
   # raise window.lookback (above) to at least 48h -- it stays the DECISION
-  # window (what load is balanced over), so most deployments just set it to
-  # match: 48h. Both plan/apply and collect-testdata
+  # window (what load is balanced over) -- and keep 96h of Prometheus history.
+  # Both plan/apply and collect-testdata
   # fetch this history in day-sized chunks regardless of how wide it gets
   # (see the RANGE_QUERY_CHUNK_SECONDS note in docs/internals/30-metrics.md),
   # so this is a Prometheus-request-count cost, never a backend point-per-
@@ -401,12 +406,10 @@ forecast:
   #     model: holt_winters
   #     holt_winters:
   #       seasonal_periods: 2016     # 7d at 5m step
-  seasonal_lookback_days: 7    # used by seasonal_naive; 0 disables
   holt_winters:
     seasonal_periods: 288      # 24h at 5m step
     trend: add
     seasonal: add
-    residual_z: 2.0            # upper bound = point + z * sigma(residuals)
 
 support:
   # Diagnostic bundles: `pve-storage-drs collect-testdata` and the global
@@ -425,10 +428,9 @@ support:
   # series-sample count before fetching anything and refuses above this,
   # naming the --range/--step/--no-series flags that would bring it under.
   max_series_points: 5000000
-  # "auto" captures the union of every forecaster's required_range() (section
-  # 16.2), currently max(window.lookback, forecast.seasonal_lookback_days,
-  # 2 * holt_winters.seasonal_periods * metrics.step) -- the superset any
-  # supported config could need, not just the one active here. A duration
+  # "auto" captures what holt_winters needs (section 16.2), currently
+  # max(2 * window.lookback, 2 * holt_winters.seasonal_periods * metrics.step) --
+  # the superset any supported config could need, not just the one active here. A duration
   # (e.g. "14d") overrides it; --range on the command line overrides both.
   capture_range: auto
 

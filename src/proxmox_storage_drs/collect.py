@@ -105,7 +105,7 @@ def hash_query_text(text: str) -> str:
     bundle captures exactly one superset range per (group, metric) pair at
     ``metrics.step`` (the only step this project ever queries at for a
     given config), and a replay request for a *narrower* window of the same
-    query (a different forecaster's own, smaller ``required_range()``) is
+    query (a different model's own, smaller history requirement) is
     served by trimming the one stored series -- see ``replay.py``'s own
     docstring for why an exact match on the literal range would defeat the
     point of capturing a superset at all."""
@@ -145,16 +145,14 @@ class CaptureEstimate:
 
 
 def capture_range_seconds(config: Config, override: float | None) -> float:
-    """Section 16.2's ``capture_range = max(...)`` -- the union of every
-    forecaster's ``required_range()``, not just the configured one, unless
-    ``--range``/``override`` was given. Also never less than
-    ``2 * window.lookback_seconds``: section 10.2's backtest gate
-    (``cli._backtest_gated_forecaster()``) fits on ``[now-2W, now-W)`` and
-    checks against ``[now-W, now]`` for *any* backtested model
-    (``seasonal_naive``/``holt_winters``), so a bundle captured with only
-    the configured forecaster's own minimum would replay the backtest gate
-    as permanently "not enough history" regardless of how much real
-    history Prometheus actually had at capture time."""
+    """Section 16.2's ``capture_range = max(...)`` -- what ``holt_winters``
+    needs, not just the configured model, unless ``--range``/``override`` was
+    given. Also never less than ``2 * window.lookback_seconds``: section 10.2's
+    backtest (``forecast.backtest()``) fits on ``[now-2W, now-W)`` and checks
+    against ``[now-W, now]``, so a bundle captured with only the configured
+    model's own minimum would replay the backtest as permanently "not enough
+    history" regardless of how much real history Prometheus actually had at
+    capture time."""
     if override is not None:
         return override
     configured = config.support.capture_range
@@ -162,7 +160,6 @@ def capture_range_seconds(config: Config, override: float | None) -> float:
         return parse_duration_seconds(configured)
     return max(
         config.window.lookback_seconds,
-        config.forecast.seasonal_lookback_days * 86400.0,
         2 * config.forecast.holt_winters.seasonal_periods * config.metrics.step_seconds,
         2 * config.window.lookback_seconds,
     )
@@ -910,7 +907,7 @@ def _drive_group_series(
     """Section 16.2 bullets 2-3, one raw metric at a time: the two
     ``quantile_over_time`` instant reductions ``compute_group_load()``
     itself consumes, plus (unless ``--no-series``) the range series over
-    ``range_seconds`` every forecaster's own narrower window is trimmed
+    ``range_seconds`` every model's own narrower window is trimmed
     from at replay time. Issues the calls only -- ``recording_prom``'s own
     ``captured`` log is what :func:`_anonymize_captured_prometheus` turns
     into bundle files, once, after every driver (this one, ``verify_metrics``,
@@ -964,15 +961,15 @@ def _drive_group_series(
             query_step = safe_range_step_seconds(
                 config.metrics.step_seconds, config.metrics.rate_window_seconds
             )
-            for quantile in (config.window.quantile, config.window.upper_quantile):
-                promql = build_quantile_over_time_promql(
-                    rate_expr, quantile, config.window.lookback_seconds, query_step
-                )
-                _guarded(
-                    log,
-                    f"instant quantile_over_time {field_name} q={quantile} ({group.name})",
-                    partial(recording_prom.instant_query, promql),
-                )
+            quantile = config.window.quantile
+            promql = build_quantile_over_time_promql(
+                rate_expr, quantile, config.window.lookback_seconds, query_step
+            )
+            _guarded(
+                log,
+                f"instant quantile_over_time {field_name} q={quantile} ({group.name})",
+                partial(recording_prom.instant_query, promql),
+            )
 
             if options.no_series:
                 continue
@@ -1676,7 +1673,6 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
         "window": {
             "lookback": config.window.lookback_seconds,
             "quantile": config.window.quantile,
-            "upper_quantile": config.window.upper_quantile,
             "min_coverage": config.window.min_coverage,
         },
         "load_weights": {
@@ -1764,12 +1760,10 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
         "state": {"path": "state.json"},
         "forecast": {
             "model": config.forecast.model,
-            "seasonal_lookback_days": config.forecast.seasonal_lookback_days,
             "holt_winters": {
                 "seasonal_periods": config.forecast.holt_winters.seasonal_periods,
                 "trend": config.forecast.holt_winters.trend,
                 "seasonal": config.forecast.holt_winters.seasonal,
-                "residual_z": config.forecast.holt_winters.residual_z,
             },
         },
         "support": {

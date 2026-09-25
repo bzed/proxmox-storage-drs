@@ -135,7 +135,7 @@ The join between them is the disk identity `(vmid, device)`, which both sides ex
 | `pve.py` | API client: auth, topology, storage status, `move_disk`, task polling |
 | `topology.py` | Build the disk/storage/group model, eligibility rules, storage-pattern expansion (§11.4) |
 | `loadmodel.py` | Reduce raw series to the scalar load vector `ℓ` |
-| `forecast.py` | Pluggable forecaster (quantile, seasonal-naive, Holt-Winters) |
+| `forecast.py` | Holt-Winters forecast of a disk's p95 over the next window, and its backtest gate (§10, §12.1) |
 | `optimize.py` | MILP formulation (CBC via `pulp`) |
 | `heuristic.py` | Dependency-free greedy + local search fallback |
 | `payback.py` | Migration cost model and acceptance test |
@@ -386,7 +386,9 @@ call site cannot silently add an unnameable member.
 | `storage_pattern_expanded` | DEBUG | A `/regex/` storage id matched a set | built: DEBUG |
 | `optimize_backend_unavailable` | DEBUG under `auto`, WARNING when that backend was explicitly configured | An optional solver dependency is not importable | built: DEBUG under `auto`, WARNING otherwise |
 | `solver_fallback` | WARNING | A configured backend produced no plan and the heuristic took over | as built, correct |
-| `forecast_fallback`, `forecast_backtest_failed` | WARNING | Section 10's forecaster degraded to the quantile | as built, correct |
+| `forecast_backtest_failed` | WARNING | `holt_winters` did not beat the quantile baseline for a group (or there is too little history to check); the group ran on `quantile` | built (phase 14b) |
+| `forecast_used` | INFO | `holt_winters` drove a group's loads: both backtest errors and how many disks were scaled or kept | built (phase 14b) |
+| `forecast_fit_failed`, `forecast_fit_skipped` | DEBUG | One disk's fit failed, or `statsmodels` is missing | built (phase 14b) |
 | `vm_locked`, `orphaned_volumes`, `orphan_check_failed` | WARNING | Section 9.4's hazards | as built, correct |
 | `state_corrupt`, `state_read_failed` | WARNING | Section 11.2's state file is unusable | as built, correct |
 | `inflight_found`, `inflight_reconciled`, `inflight_check_failed`, `cluster_task_scan_failed` | WARNING (INFO for `inflight_reconciled`) | Section 13's crash recovery | as built, correct |
@@ -2622,58 +2624,46 @@ narration for a human, not a machine-checked verdict.
 
 ## 10. Forecasting
 
-The default decision statistic is the p95 of the trailing window, which is deliberately conservative
-and needs no model fitting. Forecasting is behind an interface so it can be strengthened without
-touching the optimizer:
+The decision statistic behind every placement is `window.quantile` (p95) of a disk's load, which
+the default `quantile` model takes over the **last** `W = window.lookback`. It is deliberately
+conservative and needs no fitting. `forecast.model: holt_winters` instead predicts that same
+statistic over the **next** `W`, so a disk whose load is rising, or has a daily peak the last window
+missed, is placed for what it will do. The mechanism is §12.1's; this section states what it is and
+what it needs.
 
-```python
-class Forecaster(Protocol):
-    def required_range(self) -> timedelta:
-        """How much history this model needs. metrics.py serves exactly this."""
-
-    def predict(self, series: TimeSeries, horizon: timedelta) -> Forecast:
-        """Returns point estimate and an upper bound for the horizon."""
-```
-
-### 10.1 Each forecaster owns its data range
+### 10.1 What is forecast, and what history it needs
 
 `window.lookback` is the **decision** window — the period whose load we are balancing. It is *not*
-the amount of history a forecaster needs, and conflating the two makes the seasonal models
-unreachable: Holt-Winters with `seasonal_periods = 288` (24 h at a 5 m step) needs `2 × 288 = 576`
-samples, i.e. **48 h**, which a 24 h window can never supply. It would silently fall back to
-`quantile` forever.
+the amount of history the model needs, and conflating the two makes Holt-Winters unreachable:
+`seasonal_periods = 288` (24 h at a 5 m step) needs `2 × 288 = 576` samples, i.e. **48 h**, which a
+24 h window can never supply. Config validation (§11.1) therefore **rejects** a `window.lookback`
+below `2 · seasonal_periods · metrics.step` under `holt_winters`, rather than silently degrading;
+the backtest of §10.2 additionally needs `2W` of Prometheus history, and `metrics.py` exposes
+`query_range` over an arbitrary range for it.
 
-So `metrics.py` must expose `query_range` over an **arbitrary** range, not just `window.lookback`,
-and each forecaster declares what it needs:
+| `forecast.model` | History it needs | The per-disk statistic |
+|---|---|---|
+| `quantile` *(default)* | `window.lookback` | `window.quantile` over the last `W` (no fitting, no extra query) |
+| `holt_winters` | `max(lookback, 2 · seasonal_periods · step)` (48 h), and `2W` for the backtest | `window.quantile` of the fitted forecast path over the next `W` |
 
-| Implementation | `required_range()` | Point estimate | Upper bound |
-|---|---|---|---|
-| `quantile` *(default)* | `window.lookback` (24 h) | p95 over `W` | `quantile_over_time(upper_quantile)`, default p99 |
-| `seasonal_naive` | `max(lookback, seasonal_lookback_days)` (7 d) | median across same-hour-of-day samples | p95 across those samples |
-| `holt_winters` | `max(lookback, 2 · seasonal_periods · step)` (48 h) | fitted forecast at `horizon` | point + `z·σ` of in-sample residuals, `z = 2` |
+The forecast is **not** the last forecast point (one sample at one hour of day says nothing about
+tomorrow's peak) and carries **no** `z · σ` band: a forecast p95 is compared with its
+`quantile`-model peers' observed p95, and a residual band would inflate exactly the disks that were
+forecast. There is no upper bound and nothing consumes one (REVIEW.md T-03, AL-01; the §7.3
+saturation guard that did was removed by phase 14a). `seasonal_naive` was removed for the same
+reason — its statistic (the median of the same hour of day) is not a forecast over `W`. The removed
+config keys `window.upper_quantile`, `forecast.seasonal_lookback_days` and
+`forecast.holt_winters.residual_z` stay in the closed schema, are ignored, and warn once each.
 
-The optimizer consumes the **upper bound**, never the point estimate. Being wrong in the direction of
-"this disk is busier than it looks" costs a slightly suboptimal balance; being wrong the other way
-migrates a disk onto a storage that is about to be saturated. For the default `quantile` forecaster
-this makes the distinction concrete rather than vacuous: the point estimate is `window.quantile`
-(p95) and the bound is `window.upper_quantile` (p99), so the optimizer sees p99.
+The forecast never replaces a load, it **scales** it: `ℓ_d ← ℓ_d · f_d / h_d`, with `f_d` the
+forecast p95 and `h_d` the observed p95 of the same per-timestamp series (`loadmodel.
+apply_forecast()`). A disk keeps its observed `ℓ_d` when it is flagged for low coverage, has
+`h_d = 0`, or has no trustworthy fit. Forecasts are produced **per disk**, at the one point every
+consumer (gates, solver, payback, ordering, `show-load`) reads `ℓ` from.
 
-**As built (REVIEW.md T-03):** the decision statistic that actually drives the gates, solver,
-payback and ordering is `window.quantile` (the point estimate), computed once per group by
-`loadmodel.compute_group_load()`. The upper bound described above was consumed only by §7.3's
-saturation guard, which phase 14a removed; nothing reads it now. Wiring the upper bound into the
-optimizer, as this section describes, is **not** the plan any more — see the next paragraph.
-
-**Superseded by phase 14 (§12.1).** The optimizer will not consume the upper bound: the decision
-statistic stays `window.quantile`, and `holt_winters` predicts that same quantile over the *next*
-`W` instead of the last one. The table above and the paragraph on the upper bound are rewritten to §12.1 when phase 14b lands.
-The per-storage `L̂_s(Δ)` sum that used to follow (the saturation guard's input) was removed in 14a.
-
-Forecasts are produced **per disk** (§12.1 point 2).
-
-Config validation (§11.1) must **reject** a configuration whose Prometheus retention or whose
-selected forecaster and window are mutually inconsistent, rather than silently degrading. Enabling a
-seasonal model is a statement that the history exists to support it.
+**As built (phase 14b):** `forecast.py` is pure — `holt_winters_quantile()`, `backtest()`,
+`disk_factors()`, `forecast_group()` and `ForecastReport`; `cli._compute_group_load()` is the single
+caller-side wiring, used by both `show-load` and `plan`/`apply`.
 
 ### 10.2 Implementation warnings
 
@@ -2685,9 +2675,10 @@ seasonal model is a statement that the history exists to support it.
   `query_range`.
 - Require at least `2 × seasonal_periods` samples before trusting a Holt-Winters fit, and fall back to
   `quantile` otherwise — with a **logged warning**, since a silent fallback hides a misconfiguration.
-- Validate by backtesting: fit on `[t−2T, t−T]`, predict `[t−T, t]`, compare against actual. Refuse
-  to let a model whose backtest error exceeds the imbalance threshold drive migrations. **Phase 14b
-  replaces the threshold with a baseline comparison (§12.1 point 3).**
+- Validate by backtesting: fit on `[t−2T, t−T)`, predict the p95 of `[t−T, t]`, compare against
+  actual — and against the trivial baseline (persist the fit half's p95). Refuse to let a model that
+  does not beat the baseline drive placement. **As built (phase 14b, §12.1 point 3):** no threshold;
+  this replaced a comparison against `gates.imbalance_threshold`, an unrelated knob.
 
 **As built (bug fix):** the live per-disk forecast-history fetch (formerly `cli.py`'s
 `_saturation_forecast_inputs()`, via `loadmodel.compute_disk_load_series()`) used to issue one
@@ -2791,7 +2782,7 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `free_space.soft/hard`: absolute values `≥ 0` and parseable (bytes or byte-unit string); percentages `"N%"` with `0 ≤ N < 100`; `hard ≤ soft` **after** per-storage resolution and percent-to-bytes conversion, and **before** the deprecated `min_free_bytes` fold | §5.3.1. A `hard` above `soft` makes every plan for a compliant storage infeasible; a percentage of 100 or more is a typo, not a policy. Before the fold, because the fold can only raise `soft_s`: checked after it, a written `hard > soft` would hide behind a large `min_free_bytes` and surface as a startup failure the moment the operator deletes the deprecated key (§5.3.1, "validate as written, then fold") |
 | `free_space.soft < C_s` for every storage, after resolution — the `free_space` value's own, **not** the folded `min_free_bytes` (see the resolution rules below) | A requirement no disk could leave room for is a typo; caught only once the inventory is loaded, like the pattern rules of §11.4 |
 | `0 ≤ drift_threshold ≤ 1`, `0 ≤ imbalance_threshold ≤ 1` | They are ratios |
-| `quantile ∈ (0,1)`, `upper_quantile ∈ (0,1)`, `upper_quantile ≥ quantile` | The bound must not sit below the point estimate |
+| `quantile ∈ (0,1)` | A fraction; the decision statistic |
 | `min_coverage ∈ (0,1]` | A ratio; 0 would accept a disk with no data |
 | Metric names non-empty; label names non-empty and pairwise distinct | A duplicated label name silently collapses series |
 | `rate_window ≥ 4 × metrics.pvestatd_push_interval` | Below this, `rate()` sees too few points. The interval is a PVE-side setting the tool cannot read, so it is declared in config (default `60s`, PVE's own default) and `verify-metrics` cross-checks it against the observed sample spacing of a live series, erroring if the two disagree by more than 20% |
@@ -3052,7 +3043,7 @@ validation error. `config.py` ignores them and warns once each, the same shape a
 `snapshot_reserve.min_free_bytes` deprecation. `plan --json` loses `deferred_moves` and the per-move
 `saturation_deferred`; regenerate the fixture and corpus expected files and say so in the changelog.
 
-#### 14b — Holt-Winters-driven `ℓ_d` (one commit)
+#### 14b — Holt-Winters-driven `ℓ_d` (one commit) — **done**
 
 This replaces REVIEW.md AL-01's original design (decision statistic → the forecaster's upper bound,
 default p95 → p99). That changed every plan on every cluster for no forecasting gain and is dropped.
@@ -3103,6 +3094,16 @@ default p95 → p99). That changed every plan on every cluster for no forecastin
 
 7. **Cost.** One statsmodels fit per disk with history, per group per run — order 0.1 s at 2016
    samples (7 d at 5 min). Fine for a timer; no caching, no parallelism.
+
+**As built and observed (2026-09-25, dev cluster, `window.lookback: 3d`, 1 h step, 35 disks):**
+with 7 d of history a `7d` window has no `2W` to backtest (fit half: 10 samples), and the report says
+so (`backtest_error: null`). With `3d`, Holt-Winters fitted (error 6.5) but lost to the baseline (3.6),
+so the group stayed on `quantile` — the gate doing its job on a noisy cluster. Forcing the gate open
+to look at the factors gave median `f_d/h_d` 1.37 but a range of 0.00 – 39: an additive trend
+extrapolated over a whole window is undamped, and a disk with a tiny observed p95 can be scaled by a
+large ratio. No clamp was added (it would be a magic number the plan forbids); if a real cluster's
+gate opens and the factors look wild, a damped trend (`statsmodels`' `damped_trend`) is the first
+thing to try.
 
 **Done when:**
 
@@ -3614,7 +3615,7 @@ bug waiting to happen; this table is the audit.
 | `load_weights.iotime/ops/bytes` | §4, `ℓ_d` |
 | `load_weights.read_factor/write_factor` | §4, `raw_X(d)`, applied engine-side before normalization |
 | `window.lookback` | §3.4 reduction range |
-| `window.quantile` / `upper_quantile` | §10.1, point estimate (the actual decision statistic) vs. the bound (read by nothing since phase 14a; removed by 14b — see the "As built" note in §10.1) |
+| `window.quantile` | §10.1, the decision statistic |
 | `window.min_coverage` | §3.4, disk data rejection |
 | `groups[].storages[].id` in pattern form (`/…/`) | §11.4 expansion into group membership; the entry's options apply to every matched storage |
 | `groups[].storages[].capability_weight` | §4, `u_s = L_s / c_s` |
@@ -3752,26 +3753,22 @@ a multiple of it. The write path is never touched: this command has no code path
 
 - the instant query `verify-metrics` issues, so a bundle reproduces §3.3's own checks;
 - `label_values` for each of the three configured labels;
-- the `quantile_over_time` reductions of §3.4 that `loadmodel.compute_group_load()` consumes, for
-  both `window.quantile` and `window.upper_quantile`;
+- the `quantile_over_time` reduction of §3.4 that `loadmodel.compute_group_load()` consumes, for
+  `window.quantile`;
 - the `sum by (vmid, device) (rate(...))` **range** query of §3.4 over the **capture range**:
 
 ```
-capture_range = max(  over every registered forecaster of required_range(),
-                       2 · window.lookback )
-              = max(window.lookback,
-                    forecast.seasonal_lookback_days,
+capture_range = max(window.lookback,
                     2 · holt_winters.seasonal_periods · metrics.step,
                     2 · window.lookback)
 ```
 
-at `metrics.step` resolution — the union of §10.1's table, not the row the operator happens to have
-selected, **plus** `2 · window.lookback`: §10.2's backtest gate fits on `[now-2W, now-W)` and checks
-against `[now-W, now]` for whichever of `seasonal_naive`/`holt_winters` a bundle is replayed with,
-so a capture sized only to a forecaster's own minimum (which can equal `window.lookback` exactly,
-e.g. `holt_winters` tuned so `2 · seasonal_periods · metrics.step == window.lookback`) would replay
-the backtest gate as permanently "not enough history", independent of how much real history
-Prometheus actually had. With the defaults that is `max(24h, 7d, 48h, 48h) = 7d`.
+at `metrics.step` resolution — what `holt_winters` needs, not the model the operator happens to have
+selected, **plus** `2 · window.lookback`: §10.2's backtest fits on `[now-2W, now-W)` and checks
+against `[now-W, now]`, so a capture sized only to a model's own minimum (which can equal
+`window.lookback` exactly, e.g. `holt_winters` tuned so `2 · seasonal_periods · metrics.step ==
+window.lookback`) would replay the backtest as permanently "not enough history", independent of how
+much real history Prometheus actually had. With the defaults that is `max(24h, 48h, 48h) = 48h`.
 
 This is cheap in *queries* and expensive in *bytes*, which is the right way round. Each range query
 returns every disk in the group as one response, so the query count is
@@ -4116,7 +4113,7 @@ Four kinds of assertion that do hold:
 #### The variant matrix
 
 Per bundle, the matrix the generator sweeps: `solver.backend` ∈ {cbc, heuristic} ×
-`objective.spread_metric` ∈ {l1, minmax} × `forecast.model` ∈ {quantile, seasonal_naive,
+`objective.spread_metric` ∈ {l1, minmax} × `forecast.model` ∈ {quantile,
 holt_winters} × `objective.beta_move_count` over a small sweep, with everything else from the
 bundle's own `config.yaml`. A variant whose forecaster is unavailable in the running
 environment is **skipped and recorded as skipped**, never silently dropped: `statsmodels` is an

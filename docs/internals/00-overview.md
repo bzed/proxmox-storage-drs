@@ -89,7 +89,7 @@ utilization — all four in [`70-loadmodel.md`](70-loadmodel.md).
                      config.py (load + validate)
                      state.py (state.json: drift/cooldowns in and out, section 11.2)
                      timewindow.py (current_deadline(): auto's time-window budget, section 9.1)
-                     forecast.py (Forecaster protocol + 3 models)
+                     forecast.py (Holt-Winters forecast + backtest gate)
                      logging_setup.py (structured JSON to stderr)
                      units.py (duration/size parsing)
                      exceptions.py (error hierarchy)
@@ -104,7 +104,7 @@ utilization — all four in [`70-loadmodel.md`](70-loadmodel.md).
 | `config.py` | Load `/etc/pve/drs.yaml`, jsonschema + semantic validation, the frozen dataclass config model | section 11 |
 | `config_schema.json` | The jsonschema structural half of validation | section 11.1 |
 | `state.py` | `state.json`: the load vector as of the last executed balance, cooldowns, the node-local advisory `flock()` — reading degrades, writing raises | section 11.2 |
-| `forecast.py` | The `Forecaster` protocol, `required_range_seconds`, and `quantile`/`seasonal_naive`/`holt_winters` | section 10 |
+| `forecast.py` | `required_range_seconds`, the Holt-Winters p95 forecast, the backtest gate and `ForecastReport` | sections 10, 12.1 |
 | `logging_setup.py` | Structured JSON logging to **stderr** | section 2.1 (amended, see [`40-cli-and-logging.md`](40-cli-and-logging.md)) |
 | `metrics.py` | `PrometheusClient`, PromQL construction, `verify_metrics()`, `compute_disk_coverage()` | sections 3.1-3.4 |
 | `pve.py` | `PveClient` (built on `proxmoxer`), `build_client()` | section 3.5 |
@@ -172,8 +172,8 @@ this.
   -in-place bug it takes to get that wrong, what `show-load`/`plan`
   actually get from it today, and how its cooldown data reaches
   `topology.py`/`heuristic.py`.
-- [`20-forecasting.md`](20-forecasting.md) — the forecaster protocol and its
-  three implementations.
+- [`20-forecasting.md`](20-forecasting.md) — the Holt-Winters forecast, its
+  backtest gate, and how it scales a disk's load.
 - [`30-metrics.md`](30-metrics.md) — the Prometheus client and the six
   `verify-metrics` checks.
 - [`40-cli-and-logging.md`](40-cli-and-logging.md) — command dispatch, the

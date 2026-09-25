@@ -481,9 +481,7 @@ def test_compute_disk_coverage_applies_the_safe_step_and_decimates_back() -> Non
     300s one, matching expected_samples exactly (not capped at some
     inflated ratio)."""
     metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
-    window = WindowConfig(
-        lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
-    )
+    window = WindowConfig(lookback_seconds=300.0, quantile=0.95, min_coverage=0.8)
     dense_series = [
         {
             "metric": {"vmid": "101", "instance": "scsi0"},
@@ -506,9 +504,7 @@ def test_compute_disk_coverage_decimation_does_not_inflate_a_real_gap() -> None:
     inflated, wrong fraction relative to expected_samples (computed from
     the configured step, not the safe one)."""
     metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
-    window = WindowConfig(
-        lookback_seconds=600.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
-    )
+    window = WindowConfig(lookback_seconds=600.0, quantile=0.95, min_coverage=0.8)
     partial_series = [
         {
             "metric": {"vmid": "101", "instance": "scsi0"},
@@ -531,9 +527,7 @@ def test_compute_disk_coverage_retries_at_the_bundles_actual_captured_step() -> 
     ``compute_disk_coverage()`` retries with exactly it -- one retry,
     never a second guess -- rather than propagate the error."""
     metrics = MetricsConfig(rate_window_seconds=300.0, step_seconds=300.0, labels=MetricLabels())
-    window = WindowConfig(
-        lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
-    )
+    window = WindowConfig(lookback_seconds=300.0, quantile=0.95, min_coverage=0.8)
     real_series = [
         {"metric": {"vmid": "101", "instance": "scsi0"}, "values": [[0, "0"], [300, "0"]]}
     ]
@@ -551,9 +545,7 @@ def test_compute_disk_coverage_reraises_bundle_error_when_the_query_was_never_ca
     for this query at all, the same "no recorded response" a genuinely
     wrong or corrupted bundle raises."""
     metrics = MetricsConfig(rate_window_seconds=600.0, step_seconds=300.0, labels=MetricLabels())
-    window = WindowConfig(
-        lookback_seconds=300.0, quantile=0.95, upper_quantile=0.99, min_coverage=0.8
-    )
+    window = WindowConfig(lookback_seconds=300.0, quantile=0.95, min_coverage=0.8)
     client = _StepAwareFakeClient(working_step=999.0, result=[], found=False)
 
     with pytest.raises(BundleError):

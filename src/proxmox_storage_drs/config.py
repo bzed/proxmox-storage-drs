@@ -105,7 +105,6 @@ class MetricsConfig:
 class WindowConfig:
     lookback_seconds: float = 86400.0
     quantile: float = 0.95
-    upper_quantile: float = 0.99
     min_coverage: float = 0.80
 
 
@@ -334,13 +333,11 @@ class HoltWintersConfig:
     seasonal_periods: int = 288
     trend: str = "add"
     seasonal: str = "add"
-    residual_z: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)
 class ForecastConfig:
     model: str = "quantile"
-    seasonal_lookback_days: float = 7.0
     holt_winters: HoltWintersConfig = field(default_factory=HoltWintersConfig)
 
 
@@ -349,7 +346,7 @@ class SupportConfig:
     """Section 16.7. Diagnostic-bundle support: the anonymization salt, the
     default ``collect-testdata`` output directory, the hard refusal ceiling
     on a series capture, and the capture range (``"auto"`` for section 16.2's
-    computed maximum over every forecaster's ``required_range()``, or an
+    computed maximum of what ``holt_winters`` needs, or an
     explicit ``units.parse_duration_seconds()``-parseable duration)."""
 
     salt_path: str = "/var/lib/pve-storage-drs/anonymization-salt"
@@ -482,7 +479,7 @@ def load_config(
     warnings = _validate_semantics(
         config, require_connection=require_connection, free_space_written=_free_space_written(raw)
     )
-    warnings.extend(_ignored_saturation_warnings(raw))
+    warnings.extend(_ignored_key_warnings(raw))
 
     return ResolvedConfig(config=config, path=path, sha256=sha256, warnings=tuple(warnings))
 
@@ -579,7 +576,6 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
     window = WindowConfig(
         lookback_seconds=parse_duration_seconds(window_raw.get("lookback", "24h")),
         quantile=window_raw.get("quantile", 0.95),
-        upper_quantile=window_raw.get("upper_quantile", 0.99),
         min_coverage=window_raw.get("min_coverage", 0.80),
     )
 
@@ -738,11 +734,9 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         seasonal_periods=hw_raw.get("seasonal_periods", 288),
         trend=hw_raw.get("trend", "add"),
         seasonal=hw_raw.get("seasonal", "add"),
-        residual_z=hw_raw.get("residual_z", 2.0),
     )
     forecast = ForecastConfig(
         model=fc_raw.get("model", "quantile"),
-        seasonal_lookback_days=fc_raw.get("seasonal_lookback_days", 7.0),
         holt_winters=holt_winters,
     )
 
@@ -797,20 +791,48 @@ def _free_space_written(raw: dict[str, Any]) -> bool:
     return any("free_space" in s for g in raw.get("groups", []) for s in g.get("storages", []))
 
 
-def _ignored_saturation_warnings(raw: dict[str, Any]) -> list[str]:
-    """``migration.saturation_ceiling`` and ``groups[].storages[].saturation_load``
-    belonged to a storage-saturation guard that no longer exists: a migration
-    is throttled by ``migration.bwlimit_bytes_per_sec`` alone. The schema
-    keeps accepting both keys (it is closed, so removing them would turn every
-    config that ever set them -- and every committed diagnostic bundle --
-    into a validation error); they are read by nothing, and each warns once."""
+# Config keys that once did something and no longer do. The schema is closed
+# (an unknown key is a typo, section 11.1), so removing a key outright would turn
+# every config that ever set it -- and every committed diagnostic bundle -- into a
+# validation error. Instead the schema keeps them (marked deprecated), nothing
+# reads them, and each warns once when written. ``(section, key, reason)``;
+# ``section`` is a dotted path into the raw mapping.
+_IGNORED_KEYS: tuple[tuple[str, str, str], ...] = (
+    (
+        "migration",
+        "saturation_ceiling",
+        "the storage saturation guard was removed; migrations are throttled by "
+        "migration.bwlimit_bytes_per_sec only",
+    ),
+    (
+        "window",
+        "upper_quantile",
+        "no placement decision reads an upper bound; the decision statistic is window.quantile",
+    ),
+    (
+        "forecast",
+        "seasonal_lookback_days",
+        "forecast.model seasonal_naive was removed; holt_winters covers a diurnal cycle",
+    ),
+    (
+        "forecast.holt_winters",
+        "residual_z",
+        "the forecast is its own p95 over the next window.lookback, with no residual band",
+    ),
+)
+
+
+def _ignored_key_warnings(raw: dict[str, Any]) -> list[str]:
+    """One warning per key of :data:`_IGNORED_KEYS` the operator wrote, plus
+    one for ``groups[].storages[].saturation_load`` (which lives in a list, so
+    a dotted path cannot name it)."""
     warnings: list[str] = []
-    if "saturation_ceiling" in (raw.get("migration") or {}):
-        warnings.append(
-            "migration.saturation_ceiling is ignored: the storage saturation guard was "
-            "removed, migrations are throttled by migration.bwlimit_bytes_per_sec only; "
-            "delete the key"
-        )
+    for section, key, reason in _IGNORED_KEYS:
+        node: Any = raw
+        for part in section.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict) and key in node:
+            warnings.append(f"{section}.{key} is ignored: {reason}; delete the key")
     if any(
         s.get("saturation_load") is not None
         for g in raw.get("groups", [])
@@ -919,15 +941,6 @@ def _check_group_size(config: Config, errors: list[str]) -> None:
             )
 
 
-def _check_window(config: Config, errors: list[str]) -> None:
-    if config.window.upper_quantile < config.window.quantile:
-        errors.append(
-            "window.upper_quantile "
-            f"({config.window.upper_quantile}) must be >= window.quantile "
-            f"({config.window.quantile})"
-        )
-
-
 def _check_thick_provisioning(config: Config, errors: list[str]) -> None:
     """``migration.assume_thick_provisioning`` survives only so an existing
     config that spells it out still loads. Over-provisioning is never
@@ -967,7 +980,7 @@ def _check_metrics(config: Config, errors: list[str]) -> None:
 
 
 def _check_forecast_window(config: Config, errors: list[str]) -> None:
-    """window.lookback must cover what the configured forecaster needs."""
+    """window.lookback must cover what the configured forecast model needs."""
     from proxmox_storage_drs.forecast import required_range_seconds
 
     required = required_range_seconds(
@@ -1073,7 +1086,6 @@ def _validate_semantics(
     _check_group_storage_membership(config, errors)
     _check_storage_patterns_compile(config, errors)
     _check_group_size(config, errors)
-    _check_window(config, errors)
     _check_thick_provisioning(config, errors)
     _check_metrics(config, errors)
     _check_forecast_window(config, errors)

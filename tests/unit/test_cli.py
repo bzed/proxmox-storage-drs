@@ -1224,79 +1224,163 @@ def test_plan_json_output_accepts_payback_when_saferemove_is_off(
     assert payback["ratio"] == 0.0  # a real cost with zero benefit -> ratio 0, still accepted
 
 
-# ------------------------------------------------------- backtest validation gate
+# ------------------------------------------------------- forecast-driven group load
+
+FORECAST_NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)
+FAKE_PROM: Any = "fake-client"  # every forecast dependency is monkeypatched
 
 
-def test_backtest_gate_skips_validation_for_the_quantile_model(
+def _one_disk_group_load(idle: bool = False) -> GroupLoad:
+    return GroupLoad(
+        group_name="fc-tier1",
+        idle=idle,
+        average_utilization=1.0,
+        disks=(DiskLoad(disk_key="101:scsi0", load=2.0, flagged_reason=None),),
+        storages=(
+            StorageLoad(storage_id="san-a", load=2.0, utilization=2.0),
+            StorageLoad(storage_id="san-b", load=0.0, utilization=0.0),
+        ),
+    )
+
+
+def _patch_forecast_deps(
+    monkeypatch: pytest.MonkeyPatch, group_load: GroupLoad, calls: dict[str, Any]
+) -> None:
+    from proxmox_storage_drs.forecast import ForecastReport
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_group_load", lambda *a, **k: group_load)
+
+    def fake_series(*args: Any, **kwargs: Any) -> dict[str, object]:
+        calls["range_seconds"] = args[4]
+        return {"101:scsi0": ()}
+
+    def fake_forecast(*args: Any, **kwargs: Any) -> tuple[dict[str, float], ForecastReport]:
+        calls["forecast_args"] = args
+        return {"101:scsi0": 1.5}, ForecastReport("holt_winters", True, 0.08, 0.14, 1, 0)
+
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_disk_load_series", fake_series)
+    monkeypatch.setattr("proxmox_storage_drs.cli.forecast_group", fake_forecast)
+
+
+def test_group_load_under_quantile_issues_no_series_query_and_no_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`quantile` (the default `forecast.model`) does no fitting at all --
-    there is nothing to validate and nothing more conservative to fall
-    back to, so the gate must not even call `backtest_validated()`/
-    `group_aggregate_series()`."""
+    """The default model must cost nothing extra: no per-disk series fetch."""
 
     def fail(*_a: object, **_k: object) -> None:
-        raise AssertionError("quantile must never be backtested")
+        raise AssertionError("quantile must not fetch a forecast history")
 
-    monkeypatch.setattr("proxmox_storage_drs.cli.backtest_validated", fail)
-    monkeypatch.setattr("proxmox_storage_drs.cli.group_aggregate_series", fail)
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.compute_group_load", lambda *a, **k: _one_disk_group_load()
+    )
+    monkeypatch.setattr("proxmox_storage_drs.cli.compute_disk_load_series", fail)
+    monkeypatch.setattr("proxmox_storage_drs.cli.forecast_group", fail)
     resolved = _resolved_config(tmp_path)
-    sentinel = object()
-    result = cli._backtest_gated_forecaster(
-        sentinel,  # type: ignore[arg-type]
-        resolved.config.forecast,
-        resolved,
-        {},
-        now_epoch=0.0,
-        window_seconds=100.0,
+    load, report = cli._compute_group_load(
+        FAKE_PROM, resolved, _one_disk_group(), None, None, FORECAST_NOW
     )
-    assert result is sentinel
+    assert report is None
+    assert load == _one_disk_group_load()
 
 
-def test_backtest_gate_keeps_the_forecaster_when_validated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("proxmox_storage_drs.cli.backtest_validated", lambda *a, **k: True)
-    resolved = _resolved_config(
-        tmp_path, forecast={"model": "seasonal_naive", "seasonal_lookback_days": 1}
-    )
-    sentinel = object()
-    result = cli._backtest_gated_forecaster(
-        sentinel,  # type: ignore[arg-type]
-        resolved.config.forecast,
-        resolved,
-        {},
-        now_epoch=0.0,
-        window_seconds=100.0,
-    )
-    assert result is sentinel
-
-
-def test_backtest_gate_falls_back_to_quantile_when_validation_fails(
+def test_group_load_under_holt_winters_scales_the_load_and_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A model that fails its own backtest (or cannot be validated for
-    lack of history -- `backtest_validated()` returns `False` for both)
-    falls back to a fresh `QuantileForecaster`, not to the failed
-    forecaster it was just handed, and says so at warning level."""
-    from proxmox_storage_drs.forecast import QuantileForecaster
-
-    monkeypatch.setattr("proxmox_storage_drs.cli.backtest_validated", lambda *a, **k: False)
+    calls: dict[str, Any] = {}
+    _patch_forecast_deps(monkeypatch, _one_disk_group_load(), calls)
     resolved = _resolved_config(
-        tmp_path, forecast={"model": "seasonal_naive", "seasonal_lookback_days": 1}
+        tmp_path,
+        window={"lookback": "50h"},  # 180000s -> 2W = 360000s
+        forecast={"model": "holt_winters", "holt_winters": {"seasonal_periods": 10}},
     )
-    sentinel = object()
-    with caplog.at_level(logging.WARNING):
-        result = cli._backtest_gated_forecaster(
-            sentinel,  # type: ignore[arg-type]
-            resolved.config.forecast,
-            resolved,
-            {},
-            now_epoch=0.0,
-            window_seconds=100.0,
+    with caplog.at_level(logging.INFO):
+        load, report = cli._compute_group_load(
+            FAKE_PROM, resolved, _one_disk_group(), None, None, FORECAST_NOW
         )
-    assert isinstance(result, QuantileForecaster)
-    assert any("did not accurately predict" in r.message for r in caplog.records)
+    assert calls["range_seconds"] == 2 * 180000.0  # 2W floor over the model's own need
+    assert report is not None and report.used
+    assert load.disks[0].load == pytest.approx(3.0)  # 2.0 * 1.5
+    assert {s.storage_id: s.load for s in load.storages} == {"san-a": 3.0, "san-b": 0.0}
+    assert any("forecast holt_winters used" in r.message for r in caplog.records)
+
+
+def test_group_load_warns_when_holt_winters_is_not_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from proxmox_storage_drs.forecast import ForecastReport
+
+    calls: dict[str, Any] = {}
+    _patch_forecast_deps(monkeypatch, _one_disk_group_load(), calls)
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli.forecast_group",
+        lambda *a, **k: ({}, ForecastReport("holt_winters", False, 0.4, 0.3, 0, 1)),
+    )
+    resolved = _resolved_config(
+        tmp_path,
+        window={"lookback": "50h"},
+        forecast={"model": "holt_winters", "holt_winters": {"seasonal_periods": 10}},
+    )
+    with caplog.at_level(logging.WARNING):
+        load, report = cli._compute_group_load(
+            FAKE_PROM, resolved, _one_disk_group(), None, None, FORECAST_NOW
+        )
+    assert report is not None and not report.used
+    assert load == _one_disk_group_load()  # unchanged
+    assert any(getattr(r, "event", None) == "forecast_backtest_failed" for r in caplog.records)
+
+
+def test_group_load_does_not_forecast_an_idle_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, Any] = {}
+    _patch_forecast_deps(monkeypatch, _one_disk_group_load(idle=True), calls)
+    resolved = _resolved_config(
+        tmp_path,
+        window={"lookback": "50h"},
+        forecast={"model": "holt_winters", "holt_winters": {"seasonal_periods": 10}},
+    )
+    load, report = cli._compute_group_load(
+        FAKE_PROM, resolved, _one_disk_group(), None, None, FORECAST_NOW
+    )
+    assert report is None and "range_seconds" not in calls
+    assert load.idle
+
+
+def test_plan_json_carries_a_forecast_block_only_under_holt_winters(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, Any] = {}
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    _patch_forecast_deps(monkeypatch, _sample_group_load(), calls)
+    path = write_config(
+        tmp_path,
+        window={"lookback": "50h"},
+        forecast={"model": "holt_winters", "holt_winters": {"seasonal_periods": 10}},
+    )
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    forecast = json.loads(capsys.readouterr().out)["groups"][0]["forecast"]
+    assert forecast == {
+        "model": "holt_winters",
+        "used": True,
+        "backtest_error": 0.08,
+        "baseline_error": 0.14,
+        "disks_scaled": 1,
+        "disks_kept": 0,
+    }
+
+    _patch_plan_deps(monkeypatch, _repairable_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path)  # default quantile model
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    assert "forecast" not in json.loads(capsys.readouterr().out)["groups"][0]
+
+
+def test_render_forecast_line_says_whether_the_forecast_was_used() -> None:
+    from proxmox_storage_drs.forecast import ForecastReport
+
+    used = cli._render_forecast_line(ForecastReport("holt_winters", True, 0.08, 0.14, 37, 5))
+    assert "used" in used and "37 disks scaled" in used and "5 kept" in used
+    unused = cli._render_forecast_line(ForecastReport("holt_winters", False, None, None, 0, 42))
+    assert "not used" in unused and "loads are as observed" in unused
 
 
 def test_plan_human_output_shows_the_payback_verdict(

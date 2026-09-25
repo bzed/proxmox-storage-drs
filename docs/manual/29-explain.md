@@ -53,6 +53,23 @@ Everything up to and including the `payback:` line is identical to
 `plan`'s own output for the same input — see `docs/manual/27-plan.md` for
 how to read the move lines and the payback verdict. What follows is new.
 
+## The `forecast:` line
+
+Printed only under `forecast.model: holt_winters`, just before the `objective:`
+line, once per group whose load was computed:
+
+```
+  forecast: holt_winters used (backtest error 0.08 vs baseline 0.14): 37 disks scaled to their forecast p95, 5 kept as observed
+  forecast: holt_winters not used -- it did not beat the quantile baseline on this group's recent history (or there is not enough of it yet); loads are as observed
+```
+
+`used` means the group's per-disk loads (the `ℓ` in every number above and below)
+are scaled to a Holt-Winters forecast of their p95 over the next
+`window.lookback`; the two errors are the backtest that decided it (see
+`forecast.model` in `docs/manual/10-configuration.md`). "Kept" disks are flagged
+for low coverage, idle, or had no fit. `plan --json` and `explain --json` carry
+the same facts as a per-group `forecast` object.
+
 ## The `objective:` line
 
 The section 5.4 objective the solver actually minimized, broken into its
