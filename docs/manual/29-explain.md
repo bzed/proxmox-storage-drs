@@ -68,7 +68,8 @@ are scaled to a Holt-Winters forecast of their p95 over the next
 `window.lookback`; the two errors are the backtest that decided it (see
 `forecast.model` in `docs/manual/10-configuration.md`). "Kept" disks are flagged
 for low coverage, idle, or had no fit. `plan --json` and `explain --json` carry
-the same facts as a per-group `forecast` object.
+the same facts as a per-group `forecast` object, and `show-load` prints the same
+line (and `--json` object) so its loads are never mistaken for observed ones.
 
 ## The `objective:` line
 

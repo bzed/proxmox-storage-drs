@@ -58,6 +58,23 @@ forecast never wakes an idle group up.
 plan (and its re-plans) always see the same `l`. Under `quantile` it is exactly
 `compute_group_load()`: no extra Prometheus query, no report.
 
+**Provenance is printed by every consumer that shows loads.** The `ForecastReport`
+that call returns is not discarded anywhere: `explain` and `show-load` render it as
+the same `forecast:` line (`_render_forecast_line()`; `show-load` puts it directly
+under the group header) and `plan --json`, `explain --json` and `show-load --json`
+carry it as a per-group `forecast` object, present only when there is a report
+(REVIEW.md AM-01). Without it a forecast-scaled `ℓ` would be indistinguishable from
+a measured one.
+
+**The drift baseline is the effective load.** `last_balance.load_vector` stores
+what `_compute_group_load()` returned for the run, so under `holt_winters` it is
+forecast-scaled, and the next run's drift gate compares like with like as long as
+the forecast state is unchanged. When it changes -- `forecast.model` switched, the
+backtest verdict flipped, factors moved -- every disk's basis changes and the gate
+reads it as drift. That is intended (the balancer's picture changed, so
+reconsidering the placement is right); it only opens the imbalance gate and payback
+still gates execution (REVIEW.md AM-05).
+
 ## The gate: beat the baseline, no threshold
 
 Once per group (`forecast_group()`), on `group_aggregate_series()` (every disk's

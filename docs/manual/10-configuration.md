@@ -551,15 +551,22 @@ sooner and migrates more; below roughly 0.05 the tool will start chasing
 noise on a busy cluster. Interacts with `gates.imbalance_threshold`: drift
 decides *whether to look*, imbalance decides *whether to act*.
 
+The vector compared is the load the balancer itself acts on, whatever
+produced it: with `forecast.model: holt_winters` that is the forecast-scaled
+load, and the vector recorded at the last balance is the forecast-scaled one
+too. A change in forecast state between two runs — switching `forecast.model`,
+or the backtest starting to pass or fail — therefore counts as drift even when
+the workload did not change, by design: the picture the balancer is placing
+disks against changed, so reconsidering the placement is correct. It only
+opens the imbalance gate; a plan still has to clear the payback test.
+
 ### `gates.imbalance_threshold`
 
 Fraction, default `0.20`.
 
 The minimum relative spread across a group's storages before a plan is
 actually built. A group under this threshold is left alone even if it has
-drifted. Also, unrelatedly, this same value doubles as the backtest error
-ceiling a non-`quantile` `forecast.model` must stay within — see
-`forecast.model` below.
+drifted.
 
 ### `gates.capacity_spread_threshold`
 

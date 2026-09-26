@@ -370,6 +370,21 @@ AL-03 schedules **phase 15** (a pure refactor). Section 57 records the resolutio
 operator review of that changeset added AL-04 (remove the §7.3 saturation guard) and narrowed
 AL-01's design; both are folded into phase 14 (plan §12.1).
 
+A **twenty-ninth pass** (section 58) reviews the 25 commits after the AL-changeset: phase 14
+implemented (14a removes the §7.3 saturation guard outright; 14b drives placement with a
+backtest-gated Holt-Winters forecast that scales each disk's `ℓ_d` by forecast-p95 over
+observed-p95), the compatibility-shim reversal (five removed config keys plus
+`snapshot_reserve.min_free_bytes` and its fold now fail validation), four forecast dogfooding
+fixes (heuristic initialization, `trend: none`, a spacing probe that can actually disagree, a
+failed history fetch no longer costing a group its plan), a 2d holt-winters corpus bundle, the
+graphify release step, releases 0.1.9 and 0.1.10, text-default logging, VM names in the run log,
+and a CI job that publishes the `.deb` on a `debian/` tag. Six findings (AM-01..AM-06): one
+Medium — `show-load` prints forecast-scaled loads with no provenance anywhere (the report is
+discarded, neither renderer nor its manual page mentions forecasting); three Low (the corpus
+`--check` gate is environment-dependent again in the statsmodels arm, reproduced; the corpus
+README's 8 MiB ceiling against two committed bundles at 14 and 28 MiB; the hand-edit of
+committed bundle configs recorded in the plan but in no submission file); two Info.
+
 ---
 
 ## 0. Overall assessment
@@ -7841,6 +7856,359 @@ plan and this review agree on what "done" means before either is started.
   AL-01's design was narrowed at the same time (14b, still open).
 - **AL-02 follow-up.** Stale CP-SAT mentions the removal missed (`README.md` ×2,
   `docs/manual/27-plan.md`, `run-with-system-python.sh`, `.agents/python-style.md`) fixed.
+
+---
+
+## 58. Twenty-ninth-pass review — phase 14 built (saturation guard removed, Holt-Winters placement), the shim reversal, releases 0.1.9/0.1.10
+
+Reviewed everything after the AL-changeset `724f687` — 25 commits at HEAD (`8ef2a7f`), all through
+named branches and seven `--no-ff` merges (AJ-01's lesson held). The substantive arc: `1153e38`
+(the plan-only narrowing of phase 14 into §12.1's 14a/14b), `babb448` (14a: the §7.3 saturation
+guard deleted, both its config keys now schema-rejected), `349eed4` (14b: `forecast.py` rewritten
+around `holt_winters_quantile`/`backtest`/`disk_factors`/`forecast_group`, `loadmodel.apply_forecast()`
+scaling `ℓ_d` by `f_d/h_d` at the one call site both `show-load` and `plan`/`apply` share),
+`162357d` and `dd915d0` (the compatibility-shim reversal — the operator dropped
+accepted-and-ignored in favour of failing validation, which also removed
+`snapshot_reserve.min_free_bytes` and the whole phase-13 fold AH-01 was about), `45d562b`
+(a failed forecast-history fetch degrades to quantile instead of costing the group its plan),
+`5fc5fb7` (the 7d holt-winters corpus bundle replaced by a 2d one the backtest can actually run),
+`bf345ac` (the spacing probe rewritten around `count_over_time` — the old one provably could
+never disagree — and the push-interval default moved to 10s), `47d9932` (heuristic
+initialization: at 288 periods "estimated" never converged on real data, so the shipped defaults
+could not produce a forecast at all), `ccec51e` (`trend: none` default: an undamped additive
+trend forecast one disk at 95% of its whole group's load), then the `ad9ba39` log naming,
+`d0610b2` (text-default logging, JSON opt-in), `e51b856` (CI publishes the `.deb` on a
+`debian/` tag), releases `647fef5`/`70ee64c`, and `d92b421` (the graphify release step written
+into AGENTS.md §9.2 — after both releases, see AM-06).
+
+### 58.1 Verification run
+
+- `make check` at HEAD (`8ef2a7f`): green end to end — fmt-check (isort + black), lint, typecheck,
+  **1041 passed** in the dev venv, **96.35% line coverage**, `generate_expected.py --check` OK,
+  `validate_corpus.py --check` OK (all three bundles' narrow sweep, including the 2d bundle's own
+  `holt_winters` variant running the real backtest and losing 6.40 to 6.01, exactly as its
+  submission records), docs-check OK (all three PDF stamps and the manpage match their Markdown).
+  Notably **zero warnings**: the benign statsmodels `ConvergenceWarning` every pass since the
+  eleventh has carried is gone — consistent with `47d9932`, which made the non-converging fit
+  path unreachable at the shipped defaults.
+- System Python (pulp 2.7.0, no statsmodels — the packaged toolchain): **1029 passed, 12 skipped**;
+  only statsmodels-dependent tests skip. But `python3 tests/corpus/validate_corpus.py --check`
+  **exits 1** here — see AM-02.
+- **§12.1's done-when checklist verified item by item**: quantile-model identity (no file under
+  `tests/fixtures/` is touched anywhere in the range; the corpus quantile variants are unchanged);
+  the unit-test list (h_d = 0, flagged, failed fit, constant series, no-statsmodels, non-finite,
+  clamp; the p95-of-path statistic; the gate on seasonal-plus-trend vs white noise; the removed
+  keys and `seasonal_naive` rejected by the schema — `test_forecast.py`/`test_loadmodel.py`/
+  `test_config.py` carry each); the 2d bundle replays with the forecast block populated
+  (`used: false`, both errors recorded, per-variant in the committed expected file); the manual
+  documents when `holt_winters` is worth selecting, the gate, and the `python3-statsmodels`
+  requirement.
+- **§12.1's saturation grep checklist**: `git grep -n -i saturation` over `src/`, `config/`,
+  `docs/`, `man/`, `tests/`, `.agents/`, `README.md`, `debian/` returns nine hits, all legitimate
+  (the changelog's release notes, one "the guard is gone" historical note in
+  `docs/internals/20-forecasting.md`, the manual's "the tool does not model storage saturation"
+  sentence, and `test_config.py`'s three assertions that the keys are *rejected*).
+- **The min_free_bytes sweep after `dd915d0`**: no tracked file outside the plan's historical
+  notes, REVIEW.md and `test_config.py`'s rejection test mentions it; the schema, example config,
+  manual, `.agents/`, and the resolver are all clean; `.agents/domain-invariants.md` §2/§2a read
+  correctly without the fold (the stale "as built" note AH-05 removed stays removed), and
+  `reserve.py`'s `R_s = max(f_s·Z_s, soft_s)` matches the rewritten invariant text.
+- **Schema/example-config/manual agreement** on every changed key: `forecast.model` enum is
+  `{quantile, holt_winters}`, `holt_winters` carries exactly `seasonal_periods`/`trend`/`seasonal`
+  with `trend` defaulting to `none` everywhere; `pvestatd_push_interval` defaults to 10s in the
+  schema-facing loader, the example config and the manual; the five removed keys are gone from
+  all three. `docs/manual/27-plan.md`'s `--json` field list documents the `forecast` object and
+  no longer lists `deferred_moves`; `29-explain.md` documents the `forecast:` line both ways.
+- **Release hygiene for 0.1.9 and 0.1.10**: version lockstep in all three places; both changelog
+  entries cover their actual windows accurately (checked commit by commit against
+  `e0ab0bc..647fef5` and `647fef5..70ee64c` — the 0.1.9 entry's incompatible-keys bullet names
+  every key the two shim-removal commits dropped, including `cpsat` and `min_free_bytes`, and
+  AL-02's promised "loud schema rejection goes in the release notes" is honoured); annotated
+  tags `debian/0.1.9`/`debian/0.1.10`, tagger `Bernd Zeimetz <bernd@bzed.de>`, messages
+  `pve-storage-drs 0.1.9`/`0.1.10`, on the release merges — the same placement 0.1.7 and 0.1.8
+  already established.
+- **`bf345ac`'s mechanism claim re-derived**: a `query_range` at step `s` returns one point per
+  step regardless of the true sample spacing, so a probe stepped at
+  `metrics.pvestatd_push_interval` could only ever echo the configuration — the finding's own
+  words — and the `count_over_time` median genuinely measures the push cadence. The
+  capture-instant determinism argument survives the rewrite: the new instant query's text is
+  time-relative, so the bundle records the same key whatever wall clock a capture ran at.
+- **`e51b856`'s release-notes extraction checked against `dpkg-parsechangelog -S Changes`' real
+  output**: line 1 empty, line 2 the version header, line 3 the `.` formatting separator,
+  `tail -n +4` keeps the first bullet. The tag-versus-changelog pre-build check and the
+  write-permission scope (only the release job, `contents: write`, running no repository code)
+  are right.
+
+### 58.2 Findings summary
+
+| ID | Severity | Location | Summary |
+|----|----------|----------|---------|
+| AM-01 | Medium | `cli.py` show-load renderers, `docs/manual/25-*.md` | Under `forecast.model: holt_winters`, `show-load` prints forecast-scaled `ℓ_d`/`L_s`/`u_s`/spreads as if measured: `_compute_group_load()`'s report is discarded (`group_loads[...] , _ =` at `cli.py:1005`), neither renderer takes a forecast, `--json` has no `forecast` field, and the manual page that defines `ℓ` ("that disk's own load, measured in average in-flight I/O requests") contains zero mentions of forecasting — the one command whose §3.5 charter is "show the measured load" presents derived numbers with no provenance, and §10.1 itself names show-load among the consumers |
+| AM-02 | Low | `tests/corpus/validate_corpus.py`, Makefile | The corpus gate is environment-dependent again (Y-02's shape, new arm): the narrow sweep's new holt-winters variant is skipped without statsmodels, so `validate_corpus.py --check` exits 1 "stale (variants skipped: statsmodels is not installed)" on a statsmodels-less toolchain — reproduced on the system Python; `make SYSTEM_TOOLS=1 check` is therefore red on stock trixie unless `python3-statsmodels` is installed (CI never runs corpus-check, which is why nothing caught it) |
+| AM-03 | Low | `tests/corpus/README.md` | The README's size-ceiling section still reads "A committed bundle must be **under 8 MiB unpacked** … Anything bigger stays outside the repository" while the committed corpus is 14 MiB (`24h`, operator-accepted at its 2026-09-23 recapture) and 28 MiB (`2d-holt-winters`, 3.5× the ceiling) — both overages honestly disclosed in their submission files, the rule text a submitter reads never amended |
+| AM-04 | Low | `tests/corpus/*.submission.yaml` | `162357d` hand-edited all three committed bundles' `config.yaml` (four now-rejected keys removed, `SHA256SUMS` recomputed) and recorded the edit in the plan and its commit message — but in none of the bundles' submission files, the one place the corpus's own procedure says the history of a committed bundle's bytes stays "honest and discoverable" (the 24h file's `repairs:`/`recaptures:` lists record two earlier edits; this third one is absent) |
+| AM-05 | Info | `cli.py` `_record_executed_moves`, plan §6/§12.1 | `last_balance` records the run's effective `ℓ` vector — forecast-scaled under holt_winters — so the drift gate can compare vectors on different bases across runs (a model switch, a backtest verdict flip, or factor drift reads as workload drift); errs toward acting, never toward missing action, and payback still gates execution, but neither §6 nor §12.1 says which basis the gate compares |
+| AM-06 | Info | `d92b421`, AGENTS.md §9.2 | The graphify release step ("refresh and commit the graph as its own commit *just before* the Release commit") was added by `d92b421` *after* both releases in the range, with a commit message whose subject ("docs: refresh and commit the graphify graph just before a release") reads as the act rather than the rule — the commit changes only AGENTS.md and `.agents/git-workflow.md`; the tracked graph at HEAD is `1631885`'s (Sep 24), stale across the entire phase-14 range, which is the rule's own between-releases state, so the rule's first actual exercise is the next release |
+
+### 58.3 AM-01 — show-load prints forecast-scaled loads with no provenance
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/cli.py:1005` (the discarded report), `:867-902`
+(`_render_show_load_human`), `:903+` (`_render_show_load_json`),
+`docs/manual/25-show-load-and-verify-storages.md`, plan §10.1, §12.1 point 6.
+
+Phase 14b's own spec (§12.1 point 2) says the scaled load is what "a group's gates and its plan
+must see", and `_compute_group_load()` — the one call site both `show-load` and `plan`/`apply`
+share — delivers exactly that. `explain` shows what happened: a `forecast:` line naming the
+model, whether it was used, both backtest errors and the scaled/kept counts, right above the
+measured-load section. `plan --json` carries the same facts as a per-group `forecast` object.
+
+`show-load` has neither. The report comes back from `_compute_group_load()` and is bound to `_`
+(`cli.py:1005`); neither `_render_show_load_human` nor `_render_show_load_json` accepts a
+forecast; and the manual page — the page that defines what the columns mean ("`ℓ` after a disk's
+size/format is that disk's own load, measured in **average in-flight I/O requests**") — contains
+no occurrence of "forecast" or "holt" anywhere. So an operator who turns on `holt_winters` and
+runs the tool's own measurement command sees numbers that are neither purely observed nor
+labelled as anything else: every `ℓ`, every `L=`/`u=`, the spread, and the gate verdict's basis
+are the forecast-scaled picture, presented in exactly the formatting the manual describes as
+measured in-flight I/O. The only way to learn which picture one is looking at is to already know
+the config flag's state and the backtest's verdict — facts `explain` prints and `show-load`
+does not. This is the T-03/W-06 family (output whose provenance is misattributed), and §10.1's
+own sentence invites it: "Forecasts are produced per disk, at the one point every consumer
+(gates, solver, payback, ordering, `show-load`) reads `ℓ` from" — show-load is named a consumer,
+and §12.1 point 6 specified output surfaces only for `explain` and `plan --json`.
+
+Under the default `quantile` model nothing changes (the report is `None`), which is why every
+gate is green: the cross-reference tests check that documented knobs exist, not that a command's
+rendered numbers carry their provenance.
+
+**Recommendation:** thread the report through — the cheapest coherent shape is `explain`'s own
+`forecast:` line rendered at the top of a group's block in `show-load`'s human output, plus the
+same `forecast` object in `--json` (the renderer already receives everything else per group).
+And one paragraph in `docs/manual/25`: under `forecast.model: holt_winters` the `ℓ`/`L`/`u`
+columns are the forecast-scaled loads the balancer will act on, `explain` says whether the
+forecast was used for this run. A test asserting the line appears under holt_winters and not
+under quantile pins it.
+
+### 58.4 AM-02 — the corpus gate is environment-dependent again (Y-02, statsmodels arm)
+
+**Severity:** Low
+**Files:** `tests/corpus/validate_corpus.py` (`_statsmodels_available`, the narrow sweep),
+`Makefile` (`corpus-check`), `.github/workflows/tests.yml` (does not run it, does not install
+statsmodels).
+
+Reproduced, not inferred: on this host's system Python (no statsmodels),
+`python3 tests/corpus/validate_corpus.py --check` prints
+`stale, re-run without --check: bzed-dev-cluster-2d-holt-winters.expected.json (variants skipped:
+statsmodels is not installed)` and **exits 1**. `5fc5fb7` made the narrow sweep run the bundle's
+own configured forecast model next to quantile — the right coverage call, and the skip itself is
+correct (without statsmodels every fit returns `None`, so the variant would record a plan that
+quietly means "quantile only") — but the *expected file* now encodes one environment's
+statsmodels. Y-02 established this exact defect class when the cpsat skip reason made the
+committed files flip with the venv, and its resolution made the skip a function of the sweep
+mode, not the machine. The holt-winters arm needs the skip-aware version of that fix: a variant
+skipped for "statsmodels is not installed" should *match* whatever the committed file recorded
+for it (reported as a warning), because the committed answer was computed in the environment the
+file was generated in and the checker's job is to detect drift of the *plan*, not of the
+interpreter's package set.
+
+Mitigations, all verified: the stale message names the cause (this is `--check`'s new
+skip-naming behaviour doing its job); neither GitHub Actions nor the Salsa autopkgtest runs
+corpus-check at all; and `make check`'s venv flow installs the `forecast` extra before
+corpus-check runs. The residual blast radius is the project's own documented system-toolchain
+path: `make SYSTEM_TOOLS=1 check` on a stock trixie without `python3-statsmodels` (a package
+`tests.yml` does not install either) is red at corpus-check with a message that names the
+environment but reads as a content problem ("stale").
+
+**Recommendation:** skip-aware comparison in `--check`, as above; alternatively add
+`python3-statsmodels` to CI's install list *and* a corpus step there, which would also close the
+larger gap that the corpus gate runs in no pipeline at all.
+
+### 58.5 AM-03 — the corpus README's size ceiling against its own contents
+
+**Severity:** Low
+**Files:** `tests/corpus/README.md` ("Size ceiling, and bundles too big to commit"),
+`tests/corpus/bzed-dev-cluster-24h/` (14 MiB), `tests/corpus/bzed-dev-cluster-2d-holt-winters/`
+(28 MiB).
+
+The README tells a submitter: "A committed bundle must be **under 8 MiB unpacked** … Anything
+bigger stays outside the repository", pointing at `DRS_CORPUS_DIR`. The repository's own corpus
+at HEAD: 14 MiB and 28 MiB (the third bundle, `free-space`, sits at 8.0 MiB). Both overages are
+the operator's explicit calls and are disclosed in exactly the right place — the 24h submission's
+`recaptures:` entry records the 14 MiB acceptance with its reasoning, and the 2d submission
+explains the 28 MiB (the gigapipe deployment returns zero series for `rate()` range queries at
+most step/`rate_window` combinations above 300s, so the default that captures reliably is also
+the one that triples the point count) and notes it is "half the 7d bundle it replaces". Nothing
+is hidden; what is stale is the *rule text*: a contributor reading the operational document
+before submitting would conclude two of the three committed bundles should not exist. This is
+the second time the ceiling has moved informally (the 24h recapture was the first, accepted
+per operator call; the 2d replacement is the second), and the document that governs the
+directory has not been touched either time.
+
+**Recommendation:** one paragraph in the ceiling section recording the operator-exception
+precedent (oversized bundles may be committed by explicit submitter/maintainer call with the
+reasoning in the submission file, as both current overages already do), or actually move the
+oversized bundles to `DRS_CORPUS_DIR` if the rule is meant to bind. Either way the text and the
+contents should stop disagreeing.
+
+### 58.6 AM-04 — the bundle config hand-edit is recorded everywhere except the submission files
+
+**Severity:** Low
+**Files:** `tests/corpus/bzed-dev-cluster-{24h,2d-holt-winters,free-space}.submission.yaml`,
+commit `162357d`, plan §12.1 ("No compatibility shim").
+
+`162357d` (keys now fail validation, per operator direction) had a real problem: the three
+committed bundles' `config.yaml` carried four of the newly-rejected keys, so every replay would
+die at config validation. The fix — remove the lines, recompute `SHA256SUMS` — was the minimal
+necessary edit, and it is disclosed in the commit message and in §12.1 ("those lines were
+removed and each bundle's `SHA256SUMS` entry updated"). What it is not in is the one place the
+corpus's own convention says a committed bundle's byte-history lives: the submission files. The
+24h submission carries a `repairs:` list with two earlier entries and a `recaptures:` list with
+one, each recording what changed in the bundle's bytes and why; the free-space and 2d files
+carry their own. None mentions the four-key removal. The README's repair procedure frames its
+recording rule exactly for this: "so the history of what a committed bundle once contained stays
+honest and discoverable, rather than disappearing into a silent diff" — and the edit was not
+even a silent diff at the git level, but it *is* silent at the bundle level: nothing inside
+`tests/corpus/` distinguishes a bundle whose config was edited from one whose collector never
+wrote those keys.
+
+Worth noting the tension it resolved the other way from AH-06: there, the operator refused to
+rewrite captured configs to a newer shape for style, keeping the pre-`free_space` bundles as
+compatibility evidence. Here the edit was *necessary* (validation would fail otherwise) and the
+operator directed it — the difference is exactly why it deserved its `edits:`/`repairs:` entry:
+it is the interesting event in that bundle's history.
+
+**Recommendation:** one short entry per affected submission file (date, what was removed, which
+commit, why: the keys became schema-rejected and a replay would fail validation). Two minutes of
+writing; the record then matches what actually happened to the bytes.
+
+### 58.7 AM-05 — the drift gate's baseline mixes observed and forecast-scaled vectors (Info)
+
+`_record_executed_moves()` stores the run's `load_by_key` — under `holt_winters`, the
+forecast-scaled vector — as `last_balance.load_vector`, and the next run's drift gate compares
+its own ℓ against it. A model switch (`quantile` ↔ `holt_winters`), a backtest verdict flip
+(`used: true` → `false` between runs), or plain factor drift therefore changes every disk's
+recorded basis and can read as "load drifted" with no workload change at all. The direction is
+safe (the drift gate passing only *enables* the imbalance gate; a plan still has to clear
+payback), and one can argue "the balancer's basis changed, so reconsidering placement is
+correct" is the intended semantics — but neither §6 nor §12.1 says which basis the gate
+compares, and §12.1 was written with the opportunity to. One sentence ("`last_balance` records
+the run's effective `ℓ`, whatever produced it; a change of forecast state therefore counts as
+drift by design") pins the semantics either way.
+
+### 58.8 AM-06 — the graphify release step arrives after the releases it governs (Info)
+
+`d92b421` adds the AGENTS.md §9.2 graphify paragraph and the `.agents/git-workflow.md` text —
+the rule exists only from Sep 25 17:03 onward, so neither 0.1.9 (13:37) nor 0.1.10 (17:00)
+violated it: both shipped with the tracked graph last refreshed at `1631885` (Sep 24), stale
+across the whole phase-14 range, which is precisely the between-releases state the rule permits
+(the hook rebuild sits uncommitted in the working tree). Two nits, recorded rather than fixed:
+the commit's subject — "docs: refresh and commit the graphify graph just before a release" —
+describes the rule, not the diff, and reads in `git log` as an action that did not happen
+(AF-06's class); and the rule's first real exercise is the next release, which should carry the
+refresh *on its release branch* per the rule's own wording — worth remembering when that release
+is cut, since the working-tree rebuild will otherwise look committable straight to `main`.
+
+### 58.9 What this pass confirms
+
+- **Phase 14 is implemented to §12.1's letter, at every point this series derived.** The
+  statistic is the p95 of the forecast *path* (not the last point), clamped at 0, no residual
+  band; the entry is a ratio (`apply_forecast` multiplies, never substitutes, and rebuilds
+  `L_s`/`u_s`/`u*` from the scaled loads); flagged disks, `h_d = 0` disks and failed fits keep
+  their observed loads at *both* layers (`disk_factors` skips them and `apply_forecast`
+  re-guards); the gate beats the persistence baseline with no threshold, replaces the
+  `imbalance_threshold` comparison, and treats missing history as failure, never a free pass;
+  the fetch happens only under `holt_winters`, chunked, over `max(required_range, 2W)`; the
+  fallback warnings are DEBUG per fit and one INFO per group; idle groups are not forecast;
+  `MetricsError` and `BundleError` degrade to quantile with a warning instead of losing the
+  group's plan (`45d562b` — the conservative direction).
+- **The saturation removal is complete and honest.** The §12.1 grep checklist comes back clean
+  (nine legitimate hits, listed in 58.1); `compute_move_cost()` lost its `target`/`l_hat_*`
+  parameters and every call site with them; `plan --json` lost `deferred_moves` and the docs
+  lost it with it; `PaybackResult.accepted` is `aggregate_ok and not rejected_moves`, the S-02
+  gate shape intact; the executor's live transient check, the payback gate, dry-run default and
+  lock handling are untouched by the range except for log naming.
+- **The shim reversal was done coherently across all four copies of every key** (schema, loader
+  dataclass, example config, manual), the min_free_bytes sweep left no tracked residue, and the
+  reserve model's post-fold form (`R_s = max(f_s·Z_s, soft_s)`) matches `.agents/`'s invariant
+  text and `reserve.py`. The corpus bundle edits it forced are the one place the recording
+  discipline slipped (AM-04).
+- **The four dogfooding fixes are each real bugs found on a live cluster, each with the
+  regression test that reproduces it**: `47d9932` (the shipped defaults could not converge —
+  verified by the bursty-two-day test that fails on every seed under "estimated"), `ccec51e`
+  (an undamped trend forecasting one disk at 95% of its group), `bf345ac` (a probe that
+  tautologically echoed its own step), `45d562b` (the widest-range query failing cost the group
+  its plan). §12.1's as-built notes record the live observations (factors 0.00–39 with trend,
+  worst single-disk shift 23% without, the gate opening 1.43 vs 2.26) instead of hiding them —
+  and the plan explicitly refuses the magic-number clamp, naming `damped_trend` as the first
+  thing to try instead.
+- **The 2d corpus bundle is the right replacement for the 7d one**: the 7d capture held only
+  `W`, so under phase 14 it could only ever report "not enough history"; the 2d capture is the
+  shortest configuration with a real daily season (`step 1h`, `seasonal_periods 24`,
+  `lookback 2d`, captured over the 4d the backtest needs), replays with the backtest genuinely
+  running, and its expected file records the honest outcome (Holt-Winters loses to persistence
+  on this cluster). The narrow sweep now exercising the bundle's own model on every `make check`
+  is a real coverage gain — with the environment caveat of AM-02.
+- **The releases, the logging default, the log naming and the CI release job are all clean**:
+  changelogs accurate to their windows (including AL-02's promised loud-rejection note), version
+  lockstep, correctly signed annotated tags, `--log-format`'s reversal documented as-built in
+  plan, manual, manpage and internals with the 0.1.9 history kept honest, and a release job that
+  verifies the tag against the changelog before building, gates on every quality step, and
+  confines its write token to a job that runs no repository code.
+
+### 58.10 Assessment
+
+This is the range where phase 14 went from a plan section to the tool's actual placement
+behaviour, and it is the best-process range of the series: every commit on a branch, every merge
+`--no-ff`, every artefact (plan, manual, internals, manpage, example config, schema, changelog,
+PDF stamps) moving in the same commit as the behaviour it describes, and four live-cluster bugs
+found, root-caused and pinned by their own regressions within hours. The engineering is
+conservative in the right directions everywhere a choice existed — degrade-don't-drop on a
+failed fetch, observed-don't-invented on a failed fit, lose-the-variant-not-the-gate on a
+missing statsmodels. The one Medium finding is a provenance gap in exactly the command whose
+job is provenance (AM-01: show-load prints the scaled picture with no way to tell); the three
+Lows are the corpus's bookkeeping catching up with two deliberate operator decisions (the
+shimless key removal, the oversized bundles) plus Y-02's lesson re-learned in a new arm; the two
+Infos are a semantics sentence and a commit-message nit. Nothing touches a safety invariant:
+dry-run default, reserve-never-traded, the transient invariant, no-auto-delete and the payback
+gate are all intact and re-verified green. Fix AM-01, apply AM-02's skip-aware comparison, and
+spend the fifteen minutes of writing that AM-03/AM-04 ask for; the rest of the range can ship
+as it stands.
+
+---
+
+## 59. Resolution of twenty-ninth-pass findings (AM-01..AM-06)
+
+- **AM-01 → fixed (accepted as written).** `show-load` now threads the `ForecastReport` that
+  `_compute_group_load()` returns through both renderers: the human output prints `explain`'s own
+  `forecast:` line directly under the group header, and `--json` carries the same per-group
+  `forecast` object `plan --json` has. Both are absent under the `quantile` model (no report), as
+  in `plan --json`. `docs/manual/25` gains the paragraph that says the `ℓ`/`L`/`u` columns are
+  forecast-scaled under `holt_winters`; the manual's `explain` page, the manpage, internals
+  `20-forecasting`, plan §10.1 and §12.1 point 6 name `show-load` as a surface. Four tests in
+  `test_cli.py` pin the line (used / not used), the JSON object and its absence under `quantile`.
+  Also fixed while in the neighbourhood: `docs/manual/10-configuration.md` still said
+  `gates.imbalance_threshold` doubles as the backtest error ceiling — true before 14b, false since
+  (§12.1 point 3: the gate is "beat the baseline, no threshold").
+- **AM-02 → fixed.** `validate_corpus.py --check` adopts the committed file's case for any variant
+  *skipped* in this environment (`adopt_committed_for_skipped()`), warns on stderr naming the bundle
+  and the count, and still compares every variant that ran, so the exit status no longer depends on
+  whether `python3-statsmodels` is installed. A skipped variant with no usable committed
+  counterpart still reads as stale. Verified on the system Python (no statsmodels): exit 0 with the
+  warning. `tests/corpus/README.md` records the rule; four unit tests cover it. Not done: a corpus
+  step in CI (out of scope for the finding's primary recommendation).
+- **AM-03 → operator decision, no change.** The 14 MiB and 28 MiB bundles are deliberate.
+- **AM-04 → operator decision, no change.**
+- **AM-05 → refuted as a defect, semantics pinned.** Recording the effective (forecast-scaled) `ℓ`
+  is the intended design: the drift gate exists to ask "has the picture the balancer places against
+  changed enough to look again?", and a model switch or a backtest verdict flip changes exactly
+  that. Recording the observed vector instead would compare it against a forecast-scaled `ℓ_now` — a
+  permanent mismatch — unless the gate moved onto observed loads too, which would blind it to the
+  change the forecast exists to anticipate. The direction is safe (drift only opens the imbalance
+  gate; payback still gates execution), as the finding itself notes. What was missing, and is now
+  written, is the sentence: plan §6 ("Which `ℓ`"), manual `gates.drift_threshold` and `apply`,
+  internals `80-gates` and `20-forecasting`.
+- **AM-06 → ignored** (operator decision).
 
 ---
 

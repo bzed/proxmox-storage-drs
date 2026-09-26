@@ -211,9 +211,10 @@ PVE or Prometheus, so a second concurrent `apply` (any mode, including
 one. After the run, for every group where at least one move actually
 executed (`moved` or `draining` — both mean the mirror itself completed):
 
-- `last_balance.load_vector` is replaced with that group's load as
-  measured for this run, so the next run's drift gate compares against a
-  real balance instead of treating every run as the first one.
+- `last_balance.load_vector` is replaced with that group's load for this
+  run — the load the balancer acted on, so forecast-scaled under
+  `forecast.model: holt_winters` — so the next run's drift gate compares
+  against a real balance instead of treating every run as the first one.
 - Every executed disk gets a fresh `gates.cooldown_per_disk` timestamp at
   its **new** location.
 - **Both** of the move's storages — source and destination — get a fresh

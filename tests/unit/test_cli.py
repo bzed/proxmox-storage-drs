@@ -18,6 +18,7 @@ import yaml
 from proxmox_storage_drs import __version__, cli, collect, replay
 from proxmox_storage_drs.config import MetricsConfig, ResolvedConfig, load_config
 from proxmox_storage_drs.execute import MoveOutcome
+from proxmox_storage_drs.forecast import ForecastReport
 from proxmox_storage_drs.heuristic import ObjectiveBreakdown
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
 from proxmox_storage_drs.schedule import ScheduledMove
@@ -489,6 +490,56 @@ def test_show_load_json_output(
     assert san_a["provisioned_used_bytes"] == 5 * (1 << 40)  # what the shortfall is computed from
     assert san_a["load"] == 3.0
     assert san_a["utilization"] == 3.0
+
+
+def _patch_show_load_forecast(
+    monkeypatch: pytest.MonkeyPatch, report: ForecastReport | None
+) -> None:
+    _patch_show_load_deps(monkeypatch, _sample_group_load())
+    monkeypatch.setattr(
+        "proxmox_storage_drs.cli._compute_group_load",
+        lambda *_a, **_k: (_sample_group_load(), report),
+    )
+
+
+def test_show_load_says_when_its_loads_are_forecast_scaled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW.md AM-01: forecast-scaled loads must not pass as measured ones."""
+    _patch_show_load_forecast(monkeypatch, ForecastReport("holt_winters", True, 1.4, 2.3, 35, 4))
+    assert cli.main(["-c", str(write_config(tmp_path)), "show-load"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    header = next(i for i, line in enumerate(out) if line.startswith("Group fc-tier1"))
+    assert out[header + 1].startswith("  forecast: holt_winters used")
+    assert "35 disks scaled" in out[header + 1]
+
+
+def test_show_load_says_when_the_forecast_was_not_used(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_show_load_forecast(monkeypatch, ForecastReport("holt_winters", False, 6.4, 6.0, 0, 39))
+    assert cli.main(["-c", str(write_config(tmp_path)), "show-load"]) == 0
+    assert "forecast: holt_winters not used" in capsys.readouterr().out
+
+
+def test_show_load_json_carries_the_forecast_block(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = ForecastReport("holt_winters", True, 1.4, 2.3, 35, 4)
+    _patch_show_load_forecast(monkeypatch, report)
+    assert cli.main(["-c", str(write_config(tmp_path)), "--json", "show-load"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["groups"][0]["forecast"] == report.as_dict()
+
+
+def test_show_load_under_the_quantile_model_prints_no_forecast(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_show_load_forecast(monkeypatch, None)
+    assert cli.main(["-c", str(write_config(tmp_path)), "show-load"]) == 0
+    assert "forecast" not in capsys.readouterr().out
+    assert cli.main(["-c", str(write_config(tmp_path)), "--json", "show-load"]) == 0
+    assert "forecast" not in json.loads(capsys.readouterr().out)["groups"][0]
 
 
 def test_show_load_reports_a_pve_error(

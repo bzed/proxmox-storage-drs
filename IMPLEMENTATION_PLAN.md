@@ -1747,6 +1747,17 @@ zero:
 run. Recording it on planning runs would let load creep past the threshold in sub-threshold steps
 without ever triggering.
 
+**Which `ℓ`.** Both `ℓ_now` and `ℓ_last` are the *effective* load — the one every consumer reads
+(§10.1), so forecast-scaled under `forecast.model: holt_winters` — and `ℓ_last` records whatever
+produced that run's `ℓ`. A change of forecast state between two runs (the model switched, the
+backtest verdict flipped, the factors moved) therefore changes every disk's basis and reads as
+drift, by design (REVIEW.md AM-05): the picture the balancer places against changed, so
+reconsidering the placement is right. The drift gate passing only opens the imbalance gate; a plan
+still has to clear payback (§7.3), so the worst case is a re-plan that finds nothing worth doing.
+Recording the observed vector instead would compare forecast-scaled `ℓ_now` against observed
+`ℓ_last` — a permanent mismatch — unless the gate were moved onto observed loads too, which would
+have it ignore exactly the change the forecast exists to anticipate.
+
 **Imbalance gate** — the "% of IOPS difference over all storages in the group" requirement:
 
 ```
@@ -2616,7 +2627,9 @@ The forecast never replaces a load, it **scales** it: `ℓ_d ← ℓ_d · f_d / 
 forecast p95 and `h_d` the observed p95 of the same per-timestamp series (`loadmodel.
 apply_forecast()`). A disk keeps its observed `ℓ_d` when it is flagged for low coverage, has
 `h_d = 0`, or has no trustworthy fit. Forecasts are produced **per disk**, at the one point every
-consumer (gates, solver, payback, ordering, `show-load`) reads `ℓ` from.
+consumer (gates, solver, payback, ordering, `show-load`) reads `ℓ` from — and because a
+forecast-scaled `ℓ` is not a measured one, every consumer that *prints* loads also prints where they
+came from (`forecast:` line, `forecast` JSON object; §12.1 point 6, REVIEW.md AM-01).
 
 **As built (phase 14b):** `forecast.py` is pure — `holt_winters_quantile()`, `backtest()`,
 `disk_factors()`, `forecast_group()` and `ForecastReport`; `cli._compute_group_load()` is the single
@@ -3030,8 +3043,10 @@ default p95 → p99). That changed every plan on every cluster for no forecastin
 
 6. **Output.** Holt-Winters' per-call fallback warning drops to DEBUG (one per disk would flood the
    journal); instead one INFO per group, e.g. `group g: forecast holt_winters used (backtest err
-   0.08 vs baseline 0.14), 37 disks scaled, 5 kept`. `explain` and `plan --json`'s group report gain
-   `forecast: {model, used, backtest_error, baseline_error, disks_scaled, disks_kept}`.
+   0.08 vs baseline 0.14), 37 disks scaled, 5 kept`. `explain`, `show-load` and `plan --json`'s group report gain
+   `forecast: {model, used, backtest_error, baseline_error, disks_scaled, disks_kept}` (present
+   only when a report exists; `explain` and `show-load` render it as one `forecast:` line — under
+   the group header in `show-load` — so scaled loads never pass as measured, REVIEW.md AM-01).
 
 7. **Cost.** One statsmodels fit per disk with history, per group per run — order 0.1 s at 2016
    samples (7 d at 5 min). Fine for a timer; no caching, no parallelism.

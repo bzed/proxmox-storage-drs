@@ -55,7 +55,9 @@ the same file on every node.
   concurrent change to the cluster expected -- see the operator manual.
 
 **show-load**
-: Print every storage in every group with its disks, sizes, measured load and reserve status.
+: Print every storage in every group with its disks, sizes, load and reserve status. Under
+  *forecast.model: holt_winters* the loads are forecast-scaled and a *forecast:* line under the
+  group header says whether the forecast was used.
 
 **explain**
 : Run the identical gate/solve/schedule/payback pipeline **plan** does, and narrate what its output
