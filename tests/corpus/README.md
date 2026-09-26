@@ -162,7 +162,10 @@ corpus`; `make check` runs the narrow sweep (both backends, the first spread met
 and `forecast.model` ∈ {quantile, the bundle's own configured model}). A variant whose
 forecaster is not installed is **recorded as skipped**, never silently dropped — `statsmodels` is an
 optional dependency, and a corpus result that quietly means "quantile only" is a corpus result
-that lies.
+that lies. `--check` does not let that make it environment-dependent: a skipped variant is
+compared against the committed file's plan for the same variant (and reported as a warning), so
+a checkout without `python3-statsmodels` still passes and still catches drift in every variant
+that did run.
 
 ## What a bundle does and does not hide
 

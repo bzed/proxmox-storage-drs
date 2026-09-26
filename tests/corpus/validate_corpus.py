@@ -910,6 +910,38 @@ def build_expected(bundle: Bundle, results: list[VariantResult]) -> dict[str, An
 # ------------------------------------------------------------------- main
 
 
+def adopt_committed_for_skipped(
+    expected: dict[str, Any], committed_text: str | None
+) -> tuple[dict[str, Any], int]:
+    """``--check`` only: give every *skipped* case the committed file's answer for
+    the same variant, and return how many were adopted.
+
+    A variant skipped because an optional package is missing (statsmodels) has no
+    plan of its own to compare, and comparing its ``report: null`` with the
+    committed plan would make ``--check`` a function of the interpreter's package
+    set rather than of the plan (REVIEW.md Y-02, AM-02). The committed answer was
+    computed where the package was installed; drift in the *other* variants is
+    still caught, and a skipped variant with no committed counterpart stays as it
+    is and reads as stale."""
+    if committed_text is None:
+        return expected, 0
+    try:
+        committed = json.loads(committed_text)
+        committed_cases = {
+            json.dumps(case["variant"], sort_keys=True): case for case in committed["cases"]
+        }
+    except (ValueError, KeyError, TypeError):
+        return expected, 0
+    adopted = 0
+    cases = []
+    for case in expected["cases"]:
+        previous = committed_cases.get(json.dumps(case["variant"], sort_keys=True))
+        if case["skipped"] and previous is not None and previous.get("skipped") is None:
+            case, adopted = previous, adopted + 1
+        cases.append(case)
+    return {**expected, "cases": cases}, adopted
+
+
 def _submission_present(bundle: Bundle) -> list[str]:
     if not bundle.submission.is_file():
         return [
@@ -936,11 +968,20 @@ def main(argv: list[str]) -> int:
         all_violations.extend(check_milp_objective_total(bundle, results))
 
         expected = build_expected(bundle, results)
-        text = json.dumps(expected, indent=2, sort_keys=True) + "\n"
         if check:
             current = (
                 bundle.expected.read_text(encoding="utf-8") if bundle.expected.is_file() else None
             )
+            expected, adopted = adopt_committed_for_skipped(expected, current)
+            if adopted:
+                print(
+                    f"warning: {bundle.name}: {adopted} variant(s) skipped in this environment "
+                    "(statsmodels is not installed); their committed plans are trusted, not "
+                    "re-checked",
+                    file=sys.stderr,
+                )
+        text = json.dumps(expected, indent=2, sort_keys=True) + "\n"
+        if check:
             if current != text:
                 skipped = sorted({r.skipped for r in results if r.skipped})
                 reason = f" (variants skipped: {'; '.join(skipped)})" if skipped else ""
