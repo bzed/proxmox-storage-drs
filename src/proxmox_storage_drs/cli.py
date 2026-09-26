@@ -870,6 +870,7 @@ def _render_show_load_human(
     group_loads: dict[str, GroupLoad],
     load_errors: dict[str, str],
     last_loads_by_group: dict[str, dict[str, float] | None],
+    forecasts: dict[str, ForecastReport],
 ) -> str:
     lines: list[str] = []
     for group in topology.groups:
@@ -889,6 +890,10 @@ def _render_show_load_human(
             verdict = "ACT" if decision.act else "NO ACTION"
             header += f" → {verdict}: {decision.reason}"
         lines.append(header)
+        # REVIEW.md AM-01: under holt_winters the loads below are forecast-scaled;
+        # say so (or that the forecast was not used) rather than let them pass as measured.
+        if group.name in forecasts:
+            lines.append(_render_forecast_line(forecasts[group.name]))
         lines.extend(_render_storage_and_disk_load_lines(group, group_load, reserve_statuses))
         if group.name in load_errors:
             lines.append(f"  ⚠ per-disk load unavailable: {load_errors[group.name]}")
@@ -906,6 +911,7 @@ def _render_show_load_json(
     group_loads: dict[str, GroupLoad],
     load_errors: dict[str, str],
     last_loads_by_group: dict[str, dict[str, float] | None],
+    forecasts: dict[str, ForecastReport],
 ) -> dict[str, object]:
     groups_out = []
     for group in topology.groups:
@@ -969,17 +975,18 @@ def _render_show_load_json(
                 "imbalance_fraction": decision.imbalance_fraction,
                 "capacity_fraction": decision.capacity_fraction,
             }
-        groups_out.append(
-            {
-                "name": group.name,
-                "storages": storages_out,
-                "disks": disks_out,
-                "load_computed": group_load is not None,
-                "idle": group_load.idle if group_load is not None else None,
-                "load_error": load_errors.get(group.name),
-                "gate": gate_out,
-            }
-        )
+        group_out: dict[str, object] = {
+            "name": group.name,
+            "storages": storages_out,
+            "disks": disks_out,
+            "load_computed": group_load is not None,
+            "idle": group_load.idle if group_load is not None else None,
+            "load_error": load_errors.get(group.name),
+            "gate": gate_out,
+        }
+        if group.name in forecasts:
+            group_out["forecast"] = forecasts[group.name].as_dict()
+        groups_out.append(group_out)
     return {"groups": groups_out, "warnings": list(topology.warnings)}
 
 
@@ -1000,9 +1007,10 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
     last_loads_by_group = _last_loads_by_group(state, topology)
     group_loads: dict[str, GroupLoad] = {}
     load_errors: dict[str, str] = {}
+    forecasts: dict[str, ForecastReport] = {}
     for group in topology.groups:
         try:
-            group_loads[group.name], _ = _compute_group_load(
+            group_loads[group.name], report = _compute_group_load(
                 prom_client,
                 resolved,
                 group,
@@ -1010,6 +1018,8 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
                 node_selector,
                 now,
             )
+            if report is not None:
+                forecasts[group.name] = report
         except MetricsError as exc:
             # Section 4's load numbers are not safety-critical the way (C4)/
             # (C5) reserve status is -- a Prometheus outage should not hide
@@ -1020,14 +1030,19 @@ def _handle_show_load(resolved: ResolvedConfig, args: argparse.Namespace, mode: 
         print(
             _dump_report_json(
                 _render_show_load_json(
-                    topology, resolved.config, group_loads, load_errors, last_loads_by_group
+                    topology,
+                    resolved.config,
+                    group_loads,
+                    load_errors,
+                    last_loads_by_group,
+                    forecasts,
                 ),
             )
         )
     else:
         print(
             _render_show_load_human(
-                topology, resolved.config, group_loads, load_errors, last_loads_by_group
+                topology, resolved.config, group_loads, load_errors, last_loads_by_group, forecasts
             )
         )
     return 0

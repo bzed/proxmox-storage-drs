@@ -62,6 +62,27 @@ above are `IMPLEMENTATION_PLAN.md` section 14's own example
 (`config/drs.example.yaml` ships the same group and weights), not invented
 for this page.
 
+**Under `forecast.model: holt_winters` these are not the measured numbers.**
+The default `quantile` model reports what was observed over the last
+`window.lookback`. With `holt_winters`, each disk's `ℓ` is scaled to a
+forecast of its p95 over the *next* `window.lookback`, and `L=`/`u=`, the
+spread and the `ACT`/`NO ACTION` verdict are all computed from those scaled
+values — they are the loads the balancer will act on. `show-load` says so on
+a line directly under the group header, the same line `explain` prints:
+
+```
+Group fc-tier1 → NO ACTION: imbalance 12.2% is below gates.imbalance_threshold (20.0%)
+  forecast: holt_winters used (backtest error 0.08 vs baseline 0.14): 37 disks scaled to their forecast p95, 5 kept as observed
+```
+
+or, when the forecast lost its backtest (or there is not yet enough history
+to run one) and the group fell back to observed loads, `forecast:
+holt_winters not used -- ...; loads are as observed`. No `forecast:` line at
+all means the `quantile` model is configured, or the forecast history could
+not be fetched this run (a warning is logged and the numbers are observed).
+See [`explain`](29-explain.md) for the fields and `forecast.model` in the
+configuration reference for how the backtest decides.
+
 ## The `Group <name> → ACT`/`NO ACTION` line
 
 Four gates, evaluated in this order — **reserve override**, then the
@@ -169,7 +190,9 @@ reference (`qm unlink <vmid> <device>` for an `unusedN` entry).
 (including the exact byte counts behind the reserve check, plus `load` and
 `utilization` when available) and `groups[].disks[]` (plus `load` and
 `load_flagged_reason` when available), with each group carrying its own
-`load_computed`, `idle`, `load_error` and `gate` fields — a Prometheus
+`load_computed`, `idle`, `load_error` and `gate` fields (plus a `forecast`
+object — `model`, `used`, `backtest_error`, `baseline_error`, `disks_scaled`,
+`disks_kept` — only under `holt_winters`, when the loads are forecast-scaled) — a Prometheus
 outage on one group never prevents another group's `load_computed: true`
 or `gate` from being reported. `gate` is `null` when `load_computed` is
 `false` (no `GroupLoad` to evaluate gates against) and otherwise an object

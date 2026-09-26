@@ -455,3 +455,44 @@ def test_holt_winters_variant_is_recorded_as_skipped_without_statsmodels(
     results = _sweep(tmp_path, monkeypatch, "holt_winters", statsmodels=False)
     hw = [r for r in results if r.variant["forecast_model"] == "holt_winters"]
     assert hw and all(r.report is None and r.skipped for r in hw)
+
+
+def _case(model: str, skipped: str | None, plan: str | None) -> dict[str, object]:
+    report = None if plan is None else {"plan": plan}
+    return {"variant": {"forecast_model": model}, "skipped": skipped, "report": report}
+
+
+@needs_full_checkout
+def test_check_adopts_the_committed_plan_for_a_variant_skipped_here() -> None:
+    """REVIEW.md AM-02: a statsmodels-less ``--check`` must not read as stale."""
+    committed = {"cases": [_case("quantile", None, "q"), _case("hw", None, "h")]}
+    expected = {"cases": [_case("quantile", None, "q"), _case("hw", "no sm", None)]}
+    adopted, count = vc.adopt_committed_for_skipped(expected, json.dumps(committed))
+    assert count == 1
+    assert adopted["cases"] == committed["cases"]
+
+
+@needs_full_checkout
+def test_check_still_catches_drift_in_a_variant_that_did_run() -> None:
+    committed = {"cases": [_case("quantile", None, "old")]}
+    expected = {"cases": [_case("quantile", None, "new")]}
+    adopted, count = vc.adopt_committed_for_skipped(expected, json.dumps(committed))
+    assert count == 0 and adopted == expected
+
+
+@needs_full_checkout
+@pytest.mark.parametrize("committed_text", [None, "not json", '{"cases": [{"no": "variant"}]}'])
+def test_check_leaves_a_skipped_variant_stale_without_a_usable_committed_answer(
+    committed_text: str | None,
+) -> None:
+    expected = {"cases": [_case("hw", "no sm", None)]}
+    adopted, count = vc.adopt_committed_for_skipped(expected, committed_text)
+    assert count == 0 and adopted == expected
+
+
+@needs_full_checkout
+def test_check_does_not_adopt_a_committed_case_that_was_itself_skipped() -> None:
+    committed = {"cases": [_case("hw", "no sm", None)]}
+    expected = {"cases": [_case("hw", "no sm", None)]}
+    _, count = vc.adopt_committed_for_skipped(expected, json.dumps(committed))
+    assert count == 0

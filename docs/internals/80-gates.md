@@ -31,8 +31,13 @@ decides:
    values over every entry. Vectors are aligned over the **union** of disk
    keys (a disk absent from one side contributes its full load in the other
    as drift — a new or deleted disk is a genuine change to the group's I/O
-   profile). `last_load=None` skips this gate outright, per section 6's own
-   degenerate-case table — not "treat as zero drift", which would make an
+   profile). Both vectors are *effective* loads -- whatever
+   `cli._compute_group_load()` returned, i.e. forecast-scaled under
+   `holt_winters` -- so a change of forecast state between runs (model switched,
+   backtest verdict flipped) reads as drift on purpose: the basis the balancer
+   places against changed (REVIEW.md AM-05). It only opens the imbalance gate;
+   payback still gates execution. `last_load=None` skips this gate outright, per
+   section 6's own degenerate-case table — not "treat as zero drift", which would make an
    operator's very first run fail to act on an already-imbalanced cluster.
 3. **Imbalance gate.** `(max_s u_s − min_s u_s) / u* ≥ gates.imbalance_threshold` —
    `u_s` is each storage's own fill fraction and `u*` the group's average
