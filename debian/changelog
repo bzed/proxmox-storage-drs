@@ -1,3 +1,27 @@
+pve-storage-drs (0.1.11) trixie; urgency=medium
+
+  * show-load: under forecast.model: holt_winters the per-disk and per-storage
+    loads it prints are forecast-scaled, and it now says so. A "forecast:" line
+    (the one explain prints) sits directly under each group header, and --json
+    carries the same per-group "forecast" object plan --json has. Neither
+    appears under the default quantile model. The manual no longer describes
+    those columns as measured in that mode.
+  * docs: the manual no longer says gates.imbalance_threshold doubles as the
+    backtest error ceiling of a forecast model; since 0.1.9 the backtest has
+    no threshold, the forecast is used iff it beats the quantile baseline.
+  * docs: the drift gate's basis is now written down. Both the current and the
+    recorded load vector are the effective load the balancer acts on, so under
+    holt_winters a change of forecast state between two runs counts as drift
+    by design; it only opens the imbalance gate and payback still gates
+    execution. No behaviour change.
+  * tests: the corpus check (tests/corpus/validate_corpus.py --check) no
+    longer fails on a system without python3-statsmodels; a variant skipped
+    for that reason is compared against the committed plan and reported as a
+    warning. Contributor workflow: the knowledge graph is refreshed and
+    committed just before a release (AGENTS.md section 9.2).
+
+ -- Bernd Zeimetz <bzed@debian.org>  Sat, 26 Sep 2026 12:34:22 +0200
+
 pve-storage-drs (0.1.10) trixie; urgency=medium
 
   * logging: --log-format now defaults to text everywhere. It used to be
