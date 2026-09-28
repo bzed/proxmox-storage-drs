@@ -1244,6 +1244,71 @@ def _render_unfixable_shortfall_lines(
     return lines
 
 
+def _render_plan_no_moves_lines(
+    decision: GateDecision,
+    schedule_result: ScheduleResult,
+    unfixable: _UnfixableShortfall | None,
+    objective: ObjectiveConfig | None,
+    solve_outcome: _SolveOutcome | None,
+) -> list[str]:
+    """Why ``plan``/``apply`` show a gate verdict of ACT and then no move.
+
+    The gate only decides whether a group is *planned*; whether anything
+    moves is the objective's call, and "keep everything where it is" is a
+    legitimate optimum. Without this line the output reads as the tool
+    having ignored its own verdict. Cheap on purpose: ``explain`` does the
+    expensive part (the closest rejected move, term by term), and this only
+    points there. Silent when something else already explains the empty
+    plan -- a deadlock (its own ``⚠`` line) or an unfixable shortfall.
+
+    A capacity-gated group gets a second line naming the two weights
+    involved: the capacity gate opens a group whose I/O may already be
+    balanced, so the data-spread term (``objective.delta_capacity_spread``)
+    is the only thing that can pay for a move, and at the default weights
+    it often cannot -- a replayed bundle with a 112 % capacity spread needed
+    about 2.5 times the default before its cheapest fix (three moves, one VM
+    split) paid for itself."""
+    if not decision.act or schedule_result.order or schedule_result.deadlocked:
+        return []
+    if unfixable is not None:
+        return []
+    proven = (
+        solve_outcome is not None
+        and solve_outcome.backend == "cbc"
+        and solve_outcome.status == "optimal"
+    )
+    verdict = (
+        "keeping the current placement scores best under the configured objective weights"
+        if proven
+        else "the heuristic found nothing better than the current placement under the "
+        "configured objective weights (not proven: CBC did not solve)"
+    )
+    lines = [
+        f"  no moves made: {verdict} -- the gate decides that a group is planned, not that "
+        "the plan must move something (explain shows the closest rejected move and why)"
+    ]
+    capacity_gated = (
+        decision.capacity_fraction is not None
+        and not decision.reserve_override
+        and decision.imbalance_fraction is None
+        and decision.drift_fraction is None
+    )
+    if capacity_gated:
+        weights = (
+            f" ({objective.delta_capacity_spread:g} against {objective.beta_move_count:g} per move)"
+            if objective is not None
+            else ""
+        )
+        lines.append(
+            "    the capacity gate opened this group: no plan's data-spread gain, weighted by "
+            "objective.delta_capacity_spread, outweighs the migrations it takes, charged by "
+            f"objective.beta_move_count{weights}; raise delta_capacity_spread to spread "
+            "data more aggressively, or raise gates.capacity_spread_threshold (null "
+            "disables it) to stop planning for it"
+        )
+    return lines
+
+
 def _render_group_plan_human(
     group: Group,
     group_loads: dict[str, GroupLoad],
@@ -1255,6 +1320,8 @@ def _render_group_plan_human(
     load_errors: dict[str, str],
     payback_ratio: float,
     execution_result: ExecutionResult | None = None,
+    objective: ObjectiveConfig | None = None,
+    explain_no_moves: bool = True,
 ) -> list[str]:
     """One group's worth of ``_render_plan_human()``'s report -- shared
     with ``_render_apply_human()`` (AGENTS.md section 5), which passes its
@@ -1337,12 +1404,16 @@ def _render_group_plan_human(
         lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
         if payback_result is not None:
             lines.extend(_render_plan_payback_lines(payback_result, payback_ratio, vm_name_by_key))
-    lines.extend(
-        _render_unfixable_shortfall_lines(
-            _unfixable_shortfall(group, final_breakdown, solve_outcomes[group.name]),
-            vm_name_by_key,
+    unfixable = _unfixable_shortfall(group, final_breakdown, solve_outcomes[group.name])
+    lines.extend(_render_unfixable_shortfall_lines(unfixable, vm_name_by_key))
+    # `explain` passes explain_no_moves=False: it prints its own, richer
+    # "no moves made" block (the closest rejected move, term by term).
+    if explain_no_moves:
+        lines.extend(
+            _render_plan_no_moves_lines(
+                decision, schedule_result, unfixable, objective, solve_outcomes[group.name]
+            )
         )
-    )
     lines.append("")
     return lines
 
@@ -1357,6 +1428,7 @@ def _render_plan_human(
     final_breakdowns: dict[str, ObjectiveBreakdown],
     load_errors: dict[str, str],
     payback_ratio: float,
+    objective: ObjectiveConfig | None = None,
 ) -> str:
     lines: list[str] = []
     for group in topology.groups:
@@ -1371,6 +1443,7 @@ def _render_plan_human(
                 final_breakdowns,
                 load_errors,
                 payback_ratio,
+                objective=objective,
             )
         )
     if topology.warnings:
@@ -1391,6 +1464,7 @@ def _render_apply_human(
     load_errors: dict[str, str],
     payback_ratio: float,
     execution_results: dict[str, ExecutionResult],
+    objective: ObjectiveConfig | None = None,
 ) -> str:
     lines: list[str] = []
     for group in topology.groups:
@@ -1406,6 +1480,7 @@ def _render_apply_human(
                 load_errors,
                 payback_ratio,
                 execution_results.get(group.name),
+                objective=objective,
             )
         )
     if topology.warnings:
@@ -1878,6 +1953,7 @@ def _render_group_explain_human(
         {group.name: group_plan.final_breakdown} if group_plan.final_breakdown else {},
         {},
         payback_ratio,
+        explain_no_moves=False,
     )
 
     load_by_key = group_plan.group_load.load_by_disk_key() if group_plan.group_load else {}
@@ -2782,6 +2858,7 @@ def _handle_plan(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) 
                 final_breakdowns,
                 load_errors,
                 resolved.config.migration.payback_ratio,
+                resolved.config.objective,
             )
         )
     # A group whose load model could not be computed (a Prometheus error) is
@@ -3598,6 +3675,7 @@ def _handle_apply(resolved: ResolvedConfig, args: argparse.Namespace, mode: str)
                 load_errors,
                 resolved.config.migration.payback_ratio,
                 execution_results,
+                resolved.config.objective,
             )
         )
 

@@ -4629,3 +4629,124 @@ def test_replay_never_writes_the_status_file(tmp_path: Path) -> None:
     args = argparse.Namespace(command="apply", replay="/some/bundle")
     cli._publish_status_file(resolved, args, "dry-run", 0, 0.0)
     assert not (tmp_path / "s").exists()
+
+
+# ------------------------------------------- "ACT" followed by an empty plan
+
+
+def _no_move_schedule(deadlocked: tuple[str, ...] = ()) -> Any:
+    from proxmox_storage_drs.schedule import ScheduleResult
+
+    return ScheduleResult(order=(), deadlocked=deadlocked, final_assignment={})
+
+
+def _gate(**fields: Any) -> Any:
+    from proxmox_storage_drs.gates import GateDecision
+
+    base: dict[str, Any] = {
+        "act": True,
+        "reason": "r",
+        "reserve_override": False,
+        "drift_fraction": None,
+        "imbalance_fraction": None,
+        "capacity_fraction": None,
+    }
+    base.update(fields)
+    return GateDecision(**base)
+
+
+def _outcome(backend: str, status: str | None) -> cli._SolveOutcome:
+    group = _one_disk_group()
+    from proxmox_storage_drs.config import ObjectiveConfig
+    from proxmox_storage_drs.heuristic import evaluate_assignment, seed_assignment
+
+    breakdown = evaluate_assignment(group, seed_assignment(group), {}, ObjectiveConfig(), 0.0, 0.0)
+    return cli._SolveOutcome(
+        assignment={}, initial_breakdown=breakdown, backend=backend, status=status
+    )
+
+
+def test_a_capacity_gated_empty_plan_names_the_two_weights_that_decided_it() -> None:
+    """A replayed dev-cluster bundle: capacity spread 112 %, I/O balanced,
+    the gate says ACT and CBC proves doing nothing optimal -- at the default
+    delta_capacity_spread 0.5 no fix pays for its moves. The output used to
+    stop after the solver line."""
+    from proxmox_storage_drs.config import ObjectiveConfig
+
+    lines = cli._render_plan_no_moves_lines(
+        _gate(capacity_fraction=1.122),
+        _no_move_schedule(),
+        None,
+        ObjectiveConfig(delta_capacity_spread=0.5, beta_move_count=0.25),
+        _outcome("cbc", "optimal"),
+    )
+    assert lines[0].startswith("  no moves made: keeping the current placement scores best")
+    assert "objective.delta_capacity_spread" in lines[1]
+    assert "(0.5 against 0.25 per move)" in lines[1]
+    assert "gates.capacity_spread_threshold" in lines[1]
+
+
+def test_an_imbalance_gated_empty_plan_gets_only_the_general_line() -> None:
+    """The local cluster bundle under minmax: one disk carries 80 % of the
+    group's load, so no placement improves the hottest storage -- a
+    structural hotspot, not a data-spread weight."""
+    lines = cli._render_plan_no_moves_lines(
+        _gate(imbalance_fraction=2.4, capacity_fraction=0.09),
+        _no_move_schedule(),
+        None,
+        None,
+        _outcome("cbc", "optimal"),
+    )
+    assert len(lines) == 1 and "no moves made" in lines[0]
+
+
+def test_the_heuristic_never_claims_its_empty_plan_is_best() -> None:
+    lines = cli._render_plan_no_moves_lines(
+        _gate(imbalance_fraction=0.5), _no_move_schedule(), None, None, _outcome("heuristic", None)
+    )
+    assert "not proven: CBC did not solve" in lines[0]
+    assert "scores best" not in lines[0]
+
+
+def test_no_moves_line_stays_silent_when_something_else_already_explains_it() -> None:
+    from proxmox_storage_drs.gates import GateDecision
+
+    cbc = _outcome("cbc", "optimal")
+    deadlocked = _no_move_schedule(deadlocked=("101:scsi0",))
+    assert cli._render_plan_no_moves_lines(_gate(), deadlocked, None, None, cbc) == []
+    unfixable = cli._UnfixableShortfall(
+        by_storage={"san-a": 1 << 20}, proven=True, pinned_blockers=()
+    )
+    assert cli._render_plan_no_moves_lines(_gate(), _no_move_schedule(), unfixable, None, cbc) == []
+    idle = GateDecision(
+        act=False,
+        reason="idle",
+        reserve_override=False,
+        drift_fraction=None,
+        imbalance_fraction=None,
+    )
+    assert cli._render_plan_no_moves_lines(idle, _no_move_schedule(), None, None, cbc) == []
+
+
+def test_plan_output_explains_an_empty_plan_and_explain_does_not_repeat_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end on the all-pinned sample, with 64 TiB storages so its
+    reserve breach is gone and a zero imbalance threshold so the gate still
+    acts: nothing but "the objective prefers staying" explains the empty plan,
+    and `explain` must not print its own block and this line both."""
+    topology = _all_pinned_sample_topology()
+    group = topology.groups[0]
+    roomy = tuple(dataclasses.replace(s, capacity_bytes=64 * (1 << 40)) for s in group.storages)
+    topology = Topology(
+        groups=(dataclasses.replace(group, storages=roomy),), warnings=topology.warnings
+    )
+    _patch_plan_deps(monkeypatch, topology, _sample_group_load())
+    path = write_config(tmp_path, gates={"imbalance_threshold": 0.0})
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert "→ ACT" in out
+    assert out.count("no moves made") == 1
+
+    assert cli.main(["-c", str(path), "explain"]) == 0
+    assert capsys.readouterr().out.count("no moves made") == 1
