@@ -118,7 +118,14 @@ from proxmox_storage_drs.heuristic import (
     group_average_utilization,
     seed_assignment,
 )
-from proxmox_storage_drs.topology import Disk, Group, Storage, storage_accepts_format
+from proxmox_storage_drs.topology import (
+    Disk,
+    Group,
+    Storage,
+    is_small_disk,
+    larger_vm_disks,
+    storage_accepts_format,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +406,40 @@ def _no_feasible_solution(backend: str, group: Group, stage: str, status: str) -
 # --------------------------------------------------------------------- CBC
 
 
+def _cbc_small_disks_follow_their_vm(
+    pulp: Any,
+    prob: Any,
+    group: Group,
+    movable: tuple[Disk, ...],
+    x: dict[Any, Any],
+    tiny_disk_bytes: int,
+) -> None:
+    """(C8), linear: for a movable small disk `d` and every storage `s`
+    other than its current one,
+
+        x_{d,s}  <=  Σ_{b larger, movable, same VM} x_{b,s}  +  #{b larger, pinned, same VM, on s}
+
+    -- `d` may land on `s` only if some larger disk of its VM in this group
+    ends there too. `topology.small_disk_placement_ok()` is the rule's one
+    definition; this is its transcription, and the heuristic calls that
+    function directly. No constraint for `s = σ₀(d)`: staying is always
+    allowed."""
+    movable_keys = {d.key for d in movable}
+    for d in movable:
+        if not is_small_disk(d, tiny_disk_bytes):
+            continue
+        larger = larger_vm_disks(group, d, tiny_disk_bytes)
+        for s in group.storages:
+            if s.id == d.current_storage:
+                continue
+            anchors = pulp.lpSum(
+                x[big.key, s.id] for big in larger if big.key in movable_keys
+            ) + sum(
+                1 for big in larger if big.key not in movable_keys and big.current_storage == s.id
+            )
+            prob += x[d.key, s.id] <= anchors
+
+
 def _cbc_feasibility_constraints(
     pulp: Any,
     prob: Any,
@@ -408,8 +449,9 @@ def _cbc_feasibility_constraints(
     pinned_by_storage: dict[str, tuple[Disk, ...]],
     objective: ObjectiveConfig,
     cooldown_storages: frozenset[str] = frozenset(),
+    tiny_disk_bytes: int = 0,
 ) -> tuple[dict[Any, Any], dict[Any, Any], dict[Any, Any], dict[Any, Any]]:
-    """(C1)/(C2)/(C3)/(C4)/(C5), continuous -- "direct transcription" per the
+    """(C1)/(C2)/(C3)/(C4)/(C5)/(C8), continuous -- "direct transcription" per the
     plan's own words for this backend, no scaling needed. Factored out so
     both lexicographic stages of `_solve_cbc()` share one constraint
     builder instead of duplicating it inline."""
@@ -438,6 +480,7 @@ def _cbc_feasibility_constraints(
         prob += pulp.lpSum(x[d.key, s.id] for s in group.storages) == 1
     for d, s in _fixed_zero_pairs(movable, group.storages, cooldown_storages):
         prob += x[d.key, s.id] == 0
+    _cbc_small_disks_follow_their_vm(pulp, prob, group, movable, x, tiny_disk_bytes)
 
     for v in vmids:
         movable_of_v = [d for d in movable if d.vmid == v]
@@ -671,6 +714,7 @@ def _solve_cbc(
         pinned_by_storage,
         objective,
         cooldown_storages,
+        tiny_disk_bytes,
     )
     prob1 += pulp.lpSum(slack1.values())
     status1 = _pulp_solve(pulp, prob1, stage1_solver_cmd, probing)
@@ -693,6 +737,7 @@ def _solve_cbc(
         pinned_by_storage,
         objective,
         cooldown_storages,
+        tiny_disk_bytes,
     )
     # Exact, because both sides are whole MiB. This used to be a continuous
     # `min_slack + 1e-6` -- a tolerance of about one *byte* against a value

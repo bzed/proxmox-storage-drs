@@ -175,6 +175,17 @@ coefficient, exactly like `u*`/`b_bar` are already folded elsewhere in this
 file: `kappa · w_v` multiplies each vmid's own `pulp.lpSum(y[v, s.id] ...)`
 term directly, at full float precision.
 
+**(C8), small disks follow their VM**, is one linear constraint per
+(small movable disk, storage other than its current one), built by
+`_cbc_small_disks_follow_their_vm()` inside the shared feasibility builder,
+so both lexicographic stages carry it: `x_{d,s} ≤ Σ x_{b,s}` over the VM's
+larger movable disks in the group, plus the number of its larger *pinned*
+disks already on `s`. No new variables. It is what stops stage 1 from
+"repairing" a shortfall with a sub-MiB EFI disk that crosses a MiB boundary
+(`tests/unit/test_small_disks.py` has that case, and shows CBC does move the
+disk with the rule switched off). `topology.small_disk_placement_ok()` is
+the definition this transcribes.
+
 `D^big = {d : z_d >= migration.tiny_disk_bytes}` restricts `beta`/`gamma`
 to `movable` disks at or above the configured threshold — not a coefficient
 of `0` for an excluded disk, but the disk's terms skipped entirely. This is

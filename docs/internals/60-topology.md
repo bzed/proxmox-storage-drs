@@ -117,6 +117,19 @@ the per-disk cooldown (below), a VM lock, then an `unusedN` disk when
 `exclude.include_unused_disks` is false. A disk gets at most one reason;
 the first that applies wins, matching how an operator would explain it.
 
+One more pin is applied afterwards, per group rather than per disk, because
+it depends on the VM's *other* disks in the group: `pin_lone_small_disks()`
+pins every still-movable disk below `migration.tiny_disk_bytes` whose VM has
+no larger disk in that group (`LONE_SMALL_DISK_REASON`). This is section 5.3
+(C8)'s degenerate case — a small disk may only move to where a larger disk
+of its VM ends up, and here there is none — made visible as a pin. The rule
+itself lives beside it: `is_small_disk()`, `larger_vm_disks()` (the VM's
+non-small disks *in this group*, pinned included — disks of the same VM in
+another group never anchor anything, since nothing moves between groups),
+`small_disk_placement_ok()` for one disk and `small_disks_follow_their_vm()`
+for a whole assignment in a single pass. Both solvers use these
+(`docs/internals/90-heuristic.md`, `91-optimize.md`).
+
 ## The pending-change pin
 
 `GET .../qemu/{vmid}/config` (`vm_config()`) is confirmed, against a real

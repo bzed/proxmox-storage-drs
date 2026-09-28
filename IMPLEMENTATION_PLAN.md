@@ -924,7 +924,9 @@ a four-move plan whose entire value was reuniting VMs — two of the moves 528 K
 rejected wholesale by a payback arithmetic in which the affinity those moves bought was
 structurally worth zero (§7.2), so the tool refused the one action the operator most wanted. A tiny
 move occupies its VM's lock for seconds and transfers a rounding error of the mirror budget;
-pricing it as a migration priced affinity repair out of the tool. Second, PVE may not use the
+pricing it as a migration priced affinity repair out of the tool. Free is not the same as
+unconstrained, though: a small disk moves only *with* its VM — to a storage where a larger disk of
+the same VM in the same group ends the plan — and never on its own ((C8), §5.3). Second, PVE may not use the
 `drive-mirror` path for `tpmstate0`, because `swtpm` rather
 than QEMU holds that state. Do not depend on drive-mirror semantics for it. The transient invariant
 of §8.1 — the volume occupies **both** storages until the move completes — is the conservative
@@ -1327,7 +1329,10 @@ small:
   referring to state that predates the move;
 - `d` is within its per-disk cooldown — also pin to current;
 - `v(d)` is currently `lock`ed (§9.3) — pin for this run. A lock is transient, so this is a
-  *planning-time* pin only and carries no cooldown; the next run re-evaluates it.
+  *planning-time* pin only and carries no cooldown; the next run re-evaluates it;
+- `d` is small (`z_d < migration.tiny_disk_bytes`) and `v(d)` has no larger disk in this group — pin,
+  reported as "small disk with no larger disk of its VM in this group". (C8) below would hold it in
+  place anyway, having nothing to follow; the pin is what makes the reason visible.
 
 **(C3) VM affinity linking.** Couple `y` to `x` in both directions so the objective term is exact.
 Let `D^mov ⊆ D` be the disks that are not pinned by (C2):
@@ -1595,6 +1600,43 @@ filled to 5% that keeps 60% of its bytes on one storage deviates as much as a fu
 `b̄ = 0` the group holds no data: the term is inactive, and so is §6's capacity gate. The fill
 counts managed disks and foreign volumes but **not** the snapshot reserve — the quantity spread is
 *data at risk*, and free space is not data.
+
+**(C8) Small disks follow their VM.** Let `D^small = { d ∈ D^mov : z_d < migration.tiny_disk_bytes }`
+and, for `d ∈ D^small`, let `B(d)` be the disks of `v(d)` **in this group** that are not small,
+pinned ones included. Then, for every storage other than the disk's current one:
+
+```
+x_{d,s}  ≤  Σ_{b ∈ B(d) ∩ D^mov} x_{b,s}  +  |{ b ∈ B(d) \ D^mov : σ₀(b) = s }|      ∀ d ∈ D^small, s ≠ σ₀(d)
+```
+
+A small disk ends the plan where it is, or on a storage where at least one larger disk of its own VM
+ends it. That allows every move a small disk is actually wanted for — moving together with its VM,
+rejoining a VM that is already split, following one half of a VM that the plan splits — and forbids
+the one it is not: moving alone. Moving alone is never worth it. A small disk carries next to no
+load, so it cannot buy balance; `κ` alone can only prefer it next to its VM, which the constraint
+already allows; and as a (C5) repair it frees less than `tiny_disk_bytes` of a shortfall while
+splitting the VM. That last case is not hypothetical: found on a real bundle, a storage 231 GiB
+short, all its large disks pinned, and the lexicographic stage 1 moving a 528 KiB `efidisk0` to
+another storage because it lowered `Σ r_s` by one whole MiB (a MiB boundary crossed). Whole-MiB
+shortfalls cannot prevent that — any quantisation has boundaries — so the rule is on the disk,
+not on the arithmetic.
+
+Consequences, all deliberate:
+
+- **Large disks keep their freedom.** A VM's larger disks may still be split across storages when
+  they do not fit together, or when only a split balances; `κ` (§5.4) is the soft preference
+  against it, as before. (C8) constrains the small ones only.
+- **Groups are never crossed.** `B(d)` counts only the VM's disks in *this* group, and every `x` of
+  the model ranges over this group's storages. A VM whose system disk sits in another group has
+  nothing here for its small disk to follow: that disk is pinned by (C2) above and never moves.
+- **Staying is always allowed**, so the current assignment satisfies (C8) and the model never becomes
+  infeasible because of it.
+- **`tiny_disk_bytes: 0` switches it off** — no disk is small.
+
+`topology.small_disk_placement_ok()` is the rule's one definition. The MILP transcribes it as the
+constraint above; the heuristic discards any candidate assignment that breaks it — in its descent,
+its (C5) repair step and `explain`'s closest-alternative search — and the exhaustive fixture
+generator filters its enumeration by an independent restatement of it.
 
 ### 5.4 Objective
 
@@ -2798,7 +2840,7 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `window.lookback ≥ forecaster.required_range()` | See §10.1 — otherwise the model can never run |
 | `payback_ratio > 0`, `payback_horizon > 0` | Zero disables the safety test |
 | `payback_horizon ≥ 30d` (warn, not error) | A horizon of days rejects slow-accruing but real benefits; it should approximate VM lifetime, not operator patience (§7.2) |
-| `tiny_disk_bytes ≥ 0` | The size below which a disk moves free of `β`, `γ` and the payback test (§5.4, §7); `0` restores the old accounting |
+| `tiny_disk_bytes ≥ 0` | The size below which a disk moves free of `β`, `γ` and the payback test (§5.4, §7), and only together with a larger disk of its VM ((C8), §5.3); `0` restores the old accounting and switches (C8) off |
 | `delta_capacity_spread ≥ 0`; warn when `> alpha_spread` | A negative weight would reward concentration; above `α`, data evenness outweighs I/O evenness in every comparison and the tool is no longer an I/O balancer first |
 | `capacity_spread_threshold > 0` where set, `null` disables | A ratio of fill fractions to the mean fill; it can legitimately exceed 1 (§14.2 measures 1.85) |
 | `max_concurrent_* ≥ 1` | Zero would deadlock the scheduler |
@@ -3143,7 +3185,7 @@ Holt-Winters.
 | Target storage filled, or a disk created or moved onto it, by another user or tool after planning | The live provisioned re-check (§9.2 step 2) refuses the move; the run re-plans from fresh state, up to `execution.max_replans_per_run`, then bails out (exit `0`, next run starts fresh) — §9.2 re-plan protocol |
 | PVE API error while re-reading the VM or the target before a move, or an unsized volume on the target | Not a mismatch: the run fails (exit `1`), no further group is visited — §9.2 "Errors are not mismatches" |
 | Prometheus error while computing a group's load, in the first plan or a re-plan | The run fails (exit `1`); `plan`/`explain` report every group they can and exit `1` — §9.2 "Errors are not mismatches" |
-| VM has `efidisk0` / `tpmstate0` | Ordinary movable disks on PVE 9.2 (verified on a live cluster). Below `migration.tiny_disk_bytes` they move free of `β`, `γ` and the payback test, so `κ` reunites them with their VM (§3.6, §5.4, §7.3). Do not assume `drive-mirror` semantics for `tpmstate0`; §8.1's both-storages invariant holds either way (§3.6) |
+| VM has `efidisk0` / `tpmstate0` | Ordinary movable disks on PVE 9.2 (verified on a live cluster). Below `migration.tiny_disk_bytes` they move free of `β`, `γ` and the payback test, so `κ` reunites them with their VM (§3.6, §5.4, §7.3) — and only ever move with a larger disk of their VM ((C8), §5.3); with none in the group they are pinned. Do not assume `drive-mirror` semantics for `tpmstate0`; §8.1's both-storages invariant holds either way (§3.6) |
 | VM has disks on `ide`/`sata`/`virtio`, not just `scsi` | Full bus regex in §3.5; enumerating only `scsi*` silently mis-accounts capacity |
 | `unused{N}` volumes | Movable with `ℓ_d = 0`, so the solver relocates them only to repair a reserve violation — the intended policy |
 | VM is `lock`ed (backup, snapshot, migrate, …) | Pinned at planning time, waited for at execution time up to `execution.locks.wait_timeout`; the lock value set is treated as open-ended and never whitelisted (§9.3) |
@@ -3643,7 +3685,7 @@ bug waiting to happen; this table is the audit.
 | `migration.max_single_move_duration` | §7.3 hard per-move rule; compared against `duration_d` *including* the wipe |
 | `migration.account_saferemove_wipe` | §7.1 `duration_wipe_d` |
 | `migration.wipe_load_weight` | §7.1 `ω_wipe` in `cost_d`; §7.3 `ω_role(m,s)` while `draining` |
-| `migration.tiny_disk_bytes` | §5.4 `D^big` (β/γ exemption); §7.1 `cost_d = 0`; §7.3 aggregate-test exemption |
+| `migration.tiny_disk_bytes` | §5.4 `D^big` (β/γ exemption); §5.3 (C8) small disks follow their VM, (C2) lone-small-disk pin; §7.1 `cost_d = 0`; §7.3 aggregate-test exemption |
 | `execution.locks.*` | §9.3 lock wait loop; §5.3 (C2) planning-time pin |
 | `execution.source_release.*` | §9.3 completion criterion; §8.2 `draining` state |
 | `exclude.include_unused_disks` | §3.6 membership of `D` |

@@ -169,7 +169,9 @@ Every disk section 5.3 (C2) excludes from this run's solve, in the same
 storage, measured load (`ℓ`) and `ℓ/z` ratio when one is available, and
 its exact reason — a real snapshot or an unreferenced companion volume
 (section 3.7), an unapplied pending config change (section 3.8), a config
-exclusion, a still-running `gates.cooldown_per_disk`, or a VM config lock.
+exclusion, a still-running `gates.cooldown_per_disk`, a VM config lock, or a
+small disk (below `migration.tiny_disk_bytes`) whose VM has no larger disk
+in this group to move with.
 Identical text to what `show-load` already prints per disk as
 `[pinned: ...]`; gathered here into one block instead of interleaved with
 movable disks, because pins are `explain`'s subject, not an aside.

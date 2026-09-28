@@ -143,7 +143,10 @@ reflects real history.
 A pinned disk carries `[pinned: <reason>]` after its size and format —
 `snapshots present (N)`, `pending config change (unapplied)`,
 `pending deletion (unapplied)`, `locked: <lock>`, `excluded by config`,
-`excluded: unused disk (exclude.include_unused_disks=false)`, or
+`excluded: unused disk (exclude.include_unused_disks=false)`,
+`small disk with no larger disk of its VM in this group
+(migration.tiny_disk_bytes)` (an EFI/TPM disk whose VM's other disks are all
+in a different group — it only ever moves with a larger disk of its VM), or
 `cooldown: moved recently, <time> left on gates.cooldown_per_disk`
 whenever `state.json` records that disk having moved within
 `gates.cooldown_per_disk` — matching `IMPLEMENTATION_PLAN.md` section 5.3

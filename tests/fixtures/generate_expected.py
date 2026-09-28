@@ -220,7 +220,28 @@ def all_assignments(f: Fixture) -> Iterator[Assignment]:
     and losing."""
     domains = [eligible_storages(f, k) for k in f.keys]
     for combo in itertools.product(*domains):
-        yield dict(zip(f.keys, combo))
+        assign = dict(zip(f.keys, combo))
+        if small_disks_follow(f, assign):
+            yield assign
+
+
+def small_disks_follow(f: Fixture, assign: Assignment) -> bool:
+    """Section 5.3 (C8), written out independently of the engine's
+    `topology.small_disk_placement_ok()`: a disk below `tiny_disk_bytes`
+    ends where it started or on a storage where a larger disk of its own
+    VM (pinned or not) ends. A small disk with no larger sibling can only
+    stay -- what the engine reports as a pin."""
+    tiny = f.tiny_disk_tib
+    for key in f.keys:
+        if f.size[key] >= tiny:
+            continue
+        target = storage_of(f, assign, key)
+        if target == f.current[key]:
+            continue
+        larger = [k for k in f.all_keys if f.vmid[k] == f.vmid[key] and f.size[k] >= tiny]
+        if not any(storage_of(f, assign, k) == target for k in larger):
+            return False
+    return True
 
 
 def reserve_term(f: Fixture, s: str, largest: float) -> float:

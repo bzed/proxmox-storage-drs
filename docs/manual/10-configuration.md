@@ -759,6 +759,23 @@ real, meaningfully-sized migrations bypass the payback safety test entirely;
 there is no upper bound enforced beyond `≥ 0`, so this is an operator
 judgement call, not a validated range.
 
+**A disk below this size only ever moves together with its VM.** It may end
+a plan where it is now, or on a storage where at least one *larger* disk of
+the same VM, in the same storage group, ends the plan — never on a storage
+of its own. So an EFI or TPM disk follows its VM's system disk when that
+disk moves, rejoins it when the VM is already split, and otherwise stays
+put. Moving it alone would buy nothing: it carries no load worth balancing,
+and as a free-space "repair" it frees a fraction of a MiB while splitting
+the VM from its firmware state. Larger disks are not bound this way: a VM's
+big disks can still be placed on different storages when they do not fit
+together or when only a split balances the group (`objective.kappa_vm_affinity`
+is the soft preference against that). A VM whose disks in this group are
+*all* below the threshold — typically because its system disk is in a
+different group — has nothing to follow, and those disks are pinned with
+`small disk with no larger disk of its VM in this group
+(migration.tiny_disk_bytes)`. Nothing ever moves between groups. Setting the
+threshold to `0` switches this rule off along with the cost exemption.
+
 ## `objective` — the solver's trade-off weights
 
 The solver (and, for the terms it also uses, the heuristic backend)
