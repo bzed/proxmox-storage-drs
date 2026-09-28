@@ -1,3 +1,38 @@
+pve-storage-drs (0.1.12) trixie; urgency=medium
+
+  * solver: CBC no longer silently falls back to the heuristic on a group
+    whose smallest achievable reserve/free-space shortfall is not a whole
+    number of MiB. The second stage of the solve bounded the shortfall by the
+    first stage's result plus about one byte, against a value CBC reports to
+    three decimals of a MiB, so it came back infeasible on every such run.
+    Shortfalls are now measured in whole MiB, rounded up, everywhere
+    (show-load, plan, the heuristic, the payback repair exemption); a storage
+    one byte short is still reported short.
+  * solver: solver.mip_gap is now measured against the real objective. CBC
+    used to see the objective without its constant term, which turned the
+    default 2 % gap into a far looser absolute tolerance and let it stop at
+    plans up to ~30 % worse than optimal while reporting "optimal".
+  * solver: when a CBC stage produces no solution, the warning names CBC's
+    status; it only mentions solver.time_limit_seconds when the limit was
+    actually hit.
+  * plan/apply/explain: a group still short of its snapshot reserve or
+    free-space requirement after the plan ends with a "⚠ unfixable
+    shortfall" line: the amount per storage, whether it is proven (CBC
+    optimal), and the pinned disks on the short storages that block a fix.
+    --json carries it as groups[].unfixable_shortfall. A group forced to ACT
+    by a shortfall that nothing can relieve no longer prints ACT and then
+    nothing.
+  * planning: a disk below migration.tiny_disk_bytes (EFI var store, TPM
+    state) now only moves together with its VM: to a storage where a larger
+    disk of the same VM in the same group ends up, or not at all. It is
+    never moved on its own, in particular never as a sub-MiB "repair" of a
+    free-space shortfall. Larger disks can still be split across storages.
+    A VM whose disks in a group are all small is pinned there, with the
+    reason shown by show-load and explain. tiny_disk_bytes: 0 switches the
+    rule off. Nothing ever moves between storage groups.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Mon, 28 Sep 2026 11:53:42 +0200
+
 pve-storage-drs (0.1.11) trixie; urgency=medium
 
   * show-load: under forecast.model: holt_winters the per-disk and per-storage
