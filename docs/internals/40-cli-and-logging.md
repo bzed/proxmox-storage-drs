@@ -217,6 +217,29 @@ their own `⚠ blocked by the hard per-move duration rule` line, and the
 status-file warning (below) is the one that tracks the *executed*
 endpoint's shortfall.
 
+## "no moves made" in `plan` and `apply`
+
+`_render_plan_no_moves_lines()` covers the other way an `ACT` group can end
+empty: the objective preferred the current placement. It prints nothing
+when the gate did not act, when anything is scheduled, when the scheduler
+deadlocked (its own `⚠` line explains that) or when an unfixable shortfall
+is reported (that line explains it). It is deliberately cheap — no extra
+solve and no candidate search, because `plan` runs every cycle — and
+points to `explain`, whose `_render_no_moves_lines()` does the expensive
+part (`best_single_disk_alternative()`); `explain` therefore calls the
+shared renderer with `explain_no_moves=False` so the group does not get
+both. "Scores best" is claimed only for a CBC solve with status `optimal`.
+
+A group opened by the capacity gate alone (`GateDecision.capacity_fraction`
+set, reserve override, drift and imbalance all unset) gets a second line
+naming `objective.delta_capacity_spread` and `objective.beta_move_count`
+with their values: on such a group the I/O is usually balanced already, so
+the data-spread term is the only thing that can pay for a move, and at the
+default weights it often cannot (`IMPLEMENTATION_PLAN.md` section 5.4). The
+weights reach the renderer as an optional `objective` argument, threaded
+through `_render_plan_human()`/`_render_apply_human()` from the resolved
+config.
+
 ## The monitoring status file: `statusfile.py`
 
 `monitoring.status_file` (section 2.4) makes `apply` leave a report a

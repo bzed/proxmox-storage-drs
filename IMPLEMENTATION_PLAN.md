@@ -1704,6 +1704,20 @@ decides among plans the load objective is nearly indifferent between, and acts o
 when a group's I/O is already balanced but its data is concentrated — the case §6's capacity gate
 exists to reach.
 
+**At the default `δ = 0.5` it rarely acts on its own, and that is accepted, not fixed.** `Σ_s d_s`
+is at most 2 on two storages of similar size, so the whole term is worth about 1 there, while every
+move costs `β` plus `γ·z_d` plus, if it splits a VM, `κ·w_v`. Found on a replayed two-storage
+bundle with balanced I/O and fills of 9 % and 35 % (`Σd = 1.12`, the capacity gate at 112 %): the
+cheapest plan that evens it out moves three disks of one VM, 1.1 TiB, to `Σd = 0.06`, for a gain of
+`δ·1.06` against a cost of `0.75 + 0.05 + 0.5 + 0.01 = 1.31` — it pays only from `δ ≈ 1.25`, and at
+the defaults CBC proves staying put optimal. The capacity gate therefore opens such groups, and the
+plan is empty. Raising the default δ was considered and rejected: past `α` data evenness
+outweighs I/O evenness in every comparison (§11.1 warns), and how much data spread is worth moving
+terabytes for is operator policy. What *is* required is that the empty plan explains itself (§9.5's
+"no moves made" line, which names `δ` and `β` for a capacity-gated group) and that the manual works
+the example through, so an operator who wants data spread knows which knob to turn and roughly how
+far.
+
 Like `β` and `κ`, `δ` is an exchange rate, not a lexicographic order — a strict "I/O first, bytes
 only among exactly equal load optima" rule would never act, for the same reason §1 gives for
 refusing a strict migration minimum. It says how much summed utilization deviation one unit of
@@ -1845,7 +1859,9 @@ reason to keep data concentrated. Unlike a reserve violation this is a preferenc
 safety property: cooldowns, payback (§7) and the transient invariant (§8.1) all still apply, and
 `gates.capacity_spread_threshold: null` disables the gate — with
 `objective.delta_capacity_spread: 0`, the whole feature. The gate cannot fire when `b̄ = 0`: an
-empty group has nothing to spread.
+empty group has nothing to spread. Passing it opens the group for planning and nothing more: at
+the default `δ` the plan is often empty, which §5.4 accepts and §9.5's "no moves made" line
+explains.
 
 **Cooldowns** — a disk moved within `cooldown_per_disk` (default 24h) is pinned in place; a storage
 involved in a migration within `cooldown_per_storage` accepts no new incoming moves.
@@ -2273,6 +2289,16 @@ run. Two exceptions take priority and are scheduled first regardless of ratio:
 1. moves that resolve a storage currently violating (C5);
 2. moves that *free* space on a storage which some later move needs.
 
+**Small disks go first, ahead of the larger disks of their own VM, on purpose.** A disk below
+`tiny_disk_bytes` is mirrored and — with `saferemove` — wiped in seconds, so scheduling it first
+never makes the next move wait: a large disk's source may spend many minutes in *draining* (below)
+while its zeroing pass runs, holding that storage's concurrency slot, and a small disk queued
+behind it would wait for that wipe too. The price is an intermediate state in which a small disk
+already sits on the target while its VM's larger disks have not moved yet; if the run stops there,
+the VM is left split until the next run. That is accepted: (C8) constrains the plan's *endpoint*,
+not the order, and the next run moves the larger disks or — if the plan changed — lets `κ` bring
+the small one back for free. Do not reorder small disks after their VM's larger disks.
+
 **The source is not freed when the task succeeds.** `apply(state, m)` must not optimistically credit
 the source with `z_d` bytes back. With `saferemove` on the source storage the old volume still exists
 — fully allocated — for the whole duration of the zeroing pass (§7.1), which can be far longer than
@@ -2606,6 +2632,16 @@ carries the same fact as `groups[].unfixable_shortfall`: `null`, or `total_bytes
 `proven` and `pinned_blockers` (`disk_key`, `storage`, `reason`). It describes the solver and
 scheduler's endpoint; a move the hard per-move duration rule later refuses is reported by that
 rule's own line, and the status file's warning (§2.4) tracks the executed endpoint.
+
+**The "no moves made" line.** A group the gate sent to `ACT` whose plan moves nothing — with no
+deadlock and no unfixable shortfall to explain it — ends with a line saying the objective preferred
+the current placement (proven only for CBC `optimal`; the heuristic's line says it is not) and that
+`explain` shows the closest rejected move. When the capacity gate alone opened the group, a second
+line names `objective.delta_capacity_spread` and `objective.beta_move_count` with their values and
+the two ways out: raise `δ`, or raise or disable `gates.capacity_spread_threshold` (§5.4 has the
+worked numbers). `plan` and `apply` print it; `explain` prints its own fuller version instead. The
+other common cause after an imbalance gate is a hotspot no placement relieves — one disk carrying
+most of a group's load — which `explain`'s pinned-load line quantifies.
 
 **As built (phase 13):** the exemption note under the payback line and the per-move `[repair]`
 markers are printed by `plan`/`apply`, and the `repair` field reaches `--json` per move —

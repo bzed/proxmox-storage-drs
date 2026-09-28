@@ -584,6 +584,16 @@ fires -- a stable, balanced workload is not a reason to keep data
 concentrated on one storage. `null` disables the gate outright; the gate
 also cannot fire on a group with no data at all (mean fill `0`).
 
+**Opening a group is not the same as moving data.** When this gate fires,
+the group is planned; whether anything moves is decided by the objective,
+and on a group whose I/O is already balanced only
+`objective.delta_capacity_spread` can pay for a move. At the default weights
+it often cannot — the entry for that weight works through a 112 % spread that
+stays put — and `plan` reports `→ ACT` followed by `no moves made`, naming
+both knobs. Either raise `objective.delta_capacity_spread` until the moves
+you want pay, or raise this threshold (or set it to `null`) if you do not
+want groups planned for data spread at all.
+
 ### `gates.cooldown_per_disk`
 
 Duration, default `24h`.
@@ -871,6 +881,41 @@ concentrated — the case `gates.capacity_spread_threshold` exists to reach.
 `0` disables the term entirely; configuration validation warns once it
 exceeds `alpha_spread`, the point where data evenness starts outweighing I/O
 evenness in every plan comparison.
+
+**What the default does in practice.** The data spread this weight
+multiplies is the sum, over the group's storages, of each storage's fill
+deviation from the group's mean fill, relative to that mean
+(`Σ_s |b_s − b̄| / b̄`, where `b_s` is a storage's bytes used / capacity and
+`b̄` the group's). On two storages of similar size it cannot exceed 2 (all
+data on one, the other empty), so at the default `0.5` evening out even a
+badly skewed pair is worth at most about 1 — while every move costs `beta_move_count` (`0.25`), plus
+`gamma_move_bytes_per_tib` per TiB moved, plus `kappa_vm_affinity` times the
+VM's weight if the move leaves one of its disks behind. A real example, a
+two-storage group with its I/O balanced, one storage 9 % full and the other
+35 % (mean 22.5 %, a spread of 1.12, reported as 112 %):
+
+- the whole data-spread term is `0.5 × 1.12 = 0.56`;
+- the cheapest plan that evens it out moves three disks of one VM, 1.1 TiB,
+  bringing the spread to 0.06: a gain of `0.5 × 1.06 = 0.53`;
+- those moves cost `3 × 0.25 = 0.75` for the count, `0.05` for the bytes,
+  `0.5` for splitting the VM from its other disks and `0.01` of I/O
+  balance — `1.31` in all.
+
+The plan never pays at `0.5`; it starts to pay once this weight exceeds
+`1.31 / 1.06 ≈ 1.25`. So **at the defaults, data spread decides between
+plans the I/O objective is nearly indifferent between, and rarely causes a
+move on its own**, even when `gates.capacity_spread_threshold` opens the
+group for planning. `plan` then prints `no moves made` with a line naming
+this weight (see the plan chapter). That is safe — `plan` only reads — but it
+repeats every run until the spread or the configuration changes.
+
+To have the tool spread data on its own, raise this weight until the plans
+you want pay: work out the gain as above for the move set you expect, or
+replay a `collect-testdata` bundle with a few values and read `plan`'s
+output. Too high has a cost: past `alpha_spread` (`1.0` by default) data
+evenness outweighs I/O evenness in every comparison, and configuration
+validation warns. Too low (or `0`) leaves data spread to chance: the
+capacity gate still opens groups, and nothing moves for it.
 
 ### `objective.affinity_counts_pinned_disks`
 
