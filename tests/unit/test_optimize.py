@@ -697,3 +697,93 @@ def test_an_explicitly_configured_solver_that_is_missing_still_warns(
     record = caplog.records[-1]
     assert record.levelno == logging.WARNING
     assert "solver.backend=cbc" in record.getMessage()
+
+
+# ------------------------------------ stage 2's bound on a non-round shortfall
+
+
+def unfixable_non_round_shortfall_group() -> Group:
+    """Reduced from a real corpus bundle (tests/corpus/local, not
+    committed): a storage whose free-space requirement is not a whole
+    number of MiB, short by ~138 GiB, with its one big disk pinned and only
+    a 528 KiB EFI disk movable. The minimum achievable shortfall is
+    therefore not a round number -- the case that made stage 2's former
+    byte-sized tolerance (`min_slack + 1e-6` MiB) come back Infeasible
+    against CBC's three-decimal readback of stage 1, on every run."""
+    efi_bytes = 540_672  # 528 KiB, a real efidisk0
+    disks = (
+        dataclasses.replace(
+            make_disk("616577:virtio0", 0.0, 0.0, "slow", pinned="pending config change"),
+            size_bytes=650 * (1 << 30) - efi_bytes,
+        ),
+        dataclasses.replace(make_disk("616577:efidisk0", 0.0, 0.0, "slow"), size_bytes=efi_bytes),
+        make_disk("101:scsi0", 1.0, 1.0, "fast"),
+    )
+    storages = (
+        make_storage("slow", capacity_tib=5.0, free_space_soft_bytes=4_947_798_550_118),
+        make_storage("fast", capacity_tib=20.0, free_space_soft_bytes=2_748_778_545_152),
+    )
+    return Group(name="g", storages=storages, disks=disks)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_stage_two_is_feasible_when_the_minimum_shortfall_is_not_a_round_number(
+    backend: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    group = unfixable_non_round_shortfall_group()
+    loads = {"616577:virtio0": 0.0, "616577:efidisk0": 0.0, "101:scsi0": 1.0}
+    with caplog.at_level(logging.WARNING, logger="proxmox_storage_drs.optimize"):
+        result = _solve(group, loads, DEFAULT_OBJECTIVE, backend)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # The shortfall is reported in whole MiB, and it is the same one the
+    # current assignment has: moving the EFI disk alone cannot close it.
+    short = result.breakdown.reserve_statuses["slow"].shortfall_bytes
+    assert short > 0 and short % (1 << 20) == 0
+
+
+def test_no_feasible_solution_says_infeasible_rather_than_blaming_the_time_limit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The warning used to claim "within the time limit" for every status,
+    including a plain Infeasible that took seven seconds of a sixty-second
+    budget -- sending the operator to raise a limit that was never hit."""
+    from proxmox_storage_drs.optimize import _no_feasible_solution
+
+    group = Group(name="g", storages=(make_storage("a"),), disks=())
+    with caplog.at_level(logging.WARNING, logger="proxmox_storage_drs.optimize"):
+        _no_feasible_solution("cbc", group, "2 (objective)", "Infeasible")
+        _no_feasible_solution("cbc", group, "1 (reserve)", "Not Solved")
+    infeasible, timed_out = (r.getMessage() for r in caplog.records)
+    assert "time limit" not in infeasible and "Infeasible" in infeasible
+    assert "time_limit_seconds" in timed_out
+    assert caplog.records[0].solver_status == "Infeasible"  # type: ignore[attr-defined]
+
+
+# ------------------------------ solver.mip_gap against the real objective
+
+
+@pytest.mark.skipif(not cbc_available(), reason="pulp not installed")
+def test_objective_offset_is_carried_by_a_variable_fixed_to_one() -> None:
+    """PuLP drops an objective's constant when handing the model to CBC, so
+    CBC's relative gap was measured against a value shifted by it (on a real
+    bundle -11.18 against a true optimum of 0.30: a 2 % gap stopped 30 %
+    short). The constant must reach CBC as a fixed variable instead, and the
+    expression's value must be unchanged."""
+    import pulp
+
+    from proxmox_storage_drs.optimize import _lp_variable, _objective_with_offset_as_variable
+
+    x = _lp_variable(pulp, "x", cat="Binary")
+    expr = _objective_with_offset_as_variable(pulp, 0.25 * (1 - x) - 3.0)
+    assert expr.constant == 0
+    (offset_var,) = [v for v in expr if v.name == "objective_offset"]
+    assert (offset_var.lowBound, offset_var.upBound, expr[offset_var]) == (1, 1, -2.75)
+
+    prob = pulp.LpProblem("p", pulp.LpMinimize)
+    prob += expr
+    prob += x >= 1
+    prob.solve(pulp.COIN_CMD(msg=0))
+    assert pulp.value(prob.objective) == pytest.approx(-3.0)
+
+    unchanged = 2 * x
+    assert _objective_with_offset_as_variable(pulp, unchanged) is unchanged

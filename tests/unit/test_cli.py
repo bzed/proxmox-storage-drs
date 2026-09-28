@@ -1219,6 +1219,9 @@ def test_plan_json_output(
     assert payback["reserve_shortfall_bytes_after"] == payback["reserve_shortfall_bytes_before"]
     assert payback["rejected_moves"] == ["101:scsi0"]
     assert payback["accepted"] is False  # but still blocked by the hard duration rule
+    # The *solver* closes the shortfall; the duration rule blocking the move
+    # is reported by its own line, not as an unfixable shortfall.
+    assert group_payload["unfixable_shortfall"] is None
 
 
 def test_plan_json_output_accepts_payback_when_saferemove_is_off(
@@ -1583,6 +1586,88 @@ def test_plan_reports_a_deadlock_when_even_the_best_target_still_violates(
     assert group_payload["deadlocked"] == ["101:scsi0"]
     assert group_payload["deadlock_message"] is not None
     assert "no safe order found" in group_payload["deadlock_message"]
+
+
+def _all_pinned_sample_topology() -> Topology:
+    """`_sample_topology()` with its one movable disk pinned too: san-a
+    violates (C5) and nothing at all can relieve it -- the "acting now
+    regardless of the thresholds" run that used to print ACT and then
+    nothing, with the breach it acted on never mentioned again."""
+    topology = _sample_topology()
+    group = topology.groups[0]
+    disks = tuple(
+        dataclasses.replace(d, pinned_reason=d.pinned_reason or "pending config change (unapplied)")
+        for d in group.disks
+    )
+    return Topology(groups=(dataclasses.replace(group, disks=disks),), warnings=topology.warnings)
+
+
+@pytest.mark.parametrize("backend", ["heuristic", "auto"])
+def test_plan_reports_an_unfixable_shortfall_and_the_pins_that_block_it(
+    backend: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 5.3/9.5: a residual `r_s > 0` is reported prominently, with
+    the byte amount -- and, since every disk on the short storage is
+    pinned, with the pins an operator has to clear to let a run fix it."""
+    _patch_plan_deps(monkeypatch, _all_pinned_sample_topology(), _sample_group_load())
+    path = write_config(tmp_path, solver={"backend": backend})
+    assert cli.main(["-c", str(path), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert "Group fc-tier1 → ACT: reserve violated on san-a" in out
+    assert "⚠ unfixable shortfall: 3.00 TiB still short" in out
+    assert "(san-a 3.00 TiB)" in out
+    assert "web01(101):scsi0 on san-a -- pending config change (unapplied)" in out
+    assert "db01(102):scsi0 on san-a -- locked: backup" in out
+
+    assert cli.main(["-c", str(path), "--json", "plan"]) == 0
+    unfixable = json.loads(capsys.readouterr().out)["groups"][0]["unfixable_shortfall"]
+    assert unfixable["total_bytes"] == 3 * (1 << 40)
+    assert unfixable["by_storage"] == {"san-a": 3 * (1 << 40)}
+    assert [b["disk_key"] for b in unfixable["pinned_blockers"]] == ["101:scsi0", "102:scsi0"]
+    assert unfixable["pinned_blockers"][1] == {
+        "disk_key": "102:scsi0",
+        "storage": "san-a",
+        "reason": "locked: backup",
+    }
+    # Nothing is movable, so under `auto` CBC's "solve" is the trivially
+    # optimal current assignment -- a proof; the heuristic never is one.
+    from proxmox_storage_drs.optimize import cbc_available
+
+    assert unfixable["proven"] is (backend == "auto" and cbc_available())
+
+
+def test_unfixable_shortfall_is_proven_only_for_an_optimal_cbc_solve() -> None:
+    from proxmox_storage_drs.config import ObjectiveConfig
+    from proxmox_storage_drs.heuristic import evaluate_assignment, seed_assignment
+
+    group = _all_pinned_sample_topology().groups[0]
+    violated = evaluate_assignment(group, seed_assignment(group), {}, ObjectiveConfig(), 0.0, 0.0)
+    assert violated.reserve_statuses["san-a"].violated
+    breakdown = dataclasses.replace(violated, reserve_statuses={})  # nothing short
+
+    def outcome(backend: str, status: str | None) -> cli._SolveOutcome:
+        return cli._SolveOutcome(
+            assignment={}, initial_breakdown=violated, backend=backend, status=status
+        )
+
+    def proven(solve_outcome: cli._SolveOutcome | None) -> bool:
+        result = cli._unfixable_shortfall(group, violated, solve_outcome)
+        assert result is not None
+        return result.proven
+
+    assert proven(outcome("cbc", "optimal")) is True
+    assert proven(outcome("cbc", "feasible")) is False
+    assert proven(outcome("heuristic", None)) is False
+    assert proven(None) is False
+    assert cli._unfixable_shortfall(group, breakdown, outcome("cbc", "optimal")) is None
+    lines = cli._render_unfixable_shortfall_lines(
+        cli._unfixable_shortfall(group, violated, outcome("heuristic", None)), {}
+    )
+    assert "not proven: CBC did not solve" in lines[0]
+    assert cli._render_unfixable_shortfall_lines(None, {}) == []
 
 
 def test_plan_after_and_payback_reflect_only_the_scheduled_moves_on_partial_deadlock(

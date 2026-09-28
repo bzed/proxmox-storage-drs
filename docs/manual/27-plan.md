@@ -51,8 +51,13 @@ but a solution was still found). It is not always what `solver.backend`
 says: `auto` tries CBC before the heuristic, and even an
 explicitly forced `cbc` falls back to the heuristic (logged as a
 warning in that case) rather than failing the whole run, if that library
-is not installed or cannot solve within the time limit -- see
-`docs/internals/91-optimize.md`.
+is not installed or cannot produce a solution -- see
+`docs/internals/91-optimize.md`. When CBC is what failed, the warning says
+why in CBC's own terms: `hit solver.time_limit_seconds before finding a
+feasible solution` means raising that limit may help; anything else
+(`returned no usable solution (CBC status: Infeasible)`, for instance) is not
+a matter of time, and is worth a bug report with a `collect-testdata` bundle
+attached.
 
 The `after:`/`spread:` lines (and the payback numbers) reflect what the
 scheduler actually managed to order, not the solver's target assignment —
@@ -104,6 +109,33 @@ alone would fix the violation) is marked on neither, since holding back
 just one still leaves the other to finish the job. See the `payback:`
 line below for what the plan as a whole being exempt actually depends on
 — a per-move `repair: true` marker is a report, not itself the trigger.
+
+**`⚠ unfixable shortfall` means the plan cannot free what you asked for.**
+Every storage must end a plan with its snapshot reserve and its configured
+`free_space.soft` both free. When no placement of the disks this run is
+allowed to move gets there, `plan` (and `explain`, and `apply`) says so,
+with the amount still missing per storage, and lists the *pinned* disks
+sitting on those storages -- the ones you can unpin (apply or revert a
+pending config change, clear snapshots, wait out a lock) to give the next run
+something to move:
+
+```
+Group tier2 → ACT: reserve violated on slow-a, slow-b; acting now regardless of the normal drift/imbalance thresholds -- a capacity shortfall is never delayed by them
+  solver: cbc (optimal)
+  ⚠ unfixable shortfall: 231.05 GiB still short of the snapshot reserve / free-space requirement after this plan (slow-a 138.00 GiB, slow-b 93.05 GiB) -- no assignment of the movable disks can close it
+    pinned on the short storages (unpin to let the next run move them):
+      app01(144592):scsi0 on slow-a -- pending config change (unapplied)
+      db02(337307):scsi0 on slow-b -- snapshots present (2)
+```
+
+A group whose gate forced `ACT` because of a shortfall and that then moves
+nothing is not being ignored: this line is the answer to "why not". Under
+`solver: cbc (optimal)` it is a proof -- CBC first minimizes the total
+shortfall on its own, before anything else, so no placement of the movable
+disks does better. Under `solver: heuristic` the line says it is not proven.
+Shortfalls are counted in whole MiB, rounded up: one byte short is short,
+and prints as 1.00 MiB. The line repeats on every run until the cause is
+fixed, and the monitoring status file carries the same warning.
 
 **A `⚠` line means a deadlock, not a hidden failure.** If the target
 assignment includes a move this run cannot find any transient-feasible
@@ -234,6 +266,11 @@ outcome trigger itself — see above), `reserve_shortfall_bytes_before`/
 `_after` (`Σ r_s` on the current assignment and on the plan's executed
 endpoint, what `repair_exempt` is decided from), `rejected_moves` (disk
 keys failing the hard duration rule) and `accepted` (`aggregate_ok` and
-`rejected_moves` empty). Under `forecast.model: holt_winters` the group also
+`rejected_moves` empty). `unfixable_shortfall` is `null` unless the plan
+leaves a storage short, and then an object with `total_bytes`,
+`by_storage` (storage id to bytes still short, whole MiB rounded up),
+`proven` (`true` only for `solver_backend: "cbc"` with `solver_status:
+"optimal"`) and `pinned_blockers` (`disk_key`, `storage`, `reason` for every
+pinned disk on a short storage). Under `forecast.model: holt_winters` the group also
 has a `forecast` object: `model`, `used`, `backtest_error`, `baseline_error`,
 `disks_scaled`, `disks_kept` (absent under the default `quantile`).

@@ -118,7 +118,14 @@ from proxmox_storage_drs.heuristic import (
     group_average_utilization,
     seed_assignment,
 )
-from proxmox_storage_drs.topology import Disk, Group, Storage, storage_accepts_format
+from proxmox_storage_drs.topology import (
+    Disk,
+    Group,
+    Storage,
+    is_small_disk,
+    larger_vm_disks,
+    storage_accepts_format,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -366,16 +373,71 @@ def _log_backend_unavailable(backend: str, detail: str, probing: bool) -> None:
         )
 
 
-def _no_feasible_solution(backend: str, group: Group, stage: str) -> None:
+def _no_feasible_solution(backend: str, group: Group, stage: str, status: str) -> None:
+    """Say *why* a stage produced nothing, from the solver's own status.
+
+    ``status`` is PuLP's ``LpStatus`` string. Only ``"Not Solved"`` means the
+    time limit ran out before an incumbent was found; ``"Infeasible"`` means
+    the stage's constraint set admits no assignment at all -- which, since
+    the current assignment always satisfies stage 1's constraints, is a
+    modelling bug worth a different message than "give it more time" (the
+    stage-2 bound once was one: a byte-exact bound against CBC's
+    three-decimal MiB readback, section 5.5)."""
+    reason = (
+        "hit solver.time_limit_seconds before finding a feasible solution"
+        if status == "Not Solved"
+        else f"returned no usable solution (CBC status: {status})"
+    )
     logger.warning(
-        "%s stage %s found no feasible solution within the time limit",
+        "%s stage %s %s",
         backend,
         stage,
-        extra={"event": "optimize_no_feasible_solution", "backend": backend, "group": group.name},
+        reason,
+        extra={
+            "event": "optimize_no_feasible_solution",
+            "backend": backend,
+            "group": group.name,
+            "stage": stage,
+            "solver_status": status,
+        },
     )
 
 
 # --------------------------------------------------------------------- CBC
+
+
+def _cbc_small_disks_follow_their_vm(
+    pulp: Any,
+    prob: Any,
+    group: Group,
+    movable: tuple[Disk, ...],
+    x: dict[Any, Any],
+    tiny_disk_bytes: int,
+) -> None:
+    """(C8), linear: for a movable small disk `d` and every storage `s`
+    other than its current one,
+
+        x_{d,s}  <=  Σ_{b larger, movable, same VM} x_{b,s}  +  #{b larger, pinned, same VM, on s}
+
+    -- `d` may land on `s` only if some larger disk of its VM in this group
+    ends there too. `topology.small_disk_placement_ok()` is the rule's one
+    definition; this is its transcription, and the heuristic calls that
+    function directly. No constraint for `s = σ₀(d)`: staying is always
+    allowed."""
+    movable_keys = {d.key for d in movable}
+    for d in movable:
+        if not is_small_disk(d, tiny_disk_bytes):
+            continue
+        larger = larger_vm_disks(group, d, tiny_disk_bytes)
+        for s in group.storages:
+            if s.id == d.current_storage:
+                continue
+            anchors = pulp.lpSum(
+                x[big.key, s.id] for big in larger if big.key in movable_keys
+            ) + sum(
+                1 for big in larger if big.key not in movable_keys and big.current_storage == s.id
+            )
+            prob += x[d.key, s.id] <= anchors
 
 
 def _cbc_feasibility_constraints(
@@ -387,8 +449,9 @@ def _cbc_feasibility_constraints(
     pinned_by_storage: dict[str, tuple[Disk, ...]],
     objective: ObjectiveConfig,
     cooldown_storages: frozenset[str] = frozenset(),
+    tiny_disk_bytes: int = 0,
 ) -> tuple[dict[Any, Any], dict[Any, Any], dict[Any, Any], dict[Any, Any]]:
-    """(C1)/(C2)/(C3)/(C4)/(C5), continuous -- "direct transcription" per the
+    """(C1)/(C2)/(C3)/(C4)/(C5)/(C8), continuous -- "direct transcription" per the
     plan's own words for this backend, no scaling needed. Factored out so
     both lexicographic stages of `_solve_cbc()` share one constraint
     builder instead of duplicating it inline."""
@@ -404,12 +467,20 @@ def _cbc_feasibility_constraints(
     }
     z = {s.id: _lp_variable(pulp, f"Z_{s.id}", lowBound=0) for s in group.storages}
     r = {s.id: _lp_variable(pulp, f"R_{s.id}", lowBound=0) for s in group.storages}
-    slack = {s.id: _lp_variable(pulp, f"r_{s.id}", lowBound=0) for s in group.storages}
+    # Integer, in whole MiB: section 5.3 (C5) measures every shortfall in
+    # whole MiB rounded up, exactly as `reserve.compute_reserve_status()`
+    # does, and an integer optimum is something stage 2 can bound *exactly*
+    # (see `_solve_cbc()`), where a continuous one comes back from CBC's
+    # solution file rounded to about three decimals.
+    slack = {
+        s.id: _lp_variable(pulp, f"r_{s.id}", lowBound=0, cat="Integer") for s in group.storages
+    }
 
     for d in movable:
         prob += pulp.lpSum(x[d.key, s.id] for s in group.storages) == 1
     for d, s in _fixed_zero_pairs(movable, group.storages, cooldown_storages):
         prob += x[d.key, s.id] == 0
+    _cbc_small_disks_follow_their_vm(pulp, prob, group, movable, x, tiny_disk_bytes)
 
     for v in vmids:
         movable_of_v = [d for d in movable if d.vmid == v]
@@ -574,6 +645,28 @@ def _cbc_capacity_spread_term(
         terms.append(objective.delta_capacity_spread * pulp.lpSum(d.values()))
 
 
+def _objective_with_offset_as_variable(pulp: Any, objective_expr: Any) -> Any:
+    """``objective_expr`` with its constant term carried by a variable fixed
+    to 1, so CBC sees the *real* objective value rather than one shifted by
+    a constant it never received.
+
+    PuLP writes the model to CBC without the expression's constant (an MPS
+    objective row has none), and CBC's relative gap (``gapRel``, i.e.
+    ``solver.mip_gap``) is then measured against the shifted value. Stage
+    2's move-count/bytes terms are written as ``1 - x_{d,σ₀(d)}``, so that
+    constant is large and negative: on a real corpus bundle it was -11.18
+    against a true optimum of 0.30, which turned a configured 2 % gap into
+    an absolute tolerance of about 0.23 -- CBC stopped at 0.389 and called
+    it optimal. A fixed variable costs nothing and makes the gap mean what
+    `solver.mip_gap`'s documentation says it means."""
+    offset = objective_expr.constant
+    if not offset:
+        return objective_expr
+    objective_expr.constant = 0
+    one = _lp_variable(pulp, "objective_offset", lowBound=1, upBound=1)
+    return objective_expr + offset * one
+
+
 def _solve_cbc(
     group: Group,
     movable: tuple[Disk, ...],
@@ -621,15 +714,18 @@ def _solve_cbc(
         pinned_by_storage,
         objective,
         cooldown_storages,
+        tiny_disk_bytes,
     )
     prob1 += pulp.lpSum(slack1.values())
     status1 = _pulp_solve(pulp, prob1, stage1_solver_cmd, probing)
     if status1 is None:
         return None
     if pulp.LpStatus[status1] not in ("Optimal",):
-        _no_feasible_solution("cbc", group, "1 (reserve)")
+        _no_feasible_solution("cbc", group, "1 (reserve)", pulp.LpStatus[status1])
         return None
-    min_slack = sum(v.value() or 0.0 for v in slack1.values())
+    # Whole MiB (the slack variables are integer): `round()` strips CBC's
+    # integrality-tolerance noise so the bound below is an exact integer.
+    min_slack_mib = round(sum(v.value() or 0.0 for v in slack1.values()))
 
     prob2 = pulp.LpProblem("stage2_objective", pulp.LpMinimize)
     x2, y2, _z2, slack2 = _cbc_feasibility_constraints(
@@ -641,11 +737,14 @@ def _solve_cbc(
         pinned_by_storage,
         objective,
         cooldown_storages,
+        tiny_disk_bytes,
     )
-    # A small tolerance: CBC's own reported stage-1 slack already carries
-    # solver rounding noise, and pinning it exactly can make stage 2
-    # spuriously infeasible by a fraction of a MiB.
-    prob2 += pulp.lpSum(slack2.values()) <= min_slack + 1e-6
+    # Exact, because both sides are whole MiB. This used to be a continuous
+    # `min_slack + 1e-6` -- a tolerance of about one *byte* against a value
+    # CBC writes back to roughly three decimals of a MiB, so stage 2 came
+    # back Infeasible on every run whose minimum shortfall was not a round
+    # number and the group silently fell back to the heuristic.
+    prob2 += pulp.lpSum(slack2.values()) <= min_slack_mib
     terms = _cbc_objective_terms(
         pulp,
         prob2,
@@ -661,12 +760,12 @@ def _solve_cbc(
         y2,
         tiny_disk_bytes,
     )
-    prob2 += pulp.lpSum(terms)
+    prob2 += _objective_with_offset_as_variable(pulp, pulp.lpSum(terms))
     status2 = _pulp_solve(pulp, prob2, solver_cmd, probing)
     if status2 is None:
         return None
     if pulp.LpStatus[status2] not in ("Optimal",):
-        _no_feasible_solution("cbc", group, "2 (objective)")
+        _no_feasible_solution("cbc", group, "2 (objective)", pulp.LpStatus[status2])
         return None
 
     assignment: Assignment = {}

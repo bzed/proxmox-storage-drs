@@ -22,6 +22,7 @@ from proxmox_storage_drs import config as config_module
 from proxmox_storage_drs.exceptions import TopologyError
 from proxmox_storage_drs.pve import PveClient
 from proxmox_storage_drs.topology import (
+    LONE_SMALL_DISK_REASON,
     Disk,
     Topology,
     _allowed_formats,
@@ -1376,3 +1377,42 @@ def test_pattern_expansion_is_logged_at_debug(
         caplog.clear()
         build_topology(client, config)
     assert [r for r in caplog.records if r.levelno >= logging.INFO] == []
+
+
+def test_build_topology_pins_a_small_disk_whose_vm_has_nothing_larger_in_the_group(
+    tmp_path: Path,
+) -> None:
+    """Section 5.3 (C8): VM 301's only disk in this group is a 528 KiB
+    efidisk0 (its system disk lives on a storage outside the group), so the
+    efidisk has nothing to follow and is pinned, with a reason saying why.
+    VM 302's efidisk0 sits beside its own scsi0 and stays movable."""
+    config = make_config(tmp_path)
+    efi = 540_672
+    client = build_fake_client(
+        [_vm(301, "node1"), _vm(302, "node1")],
+        {
+            301: {
+                "name": "vm301",
+                "scsi0": "local-only:vm-301-disk-0,size=10G",
+                "efidisk0": "san-a:vm-301-disk-1,size=528K",
+            },
+            302: {
+                "name": "vm302",
+                "scsi0": "san-a:vm-302-disk-0,size=10G",
+                "efidisk0": "san-a:vm-302-disk-1,size=528K",
+            },
+        },
+        {301: [], 302: []},
+        {
+            "san-a": [
+                _content("san-a", 301, "disk-1", efi),
+                _content("san-a", 302, "disk-0", 10 * (1 << 30)),
+                _content("san-a", 302, "disk-1", efi),
+            ],
+            "san-b": [],
+        },
+    )
+    disks = {d.key: d for d in build_topology(client, config).groups[0].disks}
+    assert disks["301:efidisk0"].pinned_reason == LONE_SMALL_DISK_REASON
+    assert disks["302:efidisk0"].pinned_reason is None
+    assert disks["302:scsi0"].pinned_reason is None

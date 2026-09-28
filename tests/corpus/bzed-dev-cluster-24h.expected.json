@@ -69,7 +69,8 @@
               "total_cost_load_seconds": 256.0
             },
             "solver_backend": "heuristic",
-            "solver_status": null
+            "solver_status": null,
+            "unfixable_shortfall": null
           }
         ],
         "warnings": []
@@ -342,7 +343,8 @@
               "total_cost_load_seconds": 12584.96
             },
             "solver_backend": "cbc",
-            "solver_status": "optimal"
+            "solver_status": "optimal",
+            "unfixable_shortfall": null
           }
         ],
         "warnings": []

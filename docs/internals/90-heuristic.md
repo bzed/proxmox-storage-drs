@@ -217,6 +217,18 @@ MILP backends (`optimize.py`) import the identical function so a per-vmid
 coefficient is folded into their own `kappa` term the same way, rather
 than reimplementing the weighting twice (AGENTS.md section 5).
 
+**Section 5.3 (C8), small disks follow their VM,** is enforced by
+discarding candidates rather than by scoring them: `_best_of()` skips any
+trial assignment for which `topology.small_disks_follow_their_vm()` is
+false, which covers all three neighbourhoods `_descend()` explores (single
+moves, swaps, whole-VM relocations); `_best_repair_candidate()` does the same
+for `_repair()`'s moves, so a small disk is never a (C5) repair by itself;
+and `best_single_disk_alternative()` (`explain`'s "closest alternative")
+never offers a small disk alone. The check is on the whole assignment, not
+the one disk being moved, because moving a *larger* disk away can strand a
+small one that followed it earlier. The seed (current) assignment always
+satisfies it, so the search never starts outside the feasible region.
+
 `D^big = {d : z_d >= migration.tiny_disk_bytes}` (default 64 MiB) is the
 second change: `move_count_term`/`bytes_moved_term` sum only over moved
 disks at or above that threshold, so an `efidisk0`/`tpmstate0` reunion

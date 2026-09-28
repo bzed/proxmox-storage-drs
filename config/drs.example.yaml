@@ -256,8 +256,11 @@ migration:
   # the objective below, and needs no payback verdict -- comfortably above an EFI var
   # store or TPM state, far below anything the payback rule was written for.
   # Together with kappa_vm_affinity below, this is what lets a tiny disk rejoin its
-  # VM for free instead of being priced like a real migration. 0 restores the old
-  # accounting for every disk.
+  # VM for free instead of being priced like a real migration. A disk this small
+  # also never moves on its own: only to a storage where a larger disk of its VM
+  # (in the same group) ends up, so an EFI/TPM disk follows its VM and is never a
+  # "repair" by itself; with no larger disk of its VM in the group it is pinned.
+  # 0 restores the old accounting for every disk and switches that rule off.
   tiny_disk_bytes: 67108864            # 64 MiB
 
 # ------------------------------------------------------------ objective weights

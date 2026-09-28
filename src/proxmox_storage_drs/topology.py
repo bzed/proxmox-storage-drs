@@ -32,9 +32,9 @@ from __future__ import annotations
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from proxmox_storage_drs.config import (
     Config,
@@ -593,6 +593,112 @@ def _allowed_formats(storage_type: str) -> frozenset[str]:
     target is a balance-quality cost, landing a qcow2 disk on a storage
     that cannot actually hold it is a broken move."""
     return _ALLOWED_FORMATS_BY_STORAGE_TYPE.get(storage_type, frozenset({"raw"}))
+
+
+#: The pin reason for a small disk that has nothing to follow (section 5.3
+#: (C8)): every disk of its VM in this group is below
+#: ``migration.tiny_disk_bytes``.
+LONE_SMALL_DISK_REASON = (
+    "small disk with no larger disk of its VM in this group (migration.tiny_disk_bytes)"
+)
+
+
+def is_small_disk(disk: Disk, tiny_disk_bytes: int) -> bool:
+    """Below ``migration.tiny_disk_bytes`` (bytes): section 5.4's `D^big`
+    complement, and section 5.3 (C8)'s "small disk". ``tiny_disk_bytes = 0``
+    makes no disk small, which switches (C8) off entirely."""
+    return disk.size_bytes < tiny_disk_bytes
+
+
+def larger_vm_disks(group: Group, disk: Disk, tiny_disk_bytes: int) -> tuple[Disk, ...]:
+    """The disks of ``disk``'s VM in ``group`` that are *not* small --
+    pinned ones included, since a pinned larger disk still anchors where a
+    small one may go (it may stay with it). Disks of the same VM in other
+    groups are never included: a group is planned on its own, and nothing
+    ever moves between groups."""
+    return tuple(
+        d for d in group.disks if d.vmid == disk.vmid and not is_small_disk(d, tiny_disk_bytes)
+    )
+
+
+def small_disk_placement_ok(
+    group: Group,
+    disk: Disk,
+    target_storage_id: str,
+    storage_of: Callable[[Disk], str],
+    tiny_disk_bytes: int,
+) -> bool:
+    """Section 5.3 (C8): a small disk ends a plan either where it is now,
+    or on a storage where at least one larger disk of its VM *in this group*
+    ends it (under ``storage_of``). Always true for a disk that is not
+    small.
+
+    This is what keeps a sub-64-MiB EFI or TPM disk from being moved on its
+    own -- for balance it carries no load worth moving, and as a reserve
+    "repair" it frees under a MiB of a shortfall that may be hundreds of
+    GiB, while splitting it from its VM. Moving *with* the VM, or rejoining
+    a VM already split, stays allowed. The one implementation both solver
+    backends and the exhaustive fixture generator mirror (AGENTS.md
+    section 5)."""
+    if not is_small_disk(disk, tiny_disk_bytes):
+        return True
+    return _follows(
+        disk, target_storage_id, larger_vm_disks(group, disk, tiny_disk_bytes), storage_of
+    )
+
+
+def _follows(
+    disk: Disk,
+    target_storage_id: str,
+    larger: Iterable[Disk],
+    storage_of: Callable[[Disk], str],
+) -> bool:
+    return target_storage_id == disk.current_storage or any(
+        storage_of(d) == target_storage_id for d in larger
+    )
+
+
+def small_disks_follow_their_vm(
+    group: Group, storage_of: Callable[[Disk], str], tiny_disk_bytes: int
+) -> bool:
+    """(C8) for every small disk of ``group`` at the assignment
+    ``storage_of`` encodes -- the whole-assignment form the heuristic uses
+    to discard a candidate, since moving a *larger* disk away can break
+    the rule for a small one that followed it earlier. One pass over the
+    group per call (the heuristic calls this for every candidate it
+    scores), not one per small disk."""
+    if tiny_disk_bytes <= 0:
+        return True
+    larger_by_vmid: dict[int, list[Disk]] = {}
+    small: list[Disk] = []
+    for d in group.disks:
+        if is_small_disk(d, tiny_disk_bytes):
+            small.append(d)
+        else:
+            larger_by_vmid.setdefault(d.vmid, []).append(d)
+    return all(
+        _follows(d, storage_of(d), larger_by_vmid.get(d.vmid, ()), storage_of) for d in small
+    )
+
+
+def pin_lone_small_disks(disks: Iterable[Disk], tiny_disk_bytes: int) -> tuple[Disk, ...]:
+    """Pin, with :data:`LONE_SMALL_DISK_REASON`, every otherwise-movable
+    small disk whose VM has no larger disk in the same group (``disks`` is
+    one group's disk list). (C8) would already hold such a disk in place --
+    it has nothing to follow -- but a pin is what ``show-load``/``explain``
+    report, so the operator sees *why* it never moves. Order is preserved."""
+    disks = tuple(disks)
+    vmids_with_larger = {d.vmid for d in disks if not is_small_disk(d, tiny_disk_bytes)}
+    return tuple(
+        (
+            replace(d, pinned_reason=LONE_SMALL_DISK_REASON)
+            if d.pinned_reason is None
+            and is_small_disk(d, tiny_disk_bytes)
+            and d.vmid not in vmids_with_larger
+            else d
+        )
+        for d in disks
+    )
 
 
 def storage_accepts_format(storage: Storage, disk_format: str) -> bool:
@@ -1157,7 +1263,9 @@ def build_topology(
         Group(
             name=group_cfg.name,
             storages=_build_storages(group_cfg, config, data, referenced_volids, warnings),
-            disks=tuple(disks_by_group[group_cfg.name]),
+            disks=pin_lone_small_disks(
+                disks_by_group[group_cfg.name], config.migration.tiny_disk_bytes
+            ),
         )
         for group_cfg in config.groups
     )

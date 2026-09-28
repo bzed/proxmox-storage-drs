@@ -15,9 +15,11 @@ import dataclasses
 import pytest
 
 from proxmox_storage_drs.reserve import (
+    BYTES_PER_MIB,
     compute_reserve_status,
     largest_disk_bytes,
     managed_used_bytes,
+    round_up_to_mib,
     transient_charge_ok,
 )
 from proxmox_storage_drs.topology import Disk, Storage
@@ -288,3 +290,38 @@ def test_transient_charge_ok_with_no_charges_is_vacuously_true() -> None:
         charge_sizes_bytes=[],
         hard_free_bytes=0,
     )
+
+
+# ------------------------------------------------ whole-MiB shortfall (C5)
+
+
+@pytest.mark.parametrize(
+    ("size_bytes", "expected"),
+    [(0, 0), (1, BYTES_PER_MIB), (BYTES_PER_MIB, BYTES_PER_MIB), (BYTES_PER_MIB + 1, 2 << 20)],
+)
+def test_round_up_to_mib(size_bytes: int, expected: int) -> None:
+    assert round_up_to_mib(size_bytes) == expected
+
+
+def test_a_one_byte_shortfall_is_still_violated_and_counts_as_a_whole_mib() -> None:
+    """Rounding up, never to nearest: ``violated`` stays the byte-exact
+    predicate it always was; only the amount is coarsened."""
+    storage = make_storage("s", 1.0, 0.0, free_space_soft_bytes=TIB // 2 + 1)
+    disk = make_disk("101:scsi0", 0.5, "s")
+    status = compute_reserve_status(storage, [disk])
+    assert status.violated
+    assert status.shortfall_bytes == BYTES_PER_MIB
+
+
+def test_sub_mib_moves_inside_one_mib_leave_the_shortfall_unchanged() -> None:
+    """Two assignments whose byte-exact shortfalls differ by less than a
+    MiB -- and do not straddle a MiB boundary -- report the same shortfall,
+    so no consumer (repair, lexicographic stage 1, the section 7.3
+    exemption) can see a "repair" in sub-MiB noise."""
+    mib = BYTES_PER_MIB
+    storage = make_storage("s", 1.0, 0.0, free_space_soft_bytes=TIB // 2 + 10 * mib + 1)
+    big = make_disk("101:scsi0", 0.5, "s")
+    tiny = dataclasses.replace(make_disk("102:efidisk0", 0.0, "s"), size_bytes=100 * 1024)
+    with_tiny = compute_reserve_status(storage, [big, tiny])
+    without_tiny = compute_reserve_status(storage, [big])
+    assert with_tiny.shortfall_bytes == without_tiny.shortfall_bytes == 11 * mib

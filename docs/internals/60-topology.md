@@ -117,6 +117,19 @@ the per-disk cooldown (below), a VM lock, then an `unusedN` disk when
 `exclude.include_unused_disks` is false. A disk gets at most one reason;
 the first that applies wins, matching how an operator would explain it.
 
+One more pin is applied afterwards, per group rather than per disk, because
+it depends on the VM's *other* disks in the group: `pin_lone_small_disks()`
+pins every still-movable disk below `migration.tiny_disk_bytes` whose VM has
+no larger disk in that group (`LONE_SMALL_DISK_REASON`). This is section 5.3
+(C8)'s degenerate case — a small disk may only move to where a larger disk
+of its VM ends up, and here there is none — made visible as a pin. The rule
+itself lives beside it: `is_small_disk()`, `larger_vm_disks()` (the VM's
+non-small disks *in this group*, pinned included — disks of the same VM in
+another group never anchor anything, since nothing moves between groups),
+`small_disk_placement_ok()` for one disk and `small_disks_follow_their_vm()`
+for a whole assignment in a single pass. Both solvers use these
+(`docs/internals/90-heuristic.md`, `91-optimize.md`).
+
 ## The pending-change pin
 
 `GET .../qemu/{vmid}/config` (`vm_config()`) is confirmed, against a real
@@ -292,8 +305,16 @@ of it, needs to know a pattern was ever involved.
 `compute_reserve_status()` computes, for one storage: `used = Σ_{d∈D on s} z_d
 + Uˢᵉˣᵗ_s` (every managed disk's bytes plus the foreign/unreferenced bytes
 from "`Uˢᵉˣᵗ`: everything not referenced" above), `shortfall = max(0, used +
-R_s − capacity_s)`, and `ReserveStatus.violated` is exactly `shortfall > 0`
-— the boolean `gates.py`'s reserve-override gate reads directly
+R_s − capacity_s)` **rounded up to the next whole MiB** (`round_up_to_mib()`),
+and `ReserveStatus.violated` is exactly `shortfall > 0` — unchanged by the
+rounding, since only a zero shortfall rounds to zero. The MiB granularity
+is the one every consumer of a shortfall *difference* needs to agree on:
+the heuristic's repair step, the MILP's lexicographic stage 1 (whose `r_s`
+are integer MiB, `docs/internals/91-optimize.md`), and payback's repair
+exemption and revert test (`docs/internals/96-payback.md`) all compare
+these sums, and at byte resolution they disagreed about sub-MiB noise.
+Rounding *up* overstates a real shortfall by under a MiB and never hides
+one. `ReserveStatus.violated` is the boolean `gates.py`'s reserve-override gate reads directly
 (`docs/internals/80-gates.md`). It is deliberately its own module, not a
 method on `Storage`: `heuristic.py` needs to evaluate the identical formula
 against a *candidate* assignment, not only the current one (`storage_of=`

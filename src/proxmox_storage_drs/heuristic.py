@@ -70,7 +70,14 @@ from typing import Iterable, Mapping
 
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status
-from proxmox_storage_drs.topology import Disk, Group, Storage, storage_accepts_format
+from proxmox_storage_drs.topology import (
+    Disk,
+    Group,
+    Storage,
+    small_disk_placement_ok,
+    small_disks_follow_their_vm,
+    storage_accepts_format,
+)
 
 # Every byte-valued objective term (`gamma`, and `r_s` for reporting) is
 # expressed in TiB here, matching `objective.gamma_move_bytes_per_tib` and
@@ -423,6 +430,10 @@ def best_single_disk_alternative(
                 continue
             if not storage_accepts_format(storage, disk.format):
                 continue  # (C2): fixed x_{d,s}=0, not a real alternative
+            if not small_disk_placement_ok(
+                group, disk, storage.id, lambda d: d.current_storage, tiny_disk_bytes
+            ):
+                continue  # (C8): a small disk alone is not a real alternative either
             assignment = seed_assignment(group)
             assignment[disk.key] = storage.id
             breakdown = evaluate_assignment(
@@ -456,6 +467,7 @@ def _best_repair_candidate(
     movable: tuple[Disk, ...],
     worst_id: str,
     current_total_shortfall: int,
+    tiny_disk_bytes: int = 0,
 ) -> _RepairCandidate | None:
     """The inner search of one `_repair` iteration, factored out only to
     keep that function's own branching within the project's complexity
@@ -479,6 +491,11 @@ def _best_repair_candidate(
 
             def trial_storage_of(d: Disk, _trial: Assignment = trial) -> str:
                 return _trial.get(d.key, d.current_storage)
+
+            # (C8): a small disk is never a repair on its own -- it frees
+            # under tiny_disk_bytes of a shortfall while splitting its VM.
+            if not small_disks_follow_their_vm(group, trial_storage_of, tiny_disk_bytes):
+                continue
 
             trial_total = sum(
                 compute_reserve_status(s, group.disks, storage_of=trial_storage_of).shortfall_bytes
@@ -509,6 +526,7 @@ def _best_repair_candidate(
 def _repair(
     group: Group,
     assignment: Assignment,
+    tiny_disk_bytes: int = 0,
 ) -> tuple[Assignment, int]:
     """Section 5.5 step 2: "while any `s` violates (C5), move the disk from
     `s` that most reduces the violation per byte moved, to the feasible
@@ -563,7 +581,9 @@ def _repair(
         worst_id = max(violating, key=lambda sid: statuses[sid].shortfall_bytes)
         current_total = sum(status.shortfall_bytes for status in statuses.values())
 
-        best = _best_repair_candidate(group, assignment, movable, worst_id, current_total)
+        best = _best_repair_candidate(
+            group, assignment, movable, worst_id, current_total, tiny_disk_bytes
+        )
         if best is None:
             break  # no repair move helps: report the residual as unfixable (caller's job)
         _ratio, disk, target_id, _worsens, _used = best
@@ -602,8 +622,20 @@ def _best_of(
     ``best_value``/``best_assignment`` passed in) scores lowest --
     factored out of `_descend()`'s three candidate-generating helpers
     below purely to stay within this project's flake8 complexity limit,
-    and so all three score candidates through the exact same comparison."""
+    and so all three score candidates through the exact same comparison.
+
+    Also the one place `_descend()` applies section 5.3 (C8): a candidate
+    that leaves a small disk anywhere but its current storage or beside a
+    larger disk of its VM is not a legal assignment, and is skipped rather
+    than scored -- the MILP's own (C8) constraint, applied to the
+    heuristic's neighbourhood."""
     for trial in trials:
+
+        def trial_storage_of(d: Disk, _trial: Assignment = trial) -> str:
+            return _trial.get(d.key, d.current_storage)
+
+        if not small_disks_follow_their_vm(group, trial_storage_of, tiny_disk_bytes):
+            continue
         value = evaluate_assignment(
             group,
             trial,
@@ -813,7 +845,7 @@ def run_heuristic(
         tiny_disk_bytes,
     )
 
-    repaired, repair_moves = _repair(group, initial)
+    repaired, repair_moves = _repair(group, initial, tiny_disk_bytes)
     final = _descend(
         group,
         repaired,

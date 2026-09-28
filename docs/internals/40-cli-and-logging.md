@@ -194,6 +194,29 @@ man-db): it walks up from `cli.py`'s own file location looking for
 prints a short message naming the real installed-package path and the
 in-tree file — a local, actionable path, never a bare URL.
 
+## The unfixable-shortfall report
+
+`_render_group_plan_human()` (shared by `plan`, `apply` and `explain`) and
+`_render_group_plan_json()` both end a group with the same derived fact:
+`_unfixable_shortfall()` reads `final_breakdown.reserve_statuses` — the
+reserve/free-space state of the assignment the *solver and scheduler*
+leave behind — and returns an `_UnfixableShortfall` whenever a storage is
+still short there: the per-storage bytes, whether the result is a proof
+(`proven`: only a CBC solve with status `optimal`, since only its
+lexicographic stage 1 minimizes `Σ r_s` exactly), and every pinned disk on
+a short storage. Human output prints it as `⚠ unfixable shortfall: …` plus
+the pinned disks; `--json` as `groups[].unfixable_shortfall` (`null` when
+nothing is short).
+
+Before this existed, a group forced to `ACT` by a shortfall that nothing
+could relieve printed its gate line, a `solver:` line and nothing else —
+the breach that caused the run was never mentioned again, which read as
+the tool ignoring it. Moves the solver *did* propose but the hard
+per-move duration rule then refused are not folded in here: they have
+their own `⚠ blocked by the hard per-move duration rule` line, and the
+status-file warning (below) is the one that tracks the *executed*
+endpoint's shortfall.
+
 ## The monitoring status file: `statusfile.py`
 
 `monitoring.status_file` (section 2.4) makes `apply` leave a report a

@@ -68,6 +68,36 @@ against a hypothetical disagreement between the two solves. Cheap in
 practice: stage 1 is a near-feasibility problem that closes instantly on
 realistic groups, so forcing an exact proof costs nothing measurable.
 
+**The shortfall variables are integers, in whole MiB, and stage 2's bound
+is exact.** Stage 2 reads stage 1's optimum back from CBC and requires
+`Σ r_s ≤` it. With continuous `r_s` that readback is only as precise as
+CBC's solution file — about three decimals of a MiB — and the bound used
+to carry a tolerance of `1e-6`, commented as "a fraction of a MiB" but in
+fact a fraction of a millionth of one, about a byte. On any group whose
+minimum shortfall was not a round number of MiB, stage 2 was therefore
+`Infeasible` on every run and the group silently fell back to the
+heuristic (found on a real bundle: 231 GiB short, two 528 KiB EFI disks
+the only movable disks on the short storages). Now each `r_s` is an
+integer variable: the capacity constraint `Σ z_d x_{d,s} + … + R_s ≤ C_s
++ r_s` with integer `r_s ≥ 0` makes `r_s` exactly the shortfall rounded up
+to the next whole MiB, the same quantity `reserve.compute_reserve_status()`
+reports (`docs/internals/60-topology.md`), and stage 2's bound is the
+integer `round(min Σ r_s)` with no tolerance at all. `round()` only strips
+CBC's integrality noise (a value like 141308.9999999). There are `|S|` such
+integers per model, a handful, so the solve time does not change
+measurably.
+
+**What the warning says when a stage produces nothing.**
+`_no_feasible_solution()` takes PuLP's status string and only blames the
+clock for `Not Solved` — "hit solver.time_limit_seconds before finding a
+feasible solution". Any other status is printed verbatim ("returned no
+usable solution (CBC status: Infeasible)") and carried as `solver_status`
+in the structured log record. Stage 1 is never legitimately infeasible
+(the current assignment satisfies every one of its constraints with
+`r_s` large enough), and stage 2 is feasible by construction once its
+bound is exact, so an `Infeasible` from either is a modelling bug, not
+something more time would fix.
+
 ## CBC via pulp: "direct transcription", deliberately unscaled
 
 The plan's own words for this backend: "continuous `e_s`, `Z_s`, `r_s` are
@@ -76,6 +106,18 @@ section 5.3/5.4 constraints directly, in plain floats — no scaling
 anywhere, no integer-coefficient discipline to satisfy.
 `solver.mip_gap` and `solver.time_limit_seconds` map onto
 `pulp.COIN_CMD(gapRel=..., timeLimit=...)` directly.
+
+**`gapRel` is only meaningful against the real objective, so stage 2's
+constant is kept.** PuLP hands the model to CBC without the objective
+expression's constant term, and CBC measures its relative gap against the
+value it can see. Stage 2 writes "did disk `d` move" as `1 − x_{d,σ₀(d)}`,
+so its objective carries a large negative constant (−11.18 on the
+committed 24h corpus bundle, against a true optimum of 0.30): a 2 % gap on
+the shifted value was an absolute tolerance of about 0.23, and CBC stopped
+at 0.389 and reported it `optimal`. `_objective_with_offset_as_variable()`
+moves the constant onto a variable fixed to `[1, 1]`, so CBC's objective is
+the real one and `solver.mip_gap` means what it says. Stage 1's objective,
+`Σ r_s`, has no constant and is untouched.
 
 Every size-valued quantity (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`,
 `Uˢᵉˣᵗ`, `soft_s`/`hard_s`) is expressed in whole MiB (`_mib()`) and
@@ -133,6 +175,17 @@ coefficient, exactly like `u*`/`b_bar` are already folded elsewhere in this
 file: `kappa · w_v` multiplies each vmid's own `pulp.lpSum(y[v, s.id] ...)`
 term directly, at full float precision.
 
+**(C8), small disks follow their VM**, is one linear constraint per
+(small movable disk, storage other than its current one), built by
+`_cbc_small_disks_follow_their_vm()` inside the shared feasibility builder,
+so both lexicographic stages carry it: `x_{d,s} ≤ Σ x_{b,s}` over the VM's
+larger movable disks in the group, plus the number of its larger *pinned*
+disks already on `s`. No new variables. It is what stops stage 1 from
+"repairing" a shortfall with a sub-MiB EFI disk that crosses a MiB boundary
+(`tests/unit/test_small_disks.py` has that case, and shows CBC does move the
+disk with the rule switched off). `topology.small_disk_placement_ok()` is
+the definition this transcribes.
+
 `D^big = {d : z_d >= migration.tiny_disk_bytes}` restricts `beta`/`gamma`
 to `movable` disks at or above the configured threshold — not a coefficient
 of `0` for an excluded disk, but the disk's terms skipped entirely. This is
@@ -171,8 +224,8 @@ pinned disk).
 `cli._solve_group()` implements `solver.backend`'s three values:
 `"auto"` tries `cbc`; `"cbc"` tries only that one;
 `"heuristic"` skips `optimize.solve()` entirely. Whichever backend
-`solve()` cannot use (library not importable, or no feasible solution
-within `solver.time_limit_seconds`) returns `None` — never an exception —
+`solve()` cannot use (library not importable, or a stage with no usable
+solution — timed out or otherwise, see above) returns `None` — never an exception —
 and `_solve_group()` moves to the next one in the cascade, ending at
 `heuristic.run_heuristic()` if every MILP attempt failed. This applies
 **even to an explicitly forced backend**: section 13's failure-mode table

@@ -33,7 +33,9 @@ over-provisioning: a thin-provisioned pool (Ceph RBD, LVM-thin, ZFS) is
 counted at what its disks were provisioned at, not at what happens to be
 allocated. On a thick pool the two are the same number. On a thin one the
 pool's own, lower figure is printed next to it so the shortfall does not
-look like a mistake:
+look like a mistake. A shortfall is counted in whole MiB, rounded up -- a
+storage one byte short shows `⚠ reserve short by 1.00 MiB`, never `reserve
+OK`:
 
 ```
   ceph-a  provisioned 3.36 TiB/9.48 TiB (pool reports 1.45 TiB allocated)  L=2.10 u=2.10  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
@@ -141,7 +143,10 @@ reflects real history.
 A pinned disk carries `[pinned: <reason>]` after its size and format —
 `snapshots present (N)`, `pending config change (unapplied)`,
 `pending deletion (unapplied)`, `locked: <lock>`, `excluded by config`,
-`excluded: unused disk (exclude.include_unused_disks=false)`, or
+`excluded: unused disk (exclude.include_unused_disks=false)`,
+`small disk with no larger disk of its VM in this group
+(migration.tiny_disk_bytes)` (an EFI/TPM disk whose VM's other disks are all
+in a different group — it only ever moves with a larger disk of its VM), or
 `cooldown: moved recently, <time> left on gates.cooldown_per_disk`
 whenever `state.json` records that disk having moved within
 `gates.cooldown_per_disk` — matching `IMPLEMENTATION_PLAN.md` section 5.3
