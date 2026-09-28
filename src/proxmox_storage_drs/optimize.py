@@ -602,6 +602,28 @@ def _cbc_capacity_spread_term(
         terms.append(objective.delta_capacity_spread * pulp.lpSum(d.values()))
 
 
+def _objective_with_offset_as_variable(pulp: Any, objective_expr: Any) -> Any:
+    """``objective_expr`` with its constant term carried by a variable fixed
+    to 1, so CBC sees the *real* objective value rather than one shifted by
+    a constant it never received.
+
+    PuLP writes the model to CBC without the expression's constant (an MPS
+    objective row has none), and CBC's relative gap (``gapRel``, i.e.
+    ``solver.mip_gap``) is then measured against the shifted value. Stage
+    2's move-count/bytes terms are written as ``1 - x_{d,σ₀(d)}``, so that
+    constant is large and negative: on a real corpus bundle it was -11.18
+    against a true optimum of 0.30, which turned a configured 2 % gap into
+    an absolute tolerance of about 0.23 -- CBC stopped at 0.389 and called
+    it optimal. A fixed variable costs nothing and makes the gap mean what
+    `solver.mip_gap`'s documentation says it means."""
+    offset = objective_expr.constant
+    if not offset:
+        return objective_expr
+    objective_expr.constant = 0
+    one = _lp_variable(pulp, "objective_offset", lowBound=1, upBound=1)
+    return objective_expr + offset * one
+
+
 def _solve_cbc(
     group: Group,
     movable: tuple[Disk, ...],
@@ -693,7 +715,7 @@ def _solve_cbc(
         y2,
         tiny_disk_bytes,
     )
-    prob2 += pulp.lpSum(terms)
+    prob2 += _objective_with_offset_as_variable(pulp, pulp.lpSum(terms))
     status2 = _pulp_solve(pulp, prob2, solver_cmd, probing)
     if status2 is None:
         return None

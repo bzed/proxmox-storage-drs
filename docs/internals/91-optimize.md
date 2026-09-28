@@ -107,6 +107,18 @@ anywhere, no integer-coefficient discipline to satisfy.
 `solver.mip_gap` and `solver.time_limit_seconds` map onto
 `pulp.COIN_CMD(gapRel=..., timeLimit=...)` directly.
 
+**`gapRel` is only meaningful against the real objective, so stage 2's
+constant is kept.** PuLP hands the model to CBC without the objective
+expression's constant term, and CBC measures its relative gap against the
+value it can see. Stage 2 writes "did disk `d` move" as `1 − x_{d,σ₀(d)}`,
+so its objective carries a large negative constant (−11.18 on the
+committed 24h corpus bundle, against a true optimum of 0.30): a 2 % gap on
+the shifted value was an absolute tolerance of about 0.23, and CBC stopped
+at 0.389 and reported it `optimal`. `_objective_with_offset_as_variable()`
+moves the constant onto a variable fixed to `[1, 1]`, so CBC's objective is
+the real one and `solver.mip_gap` means what it says. Stage 1's objective,
+`Σ r_s`, has no constant and is untouched.
+
 Every size-valued quantity (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`,
 `Uˢᵉˣᵗ`, `soft_s`/`hard_s`) is expressed in whole MiB (`_mib()`) and
 every load in section 4's average in-flight I/O requests, before the

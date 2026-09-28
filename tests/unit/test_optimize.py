@@ -757,3 +757,33 @@ def test_no_feasible_solution_says_infeasible_rather_than_blaming_the_time_limit
     assert "time limit" not in infeasible and "Infeasible" in infeasible
     assert "time_limit_seconds" in timed_out
     assert caplog.records[0].solver_status == "Infeasible"  # type: ignore[attr-defined]
+
+
+# ------------------------------ solver.mip_gap against the real objective
+
+
+@pytest.mark.skipif(not cbc_available(), reason="pulp not installed")
+def test_objective_offset_is_carried_by_a_variable_fixed_to_one() -> None:
+    """PuLP drops an objective's constant when handing the model to CBC, so
+    CBC's relative gap was measured against a value shifted by it (on a real
+    bundle -11.18 against a true optimum of 0.30: a 2 % gap stopped 30 %
+    short). The constant must reach CBC as a fixed variable instead, and the
+    expression's value must be unchanged."""
+    import pulp
+
+    from proxmox_storage_drs.optimize import _lp_variable, _objective_with_offset_as_variable
+
+    x = _lp_variable(pulp, "x", cat="Binary")
+    expr = _objective_with_offset_as_variable(pulp, 0.25 * (1 - x) - 3.0)
+    assert expr.constant == 0
+    (offset_var,) = [v for v in expr if v.name == "objective_offset"]
+    assert (offset_var.lowBound, offset_var.upBound, expr[offset_var]) == (1, 1, -2.75)
+
+    prob = pulp.LpProblem("p", pulp.LpMinimize)
+    prob += expr
+    prob += x >= 1
+    prob.solve(pulp.COIN_CMD(msg=0))
+    assert pulp.value(prob.objective) == pytest.approx(-3.0)
+
+    unchanged = 2 * x
+    assert _objective_with_offset_as_variable(pulp, unchanged) is unchanged

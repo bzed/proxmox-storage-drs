@@ -1685,6 +1685,13 @@ LP matrix — CBC's simplex does not error on a badly conditioned matrix, it sil
 numerically poor "optimal" (confirmed on a real corpus bundle, where an unscaled model made CBC's
 own post-plan spread almost 100× worse than the heuristic's on the same weights).
 
+**`solver.mip_gap` must be relative to the objective as written, constant included.** PuLP drops an
+objective's constant term when it passes the model to CBC, and CBC's relative gap is then measured
+against the shifted value. §5.4's move terms, linearized as `1 − x_{d,σ₀(d)}`, make that constant
+large and negative, so the configured gap silently became a far larger absolute tolerance (as built,
+found on a committed corpus bundle: a 2 % gap stopped at 0.389 against an optimum of 0.300). Carry the
+constant on a variable fixed to 1 instead.
+
 Assert after solving that the unscaled objective recomputed in floating point from the returned
 assignment — `heuristic.evaluate_assignment()`, the one objective implementation every backend
 reports through — agrees with what the solve was told it achieved; a cheap guard against a modeling
