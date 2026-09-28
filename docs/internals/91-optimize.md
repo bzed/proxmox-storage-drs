@@ -68,6 +68,36 @@ against a hypothetical disagreement between the two solves. Cheap in
 practice: stage 1 is a near-feasibility problem that closes instantly on
 realistic groups, so forcing an exact proof costs nothing measurable.
 
+**The shortfall variables are integers, in whole MiB, and stage 2's bound
+is exact.** Stage 2 reads stage 1's optimum back from CBC and requires
+`Σ r_s ≤` it. With continuous `r_s` that readback is only as precise as
+CBC's solution file — about three decimals of a MiB — and the bound used
+to carry a tolerance of `1e-6`, commented as "a fraction of a MiB" but in
+fact a fraction of a millionth of one, about a byte. On any group whose
+minimum shortfall was not a round number of MiB, stage 2 was therefore
+`Infeasible` on every run and the group silently fell back to the
+heuristic (found on a real bundle: 231 GiB short, two 528 KiB EFI disks
+the only movable disks on the short storages). Now each `r_s` is an
+integer variable: the capacity constraint `Σ z_d x_{d,s} + … + R_s ≤ C_s
++ r_s` with integer `r_s ≥ 0` makes `r_s` exactly the shortfall rounded up
+to the next whole MiB, the same quantity `reserve.compute_reserve_status()`
+reports (`docs/internals/60-topology.md`), and stage 2's bound is the
+integer `round(min Σ r_s)` with no tolerance at all. `round()` only strips
+CBC's integrality noise (a value like 141308.9999999). There are `|S|` such
+integers per model, a handful, so the solve time does not change
+measurably.
+
+**What the warning says when a stage produces nothing.**
+`_no_feasible_solution()` takes PuLP's status string and only blames the
+clock for `Not Solved` — "hit solver.time_limit_seconds before finding a
+feasible solution". Any other status is printed verbatim ("returned no
+usable solution (CBC status: Infeasible)") and carried as `solver_status`
+in the structured log record. Stage 1 is never legitimately infeasible
+(the current assignment satisfies every one of its constraints with
+`r_s` large enough), and stage 2 is feasible by construction once its
+bound is exact, so an `Infeasible` from either is a modelling bug, not
+something more time would fix.
+
 ## CBC via pulp: "direct transcription", deliberately unscaled
 
 The plan's own words for this backend: "continuous `e_s`, `Z_s`, `r_s` are
@@ -171,8 +201,8 @@ pinned disk).
 `cli._solve_group()` implements `solver.backend`'s three values:
 `"auto"` tries `cbc`; `"cbc"` tries only that one;
 `"heuristic"` skips `optimize.solve()` entirely. Whichever backend
-`solve()` cannot use (library not importable, or no feasible solution
-within `solver.time_limit_seconds`) returns `None` — never an exception —
+`solve()` cannot use (library not importable, or a stage with no usable
+solution — timed out or otherwise, see above) returns `None` — never an exception —
 and `_solve_group()` moves to the next one in the cascade, ending at
 `heuristic.run_heuristic()` if every MILP attempt failed. This applies
 **even to an explicitly forced backend**: section 13's failure-mode table

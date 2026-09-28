@@ -31,6 +31,22 @@ from proxmox_storage_drs.topology import Disk, Storage
 # docstring; this is that "identical shape" made concrete.
 StorageOf = Callable[[Disk], str]
 
+#: The granularity every reserve/free-space shortfall is measured in
+#: (section 5.3 (C5)): whole MiB, the same unit the MILP writes every
+#: size-valued quantity in (section 5.5) and the `ε_r` the plan names as
+#: the smallest shortfall worth refusing to trade (section 5.3).
+BYTES_PER_MIB = 1 << 20
+
+
+def round_up_to_mib(size_bytes: int) -> int:
+    """``size_bytes`` rounded *up* to the next whole MiB, in bytes.
+
+    Up, never to nearest: a shortfall of one byte is still a breach, and
+    ``ReserveStatus.violated`` (``shortfall_bytes > 0``) must stay exactly
+    the byte-exact predicate it always was. Only the *amount* is coarsened.
+    Negative input is not meaningful here and is not handled."""
+    return -(-size_bytes // BYTES_PER_MIB) * BYTES_PER_MIB
+
 
 def _current_storage(disk: Disk) -> str:
     return disk.current_storage
@@ -43,7 +59,9 @@ class ReserveStatus:
     largest_disk_bytes: int  # Z_s (C4)
     required_reserve_bytes: int  # R_s = max(f_s * Z_s, soft_s) (C5, section 5.3.1)
     managed_used_bytes: int  # Sum_d z_d * x_{d,s} over disks assigned here
-    shortfall_bytes: int  # r_s: 0 unless the reserve is already breached
+    # r_s: 0 unless the reserve is already breached, and then rounded up to
+    # whole MiB (section 5.3 (C5)) -- see compute_reserve_status()
+    shortfall_bytes: int
 
     @property
     def violated(self) -> bool:
@@ -164,12 +182,23 @@ def compute_reserve_status(
     evaluate a hypothetical one instead -- ``Storage.foreign_used_bytes``
     is unaffected either way, since section 5.1.1 defines it as
     assignment-invariant (foreign volumes are never members of `D`).
+
+    ``shortfall_bytes`` is measured in **whole MiB, rounded up** (section
+    5.3 (C5)). Every consumer of a shortfall *difference* -- the heuristic's
+    repair step, the MILP's lexicographic stage 1, section 7.3's repair
+    exemption and its revert test -- compares these sums, and at byte
+    resolution two of them disagree about sub-MiB noise: CBC reports its
+    stage-1 optimum to about three decimals of a MiB, which once made the
+    byte-exact stage-2 bound spuriously infeasible on every run with a
+    non-round shortfall. Rounding up keeps ``violated`` byte-exact (one
+    byte short is still short) and overstates the amount by less than
+    1 MiB, the safe direction.
     """
     disks = list(disks)
     largest = largest_disk_bytes(disks, storage.id, storage_of=storage_of)
     required = max(round(storage.reserve_factor * largest), storage.free_space_soft_bytes)
     used = managed_used_bytes(disks, storage.id, storage_of=storage_of) + storage.foreign_used_bytes
-    shortfall = max(0, used + required - storage.capacity_bytes)
+    shortfall = round_up_to_mib(max(0, used + required - storage.capacity_bytes))
     return ReserveStatus(
         largest_disk_bytes=largest,
         required_reserve_bytes=required,

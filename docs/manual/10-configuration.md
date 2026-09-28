@@ -517,7 +517,8 @@ model is identical to the pre-`free_space` snapshot-only floor. A storage
 that ends the plan below its `soft` requirement is in violation exactly
 like a snapshot-reserve breach, and the engine migrates disks off it until
 the requirement is met or reports the residual shortfall as unfixable
-(section 9.5) — it does not guarantee the requirement is *achievable*, only
+(`plan`'s `⚠ unfixable shortfall` line, with the amount and the pinned disks
+in the way) — it does not guarantee the requirement is *achievable*, only
 that it is pursued unconditionally.
 
 ### `free_space.hard`

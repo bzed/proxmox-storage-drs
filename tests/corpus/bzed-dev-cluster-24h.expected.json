@@ -69,7 +69,8 @@
               "total_cost_load_seconds": 256.0
             },
             "solver_backend": "heuristic",
-            "solver_status": null
+            "solver_status": null,
+            "unfixable_shortfall": null
           }
         ],
         "warnings": []
@@ -86,9 +87,9 @@
       "report": {
         "groups": [
           {
-            "after_capacity_spread": 0.4208585047332279,
-            "after_objective_total": 0.30003069947699845,
-            "after_spread": 0.011724847482584407,
+            "after_capacity_spread": 0.4449105803576635,
+            "after_objective_total": 0.38871225832605094,
+            "after_spread": 0.04161371119347658,
             "before_capacity_spread": 1.122190573692033,
             "before_objective_total": 0.6448383611911461,
             "before_spread": 0.03318076990333675,
@@ -107,6 +108,22 @@
               {
                 "cost_load_seconds": 0.0,
                 "device": "efidisk0",
+                "disk_key": "163216:efidisk0",
+                "duration_mirror_seconds": 0.005,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-30d346d4",
+                "imbalance_reduction": 0.0,
+                "load_per_tib": 0.0,
+                "repair": false,
+                "size_bytes": 1048576,
+                "to_storage": "stor-5c5a9627",
+                "vm_name": "163216",
+                "vmid": 163216
+              },
+              {
+                "cost_load_seconds": 0.0,
+                "device": "efidisk0",
                 "disk_key": "644488:efidisk0",
                 "duration_mirror_seconds": 0.005,
                 "duration_wipe_seconds": 0.0,
@@ -121,6 +138,22 @@
                 "vmid": 644488
               },
               {
+                "cost_load_seconds": 256.0,
+                "device": "scsi0",
+                "disk_key": "163216:scsi0",
+                "duration_mirror_seconds": 128.0,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-30d346d4",
+                "imbalance_reduction": 0.07543481791183515,
+                "load_per_tib": 1.5449050708343766,
+                "repair": false,
+                "size_bytes": 26843545600,
+                "to_storage": "stor-5c5a9627",
+                "vm_name": "163216",
+                "vmid": 163216
+              },
+              {
                 "cost_load_seconds": 655.36,
                 "device": "scsi0",
                 "disk_key": "644488:scsi0",
@@ -128,7 +161,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.14071750061473276,
+                "imbalance_reduction": -0.1407175006147332,
                 "load_per_tib": 1.125740004917864,
                 "repair": false,
                 "size_bytes": 68719476736,
@@ -208,7 +241,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.491106875417721,
+                "imbalance_reduction": -0.4911068754177206,
                 "load_per_tib": 2.5144672021387326,
                 "repair": false,
                 "size_bytes": 107374182400,
@@ -224,7 +257,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-30d346d4",
-                "imbalance_reduction": 1.5933249166814947,
+                "imbalance_reduction": 1.5933249166814942,
                 "load_per_tib": 5.438549048939501,
                 "repair": false,
                 "size_bytes": 161061273600,
@@ -240,7 +273,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-30d346d4",
-                "imbalance_reduction": -0.18351165368996547,
+                "imbalance_reduction": -0.3343812895136353,
                 "load_per_tib": 7.218278621729415,
                 "repair": false,
                 "size_bytes": 107374182400,
@@ -288,7 +321,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": 0.07864461912299081,
+                "imbalance_reduction": 0.07864461912299126,
                 "load_per_tib": 1.1504584283134687,
                 "repair": false,
                 "size_bytes": 37580963840,
@@ -304,7 +337,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": 0.052669358462662075,
+                "imbalance_reduction": 0.05266935846266163,
                 "load_per_tib": 0.35955615377177186,
                 "repair": false,
                 "size_bytes": 80530636800,
@@ -320,7 +353,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": 0.005167779152936536,
+                "imbalance_reduction": 0.00516777915293698,
                 "load_per_tib": 0.05291805852607363,
                 "repair": false,
                 "size_bytes": 53687091200,
@@ -333,16 +366,17 @@
             "payback": {
               "accepted": true,
               "aggregate_ok": true,
-              "benefit_load_seconds": 12766322.388567362,
-              "ratio": 1014.4110421143463,
+              "benefit_load_seconds": 10008156.842453642,
+              "ratio": 779.3931950923951,
               "rejected_moves": [],
               "repair_exempt": false,
               "reserve_shortfall_bytes_after": 0,
               "reserve_shortfall_bytes_before": 0,
-              "total_cost_load_seconds": 12584.96
+              "total_cost_load_seconds": 12840.96
             },
             "solver_backend": "cbc",
-            "solver_status": "optimal"
+            "solver_status": "optimal",
+            "unfixable_shortfall": null
           }
         ],
         "warnings": []

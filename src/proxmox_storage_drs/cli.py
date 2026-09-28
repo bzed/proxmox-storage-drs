@@ -1160,6 +1160,90 @@ def _render_plan_solver_line(outcome: _SolveOutcome) -> str:
     return f"  solver: {outcome.backend}{suffix}"
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _UnfixableShortfall:
+    """Section 5.3's "report any residual `r_s > 0` prominently as an
+    unfixable shortfall, with the byte amount" (section 9.5), as data both
+    renderers share.
+
+    ``by_storage`` maps each still-short storage to its shortfall in bytes
+    (whole MiB, rounded up -- `reserve.compute_reserve_status()`).
+    ``proven`` is true only for a CBC solve that finished ``optimal``: its
+    lexicographic stage 1 is what makes "no assignment of the movable disks
+    closes this" a theorem rather than the heuristic's best effort.
+    ``pinned_blockers`` are the pinned disks sitting on a still-short
+    storage -- the ones an operator can unpin to give the next run something
+    to move; ``explain``'s ``pinned`` block already lists every other pin."""
+
+    by_storage: dict[str, int]
+    proven: bool
+    pinned_blockers: tuple[Disk, ...]
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(self.by_storage.values())
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "total_bytes": self.total_bytes,
+            "by_storage": dict(self.by_storage),
+            "proven": self.proven,
+            "pinned_blockers": [
+                {"disk_key": d.key, "storage": d.current_storage, "reason": d.pinned_reason}
+                for d in self.pinned_blockers
+            ],
+        }
+
+
+def _unfixable_shortfall(
+    group: Group, final_breakdown: ObjectiveBreakdown, solve_outcome: _SolveOutcome | None
+) -> _UnfixableShortfall | None:
+    """The residual shortfall of ``final_breakdown`` (the assignment the
+    plan actually leaves behind), or ``None`` when no storage is short."""
+    by_storage = {
+        sid: status.shortfall_bytes
+        for sid, status in sorted(final_breakdown.reserve_statuses.items())
+        if status.violated
+    }
+    if not by_storage:
+        return None
+    return _UnfixableShortfall(
+        by_storage=by_storage,
+        proven=solve_outcome is not None
+        and solve_outcome.backend == "cbc"
+        and solve_outcome.status == "optimal",
+        pinned_blockers=tuple(d for d in _pinned_disks(group) if d.current_storage in by_storage),
+    )
+
+
+def _render_unfixable_shortfall_lines(
+    shortfall: _UnfixableShortfall | None, vm_name_by_key: dict[str, str]
+) -> list[str]:
+    """The human form of :class:`_UnfixableShortfall` -- printed whether or
+    not the plan moves anything, since "ACT" followed by nothing but a
+    solver line otherwise reads as the tool having ignored the breach."""
+    if shortfall is None:
+        return []
+    per_storage = ", ".join(f"{sid} {format_bytes(b)}" for sid, b in shortfall.by_storage.items())
+    verdict = (
+        "no assignment of the movable disks can close it"
+        if shortfall.proven
+        else "the heuristic found no assignment that closes it (not proven: CBC did not solve)"
+    )
+    lines = [
+        f"  ⚠ unfixable shortfall: {format_bytes(shortfall.total_bytes)} still short of the "
+        f"snapshot reserve / free-space requirement after this plan ({per_storage}) -- {verdict}"
+    ]
+    if shortfall.pinned_blockers:
+        lines.append("    pinned on the short storages (unpin to let the next run move them):")
+        for disk in shortfall.pinned_blockers:
+            lines.append(
+                f"      {format_disk_id(disk.key, _vm_name_for(vm_name_by_key, disk.key))} "
+                f"on {disk.current_storage} -- {disk.pinned_reason}"
+            )
+    return lines
+
+
 def _render_group_plan_human(
     group: Group,
     group_loads: dict[str, GroupLoad],
@@ -1253,6 +1337,12 @@ def _render_group_plan_human(
         lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
         if payback_result is not None:
             lines.extend(_render_plan_payback_lines(payback_result, payback_ratio, vm_name_by_key))
+    lines.extend(
+        _render_unfixable_shortfall_lines(
+            _unfixable_shortfall(group, final_breakdown, solve_outcomes[group.name]),
+            vm_name_by_key,
+        )
+    )
     lines.append("")
     return lines
 
@@ -1429,6 +1519,11 @@ def _render_group_plan_json(
             "reserve_shortfall_bytes_before": payback_result.reserve_shortfall_bytes_before,
             "reserve_shortfall_bytes_after": payback_result.reserve_shortfall_bytes_after,
         }
+    unfixable = (
+        _unfixable_shortfall(group, final_breakdown, solve_outcome)
+        if final_breakdown is not None
+        else None
+    )
     out: dict[str, object] = {
         "name": group.name,
         "load_error": load_error,
@@ -1445,6 +1540,7 @@ def _render_group_plan_json(
         "before_objective_total": before_objective_total,
         "after_objective_total": after_objective_total,
         "payback": payback_out,
+        "unfixable_shortfall": unfixable.as_dict() if unfixable is not None else None,
     }
     if forecast is not None:
         out["forecast"] = forecast.as_dict()

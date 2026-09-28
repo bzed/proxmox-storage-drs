@@ -366,12 +366,33 @@ def _log_backend_unavailable(backend: str, detail: str, probing: bool) -> None:
         )
 
 
-def _no_feasible_solution(backend: str, group: Group, stage: str) -> None:
+def _no_feasible_solution(backend: str, group: Group, stage: str, status: str) -> None:
+    """Say *why* a stage produced nothing, from the solver's own status.
+
+    ``status`` is PuLP's ``LpStatus`` string. Only ``"Not Solved"`` means the
+    time limit ran out before an incumbent was found; ``"Infeasible"`` means
+    the stage's constraint set admits no assignment at all -- which, since
+    the current assignment always satisfies stage 1's constraints, is a
+    modelling bug worth a different message than "give it more time" (the
+    stage-2 bound once was one: a byte-exact bound against CBC's
+    three-decimal MiB readback, section 5.5)."""
+    reason = (
+        "hit solver.time_limit_seconds before finding a feasible solution"
+        if status == "Not Solved"
+        else f"returned no usable solution (CBC status: {status})"
+    )
     logger.warning(
-        "%s stage %s found no feasible solution within the time limit",
+        "%s stage %s %s",
         backend,
         stage,
-        extra={"event": "optimize_no_feasible_solution", "backend": backend, "group": group.name},
+        reason,
+        extra={
+            "event": "optimize_no_feasible_solution",
+            "backend": backend,
+            "group": group.name,
+            "stage": stage,
+            "solver_status": status,
+        },
     )
 
 
@@ -404,7 +425,14 @@ def _cbc_feasibility_constraints(
     }
     z = {s.id: _lp_variable(pulp, f"Z_{s.id}", lowBound=0) for s in group.storages}
     r = {s.id: _lp_variable(pulp, f"R_{s.id}", lowBound=0) for s in group.storages}
-    slack = {s.id: _lp_variable(pulp, f"r_{s.id}", lowBound=0) for s in group.storages}
+    # Integer, in whole MiB: section 5.3 (C5) measures every shortfall in
+    # whole MiB rounded up, exactly as `reserve.compute_reserve_status()`
+    # does, and an integer optimum is something stage 2 can bound *exactly*
+    # (see `_solve_cbc()`), where a continuous one comes back from CBC's
+    # solution file rounded to about three decimals.
+    slack = {
+        s.id: _lp_variable(pulp, f"r_{s.id}", lowBound=0, cat="Integer") for s in group.storages
+    }
 
     for d in movable:
         prob += pulp.lpSum(x[d.key, s.id] for s in group.storages) == 1
@@ -627,9 +655,11 @@ def _solve_cbc(
     if status1 is None:
         return None
     if pulp.LpStatus[status1] not in ("Optimal",):
-        _no_feasible_solution("cbc", group, "1 (reserve)")
+        _no_feasible_solution("cbc", group, "1 (reserve)", pulp.LpStatus[status1])
         return None
-    min_slack = sum(v.value() or 0.0 for v in slack1.values())
+    # Whole MiB (the slack variables are integer): `round()` strips CBC's
+    # integrality-tolerance noise so the bound below is an exact integer.
+    min_slack_mib = round(sum(v.value() or 0.0 for v in slack1.values()))
 
     prob2 = pulp.LpProblem("stage2_objective", pulp.LpMinimize)
     x2, y2, _z2, slack2 = _cbc_feasibility_constraints(
@@ -642,10 +672,12 @@ def _solve_cbc(
         objective,
         cooldown_storages,
     )
-    # A small tolerance: CBC's own reported stage-1 slack already carries
-    # solver rounding noise, and pinning it exactly can make stage 2
-    # spuriously infeasible by a fraction of a MiB.
-    prob2 += pulp.lpSum(slack2.values()) <= min_slack + 1e-6
+    # Exact, because both sides are whole MiB. This used to be a continuous
+    # `min_slack + 1e-6` -- a tolerance of about one *byte* against a value
+    # CBC writes back to roughly three decimals of a MiB, so stage 2 came
+    # back Infeasible on every run whose minimum shortfall was not a round
+    # number and the group silently fell back to the heuristic.
+    prob2 += pulp.lpSum(slack2.values()) <= min_slack_mib
     terms = _cbc_objective_terms(
         pulp,
         prob2,
@@ -666,7 +698,7 @@ def _solve_cbc(
     if status2 is None:
         return None
     if pulp.LpStatus[status2] not in ("Optimal",):
-        _no_feasible_solution("cbc", group, "2 (objective)")
+        _no_feasible_solution("cbc", group, "2 (objective)", pulp.LpStatus[status2])
         return None
 
     assignment: Assignment = {}

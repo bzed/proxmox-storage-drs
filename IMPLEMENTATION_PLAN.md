@@ -1362,6 +1362,18 @@ R_s  ≥  soft_s                                               (constant, §5.3.
 Σ_d z_d·x_{d,s}  +  Uˢᵉˣᵗ  +  R_s   ≤   C_s  +  r_s                ∀ s ∈ S
 ```
 
+`r_s ≥ 0` is the shortfall, and it is an **integer number of MiB**: the constraint then makes it
+the byte-exact shortfall rounded *up* to the next whole MiB, and every other place a shortfall is
+computed (`reserve.compute_reserve_status()`, which `show-load`, the heuristic, the gate and §7.3's
+repair exemption all read) rounds the same way. Up, not to nearest, so that one byte short is still
+short: `r_s > 0` stays exactly the byte-exact violation predicate, and only the amount is coarsened,
+by under a MiB, in the safe direction. The granularity is what lets the lexicographic solve below
+bound stage 2 *exactly* by stage 1's result, and it is the `ε_r = 1 MiB` the big-M alternative names
+as the smallest shortfall worth refusing to trade. **As built:** a continuous `r_s` with a stage-2
+tolerance of `1e-6` MiB (about a byte) against CBC's roughly three-decimal readback made stage 2
+infeasible on every group whose minimum shortfall was not a round number of MiB, silently sending
+it to the heuristic; found on a real bundle and fixed by this integer definition.
+
 Two one-sided bounds are exact for `R_s = max(f_s·Z_s, soft_s)` because (C5) pushes `R_s`
 *down* while both bounds push it *up*. The `f_s · Z_s` term is the "always keep 2× the largest disk
 free" rule, and (C4) is what makes it expressible in a linear model at all. `soft_s` is the storage's
@@ -1496,7 +1508,8 @@ the model infeasible and the tool useless exactly when it is most needed. Two wa
 effectively hard:
 
 1. **Lexicographic, preferred and provably correct.** Solve in two stages: minimize `Σ_s r_s`
-   alone; then fix `Σ_s r_s` to that minimum as a constraint and minimize the §5.4 objective. CBC
+   alone; then fix `Σ_s r_s` to that minimum as a constraint (`Σ_s r_s ≤ min`, exact: both sides
+   are whole MiB, (C5) above) and minimize the §5.4 objective. CBC
    supports this by re-solving. The reserve is then never traded against balance at
    any weight, and `Σ r_s > 0` provably means *physically impossible*, not merely *unattractive*.
 2. **Single-stage big-M**, simpler but requiring calibration: keep `P · Σ_s r_s` in the objective
@@ -1551,7 +1564,9 @@ which the two options provably disagree, with the exact `P` at which big-M flips
 the computed `P_min`. Test both paths against it. The §14 fixture cannot do this job — there, every
 reserve-violating assignment is also worse on balance, so both options agree at any `P`.
 
-Report any residual `r_s > 0` prominently as an unfixable shortfall, with the byte amount.
+Report any residual `r_s > 0` prominently as an unfixable shortfall, with the byte amount (§9.5
+gives the line; as built, it also names the pinned disks on the short storages, since those are
+what an operator can act on).
 
 **(C6) Spread.** With `u* = (Σ_d ℓ_d) / (Σ_s c_s)` — a **constant**, since total group load is
 invariant under reassignment — the L1 form is fully linear:
@@ -2525,6 +2540,23 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
     109  excluded by tag no-drs     0.2 TiB  ℓ 0.0  on san-c
   pinned load 1.2 of 8.6 (14%, warn at 25%);  best achievable spread given pins: 44.6%
 ```
+
+**The unfixable-shortfall line.** Whenever the planned endpoint leaves any `r_s > 0`, the group's
+output ends with it, whether or not anything moves — a group the §6 override forced to `ACT` and
+that then moves nothing otherwise shows the breach once, in the gate line, and never explains it:
+
+```
+  ⚠ unfixable shortfall: 231.05 GiB still short of the snapshot reserve / free-space requirement after this plan (slow-a 138.00 GiB, slow-b 93.05 GiB) -- no assignment of the movable disks can close it
+    pinned on the short storages (unpin to let the next run move them):
+      144592:scsi0 on slow-a -- pending config change (unapplied)
+```
+
+"No assignment … can close it" is claimed only for a CBC solve with status `optimal`, where stage 1
+of the lexicographic solve makes it a theorem; the heuristic's line says it is not proven. `--json`
+carries the same fact as `groups[].unfixable_shortfall`: `null`, or `total_bytes`, `by_storage`,
+`proven` and `pinned_blockers` (`disk_key`, `storage`, `reason`). It describes the solver and
+scheduler's endpoint; a move the hard per-move duration rule later refuses is reported by that
+rule's own line, and the status file's warning (§2.4) tracks the executed endpoint.
 
 **As built (phase 13):** the exemption note under the payback line and the per-move `[repair]`
 markers are printed by `plan`/`apply`, and the `repair` field reaches `--json` per move —

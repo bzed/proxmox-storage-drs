@@ -292,8 +292,16 @@ of it, needs to know a pattern was ever involved.
 `compute_reserve_status()` computes, for one storage: `used = Σ_{d∈D on s} z_d
 + Uˢᵉˣᵗ_s` (every managed disk's bytes plus the foreign/unreferenced bytes
 from "`Uˢᵉˣᵗ`: everything not referenced" above), `shortfall = max(0, used +
-R_s − capacity_s)`, and `ReserveStatus.violated` is exactly `shortfall > 0`
-— the boolean `gates.py`'s reserve-override gate reads directly
+R_s − capacity_s)` **rounded up to the next whole MiB** (`round_up_to_mib()`),
+and `ReserveStatus.violated` is exactly `shortfall > 0` — unchanged by the
+rounding, since only a zero shortfall rounds to zero. The MiB granularity
+is the one every consumer of a shortfall *difference* needs to agree on:
+the heuristic's repair step, the MILP's lexicographic stage 1 (whose `r_s`
+are integer MiB, `docs/internals/91-optimize.md`), and payback's repair
+exemption and revert test (`docs/internals/96-payback.md`) all compare
+these sums, and at byte resolution they disagreed about sub-MiB noise.
+Rounding *up* overstates a real shortfall by under a MiB and never hides
+one. `ReserveStatus.violated` is the boolean `gates.py`'s reserve-override gate reads directly
 (`docs/internals/80-gates.md`). It is deliberately its own module, not a
 method on `Storage`: `heuristic.py` needs to evaluate the identical formula
 against a *candidate* assignment, not only the current one (`storage_of=`

@@ -117,7 +117,8 @@
               "total_cost_load_seconds": 2508.8
             },
             "solver_backend": "heuristic",
-            "solver_status": null
+            "solver_status": null,
+            "unfixable_shortfall": null
           }
         ],
         "warnings": []
@@ -254,7 +255,8 @@
               "total_cost_load_seconds": 2508.8
             },
             "solver_backend": "heuristic",
-            "solver_status": null
+            "solver_status": null,
+            "unfixable_shortfall": null
           }
         ],
         "warnings": []
@@ -271,9 +273,9 @@
       "report": {
         "groups": [
           {
-            "after_capacity_spread": 0.5874915076324911,
-            "after_objective_total": 0.3692965498517726,
-            "after_spread": 0.0073702282439527915,
+            "after_capacity_spread": 0.6355948146966796,
+            "after_objective_total": 0.37634477955530354,
+            "after_spread": 0.0032336826418172277,
             "before_capacity_spread": 1.1214477053592502,
             "before_objective_total": 0.8477021513291862,
             "before_spread": 0.09794050704271742,
@@ -290,54 +292,6 @@
             "load_error": null,
             "moves": [
               {
-                "cost_load_seconds": 0.0,
-                "device": "efidisk0",
-                "disk_key": "163216:efidisk0",
-                "duration_mirror_seconds": 0.005,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-30d346d4",
-                "imbalance_reduction": 0.0,
-                "load_per_tib": 0.0,
-                "repair": false,
-                "size_bytes": 1048576,
-                "to_storage": "stor-5c5a9627",
-                "vm_name": "163216",
-                "vmid": 163216
-              },
-              {
-                "cost_load_seconds": 256.0,
-                "device": "scsi0",
-                "disk_key": "163216:scsi0",
-                "duration_mirror_seconds": 128.0,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-30d346d4",
-                "imbalance_reduction": -0.05760990275818223,
-                "load_per_tib": 1.1798508084875703,
-                "repair": false,
-                "size_bytes": 26843545600,
-                "to_storage": "stor-5c5a9627",
-                "vm_name": "163216",
-                "vmid": 163216
-              },
-              {
-                "cost_load_seconds": 358.4,
-                "device": "scsi0",
-                "disk_key": "494807:scsi0",
-                "duration_mirror_seconds": 179.2,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": 0.24729320548339428,
-                "load_per_tib": 6.464119915258031,
-                "repair": false,
-                "size_bytes": 37580963840,
-                "to_storage": "stor-30d346d4",
-                "vm_name": "494807",
-                "vmid": 494807
-              },
-              {
                 "cost_load_seconds": 204.8,
                 "device": "scsi0",
                 "disk_key": "240169:scsi0",
@@ -345,13 +299,29 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.04416759447054419,
+                "imbalance_reduction": 0.04416759447054419,
                 "load_per_tib": 1.1306904184459377,
                 "repair": false,
                 "size_bytes": 21474836480,
                 "to_storage": "stor-30d346d4",
                 "vm_name": "240169",
                 "vmid": 240169
+              },
+              {
+                "cost_load_seconds": 614.4,
+                "device": "scsi0",
+                "disk_key": "366117:scsi0",
+                "duration_mirror_seconds": 307.2,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-5c5a9627",
+                "imbalance_reduction": -0.06910510101068201,
+                "load_per_tib": 4.733666213279706,
+                "repair": false,
+                "size_bytes": 64424509440,
+                "to_storage": "stor-30d346d4",
+                "vm_name": "366117",
+                "vmid": 366117
               },
               {
                 "cost_load_seconds": 768.0,
@@ -361,7 +331,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.04487549140622926,
+                "imbalance_reduction": -0.04487549140622882,
                 "load_per_tib": 0.30635002133318995,
                 "repair": false,
                 "size_bytes": 80530636800,
@@ -377,45 +347,13 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.0031649108778415425,
+                "imbalance_reduction": -0.0031649108778419865,
                 "load_per_tib": 0.032408687389097905,
                 "repair": false,
                 "size_bytes": 53687091200,
                 "to_storage": "stor-30d346d4",
                 "vm_name": "747564",
                 "vmid": 747564
-              },
-              {
-                "cost_load_seconds": 665.6,
-                "device": "scsi0",
-                "disk_key": "365149:scsi0",
-                "duration_mirror_seconds": 332.8,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.13066786451623535,
-                "load_per_tib": 1.029260717420192,
-                "repair": false,
-                "size_bytes": 69793218560,
-                "to_storage": "stor-30d346d4",
-                "vm_name": "365149",
-                "vmid": 365149
-              },
-              {
-                "cost_load_seconds": 358.4,
-                "device": "scsi1",
-                "disk_key": "365149:scsi1",
-                "duration_mirror_seconds": 179.2,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.051905961607133566,
-                "load_per_tib": 0.7593100669386423,
-                "repair": false,
-                "size_bytes": 37580963840,
-                "to_storage": "stor-30d346d4",
-                "vm_name": "365149",
-                "vmid": 365149
               },
               {
                 "cost_load_seconds": 2048.0,
@@ -441,7 +379,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -1.8260922114554905,
+                "imbalance_reduction": -1.8260922114554914,
                 "load_per_tib": 3.7398368490608456,
                 "repair": false,
                 "size_bytes": 268435456000,
@@ -473,7 +411,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-30d346d4",
-                "imbalance_reduction": 1.6143944361578781,
+                "imbalance_reduction": 1.614394436157879,
                 "load_per_tib": 5.510466342085558,
                 "repair": false,
                 "size_bytes": 161061273600,
@@ -502,16 +440,17 @@
             "payback": {
               "accepted": true,
               "aggregate_ok": true,
-              "benefit_load_seconds": 16788526.391941715,
-              "ratio": 1483.7145072063872,
+              "benefit_load_seconds": 16412269.045011165,
+              "ratio": 1594.7867153501209,
               "rejected_moves": [],
               "repair_exempt": false,
               "reserve_shortfall_bytes_after": 0,
               "reserve_shortfall_bytes_before": 0,
-              "total_cost_load_seconds": 11315.2
+              "total_cost_load_seconds": 10291.2
             },
             "solver_backend": "cbc",
-            "solver_status": "optimal"
+            "solver_status": "optimal",
+            "unfixable_shortfall": null
           }
         ],
         "warnings": []
@@ -528,9 +467,9 @@
       "report": {
         "groups": [
           {
-            "after_capacity_spread": 0.5874915076324911,
-            "after_objective_total": 0.3692965498517726,
-            "after_spread": 0.0073702282439527915,
+            "after_capacity_spread": 0.6355948146966796,
+            "after_objective_total": 0.37634477955530354,
+            "after_spread": 0.0032336826418172277,
             "before_capacity_spread": 1.1214477053592502,
             "before_objective_total": 0.8477021513291862,
             "before_spread": 0.09794050704271742,
@@ -555,54 +494,6 @@
             "load_error": null,
             "moves": [
               {
-                "cost_load_seconds": 0.0,
-                "device": "efidisk0",
-                "disk_key": "163216:efidisk0",
-                "duration_mirror_seconds": 0.005,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-30d346d4",
-                "imbalance_reduction": 0.0,
-                "load_per_tib": 0.0,
-                "repair": false,
-                "size_bytes": 1048576,
-                "to_storage": "stor-5c5a9627",
-                "vm_name": "163216",
-                "vmid": 163216
-              },
-              {
-                "cost_load_seconds": 256.0,
-                "device": "scsi0",
-                "disk_key": "163216:scsi0",
-                "duration_mirror_seconds": 128.0,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-30d346d4",
-                "imbalance_reduction": -0.05760990275818223,
-                "load_per_tib": 1.1798508084875703,
-                "repair": false,
-                "size_bytes": 26843545600,
-                "to_storage": "stor-5c5a9627",
-                "vm_name": "163216",
-                "vmid": 163216
-              },
-              {
-                "cost_load_seconds": 358.4,
-                "device": "scsi0",
-                "disk_key": "494807:scsi0",
-                "duration_mirror_seconds": 179.2,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": 0.24729320548339428,
-                "load_per_tib": 6.464119915258031,
-                "repair": false,
-                "size_bytes": 37580963840,
-                "to_storage": "stor-30d346d4",
-                "vm_name": "494807",
-                "vmid": 494807
-              },
-              {
                 "cost_load_seconds": 204.8,
                 "device": "scsi0",
                 "disk_key": "240169:scsi0",
@@ -610,13 +501,29 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.04416759447054419,
+                "imbalance_reduction": 0.04416759447054419,
                 "load_per_tib": 1.1306904184459377,
                 "repair": false,
                 "size_bytes": 21474836480,
                 "to_storage": "stor-30d346d4",
                 "vm_name": "240169",
                 "vmid": 240169
+              },
+              {
+                "cost_load_seconds": 614.4,
+                "device": "scsi0",
+                "disk_key": "366117:scsi0",
+                "duration_mirror_seconds": 307.2,
+                "duration_wipe_seconds": 0.0,
+                "exceeds_max_duration": false,
+                "from_storage": "stor-5c5a9627",
+                "imbalance_reduction": -0.06910510101068201,
+                "load_per_tib": 4.733666213279706,
+                "repair": false,
+                "size_bytes": 64424509440,
+                "to_storage": "stor-30d346d4",
+                "vm_name": "366117",
+                "vmid": 366117
               },
               {
                 "cost_load_seconds": 768.0,
@@ -626,7 +533,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.04487549140622926,
+                "imbalance_reduction": -0.04487549140622882,
                 "load_per_tib": 0.30635002133318995,
                 "repair": false,
                 "size_bytes": 80530636800,
@@ -642,45 +549,13 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.0031649108778415425,
+                "imbalance_reduction": -0.0031649108778419865,
                 "load_per_tib": 0.032408687389097905,
                 "repair": false,
                 "size_bytes": 53687091200,
                 "to_storage": "stor-30d346d4",
                 "vm_name": "747564",
                 "vmid": 747564
-              },
-              {
-                "cost_load_seconds": 665.6,
-                "device": "scsi0",
-                "disk_key": "365149:scsi0",
-                "duration_mirror_seconds": 332.8,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.13066786451623535,
-                "load_per_tib": 1.029260717420192,
-                "repair": false,
-                "size_bytes": 69793218560,
-                "to_storage": "stor-30d346d4",
-                "vm_name": "365149",
-                "vmid": 365149
-              },
-              {
-                "cost_load_seconds": 358.4,
-                "device": "scsi1",
-                "disk_key": "365149:scsi1",
-                "duration_mirror_seconds": 179.2,
-                "duration_wipe_seconds": 0.0,
-                "exceeds_max_duration": false,
-                "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -0.051905961607133566,
-                "load_per_tib": 0.7593100669386423,
-                "repair": false,
-                "size_bytes": 37580963840,
-                "to_storage": "stor-30d346d4",
-                "vm_name": "365149",
-                "vmid": 365149
               },
               {
                 "cost_load_seconds": 2048.0,
@@ -706,7 +581,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-5c5a9627",
-                "imbalance_reduction": -1.8260922114554905,
+                "imbalance_reduction": -1.8260922114554914,
                 "load_per_tib": 3.7398368490608456,
                 "repair": false,
                 "size_bytes": 268435456000,
@@ -738,7 +613,7 @@
                 "duration_wipe_seconds": 0.0,
                 "exceeds_max_duration": false,
                 "from_storage": "stor-30d346d4",
-                "imbalance_reduction": 1.6143944361578781,
+                "imbalance_reduction": 1.614394436157879,
                 "load_per_tib": 5.510466342085558,
                 "repair": false,
                 "size_bytes": 161061273600,
@@ -767,16 +642,17 @@
             "payback": {
               "accepted": true,
               "aggregate_ok": true,
-              "benefit_load_seconds": 16788526.391941715,
-              "ratio": 1483.7145072063872,
+              "benefit_load_seconds": 16412269.045011165,
+              "ratio": 1594.7867153501209,
               "rejected_moves": [],
               "repair_exempt": false,
               "reserve_shortfall_bytes_after": 0,
               "reserve_shortfall_bytes_before": 0,
-              "total_cost_load_seconds": 11315.2
+              "total_cost_load_seconds": 10291.2
             },
             "solver_backend": "cbc",
-            "solver_status": "optimal"
+            "solver_status": "optimal",
+            "unfixable_shortfall": null
           }
         ],
         "warnings": []
