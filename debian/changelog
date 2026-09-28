@@ -1,3 +1,25 @@
+pve-storage-drs (0.1.13) trixie; urgency=medium
+
+  * plan/apply: a group the gate sent to ACT whose plan moves nothing now
+    says so -- "no moves made" -- instead of ending after the solver line,
+    unless a deadlock or an unfixable shortfall already explains it. The
+    line only claims the current placement scores best for a CBC solve that
+    finished optimal. When the capacity gate opened the group, a second line
+    names objective.delta_capacity_spread and objective.beta_move_count with
+    their values and the two ways out. explain keeps its own, fuller block.
+  * docs: at the default delta_capacity_spread (0.5) the data-spread term
+    rarely pays for moves on its own, so the capacity gate can open a group
+    whose plan stays empty. The defaults are unchanged; the manual now works
+    a real example through (a 112 % spread whose cheapest fix pays only from
+    about 1.25) and says which knob to turn. The example configuration's
+    comments say the same.
+  * docs: small disks are scheduled before their VM's larger disks on
+    purpose -- they are copied and wiped in seconds and never wait behind a
+    large disk's saferemove wipe. A run that stops in between leaves the VM
+    split until the next run. No behaviour change.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Mon, 28 Sep 2026 12:26:07 +0200
+
 pve-storage-drs (0.1.12) trixie; urgency=medium
 
   * solver: CBC no longer silently falls back to the heuristic on a group
