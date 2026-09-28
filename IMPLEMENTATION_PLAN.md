@@ -2289,6 +2289,16 @@ run. Two exceptions take priority and are scheduled first regardless of ratio:
 1. moves that resolve a storage currently violating (C5);
 2. moves that *free* space on a storage which some later move needs.
 
+**Small disks go first, ahead of the larger disks of their own VM, on purpose.** A disk below
+`tiny_disk_bytes` is mirrored and — with `saferemove` — wiped in seconds, so scheduling it first
+never makes the next move wait: a large disk's source may spend many minutes in *draining* (below)
+while its zeroing pass runs, holding that storage's concurrency slot, and a small disk queued
+behind it would wait for that wipe too. The price is an intermediate state in which a small disk
+already sits on the target while its VM's larger disks have not moved yet; if the run stops there,
+the VM is left split until the next run. That is accepted: (C8) constrains the plan's *endpoint*,
+not the order, and the next run moves the larger disks or — if the plan changed — lets `κ` bring
+the small one back for free. Do not reorder small disks after their VM's larger disks.
+
 **The source is not freed when the task succeeds.** `apply(state, m)` must not optimistically credit
 the source with `z_d` bytes back. With `saferemove` on the source storage the old volume still exists
 — fully allocated — for the whole duration of the zeroing pass (§7.1), which can be far longer than

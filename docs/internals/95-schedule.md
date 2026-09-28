@@ -53,6 +53,14 @@ move is ranked ahead of *every* nonzero-cost one outright, so a tiny
 `efidisk0`/`tpmstate0` reunion is always scheduled before a real migration
 that happens to reduce the objective by more in absolute terms.
 
+That includes the larger disks of the small disk's *own* VM, and it is
+deliberate: a small disk's mirror and wipe take seconds, while a large
+disk's source can hold its storage's concurrency slot for many minutes
+while `saferemove` zeroes it, so putting the small one first means it never
+waits behind that wipe. If a run stops right after it, the VM is split until
+the next run, which section 5.3 (C8) permits: it constrains where a small
+disk *ends*, not the order it gets there.
+
 ## The transient invariant, called with a single-move set always
 
 Section 8.1 defines a generalized invariant over a whole in-flight set `M`
