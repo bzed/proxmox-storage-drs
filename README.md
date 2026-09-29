@@ -493,8 +493,12 @@ Copyright © 2026 Bernd Zeimetz <bernd@bzed.de>
 
 This project was built with AI assistance at every stage. Planning and architecture — including
 `IMPLEMENTATION_PLAN.md` itself — were done with Anthropic's
-[Claude Opus 5](https://www.anthropic.com/claude), and the code, tests and documentation were
-written with Anthropic's [Claude Sonnet 5](https://www.anthropic.com/claude). The result went
+[Claude Opus 5](https://www.anthropic.com/claude), and most of the code, tests and documentation
+were written with Anthropic's [Claude Sonnet 5](https://www.anthropic.com/claude). Since late
+September 2026 the work — bug fixes found on a production cluster, new placement rules, reviews of
+the documentation and the releases — has been done with
+[Claude Opus 5.5](https://www.anthropic.com/claude). Each commit names the model that wrote it in
+its `Co-Authored-By:` trailer. The result went
 through two independent rounds of review: one by a human maintainer, and one by
 [Z.ai](https://z.ai)'s GLM 5.3 model acting as a second, automated reviewer. `REVIEW.md` is the
 standing record of both.
