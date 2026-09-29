@@ -199,6 +199,7 @@
         "max_replans_per_run": { "type": "integer", "minimum": 0 },
         "abort_on_failure": { "type": "boolean" },
         "poll_interval_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "api_outage_timeout": { "type": ["string", "number"], "minimum": 0 },
         "locks": {
           "type": "object",
           "additionalProperties": false,

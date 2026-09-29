@@ -24,14 +24,17 @@ snapshot at the start of the run").
 
 from __future__ import annotations
 
+import logging
 import threading
-from typing import Any, Callable
+import time
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 
 import requests
 from proxmoxer import AuthenticationError, ProxmoxAPI, ResourceException
 
 from proxmox_storage_drs.config import ProxmoxConfig
-from proxmox_storage_drs.exceptions import PveApiError
+from proxmox_storage_drs.exceptions import PveApiError, PveUnreachableError
 
 # proxmoxer's own https-backend default (5s) is tuned for an interactive CLI
 # rather than a bounded thread pool fetching hundreds of VM configs; 10s is a
@@ -169,6 +172,23 @@ def build_client(config: ProxmoxConfig) -> "PveClient":
     return PveClient(api, reauthenticate=lambda: _build_api(config))
 
 
+logger = logging.getLogger(__name__)
+
+
+def _api_error(message: str, transient: bool) -> PveApiError:
+    return PveUnreachableError(message) if transient else PveApiError(message)
+
+
+def _is_server_error(exc: ResourceException) -> bool:
+    """A 5xx: the proxy or node could not serve the request (PVE itself uses
+    595/596 for "no route to node" / "connection timed out")."""
+    return int(getattr(exc, "status_code", 0) or 0) >= 500
+
+
+def _is_unreachable(exc: requests.RequestException) -> bool:
+    return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+
+
 class PveClient:
     """One method per IMPLEMENTATION_PLAN.md section 3.5 endpoint.
 
@@ -198,8 +218,12 @@ class PveClient:
         # correctness-preserving, if not maximally efficient, simplification
         # given re-authentication is expected to be rare.
         self._reauth_lock = threading.Lock()
+        self._outage_tolerance = 0.0
+        # Injection points for tests, like `execute.Clock`.
+        self._sleep: Callable[[float], None] = time.sleep
+        self._monotonic: Callable[[], float] = time.monotonic
 
-    def _call(self, description: str, action: Any) -> Any:
+    def _call_once(self, description: str, action: Any) -> Any:
         """Run one ``proxmoxer`` call, wrapping every failure as :class:`PveApiError`.
 
         ``ResourceException`` covers HTTP-level API errors (4xx/5xx);
@@ -224,24 +248,72 @@ class PveClient:
                 try:
                     self._api = self._reauthenticate()
                 except (AuthenticationError, requests.RequestException) as reauth_exc:
-                    raise PveApiError(
+                    raise _api_error(
                         f"{description}: authentication ticket was rejected and "
-                        f"re-authenticating failed too: {reauth_exc}"
+                        f"re-authenticating failed too: {reauth_exc}",
+                        isinstance(reauth_exc, requests.RequestException)
+                        and _is_unreachable(reauth_exc),
                     ) from reauth_exc
             try:
                 return action()
             except (ResourceException, AuthenticationError) as retry_exc:
-                raise PveApiError(
-                    f"{description}: still failed after re-authenticating: {retry_exc}"
+                raise _api_error(
+                    f"{description}: still failed after re-authenticating: {retry_exc}",
+                    isinstance(retry_exc, ResourceException) and _is_server_error(retry_exc),
                 ) from retry_exc
             except requests.RequestException as retry_exc:
-                raise PveApiError(
-                    f"{description}: request failed after re-authenticating: {retry_exc}"
+                raise _api_error(
+                    f"{description}: request failed after re-authenticating: {retry_exc}",
+                    _is_unreachable(retry_exc),
                 ) from retry_exc
         except ResourceException as exc:
-            raise PveApiError(f"{description}: {exc}") from exc
+            raise _api_error(f"{description}: {exc}", _is_server_error(exc)) from exc
         except requests.RequestException as exc:
-            raise PveApiError(f"{description}: request failed: {exc}") from exc
+            raise _api_error(f"{description}: request failed: {exc}", _is_unreachable(exc)) from exc
+
+    def _call(self, description: str, action: Any, *, idempotent: bool = True) -> Any:
+        """:meth:`_call_once`, retried while the API is unreachable.
+
+        Only inside :meth:`outage_tolerance` (the executor opens one around a
+        run's mutating phase: once a migration is under way, a network
+        maintenance window must not turn into a failed run) and only for
+        ``idempotent`` calls -- a ``move_disk`` POST whose connection dropped
+        may or may not have been accepted, so repeating it could start a
+        second move. Backs off 5s doubling to 60s; re-raises the last error
+        once the tolerance is spent or for any error that is not
+        ``transient`` (the API answered, and said no)."""
+        outage_start: float | None = None
+        delay = 5.0
+        while True:
+            try:
+                return self._call_once(description, action)
+            except PveApiError as exc:
+                if not (idempotent and exc.transient and self._outage_tolerance > 0):
+                    raise
+                now = self._monotonic()
+                outage_start = now if outage_start is None else outage_start
+                remaining = self._outage_tolerance - (now - outage_start)
+                if remaining <= 0:
+                    raise
+                logger.warning(
+                    "Proxmox VE API unreachable (%s); retrying in %.0fs, giving up in %.0fs",
+                    exc,
+                    delay,
+                    remaining,
+                    extra={"event": "pve_api_unreachable"},
+                )
+                self._sleep(min(delay, remaining))
+                delay = min(delay * 2, 60.0)
+
+    @contextmanager
+    def outage_tolerance(self, seconds: float) -> Iterator[None]:
+        """Retry idempotent calls that fail because the API is unreachable
+        for up to ``seconds`` (per call) while the block runs."""
+        previous, self._outage_tolerance = self._outage_tolerance, seconds
+        try:
+            yield
+        finally:
+            self._outage_tolerance = previous
 
     # ------------------------------------------------------------ read path
 
@@ -415,6 +487,7 @@ class PveClient:
         result: str = self._call(
             f"moving {vmid}:{disk} to {storage!r}",
             lambda: self._api.nodes(node).qemu(vmid).move_disk.post(**params),
+            idempotent=False,
         )
         return result
 

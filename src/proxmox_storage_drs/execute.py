@@ -64,6 +64,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
@@ -1264,16 +1265,40 @@ def execute_plan(
     default caps) for the strictly-sequential form this module has always
     used.
     """
-    if mode == "auto" and (
-        execution.max_concurrent_migrations > 1 or execution.max_concurrent_per_storage > 1
+    # An unreachable API (network maintenance, a node restarting) is waited
+    # out for every read of the run, not turned into a failed run with a
+    # migration possibly still going on the cluster.
+    with (
+        nullcontext()  # dry-run issues no API calls at all
+        if mode == "dry-run"
+        else client.outage_tolerance(execution.api_outage_timeout_seconds)
     ):
-        return _execute_concurrent(
+        if mode == "auto" and (
+            execution.max_concurrent_migrations > 1 or execution.max_concurrent_per_storage > 1
+        ):
+            return _execute_concurrent(
+                client,
+                group,
+                schedule_result,
+                migration,
+                execution,
+                exclude,
+                clock,
+                deadline,
+                move_costs_by_key,
+                max_migrations,
+                on_inflight_started,
+                on_inflight_finished,
+            )
+        return _execute_sequential(
             client,
             group,
             schedule_result,
             migration,
             execution,
+            mode,
             exclude,
+            confirm,
             clock,
             deadline,
             move_costs_by_key,
@@ -1281,22 +1306,6 @@ def execute_plan(
             on_inflight_started,
             on_inflight_finished,
         )
-    return _execute_sequential(
-        client,
-        group,
-        schedule_result,
-        migration,
-        execution,
-        mode,
-        exclude,
-        confirm,
-        clock,
-        deadline,
-        move_costs_by_key,
-        max_migrations,
-        on_inflight_started,
-        on_inflight_finished,
-    )
 
 
 def _execute_sequential(

@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import pytest
+import requests
 
 from proxmox_storage_drs.config import (
     ExcludeConfig,
@@ -402,6 +403,35 @@ def test_unreadable_task_list_does_not_block_the_move() -> None:
     client, _api = client_with({"cluster/tasks": broken})
     result = run(client, default_group(), (make_move(),))
     assert result.outcomes[0].status == "moved"
+
+
+def test_api_outage_while_the_move_task_runs_does_not_fail_the_run() -> None:
+    """Network maintenance between issuing `move_disk` and its completion."""
+    polls = {"n": 0}
+
+    def task_status(**_: object) -> dict[str, object]:
+        polls["n"] += 1
+        if polls["n"] <= 2:
+            raise requests.ConnectionError("network unreachable")
+        return {"status": "stopped", "exitstatus": "OK"}
+
+    client, _api = client_with({f"nodes/pve01/tasks/{UPID}/status": task_status})
+    client._sleep = lambda _seconds: None
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "moved"
+    assert polls["n"] == 3
+
+
+def test_api_outage_beyond_the_tolerance_still_raises() -> None:
+    def task_status(**_: object) -> dict[str, object]:
+        raise requests.ConnectionError("network unreachable")
+
+    client, _api = client_with({f"nodes/pve01/tasks/{UPID}/status": task_status})
+    client._sleep = lambda _seconds: None
+    ticks = iter(range(0, 10_000, 1000))
+    client._monotonic = lambda: float(next(ticks))
+    with pytest.raises(PveApiError):
+        run(client, default_group(), (make_move(),))
 
 
 def test_vm_lock_clears_within_timeout_then_proceeds() -> None:

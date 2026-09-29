@@ -222,6 +222,17 @@ from later moves in the same run — found by a review pass, not a test,
 since nothing at the time exercised two moves sharing a storage within
 one run.
 
+## An unreachable API is waited out, reads only
+
+`execute_plan()` (any mode but `dry-run`) runs inside
+`PveClient.outage_tolerance(execution.api_outage_timeout_seconds)`. Inside it
+`PveClient._call()` retries a call that raised a `transient` `PveApiError`
+(connection error/timeout, 5xx, including a failed re-login) with 5 s→60 s
+back-off until the tolerance is spent. `move_disk` passes `idempotent=False`:
+a dropped POST is ambiguous and a blind repeat could start a second move.
+Every poll, lock check and preflight read is covered in one place, in both
+executors, with no per-loop code.
+
 ## VM locks are an open set, waited out, never whitelisted
 
 `_wait_for_unlocked()` treats any non-empty `config.lock` as "wait," full

@@ -34,7 +34,20 @@ class PveApiError(DrsError):
     """The Proxmox VE API returned an error or an unusable response.
 
     See IMPLEMENTATION_PLAN.md section 3.5.
+
+    ``transient`` is set when the API could not be *reached* (connection
+    refused, timeout, a 5xx from the proxy or a node): the request says
+    nothing about the cluster, and asking again later may well succeed.
     """
+
+    transient = False
+
+
+class PveUnreachableError(PveApiError):
+    """A :class:`PveApiError` with ``transient`` set: the API could not be
+    reached, or a node behind it could not answer."""
+
+    transient = True
 
 
 class TopologyError(DrsError):

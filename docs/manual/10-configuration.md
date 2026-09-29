@@ -1104,6 +1104,21 @@ Duration, default `10`.
 
 How often an in-flight `move_disk` task's status is polled.
 
+### `execution.api_outage_timeout`
+
+Duration, default `1h`. `0` disables.
+
+While `apply` executes, a Proxmox VE API read that fails because the API
+cannot be reached — connection refused or timed out, or an HTTP 5xx, as during
+network maintenance or a node restart — is retried with back-off (5 s doubling
+to 60 s) for up to this long, instead of ending the run while a migration may
+still be going on. The clock is per call and restarts after each success. An
+error the API actually answers (4xx) is never retried. `move_disk` itself is
+never retried blindly: a connection that dropped after the request went out
+may still have started the task; if the run does give up, the next run
+discovers a still-running move (`state.json` and the cluster task list) and
+leaves that VM alone.
+
 ### `execution.locks.wait_timeout`
 
 Duration, default `4h`.

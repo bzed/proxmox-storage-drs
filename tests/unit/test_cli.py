@@ -8,9 +8,10 @@ import argparse
 import dataclasses
 import json
 import logging
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, ContextManager
 
 import pytest
 import yaml
@@ -55,6 +56,9 @@ class _FakeClient(str):
 
     def node_names(self) -> list[str]:
         return []
+
+    def outage_tolerance(self, seconds: float) -> ContextManager[None]:
+        return nullcontext()
 
 
 FAKE_CLIENT = _FakeClient("fake-client")
