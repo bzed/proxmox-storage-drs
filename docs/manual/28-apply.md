@@ -163,6 +163,11 @@ refused and the whole run fails; see "When something cannot be read".
 A VM config lock (`backup`, `snapshot`, `migrate`, or any other value —
 this set is never whitelisted, see `docs/internals/92-execute.md`) makes
 `apply` wait, not fail, up to `execution.locks.wait_timeout_seconds`.
+So does a task still running on the VM — typically the "Erase data" job
+(`imgdel`) of an earlier move — because it can hold the config file's own
+lock and would make the move fail with `can't lock file ... - got timeout`;
+console sessions do not count. It is the same wait, with the same timeout and
+`on_timeout` handling.
 What happens on that timeout depends on `execution.locks.on_timeout`:
 `skip` (the default) reports the move `skipped` and continues with the
 rest of the plan; `abort` reports it `failed` and stops the *whole run*

@@ -232,6 +232,15 @@ half-completed operation on someone else's backup or snapshot). What
 happens after `execution.locks.wait_timeout_seconds` depends on
 `execution.locks.on_timeout`:
 
+`_check_lock_once()` also reports a task still running on the VM
+(`_active_task_on_vm()`: `/cluster/tasks` entry with the vmid as `id`, no
+`endtime`/`status`, confirmed by `task_status()`; console task types
+excluded). An `imgdel` job from an earlier move can hold the config flock
+while `lock:` reads clear, and the `move_disk` task would die on `can't lock
+file`. It is waited out through the same path; the retry below stays the
+backstop when the task list cannot be read.
+
+
 - `"skip"` (the default) — report the move `"skipped"`, continue with the
   rest of the plan.
 - `"abort"` — report it `"failed"` and set `MoveOutcome.always_stop`,

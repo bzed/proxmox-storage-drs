@@ -1109,7 +1109,9 @@ How often an in-flight `move_disk` task's status is polled.
 Duration, default `4h`.
 
 How long to wait for a VM's config `lock` (any non-empty value — the set is
-treated as open-ended and never whitelisted) to clear before applying
+treated as open-ended and never whitelisted) to clear, or for a task still
+running on the VM (such as the "Erase data" job of an earlier move) to finish,
+before applying
 `execution.locks.on_timeout`. Generous by default: a backup of a large VM
 can easily run for hours, and that is a normal, not exceptional, condition.
 
