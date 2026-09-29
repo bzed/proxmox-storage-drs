@@ -45,12 +45,30 @@ off its `dry-run` default.
 
 ### Step 1 — install
 
-There is no public apt repository yet, so `apt install pve-storage-drs` works only once you have
-built the package and put it in a repository of your own — or installed the `.deb` directly:
+**Every release is published as a ready-built Debian package** on the
+[GitHub releases page](https://github.com/bzed/proxmox-storage-drs/releases): an
+architecture-independent `pve-storage-drs_<version>_all.deb`, with a `SHA256SUMS` file next to it.
+There is no apt repository yet, so download the `.deb` and install it with `apt`, which pulls its
+dependencies from the trixie archive a PVE node already has configured:
+
+```sh
+VERSION=0.1.13      # the newest release on the releases page
+BASE=https://github.com/bzed/proxmox-storage-drs/releases/download/debian/$VERSION
+wget "$BASE/pve-storage-drs_${VERSION}_all.deb" "$BASE/SHA256SUMS"
+sha256sum -c SHA256SUMS
+apt install ./pve-storage-drs_${VERSION}_all.deb
+```
+
+The package is not signed. `SHA256SUMS` comes from the same release page as the `.deb`, so it
+catches a corrupted download, not a tampered release. A release is only published after CI has
+built the package in a `debian:trixie` container, run lintian on it, installed it and run its
+autopkgtests there.
+
+To build the package yourself instead:
 
 ```sh
 make deb                                     # builds ../pve-storage-drs_*_all.deb
-apt install ../pve-storage-drs_*_all.deb     # or: dpkg -i ... && apt -f install
+apt install ../pve-storage-drs_*_all.deb
 ```
 
 The Debian package targets **trixie**, the base of PVE 9.x, and pulls in a real MILP solver
@@ -174,7 +192,7 @@ pve-storage-drs -c /etc/pve/drs.yaml explain    # the same plan, narrated
 
 `plan` never executes anything, in any mode. `explain` runs the identical pipeline and then
 narrates what `plan`'s output does not print: every disk pinned this run and why, VMs a pin leaves
-spread across storages, the objective's five terms individually, the payback arithmetic, and —
+spread across storages, the objective's six terms individually, the payback arithmetic, and —
 when a group's gate said "act" but the solver still chose to move nothing — the closest move it
 rejected and what it would have cost. That last one answers the most common question this tool
 gets asked.
@@ -206,8 +224,9 @@ rather than preventing it.
 
 An `auto` run logs its full decision trail — gate, load, plan, objective, payback, and every
 migration with its PVE task UPID — without needing `-v`, as JSON, because under a timer that log
-is the only record of what happened to your cluster. Two options suppress it and neither belongs
-in a timer unit: `--quiet` and `--log-level error`. See
+is the only record of what happened to your cluster. `--log-level warning` or `error` on such a
+run is raised back up to `info` rather than discarding it; `--quiet` is the one option that does
+discard it, and it does not belong in a timer unit. See
 [`docs/manual/35-logging.md`](docs/manual/35-logging.md).
 
 To have your monitoring system watch an unattended run, set `monitoring.status_file`: `apply` then
@@ -267,11 +286,13 @@ the only setting that distinguishes them.
 
 ## Status
 
-Implemented and dogfooded against a production cluster. All eleven phases of
-`IMPLEMENTATION_PLAN.md` §12 are done — from reading the cluster and Prometheus, through the
-gates, the solver (CBC when installed, a dependency-free heuristic otherwise), move
-ordering and execution, to Debian packaging, the `collect-testdata` / `--replay` diagnostic-bundle
-subsystem and the §2.3 logging policy. Every command, including `apply`'s unattended `auto` mode
+Implemented, dogfooded against a production cluster, and released as a Debian package — see
+[Step 1](#step-1--install). Phases 1–14 of `IMPLEMENTATION_PLAN.md` §12 are done — from reading
+the cluster and Prometheus, through the gates, the solver (CBC when installed, a dependency-free
+heuristic otherwise), move ordering and execution, to Debian packaging, the `collect-testdata` /
+`--replay` diagnostic-bundle subsystem, the §2.3 logging policy, the capacity-spread objective,
+the free-space requirements and forecast-driven placement. Phase 15, an internal refactor of how
+configuration defaults are stored, is still open and changes no behaviour. Every command, including `apply`'s unattended `auto` mode
 and `explain`'s narration of the pins, fragmentation and payback arithmetic behind a plan, is
 implemented and covered by the test suite.
 
@@ -292,8 +313,9 @@ left alone until you have a reason to change it.
 [`config/drs.example.yaml`](config/drs.example.yaml) is the full annotated reference: every key,
 its default, and why it exists, in the order `10-configuration.md` documents them.
 [`docs/manual/10-configuration.md`](docs/manual/10-configuration.md) is the prose version of the
-same thing, one section per key. Both are generated from — and must never drift from — the actual
-defaults in `config.py` and what `--help` prints (`.agents/documentation.md`).
+same thing, one section per key. Both are written by hand, and the test suite keeps them honest:
+the example must validate against the configuration schema and carry every top-level key, and the
+manual must document every key the schema has and no key it does not (`.agents/documentation.md`).
 
 ## Contributing test data
 
@@ -425,8 +447,14 @@ targeting **Debian trixie**, the base of Proxmox VE 9.x. Dependencies are chosen
 in trixie, so the package installs on a management host with no outbound network; `debian/tests`
 installs the built package on a system carrying only its `Depends` and proves the command runs.
 
+Every `debian/<version>` tag is built by GitHub Actions and published, once the package has
+passed lintian and its install-and-run test, as a
+[GitHub release](https://github.com/bzed/proxmox-storage-drs/releases) carrying the `.deb` and a
+`SHA256SUMS` file; [Step 1](#step-1--install) shows how to install it. There is no apt repository
+yet — put the `.deb` into one of your own if you want `apt install pve-storage-drs` and
+`apt upgrade` to work.
+
 ```sh
-apt install pve-storage-drs   # once added to a repository you control
 make deb                      # local build; CI builds it in a debian:trixie container and with sbuild
 ```
 

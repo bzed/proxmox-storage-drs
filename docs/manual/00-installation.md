@@ -77,11 +77,29 @@ need revisiting later; if you set up the credential read-only for now, add
 
 ## Installing the package
 
-On a Debian trixie host (which is what Proxmox VE 9.x is built on):
+On a Debian trixie host (which is what Proxmox VE 9.x is built on). Every
+release is published as a ready-built package on the project's GitHub
+releases page, <https://github.com/bzed/proxmox-storage-drs/releases>: one
+architecture-independent `pve-storage-drs_<version>_all.deb`, with a
+`SHA256SUMS` file beside it. There is no apt repository yet, so download the
+`.deb` and install it with `apt`, which fetches the dependencies from the
+trixie archive the host already uses:
 
 ```sh
-apt install pve-storage-drs
+VERSION=0.1.13      # the newest release on the releases page
+BASE=https://github.com/bzed/proxmox-storage-drs/releases/download/debian/$VERSION
+wget "$BASE/pve-storage-drs_${VERSION}_all.deb" "$BASE/SHA256SUMS"
+sha256sum -c SHA256SUMS
+apt install ./pve-storage-drs_${VERSION}_all.deb
 ```
+
+The package is not signed. `SHA256SUMS` comes from the same page as the
+`.deb`, so it detects a corrupted download, not a tampered release. A
+release is published only after the project's CI has built the package in a
+clean Debian trixie container, checked it with lintian, installed it and run
+its tests there. If you keep a local apt repository, put the `.deb` into it
+and `apt install pve-storage-drs` and `apt upgrade` work as usual; from a
+source checkout, `make deb` builds the same package.
 
 This installs the `pve-storage-drs` executable, its manpage, the example
 configuration at `/usr/share/doc/pve-storage-drs/examples/drs.example.yaml`,
