@@ -120,6 +120,16 @@ Every caller in `collect.py` treats `None` as "drop this record", never as
 what section 16.3 means by "unmapped means dropped": the failure mode of a
 smaller bundle is preferred over the failure mode of a leak, unconditionally.
 
+**An allowlisted key is not a scrubbed value.** `CLUSTER_TASK_FIELDS` allows
+a task's `id`, and for a VM task that is the vmid — the same one the UPID
+embeds. `_anonymize_cluster_tasks()` once mapped the UPID and copied `id`
+through untouched, so a bundle carried each real vmid right next to its
+pseudonym; a small integer passes every value-pattern check, and the leak was
+found by reading a real bundle by hand. `id` is now taken from the mapped
+UPID, and dropped from an entry with no UPID. The scrub audit
+(`validate_corpus._scrub_task_ids()`) checks that every task's `id` equals the
+id its UPID carries.
+
 **Free text gets a second look.** A handful of `verify_metrics()` finding
 messages embed real values directly in human-readable prose (a sample
 series' raw label dict, a coverage gap's `vmid:device`) — the allowlist

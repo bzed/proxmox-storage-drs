@@ -602,6 +602,10 @@ LONE_SMALL_DISK_REASON = (
     "small disk with no larger disk of its VM in this group (migration.tiny_disk_bytes)"
 )
 
+#: How many unreferenced volumes a section 3.7 pin reason names before it
+#: says "and N more" -- the reason is repeated on every disk of the VM.
+_UNREFERENCED_VOLUMES_SHOWN = 2
+
 
 def is_small_disk(disk: Disk, tiny_disk_bytes: int) -> bool:
     """Below ``migration.tiny_disk_bytes`` (bytes): section 5.4's `D^big`
@@ -722,12 +726,24 @@ def _disk_snapshot_or_orphan_reason(
     if real_snapshots:
         return f"snapshots present ({len(real_snapshots)})"
 
+    # Name the volume(s): an orphan does not appear anywhere else the
+    # operator looks (not in the VM config, not in the plan's disk list),
+    # so a reason that only says "an unreferenced volume exists" sends them
+    # hunting through every storage listing by hand (section 3.7 item 3).
     referenced_volids = {f"{storage}:{name}" for storage, name, _ in disk_specs.values()}
-    for storage_id, _name, _params in disk_specs.values():
+    unreferenced: set[str] = set()
+    for storage_id in {storage for storage, _name, _params in disk_specs.values()}:
         for item in content_by_storage.get(storage_id, ()):
-            if item.get("vmid") == vmid and item.get("volid") not in referenced_volids:
-                return "unreferenced companion volume (snapshot chain or orphan)"
-    return None
+            volid = item.get("volid")
+            if item.get("vmid") == vmid and volid not in referenced_volids:
+                unreferenced.add(str(volid))
+    if not unreferenced:
+        return None
+    names = sorted(unreferenced)
+    shown = ", ".join(names[:_UNREFERENCED_VOLUMES_SHOWN])
+    if len(names) > _UNREFERENCED_VOLUMES_SHOWN:
+        shown += f" and {len(names) - _UNREFERENCED_VOLUMES_SHOWN} more"
+    return f"unreferenced companion volume {shown} (snapshot chain or orphan)"
 
 
 def pending_disk_reasons(pending: list[dict[str, Any]]) -> dict[str, str]:

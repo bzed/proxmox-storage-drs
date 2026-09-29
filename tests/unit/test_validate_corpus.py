@@ -496,3 +496,22 @@ def test_check_does_not_adopt_a_committed_case_that_was_itself_skipped() -> None
     expected = {"cases": [_case("hw", "no sm", None)]}
     _, count = vc.adopt_committed_for_skipped(expected, json.dumps(committed))
     assert count == 0
+
+
+@needs_full_checkout
+def test_scrub_pve_dir_flags_a_task_id_that_is_not_its_upids_id(tmp_path: Path) -> None:
+    """A raw vmid in a task's ``id`` is a small integer that passes every
+    value-pattern check; only the cross-check against the (pseudonymized)
+    UPID catches it."""
+    pve_dir = tmp_path / "pve"
+    pve_dir.mkdir()
+    upid = "UPID:node-aaaaaaaa:00000000:00000000:6ABA56F5:qmmove:506242:user-bbbbbbbb@pve:"
+    tasks = [
+        {"id": "129", "type": "qmmove", "upid": upid},
+        {"id": "506242", "type": "qmmove", "upid": upid},
+        {"id": "", "type": "imgdel", "upid": upid.replace("qmmove:506242", "imgdel:")},
+    ]
+    (pve_dir / "cluster-tasks.json").write_text(json.dumps(tasks), encoding="utf-8")
+    violations = vc._scrub_pve_dir(pve_dir)
+    assert len(violations) == 1
+    assert "[0].id" in violations[0] and "'129'" in violations[0]

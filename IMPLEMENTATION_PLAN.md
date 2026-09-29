@@ -1078,7 +1078,11 @@ VM shut down (out of scope — this tool never stops a VM, §1). So the policy i
    load remain accounted for in (C4)/(C5)/(C6); it is not demoted to a foreign volume.
 3. **Complain, every run, at WARN.** List each affected VM with its pinned bytes and pinned load,
    and the group total of both. A one-line "3 VMs skipped" is not enough: the operator needs to know
-   *which* snapshots to clear to unblock balancing.
+   *which* snapshots to clear to unblock balancing. For an unreferenced volume the reason names it
+   (`storage:volume`, the first two and a count of the rest): it appears nowhere else the operator
+   looks — not in the VM config, not among the plan's disks — and it is usually the source copy a
+   move without "delete source" left behind. The tool never deletes it (§9.4); the operator checks
+   it and removes it by hand.
 4. **Say when the goal has become unreachable.** If pinned load exceeds
    `report.warn_pinned_load_fraction` of a group's total (default 0.25), the residual imbalance may
    be structural rather than a planning failure. Report the best achievable spread *given the pins*
@@ -3970,7 +3974,7 @@ invert by brute force over a name list.
 | vmid | `100 + (HMAC mod 899_900)`, deterministic linear probing on collision | Must stay an integer: it is a PromQL label value, a config value in `exclude.vmids` and a component of a volume id. Probing walks candidates in order of *original* vmid so the result never depends on iteration order |
 | Volume id | rebuilt as `<storage-pseudonym>:<prefix>-<vmid-pseudonym>-disk-<n>[.<ext>]` | The structural prefix (`vm-`, `base-`), the disk index and an optional trailing `.<ext>` (e.g. `.qcow2`, PVE's own format marker on the volume name for qcow2-on-shared-LVM and similar cases, confirmed against a real cluster) survive because §3.5's parser and §3.6's movability rules read them, and because the same string must still match its own storage-content listing entry at replay time. A volume whose name matches neither the pattern nor its extension-bearing form is dropped |
 | Tag, pool | `tag-<8 hex>`, `pool-<8 hex>` | Pseudonymized rather than dropped because `exclude.tags` filters on them; the same mapping rewrites `exclude.tags` in `config.yaml` so the exclusion replays |
-| UPID | rebuilt from anonymized parts | `UPID:{node}:{pid}:{pstart}:{starttime}:{type}:{id}:{user}:`, the grammar confirmed against a real cluster in `crashrecovery.py`. Node, id and user are mapped; `pid`/`pstart` are replaced with fixed constants (they identify a process on a named host and nothing the engine reads) |
+| UPID | rebuilt from anonymized parts | `UPID:{node}:{pid}:{pstart}:{starttime}:{type}:{id}:{user}:`, the grammar confirmed against a real cluster in `crashrecovery.py`. Node, id and user are mapped; `pid`/`pstart` are replaced with fixed constants (they identify a process on a named host and nothing the engine reads). A task entry's own `id` field is the same vmid, so it is set to the id the mapped UPID carries — never copied raw — and dropped from an entry with no UPID; the scrub audit checks the two agree |
 | Username / realm | `user-<8 hex>@realm` | Only ever seen inside a UPID |
 | Metric name | **as built (REVIEW.md X-08): not anonymized, carried verbatim** | The operator's own configured names (`config.metrics.read_ops` etc.) reach the bundle in `config.yaml`, the query text and every `label_values` capture, unchanged. This table used to promise canonical `drs_rd_operations`/`drs_wr_bytes`/… names instead; that mapping was never built. The as-built behaviour leaks nothing (the names are already the operator's own config, already in `config.yaml`) and is self-consistent by construction rather than by a second mapping that could drift from it |
 | Prometheus label name | the configured `vmid`/`device`/`node` label names are kept verbatim; every other label is **dropped** | Label *names* are chosen by the operator's Telegraf config and can be identifying (`customer`, `datacenter`), but the three configured ones must survive or the bundle cannot be joined. They are already in `config.yaml`, so they leak nothing the config does not |

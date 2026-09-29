@@ -177,8 +177,9 @@ Identical text to what `show-load` already prints per disk as
 movable disks, because pins are `explain`'s subject, not an aside.
 
 A pin with something to actually act on or wait for gets a trailing
-`→ <hint>` — "clear snapshots to unblock" for a real snapshot, "remove the
-stale reference to unblock" for an orphaned volume, "apply the pending
+`→ <hint>` — "clear snapshots to unblock" for a real snapshot, "check that
+volume and, if it is a leftover copy, delete it by hand to unblock" for an
+unreferenced volume (the reason names it, as `storage:volume`), "apply the pending
 change (reboot the VM) or revert it, then re-check" for a pending config
 change, "re-check next run" for a cooldown, "re-check next run once the
 lock releases" for a VM lock. A standing policy exclusion (`exclude.*`, or

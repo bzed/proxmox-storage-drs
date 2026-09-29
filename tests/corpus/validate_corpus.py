@@ -253,12 +253,33 @@ def _scrub_node_or_storage_ids(bundle_dir: Path) -> list[str]:
     return violations
 
 
+def _scrub_task_ids(path: Path) -> list[str]:
+    """A task's ``id`` is the vmid its UPID also embeds, so the pseudonymized
+    UPID is the only value it may carry. A different one is a vmid that
+    escaped the mapper -- small integers pass every value-pattern check, so
+    only this cross-check can catch it."""
+    violations = []
+    for i, task in enumerate(json.loads(path.read_text(encoding="utf-8"))):
+        if not isinstance(task, dict) or "id" not in task:
+            continue
+        upid = task.get("upid")
+        upid_id = upid.split(":")[6] if isinstance(upid, str) and upid.count(":") >= 7 else None
+        if task["id"] != upid_id:
+            violations.append(
+                f"{path}#[{i}].id: {task['id']!r} is not the id its UPID carries ({upid_id!r})"
+            )
+    return violations
+
+
 def _scrub_pve_dir(pve_dir: Path) -> list[str]:
     violations: list[str] = []
     for name, allowlist in _PVE_ALLOWLISTS.items():
         path = pve_dir / name
         if path.is_file():
             violations.extend(_scrub_json_file(path, allowlist))
+    tasks_path = pve_dir / "cluster-tasks.json"
+    if tasks_path.is_file():
+        violations.extend(_scrub_task_ids(tasks_path))
     vm_config_dir = pve_dir / "vm-config"
     if vm_config_dir.is_dir():
         for path in sorted(vm_config_dir.glob("*.json")):

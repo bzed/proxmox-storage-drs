@@ -2829,8 +2829,10 @@ def test_pin_action_hint_names_something_to_do_only_when_there_is_something() ->
     hint (there is nothing to "unblock"), everything else does."""
     assert cli._pin_action_hint("snapshots present (2)") == "clear snapshots to unblock"
     assert (
-        cli._pin_action_hint("unreferenced companion volume (snapshot chain or orphan)")
-        == "remove the stale reference to unblock"
+        cli._pin_action_hint(
+            "unreferenced companion volume s:vm-1-disk-1 (snapshot chain or orphan)"
+        )
+        == "check that volume and, if it is a leftover copy, delete it by hand to unblock"
     )
     assert cli._pin_action_hint("cooldown: moved recently, 5.0m left") == "re-check next run"
     assert cli._pin_action_hint("locked: backup") == "re-check next run once the lock releases"
