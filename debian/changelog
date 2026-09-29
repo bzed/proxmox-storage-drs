@@ -1,3 +1,23 @@
+pve-storage-drs (0.1.14) trixie; urgency=medium
+
+  * docs: every release is published on GitHub as
+    pve-storage-drs_<version>_all.deb with a SHA256SUMS file. The README and
+    the manual's installation page now say so and give the download,
+    checksum and apt install commands. They also say the package is not
+    signed -- SHA256SUMS catches a corrupted download, not a tampered
+    release -- and what CI checks before a release is published.
+  * docs: README corrections -- phases 1-14 of the plan are done (phase 15,
+    an internal refactor, is open); explain breaks the objective into six
+    terms, not five; --log-level warning/error does not drop an unattended
+    run's audit trail, only --quiet does; the example configuration and the
+    manual are written by hand and checked by the test suite, not
+    generated. The AI disclaimer now names Claude Opus 5.5 as well.
+  * tests: the VERSION= line in the install instructions must match the
+    package version, so a version bump cannot leave them pointing at the
+    previous release.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Tue, 29 Sep 2026 12:00:15 +0200
+
 pve-storage-drs (0.1.13) trixie; urgency=medium
 
   * plan/apply: a group the gate sent to ACT whose plan moves nothing now
