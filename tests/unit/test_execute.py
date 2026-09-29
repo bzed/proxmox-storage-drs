@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import pytest
+import requests
 
 from proxmox_storage_drs.config import (
     ExcludeConfig,
@@ -152,6 +153,7 @@ DEFAULT_RESPONSES: dict[str, object] = {
     "nodes/pve01/qemu/101/move_disk": UPID,
     f"nodes/pve01/tasks/{UPID}/status": {"status": "stopped", "exitstatus": "OK"},
     "nodes/pve01/qemu/101/status/current": {"lock": None},
+    "cluster/tasks": [],
 }
 
 
@@ -326,6 +328,110 @@ def test_confirm_mode_no_callback_defaults_to_skip() -> None:
 
 
 # ---------------------------------------------------------------------- VM locks
+
+
+IMGDEL_UPID = "UPID:pve01:00001235:00ABCDF0:imgdel:101:root@pam:"
+
+
+def running_imgdel(**_: object) -> list[dict[str, object]]:
+    """`/cluster/tasks` shape for a task still running: no endtime/status."""
+    return [{"node": "pve01", "type": "imgdel", "id": "101", "upid": IMGDEL_UPID}]
+
+
+def test_running_task_on_the_vm_is_waited_out_before_move_disk(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The reported failure: an earlier move's "Erase data" (imgdel) job still
+    holds the VM's config flock, the config `lock:` reads clear, and the
+    `move_disk` task then dies on `can't lock file ... - got timeout`."""
+    polls = {"n": 0}
+
+    def task_status(**_: object) -> dict[str, object]:
+        polls["n"] += 1
+        return {"status": "running" if polls["n"] < 3 else "stopped", "exitstatus": "OK"}
+
+    client, api = client_with(
+        {"cluster/tasks": running_imgdel, f"nodes/pve01/tasks/{IMGDEL_UPID}/status": task_status}
+    )
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    with caplog.at_level(logging.WARNING, logger="proxmox_storage_drs.execute"):
+        result = run(client, default_group(), (make_move(),), clock=fc)
+    assert result.outcomes[0].status == "moved"
+    assert fc.slept and log_messages(caplog, "vm_locked")
+    assert "imgdel" in log_messages(caplog, "vm_locked")[0]
+    posts = [i for i, c in enumerate(api.calls) if c[0] == "POST"]
+    assert posts and posts[0] > max(i for i, c in enumerate(api.calls) if IMGDEL_UPID in c[1])
+
+
+def test_running_task_that_never_ends_is_skipped_not_failed() -> None:
+    client, api = client_with(
+        {
+            "cluster/tasks": running_imgdel,
+            f"nodes/pve01/tasks/{IMGDEL_UPID}/status": {"status": "running"},
+        }
+    )
+    execution = ExecutionConfig(
+        locks=LocksConfig(wait_timeout_seconds=100.0, poll_interval_seconds=30.0, on_timeout="skip")
+    )
+    fc = FakeClock(datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc))
+    result = run(client, default_group(), (make_move(),), execution=execution, clock=fc)
+    assert result.outcomes[0].status == "skipped"
+    assert "still locked" in result.outcomes[0].detail
+    assert not any(c[0] == "POST" for c in api.calls)
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        {"node": "pve01", "type": "vncproxy", "id": "101", "upid": IMGDEL_UPID},
+        {"node": "pve01", "type": "imgdel", "id": "999", "upid": IMGDEL_UPID},
+        {"node": "pve01", "type": "imgdel", "id": "101", "upid": IMGDEL_UPID, "status": "OK"},
+    ],
+)
+def test_console_other_vm_and_finished_tasks_do_not_hold_the_move(
+    task: dict[str, object],
+) -> None:
+    client, _api = client_with({"cluster/tasks": [task]})
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "moved"
+
+
+def test_unreadable_task_list_does_not_block_the_move() -> None:
+    def broken(**_: object) -> list[dict[str, object]]:
+        raise PveApiError("boom")
+
+    client, _api = client_with({"cluster/tasks": broken})
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "moved"
+
+
+def test_api_outage_while_the_move_task_runs_does_not_fail_the_run() -> None:
+    """Network maintenance between issuing `move_disk` and its completion."""
+    polls = {"n": 0}
+
+    def task_status(**_: object) -> dict[str, object]:
+        polls["n"] += 1
+        if polls["n"] <= 2:
+            raise requests.ConnectionError("network unreachable")
+        return {"status": "stopped", "exitstatus": "OK"}
+
+    client, _api = client_with({f"nodes/pve01/tasks/{UPID}/status": task_status})
+    client._sleep = lambda _seconds: None
+    result = run(client, default_group(), (make_move(),))
+    assert result.outcomes[0].status == "moved"
+    assert polls["n"] == 3
+
+
+def test_api_outage_beyond_the_tolerance_still_raises() -> None:
+    def task_status(**_: object) -> dict[str, object]:
+        raise requests.ConnectionError("network unreachable")
+
+    client, _api = client_with({f"nodes/pve01/tasks/{UPID}/status": task_status})
+    client._sleep = lambda _seconds: None
+    ticks = iter(range(0, 10_000, 1000))
+    client._monotonic = lambda: float(next(ticks))
+    with pytest.raises(PveApiError):
+        run(client, default_group(), (make_move(),))
 
 
 def test_vm_lock_clears_within_timeout_then_proceeds() -> None:
@@ -1597,6 +1703,7 @@ def concurrent_client_with(overrides: dict[str, object]) -> tuple[PveClient, Fak
         "nodes/pve01/storage/san-c/content": [],
         "nodes/pve01/storage/san-d/status": {"total": 8 * TIB, "used": 0},
         "nodes/pve01/storage/san-d/content": [],
+        "cluster/tasks": [],
     }
     responses.update(overrides)
     api = fake_api(responses)

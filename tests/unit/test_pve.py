@@ -8,9 +8,10 @@ tests/unit/fakes.py for FakeProxmoxResource, shared with test_topology.py.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import pytest
+import requests
 from proxmoxer import AuthenticationError, ResourceException
 
 from proxmox_storage_drs.config import AuthConfig, ProxmoxConfig
@@ -471,3 +472,68 @@ def test_build_client_reauthenticate_callback_rebuilds_a_fresh_api(
     second_api = client._reauthenticate()
     assert len(calls) == 2
     assert second_api is not client._api  # a genuinely new object, not the same one
+
+
+def _flaky(failures: int, exc: Exception) -> tuple[Callable[[], str], dict[str, int]]:
+    calls = {"n": 0}
+
+    def action() -> str:
+        calls["n"] += 1
+        if calls["n"] <= failures:
+            raise exc
+        return "ok"
+
+    return action, calls
+
+
+def _client_with_fake_time() -> tuple[PveClient, list[float]]:
+    client = PveClient(object())
+    slept: list[float] = []
+    now = {"t": 0.0}
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now["t"] += seconds
+
+    client._sleep = sleep
+    client._monotonic = lambda: now["t"]
+    return client, slept
+
+
+def test_unreachable_api_is_retried_inside_outage_tolerance() -> None:
+    client, slept = _client_with_fake_time()
+    action, calls = _flaky(3, requests.ConnectionError("down"))
+    with client.outage_tolerance(600):
+        assert client._call("x", action) == "ok"
+    assert calls["n"] == 4 and slept == [5.0, 10.0, 20.0]
+
+
+def test_outage_longer_than_tolerance_raises_a_transient_error() -> None:
+    client, slept = _client_with_fake_time()
+    action, _ = _flaky(10_000, requests.Timeout("slow"))
+    with client.outage_tolerance(30):
+        with pytest.raises(PveApiError) as info:
+            client._call("x", action)
+    assert info.value.transient and sum(slept) == 30
+
+
+def test_no_retry_by_default_for_non_transient_errors_or_non_idempotent_calls() -> None:
+    client, slept = _client_with_fake_time()
+    action, calls = _flaky(1, requests.ConnectionError("down"))
+    with pytest.raises(PveApiError):
+        client._call("x", action)  # no tolerance opened
+    with client.outage_tolerance(600):
+        with pytest.raises(PveApiError):
+            client._call("x", _flaky(1, ResourceException(403, "no", ""))[0])
+        with pytest.raises(PveApiError):
+            client._call("x", _flaky(1, requests.ConnectionError("down"))[0], idempotent=False)
+    assert slept == []
+    assert calls["n"] == 1
+
+
+def test_5xx_is_transient_and_tolerance_is_restored() -> None:
+    client, _ = _client_with_fake_time()
+    action, _ = _flaky(1, ResourceException(595, "no route to host", ""))
+    with client.outage_tolerance(600):
+        assert client._call("x", action) == "ok"
+    assert client._outage_tolerance == 0.0

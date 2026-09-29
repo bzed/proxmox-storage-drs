@@ -316,6 +316,13 @@ execution:
   abort_on_failure: true
   poll_interval_seconds: 10
 
+  # While executing, a PVE API read that fails because the API cannot be
+  # reached (connection refused/timed out, 5xx -- network maintenance, a node
+  # restarting) is retried with back-off for up to this long instead of ending
+  # the run mid-migration. 0 disables. move_disk itself is never retried
+  # blindly: a dropped connection may still have started the task.
+  api_outage_timeout: 1h
+
   # A VM config lock (backup, snapshot, migrate, clone, rollback, ...) blocks
   # move_disk. Locks are normal, not errors -- wait them out. The value set is
   # treated as open-ended: ANY non-empty lock means wait, never a whitelist.

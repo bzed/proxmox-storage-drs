@@ -222,6 +222,17 @@ from later moves in the same run — found by a review pass, not a test,
 since nothing at the time exercised two moves sharing a storage within
 one run.
 
+## An unreachable API is waited out, reads only
+
+`execute_plan()` (any mode but `dry-run`) runs inside
+`PveClient.outage_tolerance(execution.api_outage_timeout_seconds)`. Inside it
+`PveClient._call()` retries a call that raised a `transient` `PveApiError`
+(connection error/timeout, 5xx, including a failed re-login) with 5 s→60 s
+back-off until the tolerance is spent. `move_disk` passes `idempotent=False`:
+a dropped POST is ambiguous and a blind repeat could start a second move.
+Every poll, lock check and preflight read is covered in one place, in both
+executors, with no per-loop code.
+
 ## VM locks are an open set, waited out, never whitelisted
 
 `_wait_for_unlocked()` treats any non-empty `config.lock` as "wait," full
@@ -231,6 +242,15 @@ lock value this codebase has never seen, and guessing wrong risks a
 half-completed operation on someone else's backup or snapshot). What
 happens after `execution.locks.wait_timeout_seconds` depends on
 `execution.locks.on_timeout`:
+
+`_check_lock_once()` also reports a task still running on the VM
+(`_active_task_on_vm()`: `/cluster/tasks` entry with the vmid as `id`, no
+`endtime`/`status`, confirmed by `task_status()`; console task types
+excluded). An `imgdel` job from an earlier move can hold the config flock
+while `lock:` reads clear, and the `move_disk` task would die on `can't lock
+file`. It is waited out through the same path; the retry below stays the
+backstop when the task list cannot be read.
+
 
 - `"skip"` (the default) — report the move `"skipped"`, continue with the
   rest of the plan.

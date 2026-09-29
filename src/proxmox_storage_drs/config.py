@@ -301,6 +301,10 @@ class ExecutionConfig:
     max_replans_per_run: int = 3
     abort_on_failure: bool = True
     poll_interval_seconds: float = 10.0
+    # How long one PVE API read may keep failing because the API is
+    # unreachable (network maintenance, a node restarting) before the run
+    # gives up. Applies only while executing; 0 disables the retrying.
+    api_outage_timeout_seconds: float = 3600.0
     locks: LocksConfig = field(default_factory=LocksConfig)
     source_release: SourceReleaseConfig = field(default_factory=SourceReleaseConfig)
     time_windows: tuple[TimeWindow, ...] = ()
@@ -699,6 +703,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         max_replans_per_run=exec_raw.get("max_replans_per_run", 3),
         abort_on_failure=exec_raw.get("abort_on_failure", True),
         poll_interval_seconds=parse_duration_seconds(exec_raw.get("poll_interval_seconds", 10)),
+        api_outage_timeout_seconds=parse_duration_seconds(exec_raw.get("api_outage_timeout", "1h")),
         locks=locks,
         source_release=source_release,
         time_windows=time_windows,

@@ -64,6 +64,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
@@ -322,22 +323,64 @@ def _preflight(
     return _PreflightResult(
         None,
         node=node,
-        lock=lock if isinstance(lock, str) else None,
+        lock=lock if isinstance(lock, str) and lock else _active_task_on_vm(client, disk.vmid),
         volid=volid,
         config_size_bytes=parse_pve_config_size_bytes(params.get("size", "")),
     )
 
 
+# Console sessions carry the VM's id too but stay open for as long as the
+# operator's browser tab does, and never hold the config file's flock.
+_CONSOLE_TASK_TYPES = frozenset({"vncproxy", "vncshell", "spiceproxy", "spiceshell", "termproxy"})
+
+
+def _active_task_on_vm(client: PveClient, vmid: int) -> str | None:
+    """A still-running task on ``vmid`` (an ``imgdel`` "Erase data" job left
+    over from an earlier move, a backup, a start...), described for the
+    log, else ``None``. Any such task can hold the VM config file's flock
+    and make the `move_disk` task fail with ``can't lock file ... - got
+    timeout`` -- a failure discoverable *before* issuing it, so it is
+    waited out like a config ``lock:`` rather than raced.
+
+    ``/cluster/tasks`` lists a task without ``endtime``/``status`` while it
+    runs; the per-task status confirms it, since that list can carry a
+    stale entry. When either read fails there is nothing to wait on and
+    the task-lock-timeout retry remains the backstop."""
+    try:
+        for task in client.cluster_tasks():
+            upid, node = task.get("upid"), task.get("node")
+            if (
+                str(task.get("id")) != str(vmid)
+                or task.get("type") in _CONSOLE_TASK_TYPES
+                or "endtime" in task
+                or "status" in task
+                or not isinstance(upid, str)
+                or not isinstance(node, str)
+            ):
+                continue
+            if client.task_status(node, upid).get("status") == "running":
+                return f"{task.get('type')} task {upid}"
+    except PveApiError as exc:
+        logger.warning(
+            "could not check VM %s for running tasks: %s",
+            vmid,
+            exc,
+            extra={"event": "vm_task_scan_failed", "vmid": vmid},
+        )
+    return None
+
+
 def _check_lock_once(client: PveClient, node: str, vmid: int) -> str | None:
     """The one live read behind section 9.3.1's lock check: the VM's
-    current ``config.lock``, ``None`` when clear. Factored out so the
+    current ``config.lock``, else a task still running on it; ``None``
+    when clear. Factored out so the
     sequential executor's blocking :func:`_wait_for_unlocked` and the
     concurrent executor's own non-blocking per-cycle check (below) share
-    the identical read (AGENTS.md section 5) -- the concurrent case
+    one implementation (AGENTS.md section 5) -- the concurrent executor
     cannot block a whole poll cycle sleeping on one candidate's lock the
-    way the sequential wait loop does, since other moves may be able to
-    launch in the meantime."""
-    return client.vm_status_current(node, vmid).get("lock")
+    way the sequential one can."""
+    lock = client.vm_status_current(node, vmid).get("lock")
+    return lock or _active_task_on_vm(client, vmid)
 
 
 def _wait_for_unlocked(
@@ -1222,16 +1265,40 @@ def execute_plan(
     default caps) for the strictly-sequential form this module has always
     used.
     """
-    if mode == "auto" and (
-        execution.max_concurrent_migrations > 1 or execution.max_concurrent_per_storage > 1
+    # An unreachable API (network maintenance, a node restarting) is waited
+    # out for every read of the run, not turned into a failed run with a
+    # migration possibly still going on the cluster.
+    with (
+        nullcontext()  # dry-run issues no API calls at all
+        if mode == "dry-run"
+        else client.outage_tolerance(execution.api_outage_timeout_seconds)
     ):
-        return _execute_concurrent(
+        if mode == "auto" and (
+            execution.max_concurrent_migrations > 1 or execution.max_concurrent_per_storage > 1
+        ):
+            return _execute_concurrent(
+                client,
+                group,
+                schedule_result,
+                migration,
+                execution,
+                exclude,
+                clock,
+                deadline,
+                move_costs_by_key,
+                max_migrations,
+                on_inflight_started,
+                on_inflight_finished,
+            )
+        return _execute_sequential(
             client,
             group,
             schedule_result,
             migration,
             execution,
+            mode,
             exclude,
+            confirm,
             clock,
             deadline,
             move_costs_by_key,
@@ -1239,22 +1306,6 @@ def execute_plan(
             on_inflight_started,
             on_inflight_finished,
         )
-    return _execute_sequential(
-        client,
-        group,
-        schedule_result,
-        migration,
-        execution,
-        mode,
-        exclude,
-        confirm,
-        clock,
-        deadline,
-        move_costs_by_key,
-        max_migrations,
-        on_inflight_started,
-        on_inflight_finished,
-    )
 
 
 def _execute_sequential(
