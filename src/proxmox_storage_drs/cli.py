@@ -1733,7 +1733,7 @@ def _pin_action_hint(reason: str | None) -> str | None:
     if reason.startswith("snapshots present ("):
         return "clear snapshots to unblock"
     if reason.startswith("unreferenced companion volume"):
-        return "remove the stale reference to unblock"
+        return "check that volume and, if it is a leftover copy, delete it by hand to unblock"
     if reason.startswith("cooldown:"):
         return "re-check next run"
     if reason.startswith("locked:"):

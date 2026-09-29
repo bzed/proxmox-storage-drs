@@ -112,7 +112,9 @@ conditions: config exclusion (VM-level, then `exclude.disks`), a real
 snapshot or an unreferenced companion volume (section 3.7,
 `_disk_snapshot_or_orphan_reason` — the `"current"` entry `GET
 .../snapshot` always returns, verified on a live cluster, is filtered out
-before counting), an unapplied pending config change (section 3.8, below),
+before counting; for an unreferenced volume the reason names it,
+`storage:volume`, the first two sorted and a count of the rest, because it
+appears nowhere else the operator looks), an unapplied pending config change (section 3.8, below),
 the per-disk cooldown (below), a VM lock, then an `unusedN` disk when
 `exclude.include_unused_disks` is false. A disk gets at most one reason;
 the first that applies wins, matching how an operator would explain it.

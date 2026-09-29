@@ -27,6 +27,7 @@ from proxmox_storage_drs.topology import (
     Topology,
     _allowed_formats,
     _default_format,
+    _disk_snapshot_or_orphan_reason,
     _pin_reason,
     _split_tags,
     build_topology,
@@ -266,8 +267,9 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
     )
 
     # Orphan companion volume pins the VM's own (otherwise ordinary) disk.
+    # The reason names the volume: nothing else the operator sees does.
     assert disks_by_key["112:scsi0"].pinned_reason == (
-        "unreferenced companion volume (snapshot chain or orphan)"
+        "unreferenced companion volume san-a:vm-112-disk-1 (snapshot chain or orphan)"
     )
 
     # Pending-change-pinned (section 3.8): vm_config()'s own merged view
@@ -1416,3 +1418,26 @@ def test_build_topology_pins_a_small_disk_whose_vm_has_nothing_larger_in_the_gro
     assert disks["301:efidisk0"].pinned_reason == LONE_SMALL_DISK_REASON
     assert disks["302:efidisk0"].pinned_reason is None
     assert disks["302:scsi0"].pinned_reason is None
+
+
+def test_orphan_reason_names_at_most_two_volumes_then_counts_the_rest() -> None:
+    """Section 3.7 item 3: the operator must learn *which* volume blocks the
+    VM. The reason is repeated on every disk of the VM, so it names two and
+    counts the rest; a volume on a storage none of the VM's disks use is
+    not the VM's companion and is not named."""
+    specs: dict[str, tuple[str, str, dict[str, str]]] = {"scsi0": ("san-a", "vm-7-disk-0", {})}
+    content = {
+        "san-a": [
+            _content("san-a", 7, "disk-0", 1),
+            _content("san-a", 7, "disk-3", 1),
+            _content("san-a", 7, "disk-1", 1),
+            _content("san-a", 7, "disk-2", 1),
+        ],
+        "san-b": [_content("san-b", 7, "disk-9", 1)],
+    }
+    assert _disk_snapshot_or_orphan_reason(7, specs, [], content) == (
+        "unreferenced companion volume san-a:vm-7-disk-1, san-a:vm-7-disk-2 and 1 more"
+        " (snapshot chain or orphan)"
+    )
+    content["san-a"] = content["san-a"][:1]
+    assert _disk_snapshot_or_orphan_reason(7, specs, [], content) is None

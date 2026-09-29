@@ -486,6 +486,13 @@ def _anonymize_cluster_tasks(raw: list[dict[str, Any]], mapper: Mapper) -> list[
             if new_upid is None:
                 continue
             filtered["upid"] = new_upid
+            # ``id`` is the same vmid the UPID embeds; copying it raw left the
+            # real vmid next to its pseudonym. Take it from the mapped UPID.
+            if "id" in filtered:
+                filtered["id"] = new_upid.split(":")[6]
+        elif "id" in filtered:
+            # No UPID to take it from: never keep a raw id.
+            del filtered["id"]
         if isinstance(node, str):
             if node not in mapper.known_nodes:
                 continue

@@ -1290,3 +1290,39 @@ def test_anonymize_disk_value_counts_an_unknown_storage() -> None:
     mapper = _mapper(nodes=frozenset(), storages=frozenset())
     assert collect._anonymize_disk_value("san-unknown:vm-101-disk-0,size=10G", mapper) is None
     assert mapper.dropped_records == 1
+
+
+def test_anonymize_cluster_tasks_maps_the_task_id_with_the_upid() -> None:
+    """A task's ``id`` is the vmid its UPID embeds. It used to be copied
+    raw, leaving the real vmid beside its pseudonym (found by reading a
+    real bundle by hand); it must be the id the mapped UPID carries."""
+    mapper = _mapper(nodes=frozenset({"node1"}))
+    mapper.register_vmids([129])
+    raw = [
+        {
+            "id": "129",
+            "node": "node1",
+            "type": "qmmove",
+            "upid": "UPID:node1:0001:0002:6ABA56F5:qmmove:129:drs@pve:",
+            "status": "OK",
+        },
+        {
+            "id": "",
+            "node": "node1",
+            "type": "imgdel",
+            "upid": "UPID:node1:1:2:6ABA56F5:imgdel::drs@pve:",
+        },
+        {"id": "129", "node": "node1", "type": "qmmove"},  # no UPID to take the id from
+    ]
+    moved, imgdel, no_upid = _tasks_by_kind(collect._anonymize_cluster_tasks(raw, mapper))
+    pseudonym = str(mapper.vmid(129))
+    assert moved["id"] == pseudonym == moved["upid"].split(":")[6]
+    assert imgdel["id"] == ""
+    assert "id" not in no_upid
+    assert "129" not in json.dumps([moved, imgdel, no_upid])
+
+
+def _tasks_by_kind(tasks: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    with_upid = {t["type"]: t for t in tasks if "upid" in t}
+    (no_upid,) = (t for t in tasks if "upid" not in t)
+    return with_upid["qmmove"], with_upid["imgdel"], no_upid
