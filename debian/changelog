@@ -1,3 +1,30 @@
+pve-storage-drs (0.1.16) trixie; urgency=medium
+
+  * apply: a task still running on a VM is now waited out before its next
+    disk is moved, like a config lock, with the same execution.locks
+    wait_timeout, poll_interval and on_timeout. An "Erase data" (imgdel) job
+    left over from an earlier move can hold the VM's config file lock while
+    the config lock: line reads clear, and the move_disk task then failed
+    with "can't lock file ... - got timeout". Console sessions do not count.
+    The wait for a move's source volume to be released also waits for such a
+    task.
+  * apply: an unreachable Proxmox VE API (network maintenance, a node
+    restarting, a 5xx) no longer ends a run in the middle of a migration.
+    While executing, API reads that fail that way are retried with back-off
+    (5s doubling to 60s) for up to the new execution.api_outage_timeout
+    (default 1h, 0 disables). move_disk itself is never retried blindly: a
+    dropped connection may still have started the task, and the next run
+    finds a still-running move and leaves that VM alone.
+  * plan/apply: a VM pinned by a volume its config does not reference now
+    names that volume (storage:volume, the first two and a count) instead of
+    the generic "unreferenced companion volume", and says to check it and
+    delete it by hand.
+  * collect-testdata: each cluster task's id is now taken from its
+    pseudonymized UPID instead of being copied raw, which leaked the real
+    VM id; the scrub audit checks the two agree.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Tue, 29 Sep 2026 13:08:25 +0200
+
 pve-storage-drs (0.1.15) trixie; urgency=medium
 
   * tests: the new check that the install instructions name the current
