@@ -426,7 +426,9 @@ generated documentation. Three standing rules:
 the others:**
 
 1. **The version itself**, bumped in lockstep in `pyproject.toml`, `src/proxmox_storage_drs/__init__.py`
-   (`__version__` — `tests/unit/test_version.py` checks the two agree) and `debian/changelog`.
+   (`__version__` — `tests/unit/test_version.py` checks the two agree) and `debian/changelog`,
+   plus the `VERSION=` line of the install instructions in `README.md` and
+   `docs/manual/00-installation.md` (the same test checks those too).
 2. **A new `debian/changelog` entry**, signed `Bernd Zeimetz <bzed@debian.org>` (§0's one exception),
    covering *everything* since the previous entry — every REVIEW.md finding fixed, every
    user-visible or behavioural change — never split across entries and never backfilled into an
