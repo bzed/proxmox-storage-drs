@@ -1,3 +1,14 @@
+pve-storage-drs (0.1.15) trixie; urgency=medium
+
+  * tests: the new check that the install instructions name the current
+    version needs README.md and docs/, which pybuild's test copy does not
+    have, so it failed the 0.1.14 package build and 0.1.14 was never
+    published. It is now skipped there, like the other documentation checks;
+    it still runs from a full checkout. 0.1.14's changes ship in this
+    release.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Tue, 29 Sep 2026 12:06:50 +0200
+
 pve-storage-drs (0.1.14) trixie; urgency=medium
 
   * docs: every release is published on GitHub as
