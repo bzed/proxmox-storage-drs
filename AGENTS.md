@@ -257,10 +257,12 @@ whole plan on day one, only what is actually built, and must say so honestly whe
 the pinned requirements, the brand CSS) and `tools/build_site.sh` drive the GitHub Pages site:
 `.github/workflows/docs-pages.yml` builds it on every push and pull request and deploys it from
 `main`, with `mkdocs-material` from pip — the one carve-out from the apt rule (§9.3), legitimate
-precisely because the site is not part of the Debian package. It renders `IMPLEMENTATION_PLAN.md`,
-`docs/manual/` and `docs/internals/` from the same Markdown as the PDFs, so it cannot drift, and
-`strict: true` in `mkdocs.yml` makes a page missing from the `nav` or a broken link a build
-failure — the site's equivalent of `docs-check`. `make site` builds it locally for preview; nothing
+precisely because the site is not part of the Debian package. It renders `docs/manual/` and
+`docs/internals/` from the same Markdown as the PDFs, so it cannot drift — but deliberately not
+`IMPLEMENTATION_PLAN.md`, which stays in the repository and in the package's PDF: the plan is the
+specification for whoever builds the tool (section 0), not a web document. `strict: true` in
+`mkdocs.yml` makes a page missing from the `nav` or a broken link a build failure — the site's
+equivalent of `docs-check`. `make site` builds it locally for preview; nothing
 under `docs/.site/` or `docs/.site-html/` is ever committed.
 
 **The reference configuration is documentation too.** `config/drs.example.yaml` installs to
