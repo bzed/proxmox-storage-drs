@@ -11,12 +11,14 @@
 # and debian-package.yml stay apt-only, untouched.
 #
 # Nothing site-related is committed: the build runs tools/build_site.sh,
-# which assembles docs/.site from IMPLEMENTATION_PLAN.md, docs/manual/ and
-# docs/internals/ -- the same Markdown the committed PDFs are rendered from
-# -- and runs `mkdocs build` with strict:true, so a page missing from the
-# nav or a broken link fails the job. This is the site's equivalent of the
-# `docs-check` the PDFs get, and it runs on every pull request; the deploy
-# job publishes only from main.
+# which assembles docs/.site from docs/manual/ and docs/internals/ -- the
+# same Markdown the committed PDFs are rendered from -- and runs `mkdocs
+# build` with strict:true, so a page missing from the nav or a broken link
+# fails the job. (IMPLEMENTATION_PLAN.md is deliberately not on the site:
+# the plan is the specification for whoever builds the tool, not a web
+# document.) This is the site's equivalent of the `docs-check` the PDFs
+# get, and it runs on every pull request; the deploy job publishes only
+# from main.
 #
 # One repository setting is required, once: Settings -> Pages -> Build and
 # deployment -> Source must be "GitHub Actions".

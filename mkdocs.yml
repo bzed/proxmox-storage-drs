@@ -7,8 +7,13 @@
 # from the shipped documents (AGENTS.md section 8.6's single-generator rule
 # holds trivially: there is one generator, this file only points at it).
 #
+# The site carries docs/manual/ and docs/internals/ but not
+# IMPLEMENTATION_PLAN.md: the plan is the specification for whoever builds
+# the tool (AGENTS.md section 0), not a document the web audience needs, and
+# it stays where it already ships -- as a PDF in the package and in the repo.
+#
 # docs_dir is the throwaway tree tools/build_site.sh assembles from
-# IMPLEMENTATION_PLAN.md, docs/manual/ and docs/internals/ -- the sources stay
+# docs/manual/ and docs/internals/ -- the sources stay
 # where the PDF pipeline reads them, and no documentation file is duplicated.
 # `strict: true` makes every warning an error, which is what enforces that the
 # nav below lists every page: a file added to docs/manual/ without a nav entry
@@ -91,7 +96,6 @@ nav:
       - Safety properties, exit codes, build status: manual/30-safety-and-status.md
       - Logging: manual/35-logging.md
       - Monitoring — the status file: manual/36-monitoring.md
-  - Implementation Plan: IMPLEMENTATION_PLAN.md
   - Internals:
       - Overview: internals/00-overview.md
       - How a YAML file becomes a validated Config: internals/10-configuration.md

@@ -46,11 +46,16 @@ implements.
 |---|---|
 | Somebody running the tool | [**Operator manual**](manual/00-installation.md) — installation, configuration reference with every knob, the verification commands, how to read `plan` and `apply`, troubleshooting |
 | Whoever changes the code | [**Internals**](internals/00-overview.md) — the data path end to end: metrics in, load vector, gates, solver, scheduler, executor, `state.json` out |
-| Both, and the curious | [**Implementation plan**](IMPLEMENTATION_PLAN.md) — the specification the tool implements, with the full design derivations |
 
-The same three documents also ship as PDFs inside the Debian package, and the
-site is built from the same Markdown as those — in CI, on every push, so it
-cannot drift from what the package contains.
+Both ship as PDFs inside the Debian package too, and the site is built from
+the same Markdown as those — in CI, on every push, so it cannot drift from
+what the package contains.
+
+The [implementation plan](https://github.com/bzed/proxmox-storage-drs/blob/main/IMPLEMENTATION_PLAN.md)
+— the full specification the tool implements, with every design derivation —
+is deliberately not on the site. It is addressed to whoever builds or
+changes the tool rather than to whoever runs it, and it lives in the
+repository and as a PDF in the package.
 
 ## Getting the tool
 
