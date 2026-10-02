@@ -1,0 +1,27 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * Brand pinning for the Material theme (loaded via extra_css, after the
+ * theme's own palette). The palette in mkdocs.yml takes named colours only;
+ * this pins the accent to the exact Proxmox orange of docs/logo.svg
+ * (#E57000) in both colour schemes, so links, the search highlights and the
+ * active TOC entry carry the brand instead of Material's "deep orange"
+ * approximation (#FF6E00).
+ */
+
+:root,
+[data-md-color-scheme="default"],
+[data-md-color-scheme="slate"] {
+  --md-accent-fg-color: #e57000;
+  --md-accent-fg-color--transparent: rgba(229, 112, 0, 0.1);
+}
+
+/* Long identifiers — metric names, config paths, API routes — must wrap
+ * after underscores, the same problem the PDF pipeline solves with
+ * filters.lua's break-after-underscore trick. */
+code,
+td,
+th {
+  overflow-wrap: anywhere;
+}

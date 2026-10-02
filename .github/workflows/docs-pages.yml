@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# The GitHub Pages site: the repository's documentation rendered by MkDocs
+# Material. Pip-installed, which is the one deliberate exception to "CI
+# installs its tooling from apt" (AGENTS.md section 9.3): mkdocs-material has
+# no Debian package, and this pipeline is deliberately *not* one of the two
+# that validate the Debian package -- it ships nothing into it, proves
+# nothing about its dependencies, and a pip install here cannot hide the day
+# the packaged toolchain stops being enough. The Debian pipelines in tests.yml
+# and debian-package.yml stay apt-only, untouched.
+#
+# Nothing site-related is committed: the build runs tools/build_site.sh,
+# which assembles docs/.site from IMPLEMENTATION_PLAN.md, docs/manual/ and
+# docs/internals/ -- the same Markdown the committed PDFs are rendered from
+# -- and runs `mkdocs build` with strict:true, so a page missing from the
+# nav or a broken link fails the job. This is the site's equivalent of the
+# `docs-check` the PDFs get, and it runs on every pull request; the deploy
+# job publishes only from main.
+#
+# One repository setting is required, once: Settings -> Pages -> Build and
+# deployment -> Source must be "GitHub Actions".
+name: Docs site
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push to main supersedes an older one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install mkdocs-material
+        run: pip install --requirement docs/site/requirements.txt
+
+      - name: "Build (strict: every page in the nav, every link resolving)"
+        run: tools/build_site.sh
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/.site-html
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

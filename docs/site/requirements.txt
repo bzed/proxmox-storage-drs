@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Pinned requirements for the GitHub Pages build (tools/build_site.sh,
+# .github/workflows/docs-pages.yml). This is the one place in the project
+# where a pip-installed tool is legitimate: mkdocs-material has no Debian
+# package, and the site it builds is not part of the Debian package, ships
+# nothing into it, and validates nothing about it (AGENTS.md section 9.3).
+# Pin exactly: the site is built in CI only, and a surprise major upgrade of
+# the theme should be a deliberate change to this file, not a Tuesday.
+mkdocs-material==9.7.7

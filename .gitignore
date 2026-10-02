@@ -14,6 +14,10 @@ dist/
 # Paper build intermediates (the PDF itself in docs/ is committed)
 docs/.build/
 
+# Site build intermediates (the GitHub Pages site is built in CI, never committed)
+docs/.site/
+docs/.site-html/
+
 # Coverage artefacts
 .coverage
 .coverage.*

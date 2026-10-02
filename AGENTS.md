@@ -253,6 +253,16 @@ page and manual section that describe it, in the same commit — they do not nee
 whole plan on day one, only what is actually built, and must say so honestly where it is not
 (see `docs/manual/30-safety-and-status.md`'s per-command status table for the pattern).
 
+**The web rendering is generated, never committed.** `mkdocs.yml`, `docs/site/` (the landing page,
+the pinned requirements, the brand CSS) and `tools/build_site.sh` drive the GitHub Pages site:
+`.github/workflows/docs-pages.yml` builds it on every push and pull request and deploys it from
+`main`, with `mkdocs-material` from pip — the one carve-out from the apt rule (§9.3), legitimate
+precisely because the site is not part of the Debian package. It renders `IMPLEMENTATION_PLAN.md`,
+`docs/manual/` and `docs/internals/` from the same Markdown as the PDFs, so it cannot drift, and
+`strict: true` in `mkdocs.yml` makes a page missing from the `nav` or a broken link a build
+failure — the site's equivalent of `docs-check`. `make site` builds it locally for preview; nothing
+under `docs/.site/` or `docs/.site-html/` is ever committed.
+
 **The reference configuration is documentation too.** `config/drs.example.yaml` installs to
 `/usr/share/doc/pve-storage-drs/examples/` and is, in practice, the first thing most operators read.
 It is the one shipped artefact not generated from Markdown, which makes it the easiest to let rot:
@@ -465,6 +475,14 @@ the system toolchain.
 There is currently no pip exception: the one that used to exist (GitHub Actions `pip install`ing
 `ortools` for CP-SAT test coverage) was removed together with the CP-SAT backend (REVIEW.md AL-02
 — `ortools` has no Debian package and the backend could never run on the deployment target).
+
+The one pip install that does exist — `mkdocs-material`, pinned in `docs/site/requirements.txt`
+and installed by `.github/workflows/docs-pages.yml` — sits outside that rule on purpose: it builds
+the GitHub Pages site, a web rendering of the same Markdown as the PDFs, which is not part of the
+Debian package, ships nothing into it and validates nothing about it. It is a carve-out for a
+presentation pipeline, not a precedent: pip in a workflow that builds, tests or validates the
+*package* remains forbidden, and the two pipelines in `tests.yml` and `debian-package.yml` stay
+apt-only.
 
 The Salsa build has no network on purpose: that is what proves the package builds from trixie alone.
 If a module genuinely has to be fetched during a build, vendor it (§9.1 rule 2). Setting
