@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="pve-storage-drs logo: a disk moving between two storage pools" width="160">
+</p>
+
 # proxmox-storage-drs
 
 [![Proxmox](https://img.shields.io/badge/Proxmox-E57000?style=for-the-badge&logo=proxmox&logoColor=white)](https://proxmox.com/)
