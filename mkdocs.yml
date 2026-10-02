@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Configuration for the GitHub Pages site. The site is a web rendering of the
+# same Markdown that produces the committed PDFs, built in CI only
+# (.github/workflows/docs-pages.yml) and never committed, so it cannot drift
+# from the shipped documents (AGENTS.md section 8.6's single-generator rule
+# holds trivially: there is one generator, this file only points at it).
+#
+# docs_dir is the throwaway tree tools/build_site.sh assembles from
+# IMPLEMENTATION_PLAN.md, docs/manual/ and docs/internals/ -- the sources stay
+# where the PDF pipeline reads them, and no documentation file is duplicated.
+# `strict: true` makes every warning an error, which is what enforces that the
+# nav below lists every page: a file added to docs/manual/ without a nav entry
+# fails the build instead of quietly vanishing from the site.
+site_name: proxmox-storage-drs
+site_description: Storage I/O load balancing for Proxmox VE 9.2 — a Storage DRS replacement
+site_url: https://bzed.github.io/proxmox-storage-drs/
+repo_url: https://github.com/bzed/proxmox-storage-drs
+repo_name: bzed/proxmox-storage-drs
+
+docs_dir: docs/.site
+site_dir: docs/.site-html
+strict: true
+
+theme:
+  name: material
+  logo: logo.svg
+  favicon: logo.svg
+  features:
+    - navigation.tracking
+    - navigation.top
+    - navigation.path
+    - toc.follow
+    - search.highlight
+    - search.suggest
+    - search.share
+    - content.code.copy
+  palette:
+    # The logo's slate for the primary colour in light mode, a dark header in
+    # dark mode; the exact Proxmox orange of the logo is pinned as the accent
+    # in docs/site/extra.css, which loads after the theme's palette.
+    - media: "(prefers-color-scheme)"
+      scheme: default
+      primary: slate
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme)"
+      scheme: slate
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+extra_css:
+  - extra.css
+
+markdown_extensions:
+  # The documents number their own headings ("## 5. The optimization
+  # problem"), so no section numbering here; permalinks give every heading a
+  # stable anchor to link at, which the PDFs get from the printed page.
+  - toc:
+      permalink: "#"
+      toc_depth: 4
+  - admonition
+  - attr_list
+  - footnotes
+  - sane_lists
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  # admonition-adjacent syntax the documents may pick up later; superfences
+  # also backs the copy-to-clipboard button above.
+  - pymdownx.superfences
+  - pymdownx.details
+
+nav:
+  - Home: index.md
+  - Operator Manual:
+      - Installation and requirements: manual/00-installation.md
+      - Where the numbers come from: manual/05-metrics-pipeline.md
+      - Configuration reference: manual/10-configuration.md
+      - Verifying your setup: manual/20-verifying-metrics.md
+      - Reading show-load and verify-storages: manual/25-show-load-and-verify-storages.md
+      - Diagnostic bundles — collect-testdata and replay: manual/26-collect-testdata-and-replay.md
+      - Reading plan: manual/27-plan.md
+      - Reading apply: manual/28-apply.md
+      - Reading explain: manual/29-explain.md
+      - Safety properties, exit codes, build status: manual/30-safety-and-status.md
+      - Logging: manual/35-logging.md
+      - Monitoring — the status file: manual/36-monitoring.md
+  - Implementation Plan: IMPLEMENTATION_PLAN.md
+  - Internals:
+      - Overview: internals/00-overview.md
+      - How a YAML file becomes a validated Config: internals/10-configuration.md
+      - Persistent state — state.json: internals/15-state.md
+      - Forecasting: internals/20-forecasting.md
+      - The Prometheus client and verify-metrics: internals/30-metrics.md
+      - Command dispatch, the mode-override rule, logging: internals/40-cli-and-logging.md
+      - The Proxmox VE API client: internals/50-pve-api.md
+      - Building the disk/storage/group model: internals/60-topology.md
+      - The load model: internals/70-loadmodel.md
+      - Gating: internals/80-gates.md
+      - The heuristic solver: internals/90-heuristic.md
+      - The MILP backend — CBC via pulp: internals/91-optimize.md
+      - Executing a plan: internals/92-execute.md
+      - Crash and two-instance recovery: internals/93-crashrecovery.md
+      - Ordering the moves: internals/95-schedule.md
+      - Migration cost and the payback test: internals/96-payback.md
+      - Anonymize, collect, replay: internals/97-collect-and-replay.md

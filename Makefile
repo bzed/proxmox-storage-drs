@@ -70,6 +70,7 @@ help:
 	@echo "man        render man/pve-storage-drs.1.md to man/pve-storage-drs.1"
 	@echo "docs       pdf + internals + manual + man"
 	@echo "docs-check assert every generated document matches its Markdown"
+	@echo "site       build the GitHub Pages site (needs mkdocs-material, pip)"
 	@echo "deb        build the Debian package with dpkg-buildpackage"
 	@echo "check      fmt-check + lint + typecheck + test + fixtures + pdf-check"
 
@@ -167,7 +168,8 @@ check: fmt-check lint typecheck test fixtures corpus-check docs-check
 	@echo "check: OK"
 
 clean:
-	rm -rf .pytest_cache .mypy_cache htmlcov .coverage coverage.xml $(BUILDDIR)
+	rm -rf .pytest_cache .mypy_cache htmlcov .coverage coverage.xml $(BUILDDIR) \
+	       docs/.site docs/.site-html
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 
 # ---------------------------------------------------------------- paper ----
@@ -194,7 +196,7 @@ PAPER_DEPS := $(PAPER_SRC)/header.tex $(PAPER_SRC)/filters.lua $(PAPER_SRC)/meta
               Makefile tools/check_paper_log.py tools/build_paper.sh
 BUILDDIR   := docs/.build
 
-.PHONY: pdf pdf-check internals internals-check manual manual-check man man-check docs docs-check deb
+.PHONY: pdf pdf-check internals internals-check manual manual-check man man-check docs docs-check deb site
 
 empty :=
 comma := ,
@@ -270,3 +272,17 @@ man-check:
 # Builds in place, not in a chroot: a quick local check, not what CI does.
 deb:
 	dpkg-buildpackage -us -uc -b
+
+# ---------------------------------------------------------------- site ----
+# The GitHub Pages rendering of the documentation. Unlike the PDFs it is not
+# committed anywhere: .github/workflows/docs-pages.yml builds it in CI from
+# the same Markdown and deploys it to Pages, so there is no stamp and
+# docs-check has nothing to assert about it. tools/build_site.sh runs mkdocs
+# with strict:true in mkdocs.yml, which fails on a page missing from the nav
+# or on a broken link -- the site's own consistency check, run on every
+# push to main and every pull request. mkdocs-material comes from pip
+# (docs/site/requirements.txt) -- the one legitimate pip use, see AGENTS.md
+# section 9.3 -- so this target is deliberately not part of `check`, which
+# must run on the Debian toolchain alone.
+site:
+	tools/build_site.sh
