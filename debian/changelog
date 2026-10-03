@@ -1,3 +1,18 @@
+pve-storage-drs (0.1.17) trixie; urgency=medium
+
+  * docs: the README now carries a project logo, in Proxmox-leaning orange.
+  * docs: the manual and internals PDFs are also rendered as a web site with
+    MkDocs Material, built on every push and deployed to GitHub Pages from
+    main. The site is generated from the same Markdown, never committed, and
+    does not include the implementation plan. It is not part of the Debian
+    package.
+  * docs: the internals state page no longer lists in-flight task ids
+    (inflight_upids) as not implemented, and a broken path span in the
+    explain manual page is rewrapped.
+  * No change to the program's behaviour.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Sat, 03 Oct 2026 17:33:05 +0200
+
 pve-storage-drs (0.1.16) trixie; urgency=medium
 
   * apply: a task still running on a VM is now waited out before its next
