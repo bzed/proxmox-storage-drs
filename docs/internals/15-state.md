@@ -143,6 +143,13 @@ just taken (see this page's own account of that bug, above) — before
 lock held. `show-load`/`plan` still never take it, for the same
 read-only-report reason as always.
 
+The same run-time writes also record each migration's UPID into
+`inflight_upids`, through `cli.py`'s synchronous
+`with_inflight_upid()`/`without_inflight_upid()` callback into
+`execute_plan()` — the next run's startup scan of them, and what a crash
+in between leaves behind, is `crashrecovery.py`'s story
+(`docs/internals/93-crashrecovery.md`).
+
 ## Deliberately not implemented in this pass
 
 - **A disk-cooldown pin is not exempted for an active reserve violation
@@ -160,11 +167,6 @@ read-only-report reason as always.
   `topology.py` into two passes (build every disk first, compute reserve
   status per storage, then finalize cooldown pins), which is a real,
   separately-scoped change.
-- **`inflight_upids`** is now written and read — see
-  `docs/internals/93-crashrecovery.md` for the full mechanism
-  (`with_inflight_upid()`/`without_inflight_upid()`, `crashrecovery.py`'s
-  startup scan, and `cli.py`'s synchronous-write callback into
-  `execute_plan()`).
 - **`staged_disks`** exists in the dataclass and round-trips correctly,
   but nothing writes or reads it yet — it belongs to `schedule.py`'s
   staging (section 8.3 option 1), not implemented.
