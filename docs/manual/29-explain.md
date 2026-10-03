@@ -128,13 +128,14 @@ pinned, or a one-storage group) or when the plan actually moved something.
 ## `measured load:`
 
 The section 4 input every number above derives from — identical to
-`show-load`'s own per-storage, per-disk report (`docs/manual/25-show-load-
-and-verify-storages.md`): each storage's used/capacity, `L_s`/`u_s`,
-reserve status, and every disk on it with its size, format, measured `ℓ_d`
-when one was fetched, and `[pinned: ...]` when section 5.3 (C2) excludes
-it. Always present, printed even for a `NO ACTION` group and even when no
-migration was possible at all — it is the data the rest of `explain`'s
-narrative is *about*, not part of the plan itself.
+`show-load`'s own per-storage, per-disk report
+(`docs/manual/25-show-load-and-verify-storages.md`): each storage's
+used/capacity, `L_s`/`u_s`, reserve status, and every disk on it with its
+size, format, measured `ℓ_d` when one was fetched, and `[pinned: ...]`
+when section 5.3 (C2) excludes it. Always present, printed even for a
+`NO ACTION` group and even when no migration was possible at all — it is
+the data the rest of `explain`'s narrative is *about*, not part of the
+plan itself.
 
 ## `-v`: the `data source:` line
 
