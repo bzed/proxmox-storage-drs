@@ -122,9 +122,11 @@ from proxmox_storage_drs.topology import (
     Disk,
     Group,
     Storage,
+    disk_size_on,
     is_small_disk,
     larger_vm_disks,
     storage_accepts_format,
+    target_format,
 )
 
 logger = logging.getLogger(__name__)
@@ -184,7 +186,7 @@ def _fixed_zero_pairs(
         for s in storages:
             if s.id == d.current_storage:
                 continue
-            if s.id in cooldown_storages or not storage_accepts_format(s, d.format):
+            if s.id in cooldown_storages or not storage_accepts_format(s, target_format(d, s)):
                 yield d, s
 
 
@@ -499,7 +501,7 @@ def _cbc_feasibility_constraints(
         if pinned_largest:
             prob += z[s.id] >= pinned_largest / _BYTES_PER_MIB
         for d in movable:
-            prob += z[s.id] >= (d.size_bytes / _BYTES_PER_MIB) * x[d.key, s.id]
+            prob += z[s.id] >= (disk_size_on(d, s) / _BYTES_PER_MIB) * x[d.key, s.id]
 
     for s in group.storages:
         prob += r[s.id] >= s.reserve_factor * z[s.id]
@@ -507,7 +509,7 @@ def _cbc_feasibility_constraints(
         pinned_used = sum(d.size_bytes for d in pinned_by_storage[s.id]) / _BYTES_PER_MIB
         foreign_mib = s.foreign_used_bytes / _BYTES_PER_MIB
         prob += (
-            pulp.lpSum((d.size_bytes / _BYTES_PER_MIB) * x[d.key, s.id] for d in movable)
+            pulp.lpSum((disk_size_on(d, s) / _BYTES_PER_MIB) * x[d.key, s.id] for d in movable)
             + pinned_used
             + foreign_mib
             + r[s.id]
@@ -549,7 +551,9 @@ def _cbc_storage_fill(
     where an unscaled version of this function made CBC's own after_spread
     almost 100x worse than the heuristic's on the same weights)."""
     pinned_used = sum(d.size_bytes for d in pinned_by_storage[s.id]) / _BYTES_PER_MIB
-    moved_bytes = pulp.lpSum((d.size_bytes / _BYTES_PER_MIB) * x[d.key, s.id] for d in movable)
+    moved_bytes = pulp.lpSum(
+        (disk_size_on(d, s) / _BYTES_PER_MIB) * x[d.key, s.id] for d in movable
+    )
     foreign_mib = s.foreign_used_bytes / _BYTES_PER_MIB
     numerator = moved_bytes + pinned_used + foreign_mib
     capacity_mib = s.capacity_bytes / _BYTES_PER_MIB

@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from proxmox_storage_drs.topology import Disk, Storage
+from proxmox_storage_drs.topology import Disk, Storage, disk_size_on
 
 # The default assignment source: `Disk.current_storage`, i.e. "the real,
 # present-day placement." `heuristic.py` passes its own lookup (typically
@@ -69,19 +69,37 @@ class ReserveStatus:
 
 
 def largest_disk_bytes(
-    disks: Iterable[Disk], storage_id: str, *, storage_of: StorageOf = _current_storage
+    disks: Iterable[Disk],
+    storage_id: str,
+    *,
+    storage_of: StorageOf = _current_storage,
+    storage: Storage | None = None,
 ) -> int:
-    """Z_s: the largest disk on ``storage_id`` under ``storage_of``, 0 if none (C4)."""
-    return max((d.size_bytes for d in disks if storage_of(d) == storage_id), default=0)
+    """Z_s: the largest disk on ``storage_id`` under ``storage_of``, 0 if none (C4).
+
+    Each disk counts at ``z_{d,s}`` (section 5.3.2) when ``storage`` -- the
+    :class:`Storage` named by ``storage_id`` -- is given, at ``size_bytes`` otherwise."""
+    return max(
+        (_size_on(d, storage) for d in disks if storage_of(d) == storage_id),
+        default=0,
+    )
+
+
+def _size_on(disk: Disk, storage: Storage | None) -> int:
+    return disk.size_bytes if storage is None else disk_size_on(disk, storage)
 
 
 def managed_used_bytes(
-    disks: Iterable[Disk], storage_id: str, *, storage_of: StorageOf = _current_storage
+    disks: Iterable[Disk],
+    storage_id: str,
+    *,
+    storage_of: StorageOf = _current_storage,
+    storage: Storage | None = None,
 ) -> int:
     """Sum_d z_d for every disk in `D` on ``storage_id`` under ``storage_of`` --
     the part of a storage's usage this tool is actually tracking, as opposed
     to ``Storage.foreign_used_bytes`` (section 5.1.1)."""
-    return sum(d.size_bytes for d in disks if storage_of(d) == storage_id)
+    return sum(_size_on(d, storage) for d in disks if storage_of(d) == storage_id)
 
 
 def transient_charge_ok(
@@ -195,9 +213,12 @@ def compute_reserve_status(
     1 MiB, the safe direction.
     """
     disks = list(disks)
-    largest = largest_disk_bytes(disks, storage.id, storage_of=storage_of)
+    largest = largest_disk_bytes(disks, storage.id, storage_of=storage_of, storage=storage)
     required = max(round(storage.reserve_factor * largest), storage.free_space_soft_bytes)
-    used = managed_used_bytes(disks, storage.id, storage_of=storage_of) + storage.foreign_used_bytes
+    used = (
+        managed_used_bytes(disks, storage.id, storage_of=storage_of, storage=storage)
+        + storage.foreign_used_bytes
+    )
     shortfall = round_up_to_mib(max(0, used + required - storage.capacity_bytes))
     return ReserveStatus(
         largest_disk_bytes=largest,

@@ -455,6 +455,53 @@ Weight or `null`, default `null` (inherits `snapshot_reserve.factor`).
 Per-storage override of the group-wide snapshot reserve factor, for a
 storage whose snapshot behaviour genuinely differs from its peers.
 
+### `groups[].storages[].enforce_format`
+
+`raw`, `qcow2` or `null`, default `null` (keep the disk's current format).
+
+Normally a disk keeps its format when it moves: a `qcow2` disk lands as
+`qcow2`, a raw one as raw, and a storage that cannot hold that format is
+never chosen as a destination. Setting `enforce_format` on a storage changes
+that for **moves onto it**: every disk the plan moves there arrives in the
+named format, converted during the move if it was in another one. The typical
+use is shared (non-thin) LVM on Proxmox VE 9.2, where a `qcow2` volume is what
+makes volume-chain snapshots possible: `enforce_format: qcow2` makes every
+disk that lands on that LUN snapshot-capable; `raw` does the opposite, for the
+speed of a plain block device. It can be set on a literal entry or on a
+`/…/` pattern entry (every storage the pattern matches gets it; a literal
+entry for one of them overrides the pattern wholesale, as for every
+per-storage option). There is no global setting, because which formats exist
+depends on the storage type. `vmdk` is not offered.
+
+What it does *not* do:
+
+- It never causes a move. A disk already sitting on the storage in another
+  format is left alone (`verify-storages` counts such disks so you can see
+  how far the storage is from its policy); converting those in place is
+  something you do with `qm disk move` yourself. A disk is converted only as
+  a side effect of a move the balancer wanted for its usual reasons.
+- It never touches a VM's TPM state disk (`tpmstate0`), which always keeps
+  its format, and a disk with snapshots is never moved at all.
+- It must fit the storage's type: `qcow2` is accepted on `lvm`, `dir`, `nfs`,
+  `cifs` and `cephfs` storages, `raw` everywhere. A value the storage's type
+  cannot hold is refused when the cluster is read, naming the storage —
+  which for a pattern entry means "narrow the pattern".
+
+**Space accounting.** A disk that is converted is counted on the target at the
+larger of its current size and the `size=` in its VM configuration, and, for a
+`qcow2` volume on an `lvm` storage, plus the image's own metadata (a small
+fraction of a percent; the tool uses a safe upper bound). That larger figure is
+what the snapshot reserve, your `free_space` requirement and the in-flight
+space check are computed with, so a conversion cannot quietly eat into them.
+Just before a converting move starts, the tool re-reads the volume; if its
+format is no longer the planned one the move is skipped and the next run plans
+again.
+
+Too much policy has a price: `qcow2 → raw` on LVM gives up volume-chain
+snapshots on that storage for the moved disks, and `raw → qcow2` adds a
+qcow2 layer to every I/O. Leave it `null` unless you want one of those
+outcomes. The move line of `plan` shows a conversion as `raw→qcow2`.
+
 ### `groups[].storages[].free_space.soft` / `groups[].storages[].free_space.hard`
 
 Size, byte-unit string, percentage string (`"N%"`), or `null` — each

@@ -56,9 +56,10 @@ way both MILP backends implement it (section 12's phase 13): every
 candidate-generating function below (`_single_move_trials`,
 `_swap_trials`, `_vm_relocation_trials`, `_best_repair_candidate`'s target
 loop, `best_single_disk_alternative`) excludes a target storage whose
-`allowed_formats` does not contain the disk's `format`
-(`topology.storage_accepts_format`) -- a swap excludes the pair unless
-*both* legs are eligible. The section 14 fixture is homogeneous (all three
+`allowed_formats` does not contain the format the disk would arrive in
+(`topology.storage_accepts_format` of `topology.target_format`, section
+5.3.2's `phi(d,s)`: the storage's `enforce_format` when it sets one) -- a swap
+excludes the pair unless *both* legs are eligible. The section 14 fixture is homogeneous (all three
 storages accept the same format) and does not exercise this; section
 14.8's ``free-space-repair.yaml`` does.
 """
@@ -77,6 +78,7 @@ from proxmox_storage_drs.topology import (
     small_disk_placement_ok,
     small_disks_follow_their_vm,
     storage_accepts_format,
+    target_format,
 )
 
 # Every byte-valued objective term (`gamma`, and `r_s` for reporting) is
@@ -428,7 +430,7 @@ def best_single_disk_alternative(
         for storage in group.storages:
             if storage.id == disk.current_storage:
                 continue
-            if not storage_accepts_format(storage, disk.format):
+            if not storage_accepts_format(storage, target_format(disk, storage)):
                 continue  # (C2): fixed x_{d,s}=0, not a real alternative
             if not small_disk_placement_ok(
                 group, disk, storage.id, lambda d: d.current_storage, tiny_disk_bytes
@@ -484,7 +486,7 @@ def _best_repair_candidate(
         for target in group.storages:
             if target.id == worst_id:
                 continue
-            if not storage_accepts_format(target, disk.format):
+            if not storage_accepts_format(target, target_format(disk, target)):
                 continue  # (C2): fixed x_{d,s}=0, not a real repair target
             trial = dict(assignment)
             trial[disk.key] = target.id
@@ -662,7 +664,7 @@ def _single_move_trials(
         for target in storages:
             if target.id == here or target.id in cooldown_storages:
                 continue
-            if not storage_accepts_format(target, disk.format):
+            if not storage_accepts_format(target, target_format(disk, target)):
                 continue  # (C2): fixed x_{d,s}=0
             trial = dict(assignment)
             trial[disk.key] = target.id
@@ -685,9 +687,13 @@ def _swap_trials(
                 continue  # the swap would send a disk to each of these
             # (C2): a swap sends disk_a to here_b and disk_b to here_a -- both legs
             # must be format-eligible, or this pair fixes x_{d,s}=0 for it.
-            if not storage_accepts_format(storages_by_id[here_b], disk_a.format):
+            if not storage_accepts_format(
+                storages_by_id[here_b], target_format(disk_a, storages_by_id[here_b])
+            ):
                 continue
-            if not storage_accepts_format(storages_by_id[here_a], disk_b.format):
+            if not storage_accepts_format(
+                storages_by_id[here_a], target_format(disk_b, storages_by_id[here_a])
+            ):
                 continue
             trial = dict(assignment)
             trial[disk_a.key], trial[disk_b.key] = here_b, here_a
@@ -706,7 +712,9 @@ def _vm_relocation_trials(
             if here == {target.id} or target.id in cooldown_storages:
                 continue
             # (C2): every disk in the VM must be format-eligible for the shared target.
-            if any(not storage_accepts_format(target, disk.format) for disk in disks):
+            if any(
+                not storage_accepts_format(target, target_format(disk, target)) for disk in disks
+            ):
                 continue
             trial = dict(assignment)
             for disk in disks:

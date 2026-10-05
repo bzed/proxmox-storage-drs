@@ -178,6 +178,9 @@ class Disk:
     current_storage: str
     format: str
     pinned_reason: str | None  # None means movable (d in D^mov, section 5.3 (C3))
+    # The disk line's parsed ``size=`` (section 5.3.2's ``z_d^cfg``); 0 when the line carries
+    # none, which `disk_size_on()` treats as "no larger than the listed size".
+    config_size_bytes: int = 0
 
     @property
     def display_id(self) -> str:
@@ -214,6 +217,11 @@ class Storage:
     # solver, the scheduler or execute.py. Empty for a hand-built Storage.
     free_space_soft_source: str = ""
     free_space_hard_source: str = ""
+    # Section 5.3.2: the format a disk moved onto this storage must arrive in
+    # (``"raw"``/``"qcow2"``), or None to keep the source's format. Resolved
+    # through literal-beats-pattern like every per-storage option.
+    enforce_format: str | None = None
+    enforce_format_source: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +464,7 @@ def _match_pattern_entries(
                 reserve_factor=storage_cfg.reserve_factor,
                 free_space_soft=storage_cfg.free_space_soft,
                 free_space_hard=storage_cfg.free_space_hard,
+                enforce_format=storage_cfg.enforce_format,
             )
     return by_id, expansions
 
@@ -508,6 +517,15 @@ def _expand_group(
             )
         by_id[storage_cfg.id] = storage_cfg  # a literal entry always overrides a pattern match
 
+    for sid in sorted(by_id):
+        enforced = by_id[sid].enforce_format
+        storage_type = str(definitions_by_id[sid].get("type", ""))
+        if enforced is not None and enforced not in _allowed_formats(storage_type):
+            raise TopologyError(
+                f"group {group.name!r} storage {sid!r}: enforce_format {enforced!r} cannot be "
+                f"honoured, a {storage_type!r} storage holds only "
+                f"{sorted(_allowed_formats(storage_type))} (section 5.3.2)"
+            )
     if len(by_id) < 2:
         raise TopologyError(
             f"group {group.name!r} matches only {len(by_id)} storage(s) after pattern "
@@ -710,6 +728,76 @@ def storage_accepts_format(storage: Storage, disk_format: str) -> bool:
     The one place this question is answered -- both solver backends call
     it to fix ``x_{d,s} = 0`` for an ineligible pair (AGENTS.md section 5)."""
     return disk_format in storage.allowed_formats
+
+
+#: Device whose volume is never converted (section 5.3.2): swtpm state is raw, and whether PVE
+#: would convert or refuse a ``format=`` move of it is not verified.
+TPM_STATE_DEVICE = "tpmstate0"
+
+_QCOW2_LVM_HEADROOM_BYTES = 8 << 20
+
+
+def qcow2_lvm_allocation_bytes(virtual_bytes: int) -> int:
+    """Upper bound on the LV ``alloc_image`` creates for a ``qcow2`` volume of ``virtual_bytes``
+    on an ``lvm`` storage (section 5.3.2).
+
+    PVE sizes that LV with ``qemu-img measure``'s ``fully-allocated`` figure, i.e. the virtual
+    size plus the image's own metadata, so it is larger than ``size=``. With the default 64 KiB
+    clusters (the plugin passes no ``cluster_size`` for a non-backed volume) the metadata is one
+    8-byte L2 entry and one 2-byte refcount entry per cluster, about 0.015 % of the size. This
+    bound charges 0.0244 % (``size / 4096``) plus 8 MiB for the header, the L1 and refcount
+    tables and extent rounding: at or above what qemu reports, never below -- the direction
+    AGENTS.md section 6 requires. It is a bound, not a prediction.
+    """
+    return virtual_bytes + -(-virtual_bytes // 4096) + _QCOW2_LVM_HEADROOM_BYTES
+
+
+def target_format(disk: Disk, storage: Storage) -> str:
+    """Section 5.3.2's ``phi(d, s)``: the format ``disk`` would have on ``storage``.
+
+    ``storage.enforce_format`` for a move onto an enforcing storage, otherwise the disk's own
+    format. A disk already on ``storage``, and a ``tpmstate0``, keep theirs: enforcement never
+    creates a move and never touches TPM state."""
+    if (
+        storage.enforce_format is None
+        or storage.id == disk.current_storage
+        or disk.device == TPM_STATE_DEVICE
+    ):
+        return disk.format
+    return storage.enforce_format
+
+
+def disk_size_on(disk: Disk, storage: Storage) -> int:
+    """Section 5.3.2's ``z_{d,s}``, in bytes: what ``disk`` occupies when placed on ``storage``.
+
+    ``disk.size_bytes`` for a disk that stays or arrives in its own format. A move that changes
+    the format is charged at ``max(size_bytes, config_size_bytes)`` (PVE allocates a new volume
+    of the target kind), and, when it produces a ``qcow2`` volume on an ``lvm`` storage, at least
+    :func:`qcow2_lvm_allocation_bytes` of that. With no ``enforce_format`` anywhere this is
+    ``size_bytes`` identically."""
+    if target_format(disk, storage) == disk.format:
+        return disk.size_bytes
+    size = max(disk.size_bytes, disk.config_size_bytes)
+    if storage.enforce_format == "qcow2" and storage.storage_type == "lvm":
+        size = max(size, qcow2_lvm_allocation_bytes(size))
+    return size
+
+
+def nonconforming_disks(storage: Storage, disks: Iterable[Disk]) -> tuple[int, int]:
+    """``(count, bytes)`` of the disks on ``storage`` whose format is not its ``enforce_format``
+    (section 5.3.2) -- what ``verify-storages`` reports. Not a violation: enforcement only applies
+    to moves, so this is how far the storage is from its policy. A ``tpmstate0`` is exempt and
+    never counted; ``(0, 0)`` when the storage enforces nothing."""
+    if storage.enforce_format is None:
+        return 0, 0
+    bad = [
+        d
+        for d in disks
+        if d.current_storage == storage.id
+        and d.device != TPM_STATE_DEVICE
+        and d.format != storage.enforce_format
+    ]
+    return len(bad), sum(d.size_bytes for d in bad)
 
 
 def _disk_snapshot_or_orphan_reason(
@@ -1106,6 +1194,7 @@ def _join_vm_disks(
                 current_storage=storage_id,
                 format=disk_format,
                 pinned_reason=pinned_reason,
+                config_size_bytes=parse_pve_config_size_bytes(params.get("size", "")) or 0,
             )
         )
 
@@ -1179,6 +1268,10 @@ def _build_storages(
                 allowed_formats=_allowed_formats(storage_type),
                 free_space_soft_source=free_space.soft_source,
                 free_space_hard_source=free_space.hard_source,
+                enforce_format=storage_cfg.enforce_format,
+                enforce_format_source=(
+                    _entry_level(group_cfg, sid) if storage_cfg.enforce_format else ""
+                ),
             )
         )
     return tuple(storages)

@@ -135,6 +135,7 @@ from proxmox_storage_drs.topology import (
     Topology,
     build_topology,
     format_disk_id,
+    nonconforming_disks,
 )
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds, parse_duration_seconds
 
@@ -1097,8 +1098,14 @@ def _render_plan_move_line(
     change = -move.imbalance_reduction
     load_per_tib = _load_per_tib(load_by_key, move.disk_key, move.size_bytes)
     display_id = format_disk_id(move.disk_key, vm_name)
+    # Section 9.5: a move that converts the disk's format says so on its line.
+    conversion = (
+        f" ({move.format_from}→{move.format_to})"
+        if move.format_from and move.format_from != move.format_to
+        else ""
+    )
     line = (
-        f"  {index}. {display_id:<28} {move.from_storage} → {move.to_storage}   "
+        f"  {index}. {display_id:<28} {move.from_storage} → {move.to_storage}{conversion}   "
         f"{format_bytes(move.size_bytes):>10}   {duration_str}   "
         f"Δimbalance {change:+.2f}   ℓ/z {load_per_tib:.2f}{flag}"
     )
@@ -1522,6 +1529,8 @@ def _render_group_plan_json(
                     "device": move.device,
                     "from_storage": move.from_storage,
                     "to_storage": move.to_storage,
+                    "format_from": move.format_from or None,
+                    "format_to": move.format_to or None,
                     "size_bytes": move.size_bytes,
                     "imbalance_reduction": move.imbalance_reduction,
                     "repair": move_cost.repair if move_cost else None,
@@ -3724,6 +3733,13 @@ def _render_verify_storages_human(topology: Topology, config: Any) -> str:
             largest = largest_disk_bytes(group.disks, storage.id)
             state = "on" if storage.saferemove else "off"
             lines.append(f"  {storage.id}  saferemove={state}")
+            if storage.enforce_format is not None:
+                bad_count, bad_bytes = nonconforming_disks(storage, group.disks)
+                lines.append(
+                    f"    enforce_format: {storage.enforce_format}"
+                    f"{_source_suffix(storage.enforce_format_source)}  "
+                    f"non-conforming disks: {bad_count} ({format_bytes(bad_bytes)})"
+                )
             lines.append(
                 "    free_space: soft="
                 f"{format_bytes(storage.free_space_soft_bytes)}"
@@ -3776,6 +3792,7 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
         storages_out = []
         for storage in group.storages:
             largest = largest_disk_bytes(group.disks, storage.id)
+            nonconforming = nonconforming_disks(storage, group.disks)
             wipe_seconds = compute_wipe_duration_seconds(
                 largest, storage.saferemove_throughput_bytes_per_sec
             )
@@ -3790,6 +3807,10 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
                     "free_space_hard_bytes": storage.free_space_hard_bytes,
                     "free_space_soft_source": storage.free_space_soft_source,
                     "free_space_hard_source": storage.free_space_hard_source,
+                    "enforce_format": storage.enforce_format,
+                    "enforce_format_source": storage.enforce_format_source or None,
+                    "nonconforming_disks": nonconforming[0],
+                    "nonconforming_bytes": nonconforming[1],
                     "largest_disk_bytes": largest,
                     "implied_wipe_seconds": wipe_seconds,
                     "cooldown_per_storage_too_short": (

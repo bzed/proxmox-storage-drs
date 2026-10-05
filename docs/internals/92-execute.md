@@ -133,11 +133,21 @@ charged. A same-kind move keeps the listed size, since there the target is a
 copy of the source image and charging more would refuse moves for a
 discrepancy that does not apply. `_live_transient_check()` takes the
 candidate's charge as a number and computes each in-flight move's own the
-same way from its stored `source`/`target`/`config_size_bytes`. The tool
-never passes `format=` to `move_disk` and (C2) keeps a qcow2 disk off a
-storage that cannot hold it, so the conversion branch is a guard rather than
-something a plan produces today; the plan-time check in `schedule.py` keeps
-using the listed size. The matching is deliberately narrow for the same reason: a
+same way from its stored `source`/`target`/`config_size_bytes`. A
+move onto an `enforce_format` storage that changes the disk's format is the
+planned conversion case: its charge is at least `topology.disk_size_on()`
+(plan `z_{d,s}`), computed from the live `size=`, the same number
+`schedule.py`'s plan-time check used, so the endpoint, the plan-time check and
+the live check cannot disagree about it. `format=` is passed to `move_disk` by
+`_format_arg()` exactly when `target_format(disk, target)` differs from the
+disk's own format, so a move without enforcement is the call it always was.
+Before issuing it, `_preflight` re-derives the volume's *live* format from its
+name (`.qcow2`/`.vmdk` suffix, else raw -- how `LVMPlugin::parse_volname` and
+`Plugin::parse_volname` decide it) and refuses the move if it differs from the
+planned one, since the plan's conversion and size were computed for a
+different volume; the next run plans again. The mirror-target matcher also
+accepts the converted size, and only ever errs towards counting a volume
+twice. The matching is deliberately narrow for the same reason: a
 foreign volume that appeared since the launch, or a leftover of the same VM
 that was already there (it is in the baseline), is never excluded — wrongly
 keeping a volume only tightens the check, wrongly dropping one would weaken

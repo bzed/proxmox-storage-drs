@@ -115,6 +115,7 @@
                 "id": { "type": "string", "minLength": 1 },
                 "capability_weight": { "type": "number", "exclusiveMinimum": 0 },
                 "reserve_factor": { "type": ["number", "null"], "minimum": 0 },
+                "enforce_format": { "enum": ["raw", "qcow2", null] },
                 "free_space": {
                   "type": "object",
                   "additionalProperties": false,
