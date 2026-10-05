@@ -826,16 +826,20 @@ volume does occupy real bytes on the storage, so it is not in `D` but it **is** 
 **Disk format.** Detect the source format from the volume returned by `/storage/{storage}/content`
 (`format: raw|qcow2|…`), falling back to the storage type's default (raw for LVM, qcow2 for
 directory storages, raw for ZFS zvols). (C2) fixes `x_{d,s} = 0` when `s` cannot store that format.
-`move_disk` without an explicit `format` preserves the source format, which is what we want:
-**format conversion is out of scope and must stay disabled by default.** Only pass `format=` when an
-operator has explicitly opted in — converting raw→qcow2 on shared LVM is what enables volume-chain
-snapshots, but it is a deliberate storage-policy change, not something a balancer should do
-silently.
+`move_disk` without an explicit `format` preserves the source format, which is what we want by
+default: **format conversion stays disabled unless the operator opts in.** The opt-in is per target
+storage, `groups[].storages[].enforce_format` (§5.3.2): only then is `format=` passed, and only for a
+move whose source format differs from it — converting raw→qcow2 on shared LVM is what enables
+volume-chain snapshots, but it is a deliberate storage-policy change, not something a balancer
+should do silently.
 
 **`pve-storage-drs verify-storages`.** A companion to `verify-metrics` (§3.3), run once per storage before
 relying on any plan. For every storage in every group it reports `type`, `shared`, `content`,
 `saferemove`, `saferemove_throughput`, total/used, the largest disk currently on it, and the
-**resolved** free-space requirement `soft_s`/`hard_s` with the level each came from (§5.3.1);
+**resolved** free-space requirement `soft_s`/`hard_s` with the level each came from (§5.3.1), and
+the resolved `enforce_format` with the entry it came from plus the number and bytes of disks
+currently on the storage in another format (§5.3.2 — non-conforming, informational, never a
+violation);
 then it derives the implied wipe time `z_max / |saferemove_throughput|` (§7.1 on that sign) and warns
 when that exceeds
 `migration.max_single_move_duration` or `gates.cooldown_per_storage` (§9.3). It also prints the
@@ -1252,6 +1256,9 @@ four groups is four small problems, not one large one.
 | `f_s` | snapshot reserve factor for `s` (default 2.0) |
 | `soft_s` | configured free-space requirement for `s`, in bytes — the plan endpoint (§5.3.1) |
 | `hard_s` | transient free-space floor for `s`, in bytes, `≤ soft_s` (§5.3.1, §8.1) |
+| `fmt_d` | current format of disk `d` (`raw`, `qcow2`, …; §3.5) |
+| `φ(d,s)` | format `d` would have on `s`: `enforce_format_s` for a move onto an enforcing storage, else `fmt_d` (§5.3.2) |
+| `z_{d,s}` | bytes `d` occupies on `s`; equals `z_d` unless the move converts it (§5.3.2) |
 
 **Provisioned size, never allocated size — on every storage type.** `z_d` is what the volume was
 *provisioned* at, and `Σ_d z_d·x_{d,s} + Uˢᵉˣᵗ` is what a storage is counted as holding, including on
@@ -1320,7 +1327,8 @@ small:
 
 - `s` does not have `images` in its `content` list;
 - `s` is not shared, or is restricted to nodes that cannot see the VM;
-- `s` cannot hold the disk's format;
+- `s` cannot hold the disk's format **as it would arrive there**, `φ(d,s)` — the source format,
+  or the storage's `enforce_format` when it sets one (§5.3.2);
 - `d` or `v(d)` is excluded by config (`exclude.vmids`, `exclude.disks`, tags, `no-drs`) — also pin;
 - `σ₀(d)` belongs to **no** configured group — such a disk is unmanaged: it is not in any `D`, it is
   pinned where it is, and its bytes count toward `Uˢᵉˣᵗ` of its storage. Report it in `show-load` as
@@ -1641,6 +1649,99 @@ Consequences, all deliberate:
 constraint above; the heuristic discards any candidate assignment that breaks it — in its descent,
 its (C5) repair step and `explain`'s closest-alternative search — and the exhaustive fixture
 generator filters its enumeration by an independent restatement of it.
+
+#### 5.3.2 Enforcing a disk format on a storage: `enforce_format`
+
+By default a move preserves the disk's format: `move_disk` is called without `format=`, PVE keeps the
+source format, and (C2) keeps a disk off any storage that cannot hold that format (§3.5). That stays
+the default. `enforce_format` is the operator's opt-in to the alternative — **a storage that names a
+format gets every disk the plan moves onto it in that format**, converted during the move if the
+source is in another one. The motivating case is shared (non-thin) LVM on PVE 9.2, where a `qcow2`
+LV is what enables volume-chain snapshots (§3.5): an operator who wants every disk that lands on such
+a LUN to become snapshot-capable sets `enforce_format: qcow2` on it; one who wants the opposite —
+everything on a LUN raw, for the performance of a plain block device — sets `raw`.
+
+```yaml
+groups:
+  - name: fc-tier1
+    storages:
+      - id: /san-.*/
+        enforce_format: qcow2   # every disk moved onto any san-* LUN arrives as qcow2
+      - id: san-b
+        capability_weight: 0.5  # literal beats pattern (§11.4): san-b preserves formats
+```
+
+**Shape.** A per-storage option on `groups[].storages[]` entries, literal or pattern (§11.4), with
+the same precedence every per-storage option has: a pattern entry's value applies to every storage
+it matches, a literal entry replaces the pattern's options wholesale. Values: `raw`, `qcow2`, or
+`null` (the default — preserve the source format, today's behaviour). There is **no global
+`enforce_format`**: a format is a property of a storage type, and a single cluster-wide value would
+be invalid on half the storages of any mixed group. `vmdk`, which PVE's `move_disk` also accepts, is
+deliberately not offered — nothing in this tool's scope needs a balancer to produce VMware images.
+
+**The target format.** For disk `d` and storage `s` let
+
+```
+φ(d,s) = enforce_format_s      if s ≠ σ₀(d) and enforce_format_s is set and d is not tpmstate0
+       = fmt_d                 otherwise
+```
+
+where `fmt_d` is the disk's current format (§3.5). `φ` is what the disk *would be* on `s`; it only
+differs from `fmt_d` for a storage the disk would have to move to. Three rules follow from it:
+
+1. **Eligibility uses `φ`, not `fmt_d`.** (C2)'s format bullet becomes "`s` cannot hold `φ(d,s)`".
+   Since §11.1 validates `enforce_format_s` against the storage type, an enforcing storage accepts
+   every disk on format grounds — enforcement *widens* eligibility (a `qcow2` disk on a directory
+   storage becomes eligible for an LVM-thin target enforcing `raw`, which it was not before) and
+   never narrows it. `topology.storage_accepts_format()` stays the single implementation; it gains
+   `target_format(d, s)` as its one caller-facing companion, and both solver backends and the
+   executor ask that pair, never `fmt_d` directly (AGENTS.md §5: one implementation, two callers).
+2. **Enforcement never creates a move.** A disk already on `s` in a format other than
+   `enforce_format_s` is *non-conforming*, and that is **not a violation**: no slack, no objective
+   term, no gate override. The balancer converts a disk only as a side effect of a move it chose for
+   its own reasons (balance, reserve, free space, affinity), and the payback test of §7.3 prices
+   that move exactly as it would without the conversion. A disk is never moved *in order to* convert
+   it, and never moved off and back. Converting a whole storage in place is a storage-policy
+   operation the operator runs with `qm disk move` themselves; a "conform" mode is out of scope for
+   this phase and would need its own section here before it is built. Non-conforming disks are
+   counted per storage by `verify-storages` (§3.5) so the operator can see how far a storage is from
+   its policy.
+3. **`tpmstate0` is exempt and keeps its format.** swtpm state is a raw volume, and whether PVE
+   would convert or refuse a `format=qcow2` move of it is **not verified**; the exemption is the
+   safe answer either way and costs nothing — it is a few MiB below `migration.tiny_disk_bytes`.
+   `efidisk0` is *not* exempt: PVE stores EFI vars as `qcow2` on file-backed storages routinely.
+   That an `efidisk0` converts cleanly in both directions on PVE 9.2 is an item for the phase 16
+   live test (§12), not an assumption.
+
+**Size on the target: `z_{d,s}`.** A converting move does not produce a copy of the source volume;
+PVE allocates a new one of the target kind. §9.2 step 2 already charges such a move at the larger of
+the listed size and the VM config's `size=` (as the operator describes PVE's allocation, not read
+from its source). Enforcement makes that case a planned one rather than a guard, so the model must
+count it at the endpoint too, not only in flight:
+
+```
+z_{d,s} = max(z_d, z_d^cfg)    if φ(d,s) ≠ fmt_d
+        = z_d                  otherwise
+```
+
+`z_d^cfg` is the disk line's parsed `size=` (`z_d` when the line carries none). (C4), (C5), (C7) and
+§8.1's transient predicate use `z_{d,s}` wherever they use `z_d` for a disk placed on `s`; the
+MILP's capacity rows simply get per-pair coefficients, which keeps the model linear. With no
+`enforce_format` anywhere `z_{d,s} = z_d` identically, so every existing fixture and every existing
+plan is unchanged. The §7.1 cost keeps `z_d`: the mirror reads the source's virtual size whatever
+the target's format.
+
+**Open, verify before implementing.** A `qcow2` image on an LV needs room for its own metadata, so
+the LV PVE allocates for a `qcow2` volume on `lvm` is plausibly *larger* than `size=`. `z_{d,s}`
+above does not include that overhead, and must not ship onto `lvm` until the allocation rule is read
+from PVE 9.2's `LVMPlugin.pm` (`alloc_image` for `fmt=qcow2`) and added as a third term of the
+`max()`. Until then, under-counting it would erode the reserve by the metadata of every converted
+disk — a direction AGENTS.md §6 does not permit.
+
+**What the operator gives up.** Converting `qcow2 → raw` on LVM removes the disk's ability to take
+volume-chain snapshots on that storage; converting `raw → qcow2` adds a qcow2 layer to every I/O.
+Both are the point of the option, and both are the operator's policy, stated once in config. Disks
+with snapshots are pinned by (C2) regardless (§3.7), so no existing snapshot chain is ever converted.
 
 ### 5.4 Objective
 
@@ -2204,7 +2305,8 @@ used_b + z_d + f_b · max(Z_b, z_d)   ≤   C_b
 ```
 
 Note the `max(Z_b, z_d)`: if the incoming disk is the new largest on `b`, the required reserve grows
-at the same moment the disk arrives. This is the case most likely to be missed, and the one most
+at the same moment the disk arrives. (For a move that converts the disk's format onto an
+`enforce_format` storage, `z_d` here and below reads `z_{d,b}`, the converted size — §5.3.2.) This is the case most likely to be missed, and the one most
 likely to fill a SAN LUN.
 
 **The transient free-space floor.** The snapshot term above is not the only thing `b` must keep: a
@@ -2361,7 +2463,7 @@ stop cleanly at window close rather than aborting an in-flight move; and honour
 
 ```
 POST /nodes/{node}/qemu/{vmid}/move_disk
-     disk={device} storage={target} delete=1 bwlimit={KiB/s}
+     disk={device} storage={target} delete=1 bwlimit={KiB/s} [format={φ(d,target)}]
   → UPID
 poll GET /nodes/{node}/tasks/{upid}/status every execution.poll_interval_seconds
   until status == "stopped"; task success ⟺ exitstatus == "OK"
@@ -2421,8 +2523,10 @@ Before **every** move, re-read the live state rather than trusting the plan:
    the move changes the kind of volume made — between different storage types (`storage.type` differs), or
    a qcow2 disk landing on a target that cannot hold qcow2 so PVE writes it raw — where the target is
    allocated at the config's `size=` and the larger of the two is charged. A same-kind move keeps the
-   listed size. (The tool never passes `format=` and (C2) keeps a qcow2 disk off a storage that cannot hold
-   it, so the conversion branch is a guard; the plan's own §8.1 check keeps `z_d`, the listed size.) Nothing else is ever excluded — a foreign volume that appeared since, or a
+   listed size — and a move onto a storage whose `enforce_format` differs from the source format
+   (§5.3.2), the one case in which the tool passes `format=`. Without enforcement (C2) keeps a qcow2
+   disk off a storage that cannot hold it, so the implicit-conversion branch stays a guard; the plan's
+   own §8.1 check uses `z_{d,b}`, which is the listed size for every non-converting move. Nothing else is ever excluded — a foreign volume that appeared since, or a
    leftover of the same VM that was already there, still counts — and where nothing matches (the window
    between `move_disk` returning and the allocation) the move is charged by its `z_m` alone. Wrongly
    keeping a volume only makes the check stricter; wrongly dropping one would weaken it, so the match is
@@ -2435,6 +2539,12 @@ Before **every** move, re-read the live state rather than trusting the plan:
    pending change (§3.8); if one has appeared since planning — an operator can queue one in the PVE
    UI at any time — drop the move and re-plan rather than risk `move_disk` leaving that entry
    referring to pre-move state.
+
+`format=` is sent **iff** `φ(d, target) ≠ fmt_d` (§5.3.2), with `fmt_d` taken from the live volume
+step 1 re-read, not from the plan: a disk whose format no longer matches what the plan assumed is a
+mismatch, dropped and re-planned like any other step-1 discrepancy, because its `z_{d,s}` and its
+eligibility were computed for the old format. A move that does not convert sends exactly the request
+it sends today.
 
 These re-reads bypass the per-run topology cache (§3.5) for this VM and this storage only. Steps 4
 and 5 are cheap: both come from the same `/qemu/{vmid}/config` response as step 1. Step 6 is its own
@@ -2667,6 +2777,12 @@ first instalment on §16.6's X-07/Y-04 gap: with it, check 4's "payback arithmet
 records a verdict a regression diff can read, and check 2's `Σ r_s` invariant (final ≤ current) becomes
 checkable from `plan --json` without the emitted order.
 
+**A converting move says so.** A move onto an `enforce_format` storage whose source is in another
+format (§5.3.2) carries the conversion on its plan line, after the size — `1.5 TiB  raw→qcow2` — and
+`--json` carries `format_from`/`format_to` on every move: `fmt_d` and `φ(d,target)`, equal for a move
+that does not convert. The conversion is part of what `confirm` mode asks the operator to approve,
+so it is printed, not inferred from the config.
+
 The pinned block is not optional decoration — it is the "complain" half of the skip-and-complain
 policy of §3.7, and it is the only place an operator learns which snapshots to clear.
 
@@ -2840,6 +2956,7 @@ requirement-to-setting mapping:
 | Storage groups VMs may not leave | `groups[].storages[]` — literal ids or `/regex/` patterns (§11.4) |
 | 2× largest disk free for snapshots | `snapshot_reserve.factor` (default `2.0`), per-storage override |
 | Keep N bytes / N% of each storage free | `free_space.soft` — global, per-storage or per-pattern (§5.3.1) |
+| Convert disks to a storage's format when moving them onto it | `groups[].storages[].enforce_format` (default `null` = preserve, §5.3.2) |
 | Min % changed traffic before migrating | `gates.drift_threshold` (default `0.10`) |
 | % I/O difference across the group | `gates.imbalance_threshold` |
 | Timeframe considered | `window.lookback` (default `24h`) |
@@ -2871,6 +2988,7 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `capability_weight > 0` | Appears in a denominator |
 | `reserve_factor ≥ 0` | Negative reserve is meaningless |
 | `free_space.soft/hard`: absolute values `≥ 0` and parseable (bytes or byte-unit string); percentages `"N%"` with `0 ≤ N < 100`; `hard ≤ soft` after per-storage resolution and percent-to-bytes conversion | §5.3.1. A `hard` above `soft` makes every plan for a compliant storage infeasible; a percentage of 100 or more is a typo, not a policy |
+| `enforce_format ∈ {raw, qcow2, null}`, and for every storage the entry resolves to (after pattern expansion) the value is in the formats that storage's type can hold (§5.3 (C2)) | §5.3.2. `qcow2` on an RBD, ZFS or LVM-thin storage could never be honoured; a pattern entry that matches one such storage is the same error, named with the storage, because the cluster changed under the pattern rather than the file |
 | `free_space.soft < C_s` for every storage, after resolution | A requirement no disk could leave room for is a typo; caught only once the inventory is loaded, like the pattern rules of §11.4 |
 | `0 ≤ drift_threshold ≤ 1`, `0 ≤ imbalance_threshold ≤ 1` | They are ratios |
 | `quantile ∈ (0,1)` | A fraction; the decision statistic |
@@ -2987,7 +3105,7 @@ nothing at all — stays checkable instead of silent:
   suffix after the closing slash.
 - **The entry's options apply to every storage it matches.** A pattern entry accepts the same
   per-storage options as a literal one (`capability_weight`, `reserve_factor`,
-  `free_space`), and every matched storage inherits them. This is the point of
+  `free_space`, `enforce_format`), and every matched storage inherits them. This is the point of
   the feature: one entry weights or reserves a whole LUN family. A pattern-level `free_space` is
   resolved per matched storage — a `"10%"` demands a tenth of *each* LUN's own capacity (§5.3.1).
 - **A literal entry beats a pattern.** Within one group, a storage named by a literal entry uses
@@ -3056,6 +3174,7 @@ Each phase is independently testable and useful on its own.
 | 13 | Free-space requirements (§5.3.1, §5.3 (C5), §6 override, §7.3 repair exemption, §8.1 hard floor) **and the (C2) format-compatibility eligibility it needs** | `config_schema.json` gains the block **first** — the schema is closed (`additionalProperties: false` throughout, deliberately: it is where a typo'd key is caught, §11.1's structural pass), so a `free_space:` key is rejected before `config.py` ever sees it: a top-level `free_space` object and a `free_space` property on `groups[].storages[]`, each with `soft`/`hard` typed `["string", "number", "null"]` for §5.3.1's grammar (integer bytes, byte-unit string, `"N%"`, and `null` with its two by-level meanings); `config.py` then resolves `free_space.soft/hard` per storage (bytes, byte-unit strings, percentages; global, per-storage, per-pattern; the global `snapshot_reserve.min_free_bytes` scalar deprecated, folded in per storage after percent conversion as `soft_s = max(soft_s_resolved, min_free_bytes)` — §5.3.1), validates `hard ≤ soft` and `soft < C_s` **on the written values, before that fold** (§5.3.1, "validate as written, then fold"); the per-storage `soft_s`/`hard_s` pair replaces the `min_free_bytes` scalar parameter across `reserve.compute_reserve_status()`/`transient_charge_ok()`, `heuristic.run_heuristic()` and its helpers, `schedule.transient_invariant_ok()`/`order_moves()`, `optimize.py`, `execute.py`'s live execution-time re-check and every `cli.py` call site that threads the scalar today, and `collect.py`'s bundle manifest (which serialises the scalar, so a replayed bundle carries the pair instead — §16); `topology.Storage` gains the type/format fields (C2) needs and both solver backends fix `x_{d,s}=0` for format-incompatible targets; `payback.py`'s repair detection (`ScheduledMove.resolves_reserve_violation`, set by `schedule.py`'s "source presently violating" test) is replaced by §7.3's outcome trigger (exempt iff the plan's final `Σ r_s` is strictly below the current assignment's) plus a per-move `repair` marker computed by the revert test — re-scoring `Σ r_s` on the final assignment with one `x` held — while `order_moves()`'s internal priority-1 test keeps §8.2's "source currently violating" form (a current-state rule, not a plan-outcome one); the outcome trigger is a **signature and data-flow change**, not a flag swap: `evaluate_plan_payback(move_costs, benefit_load_seconds, payback_ratio)` has no access to `Σ r_s`, so the current and final slack are threaded in from its sole production caller (`cli.py`'s plan builder, `evaluate_plan_payback()`'s only call site outside tests) — both sums already exist there as `Σ shortfall_bytes` over `ObjectiveBreakdown.reserve_statuses` (`solve_outcome.initial_breakdown` and the R-02 `final_breakdown` are in hand at the call site), so the change is two sums over objects already passed to the benefit computation, no new plumbing through the solver — with one sequencing constraint the signature change must respect: the final sum is taken over the move set the gate will actually execute, i.e. **after** the per-move duration rejections and saturation deferrals are known and their moves removed (§7.3), so the refusal computation that today lives inside `evaluate_plan_payback()` has to produce its verdicts before the trigger's sums are taken rather than alongside them, and `_execute_group_plan()`'s `excluded_keys` filtering stops being the only place the drop is applied; the exemption also gains a `--json` surface it has never had — `repair_exempt` plus `reserve_shortfall_bytes_before`/`_after` in the payback block (§9.5), without which an exempt plan and one accepted on merit are the same object to `validate_corpus.py`'s expected files (§16.6 checks 2 and 4); the sweep is defined by grep, not by enumeration — every file matching `git grep -l resolves_reserve_violation` (today: `payback.py`, `schedule.py`, `cli.py`, `test_schedule.py`, `test_cli.py`, `test_payback.py`, `test_execute.py`, both `tests/corpus/*.expected.json` bundles, `docs/manual/27-plan.md`, `docs/internals/96-payback.md`, plus the plan and REVIEW.md) is updated with it, and every file matching `git grep -l evaluate_plan_payback` (which adds `test_affinity_repair_fixture.py`, whose positional three-argument call breaks on the signature change without ever naming the flag, and `docs/internals/00-overview.md`) with the signature change — the manual's `resolves_reserve_violation` prose must be *split*, not renamed: its scheduling half (§8.2 priority 1) keeps the current-state form, its exemption half becomes the plan-level outcome trigger; the §14.8 fixture (which requires the format rule, landed in the same commit — so it carries no `requires_format_eligibility` marker, see §14.8's AH-03 note) proves the mandate, the exemption and both `hard`-sweep orders; the manual documents the block, and `config/drs.example.yaml` gains it in **phase 13's own commit** as `soft: 0` / `hard: null` (it is a shipped artefact, §8, and today carries `snapshot_reserve.min_free_bytes` with no `free_space` block at all) — `hard: null` there is load-bearing rather than cosmetic: any spelled-out `hard` below the folded floor would weaken §8.1's transient charge for exactly the operators the fold protects, because the built check charges `min_free_bytes` on every in-flight state and `hard_s` is what replaces it, while `hard: null` (= `soft`) leaves an upgrading deprecated-key config exactly as strong as it is today; and the scalar → pair replacement gets the same grep treatment as the flag, because it deprecates a **documented config key** and reaches further than the code: every file matching `git grep -l min_free_bytes` (today 30 — the `src/` files named above plus `config_schema.json`, seven test modules, both `tests/corpus/*/config.yaml` replay inputs (**left as captured** — AH-06: a committed bundle is real captured data, and a pre-`free_space` bundle is the compatibility case replay must keep serving), `config/drs.example.yaml`, `docs/manual/10-configuration.md` — whose `### snapshot_reserve.min_free_bytes` reference section becomes the deprecation notice and the `free_space` documentation — `docs/manual/00-installation.md`, `docs/manual/27-plan.md`, `docs/manual/30-safety-and-status.md`, `docs/internals/60-topology.md`, `docs/internals/91-optimize.md`, `docs/internals/95-schedule.md` — which documents the built fold of the scalar into the transient check — `.agents/domain-invariants.md`, whose invariant 2 is written `used + max(f·Z_s, min_free_bytes) ≤ C_s` and becomes `soft_s`, `.agents/testing.md`, plus the plan and REVIEW.md) is updated with it; **one file the sweep does not name still needs the same treatment**: `verify-storages` gains the resolved `soft_s`/`hard_s` per storage, with the level each came from (§3.5 — the derivation an operator cannot otherwise predict, and the same argument that put the pattern expansion there), so `docs/manual/25-show-load-and-verify-storages.md` joins the phase's file set even though it matches none of the three greps today |
 | 14 | Holt-Winters-driven placement; §7.3 saturation guard removed (§12.1; REVIEW.md T-03, AL-01, AL-04) | Two commits, in order. **14a** deletes the saturation guard — `migration.bwlimit_bytes_per_sec` is the only throttle a migration needs — deleting `saturation_load`/`saturation_ceiling` from the schema outright (no compatibility shim: a config that sets them fails validation, and the committed bundles' `config.yaml` were edited). **14b** scales each disk's `ℓ_d` by a backtest-validated Holt-Winters forecast of its p95 over the next `window.lookback`, at the one point gates, solver, payback and ordering all read it. The default `forecast.model: quantile` is unchanged: §14 fixtures and quantile corpus variants byte-identical apart from the removed saturation fields. Done when §12.1's checklist holds |
 | 15 | Single-source configuration defaults (§11.1; REVIEW.md AL-03) | Every default exists **exactly once, on the dataclass field**; the loader constructs each config class from the raw mapping by passing **only the keys the operator actually wrote**, through field-level converters (duration/byte/percent strings, list→tuple), so no `.get(key, default)` ever restates a default — today's twin copies in `config.py` (e.g. `model: str = "quantile"` on `ForecastConfig` beside `fc_raw.get("model", "quantile")` in the loader, and the same shape for every other knob) are gone; `config_schema.json`, the third copy of the shape, is generated from the same field/type/enum source — or, if generation proves heavier than checking, a check target fails on drift between schema and dataclasses — so it cannot rot either; **zero operator-visible behaviour change**: `--help`, the manual's option tables and `config/drs.example.yaml` values are byte-identical before and after, proven by the fixture and corpus checks running green untouched |
+| 16 | Per-storage target format, `enforce_format` (§5.3.2) | **Not started.** First the open item of §5.3.2 is closed: the `qcow2`-on-`lvm` allocation rule is read from PVE 9.2's `LVMPlugin.pm` and recorded in §5.3.2 with the source reference, and `z_{d,s}` gains its third term. Then: `config_schema.json` gains `enforce_format` (`enum [raw, qcow2, null]`) on `groups[].storages[]` — no top-level key; `config.py` resolves it per expanded storage with §11.4's literal-beats-pattern precedence and runs §11.1's type check once the inventory is loaded; `topology.target_format()` and a per-pair `disk_size_on()` are the single implementations of `φ(d,s)` and `z_{d,s}`, and `storage_accepts_format()`'s callers in `optimize.py`, `heuristic.py` and `execute.py` pass `φ(d,s)` instead of `fmt_d`; the MILP's (C4)/(C5)/(C7) rows and `schedule.transient_invariant_ok()` use `z_{d,s}`; `execute.py` sends `format=` iff `φ ≠ fmt_d` (§9.2), and its existing conversion charge becomes the planned case; `verify-storages`, the plan line and `--json` show it (§3.5, §9.5). A fixture in which one enforcing target makes an otherwise ineligible move feasible, and the converted `z_{d,s}` changes which disk fits, is generated by `generate_expected.py`; every existing fixture and corpus bundle must replay byte-identical (no `enforce_format` ⇒ `z_{d,s} = z_d`). The manual, `config/drs.example.yaml` and `docs/internals/` move in the same commit (no CLI option is added, so the manpage's `OPTIONS` is unchanged). **Done when** additionally a live `confirm` run on the dev cluster converts one data disk and one `efidisk0` in each direction onto shared LVM, the source volume is observed gone (§9.3), and the target's listed size matches `z_{d,s}` |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
@@ -3233,6 +3352,7 @@ Holt-Winters.
 | Next move blocked by the previous move's wipe | Completion requires task OK **and** source volume absent **and** lock clear; `cooldown_per_storage` validated against the wipe time (§9.3) |
 | Thin provisioning | **Never considered** (§5.1): every disk counts at its provisioned size, so a thin pool's "used" is `Σ z_d + Uˢᵉˣᵗ`, which can be several times what the pool reports allocated. `migration.assume_thick_provisioning` survives only as an accepted-`true`, refused-`false` key; there is no allocated-size mode |
 | Foreign volumes on a storage | Counted via `count_foreign_volumes`; otherwise the reserve silently overstates free space |
+| A move converts a disk's format | Only onto a storage with `enforce_format` set, only as a side effect of a move the plan makes anyway, never for `tpmstate0`, never for a disk with snapshots (§5.3.2); the converted size `z_{d,s}` is what the reserve and the transient invariant count; the conversion is printed on the move line |
 | Orphaned target volume after a failure | Detected and reported, never auto-deleted (§9.3) |
 | Storage already violating the reserve | Soft slack `r_s` keeps the model feasible; violation bypasses gates and is scheduled first |
 | Storage below its configured free-space requirement (`free_space.soft`, §5.3.1) | Same handling as a reserve violation: slack keeps the model feasible, the §6 override bypasses drift/imbalance, a repairing plan is payback-exempt (§7.3) and the *direct* repair — the move off the short storage — is scheduled first (§8.2 exception 1); an *indirect* repair, one that frees the space the direct repair needs, waits for the spec-only exception 2, as §14.8's second move shows; an unrepairable shortfall is reported with the byte amount |
@@ -3715,6 +3835,7 @@ bug waiting to happen; this table is the audit.
 | `free_space.soft` (global, per-storage, per-pattern) | §5.3 (C5), `R_s ≥ soft_s`; §6 reserve override; §7.3 repair exemption |
 | `free_space.hard` (global, per-storage, per-pattern) | §8.1 transient invariant, `max(f_b·…, hard_b)` floor |
 | `snapshot_reserve.count_foreign_volumes` | §5.1.1, `Uˢᵉˣᵗ` |
+| `groups[].storages[].enforce_format` | §5.3.2, `φ(d,s)` in (C2) eligibility and `z_{d,s}` in (C4)/(C5)/(C7)/§8.1; `format=` on `move_disk` (§9.2) |
 | `gates.drift_threshold` | §6 drift gate |
 | `gates.imbalance_threshold` | §6 imbalance gate |
 | `gates.capacity_spread_threshold` | §6 capacity gate (fill fractions from §5.3 (C7)) |
@@ -4027,7 +4148,7 @@ between it and the recorded responses shows up as a key miss (§16.5) rather tha
 
 Everything else — `window`, `snapshot_reserve`, `free_space`, `gates`, `migration`, `objective`,
 `solver`, `execution`, `forecast`, `report`, the per-storage `capability_weight`/`reserve_factor`/
-`free_space` — is carried **verbatim**. Those knobs are the test case.
+`free_space`/`enforce_format` — is carried **verbatim**. Those knobs are the test case.
 
 #### What is deliberately preserved
 
