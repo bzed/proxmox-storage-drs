@@ -142,6 +142,9 @@ class StorageConfig:
     # (section 5.3.1).
     free_space_soft: FreeSpaceValue | None = None
     free_space_hard: FreeSpaceValue | None = None
+    # Section 5.3.2: the format every disk moved onto this storage arrives in
+    # (``"raw"`` or ``"qcow2"``), or None to preserve the source's format.
+    enforce_format: str | None = None
 
 
 def _parse_free_space_value(raw: Any, *, where: str) -> FreeSpaceValue | None:
@@ -600,6 +603,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
                         s.get("free_space", {}).get("soft"),
                         where=f"groups[{g['name']!r}].storages[{s['id']!r}].free_space.soft",
                     ),
+                    enforce_format=s.get("enforce_format"),
                     free_space_hard=_parse_free_space_value(
                         s.get("free_space", {}).get("hard"),
                         where=f"groups[{g['name']!r}].storages[{s['id']!r}].free_space.hard",

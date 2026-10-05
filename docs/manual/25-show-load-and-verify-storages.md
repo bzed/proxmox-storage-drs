@@ -227,6 +227,12 @@ outright rather than merely running slowly.
 
 ## `verify-storages`
 
+For a storage that sets `enforce_format` it also prints that value, the entry it came from, and how many
+disks already on the storage are in a different format (and their total size) — not an error, only how far
+the storage is from its policy, since enforcement applies to moves and never moves a disk by itself. The
+`--json` form carries the same as `enforce_format`, `enforce_format_source`, `nonconforming_disks` and
+`nonconforming_bytes`.
+
 Reports the resolved `free_space.soft`/`.hard` bytes for each storage,
 each with the level it came from (`IMPLEMENTATION_PLAN.md` section 5.3.1) —
 the derivation an operator cannot otherwise predict, once inheritance,

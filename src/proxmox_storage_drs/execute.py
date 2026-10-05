@@ -81,10 +81,12 @@ from proxmox_storage_drs.topology import (
     Group,
     Storage,
     content_item_size,
+    disk_size_on,
     parse_disk_spec,
     parse_pve_config_size_bytes,
     pending_disk_reasons,
     storage_accepts_format,
+    target_format,
 )
 from proxmox_storage_drs.units import format_bytes
 
@@ -260,7 +262,11 @@ def _is_excluded_by_tag_or_vmid(
 
 
 def _preflight(
-    client: PveClient, disk: Disk, move: ScheduledMove, exclude: ExcludeConfig
+    client: PveClient,
+    disk: Disk,
+    move: ScheduledMove,
+    exclude: ExcludeConfig,
+    target: Storage | None = None,
 ) -> _PreflightResult:
     """Section 9.2's six re-checks, immediately before issuing one move.
 
@@ -293,6 +299,17 @@ def _preflight(
         return _PreflightResult(
             f"{disk.display_id} is now on {storage_id!r}, not the planned {move.from_storage!r}"
         )
+
+    # Section 9.2 step 1: ``format=`` is only sent when the plan converts, and what it converts
+    # *from* is the live volume's format, not the planned one -- if they differ the plan's
+    # ``z_{d,s}`` and its conversion are for a different disk, so re-plan.
+    if target is not None and _format_arg(disk, target) is not None:
+        live_format = _volume_format(volume_name)
+        if live_format != disk.format:
+            return _PreflightResult(
+                f"{disk.display_id} is now {live_format}, not the planned {disk.format}, "
+                "so the planned format conversion no longer applies -- re-plan"
+            )
 
     if resource.get("status") != "running":
         return _PreflightResult(f"VM {disk.vmid} is no longer running")
@@ -488,7 +505,7 @@ def _is_mirror_target(item: Mapping[str, Any], im: _InflightMove, taken: set[str
         and volid not in im.target_baseline_volids
         and item.get("vmid") == im.disk.vmid
         and sized is not None
-        and sized[0] in (im.disk.size_bytes, im.config_size_bytes)
+        and sized[0] in (im.disk.size_bytes, im.config_size_bytes, disk_size_on(im.disk, im.target))
     )
 
 
@@ -555,15 +572,40 @@ def _move_charge_bytes(
     This is what the operator describes PVE doing (not read from PVE's
     source). A same-kind move keeps the listed size on purpose: there the
     target is a copy of the source image, and charging more would refuse
-    moves for a discrepancy that does not apply. This tool never passes
-    ``format=`` to ``move_disk`` and (C2) keeps a qcow2 disk off storage that
-    cannot hold it, so the conversion case is a guard rather than something
-    a plan produces today."""
+    moves for a discrepancy that does not apply.
+
+    A move onto an ``enforce_format`` storage that changes the disk's format
+    (section 5.3.2) is the *planned* conversion case: it is charged at least
+    ``topology.disk_size_on()``, the same ``z_{d,s}`` the plan was checked
+    with -- computed from the live ``size=`` -- which for a ``qcow2`` volume on
+    ``lvm`` includes the image's own metadata. A guard case (a qcow2 disk that
+    lands on a target that cannot hold qcow2, so PVE writes it raw) stays as
+    before."""
     changes_kind = source.storage_type != target.storage_type
     converts_to_raw = disk.format == "qcow2" and not storage_accepts_format(target, "qcow2")
+    charge = disk.size_bytes
     if (changes_kind or converts_to_raw) and config_size_bytes is not None:
-        return max(disk.size_bytes, config_size_bytes)
-    return disk.size_bytes
+        charge = max(charge, config_size_bytes)
+    if config_size_bytes is not None and config_size_bytes > disk.config_size_bytes:
+        disk = replace(disk, config_size_bytes=config_size_bytes)
+    return max(charge, disk_size_on(disk, target))
+
+
+def _volume_format(volume_name: str) -> str:
+    """The format PVE gives a volume, from its name: ``.qcow2``/``.vmdk`` suffix, else ``raw``
+    (``LVMPlugin::parse_volname``, ``Plugin::parse_volname`` -- an LV or a ``.raw`` file)."""
+    for suffix in ("qcow2", "vmdk"):
+        if volume_name.endswith(f".{suffix}"):
+            return suffix
+    return "raw"
+
+
+def _format_arg(disk: Disk, target: Storage) -> str | None:
+    """``move_disk``'s ``format=`` for this move, or ``None`` (section 9.2): sent iff the target
+    format ``phi(d, target)`` differs from the disk's own, so a move without enforcement is
+    byte-for-byte the call it always was."""
+    arriving = target_format(disk, target)
+    return arriving if arriving != disk.format else None
 
 
 def _pre_move_refusal(move: ScheduledMove, detail: str, *, fatal: bool) -> MoveOutcome:
@@ -838,6 +880,7 @@ def _issue_move_disk_and_wait(
     clock: Clock,
     on_inflight_started: InflightCallback | None,
     on_inflight_finished: InflightCallback | None,
+    format_arg: str | None = None,
 ) -> tuple[str, str, str]:
     """Issues one `move_disk` attempt and blocks for section 9.3.2's
     completion criterion -- factored out of `_execute_one_move()` purely
@@ -857,6 +900,7 @@ def _issue_move_disk_and_wait(
         move.to_storage,
         delete=True,
         bwlimit_bytes_per_sec=migration.bwlimit_bytes_per_sec,
+        format=format_arg,
     )
     # Section 11.2: written *before* this function does anything else with
     # `upid` -- if the engine crashes, is killed, or the host reboots
@@ -957,7 +1001,7 @@ def _execute_one_move(
             always_stop,
         )
 
-    preflight = _preflight(client, disk, move, exclude)
+    preflight = _preflight(client, disk, move, exclude, storages_by_id[move.to_storage])
     if preflight.mismatch is not None:
         return _pre_move_refusal(move, preflight.mismatch, fatal=preflight.fatal)
     assert (
@@ -1018,6 +1062,7 @@ def _execute_one_move(
             clock,
             on_inflight_started,
             on_inflight_finished,
+            _format_arg(disk, target),
         )
         # Section 9.3 point 3: the task's own flock on the VM config file is
         # not the `lock:` config attribute the pre-flight check above waits
@@ -1578,6 +1623,7 @@ def _poll_inflight_once(
                 im.move.to_storage,
                 delete=True,
                 bwlimit_bytes_per_sec=migration.bwlimit_bytes_per_sec,
+                format=_format_arg(im.disk, im.target),
             )
             if on_inflight_started is not None:
                 on_inflight_started(new_upid)
@@ -1743,7 +1789,7 @@ def _launch_decision(
     ):
         return _LaunchDecision("wait", lock_wait=lock_wait)
 
-    preflight = _preflight(client, disk, candidate, exclude)
+    preflight = _preflight(client, disk, candidate, exclude, storages_by_id[candidate.to_storage])
     if preflight.mismatch is not None:
         outcome = _pre_move_refusal(candidate, preflight.mismatch, fatal=preflight.fatal)
         return _LaunchDecision("resolved", outcome=outcome)
@@ -1854,6 +1900,7 @@ def _advance_pending(
             candidate.to_storage,
             delete=True,
             bwlimit_bytes_per_sec=migration.bwlimit_bytes_per_sec,
+            format=_format_arg(disk, storages_by_id[candidate.to_storage]),
         )
         # Section 11.2: recorded before this function does anything else
         # with `upid`, exactly as `_execute_one_move()` does -- see that

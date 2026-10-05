@@ -383,3 +383,36 @@ the neighbourhood the heuristic searches) for every ineligible target.
 Unlike the free-space floor, format eligibility needs no per-run
 resolution step of its own -- it is a pure function of `storage_type`,
 computed once when `Storage` is built and read directly thereafter.
+
+### `enforce_format`: `target_format()` and `disk_size_on()`
+
+A storage entry may name the format every disk moved onto it arrives in
+(`groups[].storages[].enforce_format`: `raw`, `qcow2` or unset; plan section
+5.3.2). `Storage.enforce_format` carries the resolved value (a pattern
+entry's value is copied to each storage it matches in `_match_pattern_entries`,
+a literal entry replaces it wholesale, like every per-storage option) and
+`enforce_format_source` says which entry it came from, for `verify-storages`.
+`_expand_group` refuses a value the storage's type cannot hold (`qcow2` on an
+RBD, ZFS or LVM-thin storage) with a `TopologyError` naming the storage.
+
+Two functions are the only implementations of the two questions enforcement
+adds. `target_format(disk, storage)` is the plan's `phi(d,s)`: the storage's
+`enforce_format` for a disk that is *not* already on it, otherwise the disk's
+own format; a `tpmstate0` always keeps its own. (C2)'s eligibility is then
+`storage_accepts_format(s, target_format(d, s))` at every call site -- the two
+solver backends, the heuristic's candidate generators and the executor -- so
+enforcement can only widen what a storage accepts. `disk_size_on(disk,
+storage)` is `z_{d,s}`: `Disk.size_bytes` unless the move changes the format,
+where PVE allocates a fresh volume and the charge is
+`max(size_bytes, config_size_bytes)` (`Disk.config_size_bytes` is the disk
+line's `size=`, 0 when absent), and a `qcow2` volume landing on an `lvm`
+storage is charged at least `qcow2_lvm_allocation_bytes()` of that. The latter
+is an upper bound on what PVE's `LVMPlugin::alloc_image` creates -- it sizes
+the LV from `qemu-img measure`'s `fully-allocated` figure, the virtual size
+plus the image's own metadata (about 0.015 % with the default 64 KiB
+clusters) -- so it is `size + size/4096 + 8 MiB`, never below the real value.
+`reserve.py`, `schedule.py` and both solver backends read sizes through
+`disk_size_on`, so (C4), (C5), (C7) and the transient check agree; the group
+mean fill `b_bar` and the move-cost terms deliberately stay at `size_bytes`
+(they are targets and prices, not constraints). With no `enforce_format`
+anywhere `disk_size_on` is `size_bytes` and every earlier plan is unchanged.

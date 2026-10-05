@@ -161,6 +161,14 @@ groups:
         # free_space:
         #   soft: "15%"
         #   hard: null
+        # Disk format for disks moved ONTO this storage: raw, qcow2, or null (the
+        # default) to keep each disk's current format. Only applies as a side effect
+        # of a move the balancer makes anyway -- it never moves a disk just to
+        # convert it -- and never to a VM's tpmstate0. On shared LVM, qcow2 is what
+        # enables volume-chain snapshots. The format must be one the storage's type
+        # can hold (qcow2: lvm, dir, nfs, cifs, cephfs). Also valid on /pattern/
+        # entries.
+        # enforce_format: qcow2
       - id: san-b
         capability_weight: 1.0
       - id: san-c

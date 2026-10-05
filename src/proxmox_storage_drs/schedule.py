@@ -66,7 +66,7 @@ from proxmox_storage_drs.reserve import (
     managed_used_bytes,
     transient_charge_ok,
 )
-from proxmox_storage_drs.topology import Disk, Group, Storage
+from proxmox_storage_drs.topology import Disk, Group, Storage, disk_size_on, target_format
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +81,10 @@ class ScheduledMove:
     size_bytes: int
     imbalance_reduction: float  # this move's own effect, at the moment it was scheduled
     resolves_reserve_violation: bool  # section 8.2 priority 1: scheduled first regardless of ratio
+    # Section 5.3.2: the disk's format before the move and `phi(d, target)`, the format it
+    # arrives in. Equal unless the target enforces another one; "" on a hand-built move.
+    format_from: str = ""
+    format_to: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,16 +154,20 @@ def transient_invariant_ok(
         return state.get(d.key, d.current_storage)
 
     used_b = (
-        managed_used_bytes(group.disks, target_storage.id, storage_of=storage_of)
+        managed_used_bytes(
+            group.disks, target_storage.id, storage_of=storage_of, storage=target_storage
+        )
         + target_storage.foreign_used_bytes
     )
-    existing_largest = largest_disk_bytes(group.disks, target_storage.id, storage_of=storage_of)
+    existing_largest = largest_disk_bytes(
+        group.disks, target_storage.id, storage_of=storage_of, storage=target_storage
+    )
     return transient_charge_ok(
         target_storage.reserve_factor,
         target_storage.capacity_bytes,
         used_b,
         existing_largest,
-        [disk.size_bytes],
+        [disk_size_on(disk, target_storage)],
         target_storage.free_space_hard_bytes,
     )
 
@@ -297,6 +305,8 @@ def order_moves(
                 size_bytes=disk.size_bytes,
                 imbalance_reduction=best_reduction,
                 resolves_reserve_violation=best_key in priority,
+                format_from=disk.format,
+                format_to=target_format(disk, storages_by_id[target_id]),
             )
         )
         state[best_key] = target_id
