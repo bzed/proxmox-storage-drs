@@ -1289,14 +1289,35 @@ they reach the API. Setting this `false` does **not** make such a move
 work — PVE rejects `move_disk delete=1` on a snapshotted volume regardless;
 it only removes the early, informative warning. Keep this `true`.
 
-### `exclude.running_only`
+### `exclude.stopped`
 
 Boolean, default `true`.
 
-Only running VMs generate load to balance; a stopped VM's disks are moved
-only if a capacity constraint requires it. Setting this `false` widens the
-movable set to stopped VMs' disks for capacity purposes but they still
-contribute zero load.
+Whether stopped VMs are left out of the balancing run entirely. It reads
+like the other `exclude.*` keys: `true` means *exclude* stopped VMs.
+
+With `true` (the default) a VM whose status is not `running` is skipped
+before its configuration is even fetched. Its disks are never moved --
+not for balance, and not to repair a capacity shortfall either. They still
+occupy space on their storage, so their bytes are counted as foreign
+volumes and reduce the room the planner has to work with; they simply are
+never candidates for a move. A stopped VM generates no I/O, so there is
+nothing to balance, and moving its disks would be an offline `move_disk`
+for no load benefit.
+
+With `false`, stopped VMs are treated like any other VM: their disks can be
+moved, but because they carry zero load the planner only does so to repair
+a capacity violation (the reserve or the configured free space), never for
+balance. Those moves are offline moves.
+
+Too much (`true` when stopped VMs hold most of a full storage): the planner
+cannot free that space by moving them and may report an unfixable reserve
+violation. Too little (`false`): a larger inventory is fetched on every
+run, and offline moves of VMs nobody is using appear in plans.
+
+Renamed from `running_only`, which had the opposite polarity (`running_only:
+true` is `exclude.stopped: true`). A configuration still carrying the old
+key is rejected at load time as an unknown key.
 
 ### `exclude.include_unused_disks`
 

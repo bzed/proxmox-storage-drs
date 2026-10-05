@@ -320,7 +320,7 @@ class ExcludeConfig:
     storages: tuple[str, ...] = ()
     tags: tuple[str, ...] = ("no-drs",)
     skip_vms_with_snapshots: bool = True
-    running_only: bool = True
+    stopped: bool = True
     include_unused_disks: bool = True
 
 
@@ -720,7 +720,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         storages=tuple(excl_raw.get("storages", [])),
         tags=tuple(excl_raw.get("tags", ["no-drs"])),
         skip_vms_with_snapshots=excl_raw.get("skip_vms_with_snapshots", True),
-        running_only=excl_raw.get("running_only", True),
+        stopped=excl_raw.get("stopped", True),
         include_unused_disks=excl_raw.get("include_unused_disks", True),
     )
 

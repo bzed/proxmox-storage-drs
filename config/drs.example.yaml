@@ -373,7 +373,7 @@ exclude:
   # Snapshotted disks are pinned (bytes and load still counted) and reported at WARN
   # every run, naming the VMs whose snapshots must be cleared.
   skip_vms_with_snapshots: true
-  running_only: true              # only consider running VMs
+  stopped: true                   # true = leave stopped VMs out entirely (see manual)
   # unused{N} volumes are real allocated bytes with no I/O. Including them lets the
   # solver relocate one to repair a reserve violation; it will never move one for
   # balance, since the benefit is zero by construction. false pins them instead.

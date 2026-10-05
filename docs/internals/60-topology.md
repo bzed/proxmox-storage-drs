@@ -16,7 +16,7 @@ pinned disk is still a full member of `D` — its bytes and its I/O still
 count — it is simply excluded from ever being *reassigned*; the "Pin
 priority" section below enumerates every condition that triggers it. A disk
 this module never sees at all — a stopped VM excluded by
-`exclude.running_only`, or a disk whose current storage is not in any
+`exclude.stopped`, or a disk whose current storage is not in any
 configured group — is what "foreign" (`Uˢᵉˣᵗ`, section 5.1.1) means.
 Config-excluded disks (`exclude.vmids`/`exclude.disks`/tags) are *not*
 foreign: (C2) pins them into `D` specifically so their bytes still count
@@ -55,7 +55,7 @@ storage)` content-fetch phase, the single-threaded join
    (`_pick_active_node`, preferring one reporting `status: "available"`).
 3. `storage_content()` and `storage_status()` per group storage.
 4. `vm_config()`, `vm_snapshots()` and `vm_pending()` per considered VM. A VM is *not*
-   fetched at all when `exclude.running_only` is set and it is stopped —
+   fetched at all when `exclude.stopped` is set and it is stopped —
    the one case `cluster/resources`'s own fields can decide without a
    config fetch. Every other VM is fetched, including config-excluded ones:
    whether a specific disk turns out to be "ungrouped" is only knowable

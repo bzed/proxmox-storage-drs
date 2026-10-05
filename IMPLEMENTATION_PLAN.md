@@ -77,8 +77,10 @@ concentrated on few storages.
 ### Operating assumptions
 
 - PVE 9.2, shared LVM (typically over FC) or any shared storage supporting `move_disk`.
-- Only **running** VMs are considered by default; a stopped VM generates no I/O to balance, and its
-  disks are moved only if a capacity constraint requires it.
+- Only **running** VMs are considered by default (`exclude.stopped: true`); a stopped VM generates no
+  I/O to balance, and its disks are never moved — they count as foreign bytes (§5.1.1). Setting
+  `exclude.stopped: false` makes them eligible, and then they move only if a capacity constraint
+  requires it.
 - Disks are thick-provisioned by default, so migration cost is proportional to *provisioned* size.
 - **A VM is never stopped, suspended or reconfigured.** The only write the engine issues is
   `move_disk`. This is what rules out the offline path for snapshotted disks (§3.7), which are
@@ -865,7 +867,7 @@ fetching dominates run time. Specify:
   storage it is about to touch, and only for those; everything else may be reused;
 - `/cluster/resources` is a single call and gives the VM inventory, node placement and coarse
   storage usage, so fetch it first and use it to decide which per-VM configs are needed at all —
-  in practice this means only a **stopped** VM, when `exclude.running_only` is set, can be skipped
+  in practice this means only a **stopped** VM, when `exclude.stopped` is set, can be skipped
   without fetching its config, since that is the only exclusion `cluster/resources`'s own fields
   (`status`) can decide. A VM excluded by `exclude.vmids`/tags still needs its config fetched: (C2)
   *pins* such a disk into `D` rather than dropping it (§5.1.1's note on why), which needs its size.
