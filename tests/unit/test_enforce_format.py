@@ -38,16 +38,11 @@ from proxmox_storage_drs.topology import (
     storage_accepts_format,
     target_format,
 )
-from tests.unit.test_execute import (
-    TIB,
-    client_with,
-    make_move,
-)
-from tests.unit.test_execute import make_storage as make_exec_storage
-from tests.unit.test_execute import run
+from tests.unit import test_execute as exe
 from tests.unit.test_topology import _cluster_client, make_config
 
 GIB = 1 << 30
+TIB = exe.TIB
 OBJECTIVE = ObjectiveConfig(
     alpha_spread=1.0,
     beta_move_count=0.25,
@@ -356,11 +351,11 @@ def test_a_move_without_enforcement_records_equal_formats() -> None:
 
 
 def _exec_group(enforce: str | None, fmt: str, volume: str, size: str) -> tuple[Group, Any]:
-    src = make_exec_storage("san-a")
-    dst = replace(make_exec_storage("san-b"), enforce_format=enforce)
+    src = exe.make_storage("san-a")
+    dst = replace(exe.make_storage("san-b"), enforce_format=enforce)
     d = replace(_exec_disk(), format=fmt, config_size_bytes=0)
     group = Group(name="fc-tier1", storages=(src, dst), disks=(d,))
-    client, api = client_with(
+    client, api = exe.client_with(
         {"nodes/pve01/qemu/101/config": {"scsi0": f"san-a:{volume},size={size}"}}
     )
     return group, (client, api)
@@ -378,27 +373,27 @@ def _posted_move(api: Any) -> dict[str, Any]:
 
 def test_format_is_sent_only_when_the_move_converts() -> None:
     group, (client, api) = _exec_group("raw", "qcow2", "101/vm-101-disk-0.qcow2", "1024G")
-    result = run(client, group, (make_move(),))
+    result = exe.run(client, group, (exe.make_move(),))
     assert result.outcomes[0].status == "moved"
     assert _posted_move(api)["format"] == "raw"
 
 
 def test_format_is_not_sent_without_enforcement() -> None:
     group, (client, api) = _exec_group(None, "qcow2", "101/vm-101-disk-0.qcow2", "1024G")
-    run(client, group, (make_move(),))
+    exe.run(client, group, (exe.make_move(),))
     assert "format" not in _posted_move(api)
 
 
 def test_format_is_not_sent_when_the_disk_already_has_the_enforced_format() -> None:
     group, (client, api) = _exec_group("raw", "raw", "vm-101-disk-0", "1024G")
-    run(client, group, (make_move(),))
+    exe.run(client, group, (exe.make_move(),))
     assert "format" not in _posted_move(api)
 
 
 def test_a_live_format_that_differs_from_the_plan_means_replan() -> None:
     # The plan believed qcow2 -> raw; the volume is raw by now (no .qcow2 suffix).
     group, (client, api) = _exec_group("raw", "qcow2", "vm-101-disk-0", "1024G")
-    result = run(client, group, (make_move(),))
+    result = exe.run(client, group, (exe.make_move(),))
     assert result.outcomes[0].status == "replan_needed"
     assert "re-plan" in result.outcomes[0].detail
     assert not [c for c in api.calls if c[1] == "nodes/pve01/qemu/101/move_disk"]
@@ -406,23 +401,23 @@ def test_a_live_format_that_differs_from_the_plan_means_replan() -> None:
 
 def test_live_format_is_not_checked_for_a_move_that_does_not_convert() -> None:
     group, (client, api) = _exec_group(None, "qcow2", "vm-101-disk-0", "1024G")
-    result = run(client, group, (make_move(),))
+    result = exe.run(client, group, (exe.make_move(),))
     assert result.outcomes[0].status == "moved"
 
 
 def test_a_converting_move_is_refused_when_the_live_check_finds_no_room() -> None:
     """The live transient check charges the converted size from the live `size=`."""
-    src = make_exec_storage("san-a")
-    dst = replace(make_exec_storage("san-b", capacity_tib=0.5), enforce_format="raw")
+    src = exe.make_storage("san-a")
+    dst = replace(exe.make_storage("san-b", capacity_tib=0.5), enforce_format="raw")
     d = replace(_exec_disk(), format="qcow2", size_bytes=100 * GIB)
     group = Group(name="fc-tier1", storages=(src, dst), disks=(d,))
-    client, api = client_with(
+    client, api = exe.client_with(
         {
             "nodes/pve01/qemu/101/config": {"scsi0": "san-a:101/vm-101-disk-0.qcow2,size=1024G"},
             "nodes/pve01/storage/san-b/status": {"total": TIB // 2, "used": 0},
         }
     )
-    result = run(client, group, (make_move(),))
+    result = exe.run(client, group, (exe.make_move(),))
     assert result.outcomes[0].status != "moved"
     assert not [c for c in api.calls if c[1] == "nodes/pve01/qemu/101/move_disk"]
 
