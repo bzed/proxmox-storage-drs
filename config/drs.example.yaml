@@ -284,7 +284,7 @@ objective:
   # failure costs. Defaults to half of alpha_spread so I/O balance stays the first
   # priority; 0 disables the term. At this default it mostly breaks ties between
   # plans: on a group with balanced I/O it rarely pays for moves by itself (a
-  # two-storage group at 9% and 35% fill needed about 1.25 before its cheapest
+  # two-storage group at 9% and 35% fill needed about 1.24 before its cheapest
   # fix -- three moves, 1.1 TiB, one VM split -- paid), so the capacity gate can
   # open a group and plan prints "no moves made". Raise it to spread data on its
   # own; above alpha_spread, data evenness outweighs I/O in every comparison.

@@ -949,7 +949,7 @@ two-storage group with its I/O balanced, one storage 9 % full and the other
   balance — `1.31` in all.
 
 The plan never pays at `0.5`; it starts to pay once this weight exceeds
-`1.31 / 1.06 ≈ 1.25`. So **at the defaults, data spread decides between
+`1.31 / 1.06 ≈ 1.24`. So **at the defaults, data spread decides between
 plans the I/O objective is nearly indifferent between, and rarely causes a
 move on its own**, even when `gates.capacity_spread_threshold` opens the
 group for planning. `plan` then prints `no moves made` with a line naming

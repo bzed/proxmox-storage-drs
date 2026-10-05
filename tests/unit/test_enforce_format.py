@@ -664,3 +664,21 @@ def test_a_move_that_keeps_its_format_shows_nothing_extra() -> None:
 
 def test_a_hand_built_move_without_formats_shows_nothing_extra() -> None:
     assert "san-b   " in _plan_line(_move("", ""))
+
+
+def test_a_second_converting_move_sees_the_first_ones_converted_size_as_z_b() -> None:
+    """REVIEW.md AN-01: the (C4) largest-disk bookkeeping records ``z_{d,s}``, not the listed size,
+    so a later move onto the same enforcing storage is checked against the right ``Z_b``."""
+    from proxmox_storage_drs.config import ExecutionConfig
+    from proxmox_storage_drs.execute import MoveOutcome, _post_move_bookkeeping
+
+    d = disk(fmt="raw", size_bytes=100 * GIB, config_size_bytes=120 * GIB)
+    lvm = storage("san-b", storage_type="lvm", enforce="qcow2")
+    largest = {"san-b": 0}
+    outcome = MoveOutcome(
+        disk_key=d.key, from_storage="san-a", to_storage="san-b", status="moved", detail=""
+    )
+    move = _move("raw", "qcow2")
+    stop = _post_move_bookkeeping(outcome, move, d, largest, set(), ExecutionConfig(), lvm)
+    assert stop is None
+    assert largest["san-b"] == disk_size_on(d, lvm) > 120 * GIB

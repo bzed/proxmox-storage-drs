@@ -1217,6 +1217,7 @@ def _post_move_bookkeeping(
     largest_by_storage: dict[str, int],
     drained_storages: set[str],
     execution: ExecutionConfig,
+    target: Storage,
 ) -> str | None:
     """Updates this run's own (C4) largest-disk tracking and drained
     -storage exclusion after one move's outcome, returning a stop reason
@@ -1230,8 +1231,11 @@ def _post_move_bookkeeping(
         # the target's own (C4) largest-disk accounting already needs to
         # include this disk for any later move's live transient check
         # against the same target.
+        # Recorded at ``z_{d,s}`` (section 5.3.2), the size the live check charged the move
+        # at, not the listed size: for a converting move the landed volume is larger, and a
+        # later move onto the same storage must see that ``Z_b`` (REVIEW.md AN-01).
         largest_by_storage[move.to_storage] = max(
-            largest_by_storage[move.to_storage], disk.size_bytes
+            largest_by_storage[move.to_storage], disk_size_on(disk, target)
         )
         if result.status == "draining":
             drained_storages.add(move.from_storage)
@@ -1460,7 +1464,13 @@ def _execute_sequential(
             migrations_used += 1
 
         stop_reason = _post_move_bookkeeping(
-            result, move, disk, largest_by_storage, drained_storages, execution
+            result,
+            move,
+            disk,
+            largest_by_storage,
+            drained_storages,
+            execution,
+            storages_by_id[move.to_storage],
         )
         if stop_reason is not None:
             return ExecutionResult(tuple(outcomes), True, stop_reason)
@@ -1681,7 +1691,7 @@ def _poll_inflight_once(
         )
         resolved.append(outcome)
         reason = _post_move_bookkeeping(
-            outcome, im.move, im.disk, largest_by_storage, drained_storages, execution
+            outcome, im.move, im.disk, largest_by_storage, drained_storages, execution, im.target
         )
         if reason is not None and stop_reason is None:
             stop_reason = reason
@@ -1949,7 +1959,13 @@ def _advance_pending(
     outcomes.append(decision.outcome)
     pending.pop(0)
     stop_reason = _post_move_bookkeeping(
-        decision.outcome, candidate, disk, largest_by_storage, drained_storages, execution
+        decision.outcome,
+        candidate,
+        disk,
+        largest_by_storage,
+        drained_storages,
+        execution,
+        storages_by_id[candidate.to_storage],
     )
     return _LockWaitTracker(), migrations_used, stop_reason
 
