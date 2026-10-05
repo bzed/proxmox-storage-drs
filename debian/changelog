@@ -1,3 +1,37 @@
+pve-storage-drs (0.1.18) trixie; urgency=medium
+
+  * New per-storage option groups[].storages[].enforce_format (raw, qcow2 or
+    null, the default). A storage that sets it receives every disk the plan
+    moves onto it in that format, converted during the move if needed;
+    move_disk is called with format= only then. Typical use: shared LVM on
+    PVE 9.2, where a qcow2 volume enables volume-chain snapshots. It never
+    causes a move by itself, never touches tpmstate0, and a value the
+    storage type cannot hold (qcow2 on RBD, ZFS, LVM-thin) is refused at
+    start. A pattern entry passes it to every storage it matches; a literal
+    entry overrides the pattern.
+  * A converted disk is counted on its target at the larger of its listed
+    size and the size= in the VM configuration, plus, for qcow2 on LVM, an
+    upper bound on the image's own metadata (PVE allocates the LV from
+    qemu-img measure), in the reserve, the free-space requirement, the
+    capacity spread and the in-flight space check. Just before a converting
+    move the volume's format is re-read; a change means the move is skipped
+    and the next run plans again. Not yet exercised on a live cluster.
+  * plan shows a conversion as (raw->qcow2) on the move line; plan --json
+    moves[] gain format_from/format_to; verify-storages reports the
+    resolved enforce_format, where it came from, and how many disks on the
+    storage are in another format.
+  * apply: a move's landed disk is recorded in the largest-disk bookkeeping
+    at its converted size, so a second converting move onto the same
+    storage in one run is checked against the right figure (REVIEW.md
+    AN-01).
+  * docs: the worked capacity-spread example now divides correctly
+    (1.31 / 1.06 = 1.24, not 1.25; AN-04); plan --json documents
+    format_from/format_to (AN-03); the plan records why a small disk may be
+    left split when the duration rule refuses its VM's larger disk (AN-02).
+  * Thirtieth-pass review recorded in REVIEW.md; AN-05 accepted as is.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Mon, 05 Oct 2026 15:10:00 +0200
+
 pve-storage-drs (0.1.17) trixie; urgency=medium
 
   * docs: the README now carries a project logo, in Proxmox-leaning orange.
