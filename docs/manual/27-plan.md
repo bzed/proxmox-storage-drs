@@ -271,7 +271,9 @@ gate said `NO ACTION`; otherwise `"heuristic"`/`null`, or `"cbc"`
 with `"optimal"`/`"feasible"` -- the same information the human
 output's `solver:` line names), `moves[]` (`disk_key`, `vmid`, `vm_name`, `device`,
 `from_storage`, `to_storage`, `size_bytes`, `imbalance_reduction`,
-`repair` (the section 7.3 revert-test marker — see "The `payback:` line"
+`format_from`/`format_to` (the disk's format before the move and the one it
+arrives in — equal unless the target storage sets `enforce_format`; `null` on
+a hand-built move), `repair` (the section 7.3 revert-test marker — see "The `payback:` line"
 above), `load_per_tib`, `duration_mirror_seconds`,
 `duration_wipe_seconds`, `cost_load_seconds`, `exceeds_max_duration`),
 `deadlocked` (a list of disk keys) and `deadlock_message` (`null` if none),

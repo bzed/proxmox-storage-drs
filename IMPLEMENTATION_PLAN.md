@@ -1830,7 +1830,7 @@ is at most 2 on two storages of similar size, so the whole term is worth about 1
 move costs `β` plus `γ·z_d` plus, if it splits a VM, `κ·w_v`. Found on a replayed two-storage
 bundle with balanced I/O and fills of 9 % and 35 % (`Σd = 1.12`, the capacity gate at 112 %): the
 cheapest plan that evens it out moves three disks of one VM, 1.1 TiB, to `Σd = 0.06`, for a gain of
-`δ·1.06` against a cost of `0.75 + 0.05 + 0.5 + 0.01 = 1.31` — it pays only from `δ ≈ 1.25`, and at
+`δ·1.06` against a cost of `0.75 + 0.05 + 0.5 + 0.01 = 1.31` — it pays only from `δ ≈ 1.24` (`1.31 / 1.06`), and at
 the defaults CBC proves staying put optimal. The capacity gate therefore opens such groups, and the
 plan is empty. Raising the default δ was considered and rejected: past `α` data evenness
 outweighs I/O evenness in every comparison (§11.1 warns), and how much data spread is worth moving
@@ -2420,6 +2420,15 @@ already sits on the target while its VM's larger disks have not moved yet; if th
 the VM is left split until the next run. That is accepted: (C8) constrains the plan's *endpoint*,
 not the order, and the next run moves the larger disks or — if the plan changed — lets `κ` bring
 the small one back for free. Do not reorder small disks after their VM's larger disks.
+
+The same acceptance covers the one case that is not an ordering intermediate: when §7.3's hard
+per-move duration rule refuses a larger disk's move, the small disk's own move (seconds of mirror,
+never the one a duration limit refuses) still runs, and the executed endpoint leaves the small disk
+on a storage its VM's larger disk never reaches. The executed endpoint is what payback scores
+(`κ·ΔA` prices the new split, so a plan whose benefit does not cover it is vetoed), and the next run's
+`κ` brings the small disk back for free; no filter re-checks (C8) on the executed assignment, by
+choice — it constrains the solver's endpoint, and a split of a sub-`tiny_disk_bytes` disk is a
+balance-quality cost, never a reserve or safety one.
 
 **The source is not freed when the task succeeds.** `apply(state, m)` must not optimistically credit
 the source with `z_d` bytes back. With `saferemove` on the source storage the old volume still exists

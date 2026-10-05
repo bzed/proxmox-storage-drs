@@ -385,6 +385,23 @@ discarded, neither renderer nor its manual page mentions forecasting); three Low
 README's 8 MiB ceiling against two committed bundles at 14 and 28 MiB; the hand-edit of
 committed bundle configs recorded in the plan but in no submission file); two Info.
 
+A **thirtieth pass** (section 60) reviews everything after the twenty-ninth pass's HEAD
+(`8ef2a7f`, release 0.1.10) — 56 commits at HEAD (`eba7821`): the AM-fix commits themselves, the
+CBC stage-2 repair cluster (whole-MiB shortfalls, the `mip_gap` offset variable, and (C8), small
+disks follow their VM), the "no moves made" line, releases 0.1.11 through 0.1.17, the `.deb`
+install documentation, the VM lock/task wait and the PVE-API outage rides, the unreferenced-volume
+naming and task-id scrub, the MkDocs GitHub Pages site with its recorded pip carve-out, and plan
+§5.3.2's `enforce_format` — the newest plan section added since the implementation was
+finished, specified and built in the range's last two commits. Five findings (AN-01..AN-05):
+one Medium — a converting move is recorded in the run's same-target largest-disk tracking at its
+listed size, not the `z_{d,s}` it was just charged at, so a second converting move onto the same
+storage checks §8.1's reserve against an understated `Z_b` (reproduced: charged 120.04 GiB,
+recorded 100.0); three Low (the hard duration rule can drop a small disk's (C8) anchor while the
+small disk's own move runs, leaving the *executed* endpoint in the state (C8) exists to forbid;
+`plan --json`'s documented `moves[]` field list omits the new `format_from`/`format_to`; the
+manual's worked `delta_capacity_spread` threshold "≈ 1.25" does not divide from its own displayed
+figures — `1.31 / 1.06 = 1.236`); one Info.
+
 ---
 
 ## 0. Overall assessment
@@ -8209,6 +8226,246 @@ as it stands.
   written, is the sentence: plan §6 ("Which `ℓ`"), manual `gates.drift_threshold` and `apply`,
   internals `80-gates` and `20-forecasting`.
 - **AM-06 → ignored** (operator decision).
+
+---
+
+## 60. Thirtieth-pass review — the AM fixes, the CBC stage-2 cluster, (C8), releases 0.1.11–0.1.17, the Pages site, and §5.3.2's `enforce_format`
+
+Reviewed everything after the twenty-ninth pass's HEAD (`8ef2a7f`) — 56 commits at HEAD
+(`eba7821`), all through named branches and `--no-ff` merges. The substantive arc: `b9612d6`
+and `b357a53` (the AM-01/AM-02/AM-05 fixes §59 records — the first review of them, since no
+verification pass sat between), `6c4fb81` (whole-MiB shortfalls: integer `r_s`, the exact stage-2
+bound, the unfixable-shortfall line), `6afa4e0` (CBC's `mip_gap` measured against the real
+stage-2 objective), `cd2bb0a` (§5.3 (C8), small disks follow their VM, plus the lone-small-disk
+pin), `d226192` and `2a5da6f` (the "no moves made" line and the small-disk ordering rationale),
+`4b3a219`/`1f0ac0c`/`ebabb21` (install docs at the released `.deb`, the README disclaimer, the
+pybuild test skip that unblocked 0.1.15), `2b1cff8` (naming the unreferenced volume; taking
+`collect`'s task `id` from the mapped UPID), `7daa9af` and `998b713` (waiting out a running task
+on a VM and riding out an unreachable PVE API while executing, with the new
+`execution.api_outage_timeout`), the logo and MkDocs Pages work (`d7e682f`, `d8ec25f`,
+`ab75831`, `b36dbec`, `5a54a07`), the two internals/man page corrections (`5ee7a59`,
+`a93c776`), releases 0.1.11 through 0.1.17, and finally `f97b0bf` plus `b881244` — plan §5.3.2's
+per-storage `enforce_format`, specified and then implemented, phase 16.
+
+### 60.1 Verification run
+
+- **`make check` at HEAD (`eba7821`): green end to end** — fmt-check, lint, typecheck, **1146
+  passed**, **96.90% line coverage**, `generate_expected.py --check` OK, `validate_corpus.py
+  --check` OK (the two "holt_winters did not beat the quantile baseline" warnings are the 2d
+  bundle's honest not-used verdicts, not failures), docs-check OK (all three PDF stamps and the
+  manpage match their Markdown).
+- **Branch discipline verified the way AJ-01 taught**: `git log --first-parent` over
+  `8ef2a7f..eba7821` contains *only* merge commits — twenty-two `--no-ff` merges, zero
+  non-merge commits on main's own line, including the releases (each cut on `release/<version>`
+  and merged).
+- **The AM fixes verify as §59 describes them.** AM-01: the `ForecastReport` is threaded through
+  both `show-load` renderers (the `forecast:` line sits under the group header, the `--json`
+  `forecast` object beside `plan --json`'s, both absent under `quantile`), `docs/manual/25` gains
+  the paragraph that says the columns are the loads the balancer acts on, and the stale
+  "imbalance_threshold doubles as the backtest error ceiling" sentence is gone from
+  `10-configuration.md`. AM-02: `adopt_committed_for_skipped()` adopts the committed file's case
+  for a variant skipped in this environment, warns on stderr, keeps comparing every variant that
+  ran, and leaves a skipped variant with no committed counterpart reading as stale. AM-05's
+  refutation is recorded with its sentences in plan §6, the manual and internals. AM-03/AM-04
+  are the operator's accepted deviations, AM-06 ignored, all as §59 says.
+- **Release hygiene for 0.1.11–0.1.17, checked release by release.** Version lockstep in all
+  five places each time (`pyproject.toml`, `__init__.py`, `debian/changelog`, the `VERSION=` lines
+  of `README.md` and `docs/manual/00-installation.md`); each changelog entry checked against its
+  commit window and accurate — 0.1.12's solver bullets name the exact defect shapes and numbers
+  ("~30 % worse" is 0.389 against 0.300), 0.1.14's tests-only entry and 0.1.15's honest "0.1.14
+  was never published, its changes ship here", 0.1.16's four dogfooding fixes, 0.1.17's
+  docs-only entry; annotated tags `debian/0.1.11`–`debian/0.1.17` on the release merge commits,
+  tagger `Bernd Zeimetz <bernd@bzed.de>`, messages `pve-storage-drs <version>`; and AM-06's
+  graphify rule is now exercised at every release — each has its graph refresh commit
+  immediately before the Release commit, on the release branch. The unreleased `enforce_format`
+  commits correctly carry no changelog entry yet.
+- **`6c4fb81`'s MiB rounding is sound.** `round_up_to_mib()` preserves the zero/non-zero
+  predicate, so `ReserveStatus.violated` stays byte-exact while every *amount* coarsens by under
+  a MiB in the safe direction; every shortfall consumer (the heuristic's repair step, §7.3's
+  exemption and revert test, the gates, `show-load`, the unfixable-shortfall line) reads the same
+  figure through `compute_reserve_status`/`total_shortfall_bytes`; the MILP's integer `r_s` and
+  the exact stage-2 bound are consistent with it; the corpus expected files were regenerated by
+  the generator, which is the sanctioned path.
+- **`6afa4e0`'s offset variable is right and complete.** `_objective_with_offset_as_variable()`
+  carries the constant on a variable fixed to `[1, 1]`, so CBC's `gapRel` measures the real
+  objective; stage 1's `Σ r_s` has no constant and is untouched; and `move_disk` is the only
+  non-idempotent call in `PveClient` — it is the one call marked `idempotent=False`. The corpus
+  diffs show CBC equal or better on every bundle (0.300 restored on 24h, 0.369→0.333 on 2d,
+  513.53→513.40 on free-space).
+- **`cd2bb0a`'s (C8) implementation matches §5.3's formula.** The MILP transcription counts
+  movable larger siblings through `x` and pinned ones at `σ₀(b) = s`, exactly as written; the
+  heuristic's whole-assignment form (`small_disks_follow_their_vm`) catches the case a per-move
+  check cannot (moving a *larger* disk away strands a small one that followed it);
+  `pin_lone_small_disks` pins only otherwise-movable small disks and preserves order; the
+  fixture generator filters by an independent restatement and every existing fixture replays
+  unchanged. `tiny_disk_bytes: 0` switches both the exemption and (C8) off.
+- **`f97b0bf`+`b881244`'s `enforce_format` implementation is single-sourced and audited
+  end to end.** `target_format()` is the one `φ(d,s)` and `disk_size_on()` the one `z_{d,s}`;
+  every eligibility call site audited — `_fixed_zero_pairs`, all five heuristic trial
+  generators, the executor — now asks `storage_accepts_format(s, target_format(d, s))`; every
+  capacity/reserve consumer audited — the MILP's (C4)/(C5)/(C7) rows, `compute_reserve_status`,
+  `transient_invariant_ok`, `_move_charge_bytes`, the live check and the mirror-target matcher —
+  threads `z_{d,s}`, while `b̄` and the §7.1 cost stay at `z_d` as the plan says; the
+  qcow2-on-lvm bound is deliberately above qemu's default layout and parametrized-tested;
+  `tpmstate0` is exempt everywhere; the per-storage type check raises a `TopologyError` naming
+  the storage; the corpus `expected.json` diffs are purely additive (32/72/72 lines added, zero
+  removed — every plan byte-identical, the no-enforcement identity confirmed); and the phase-16
+  row honestly records the deviations: no `generate_expected.py` fixture (the two cases are unit
+  tests against both backends) and the live conversion test still open. Schema, example config,
+  manual and internals moved in the same commit; `verify-storages` reports the resolved value,
+  its source entry, and the non-conforming count and bytes (never a violation).
+- **The Pages site is built the way AGENTS.md now records it.** `mkdocs.yml` is `strict: true`
+  (a page missing from the nav or a broken link fails the build), `mkdocs-material==9.7.7` is
+  pinned, nothing under `docs/.site/` is committed, the plan's exclusion is a recorded decision in
+  both AGENTS.md and the workflow, and the pip carve-out is written into AGENTS.md §9.3 as a
+  decision with its scope — the two package pipelines stay apt-only and untouched.
+- **`2b1cff8`'s scrub fix is correct in the details.** `new_upid.split(":")[6]` is the `id`
+  field of `UPID:node:pid:pstart:starttime:type:id:mode`; a task without a usable UPID loses its
+  `id` rather than keeping the raw one; and the scrub audit now checks the two agree.
+- **`7daa9af`/`998b713` hold their invariants.** The task scan filters console proxies and
+  finished tasks and confirms per-task status before reporting a lock; the outage retry fires
+  only on transient errors (connection/timeout/5xx/failed re-login) inside the executor's
+  `outage_tolerance` context, backs off 5 s doubling to 60 s, and never retries `move_disk`.
+
+### 60.2 Findings summary
+
+| ID | Severity | Location | Summary |
+|----|----------|----------|---------|
+| AN-01 | Medium | `src/proxmox_storage_drs/execute.py` `_post_move_bookkeeping` | A converting move is charged at `z_{d,s}` (`_move_charge_bytes`, `disk_size_on`), but the same run's (C4) largest-disk tracking records the landed disk at `disk.size_bytes` — so a *second* converting move onto the same `enforce_format` storage in one run checks §8.1's transient predicate against a `Z_b` understated by exactly the conversion delta (reproduced: charged 120.04 GiB, recorded 100.0 GiB; with only the qcow2-lvm metadata at stake it is ~0.03 % + 8 MiB, with a listed/config size discrepancy it is the full delta), eroding the reserve in the one direction AGENTS.md §6 forbids — and `docs/internals/92-execute.md` claims the plan-time and live checks "cannot disagree" about this charge |
+| AN-02 | Low | `src/proxmox_storage_drs/cli.py` `_apply_payback_gate`, plan §5.3 (C8)/§7.3 | The hard per-move duration rule drops a move from the executed plan while its small companion's move survives (`kept` filters per move), so a small disk can be executed onto a storage its VM's larger disk never reaches — the executed endpoint violates (C8), the rule built to forbid exactly that. Nothing re-checks `small_disk_placement_ok` on the executed assignment, and the plan's acceptance clause covers ordering intermediates only, not this permanent-for-the-run split; payback on the executed endpoint (κ·ΔA) usually vetoes or prices it, but a plan with compensating moves can ship it |
+| AN-03 | Low | `docs/manual/27-plan.md` | `plan --json`'s documented `moves[]` field list omits `format_from`/`format_to`, which `b881244` added to the emitted object and to every committed corpus expected file; `apply`'s `--json` section inherits the gap by saying it is "identical to plan's own groups[] shape" |
+| AN-04 | Low | plan §5.4, `docs/manual/10-configuration.md`, `config/drs.example.yaml` | The worked `delta_capacity_spread` threshold does not divide from its own displayed figures: the manual prints "1.31 / 1.06 ≈ 1.25", but 1.31/1.06 = 1.236 — the derivable threshold is ≈ 1.24. The same "≈ 1.25" stands in plan §5.4 and the example config's comment, and in `d226192`'s commit message ("~1.25") |
+| AN-05 | Info | `src/proxmox_storage_drs/execute.py` `_active_task_on_vm` | Waiting out running tasks added a full `/cluster/tasks` scan (plus a per-candidate `task_status` read) to *every* lock check: in the concurrent executor that is one cluster-wide scan per candidate per poll cycle, and in `_wait_for_unlocked` one per 30 s poll — the W-09 read-amplification class, correct but chatty against the API |
+
+### 60.3 AN-01 — the landed-largest bookkeeping ignores `z_{d,s}`
+
+**Severity:** Medium
+**Files:** `src/proxmox_storage_drs/execute.py` (`_post_move_bookkeeping`, used by both
+`_execute_sequential` and `_execute_concurrent`; `largest_by_storage` feeding
+`_live_transient_check`'s `existing_largest_bytes`), `docs/internals/92-execute.md`.
+
+Reproduced, not inferred: a 100 GiB `raw` disk with a config `size=` of 120 GiB converting onto an
+`enforce_format: qcow2` `lvm` storage is charged by `_move_charge_bytes` at `z_{d,s}` =
+120.0371 GiB, and `_post_move_bookkeeping` then records `largest_by_storage["san-b"] = 100.0`
+GiB — `disk.size_bytes`, not `disk_size_on(disk, target)`. The charge side of §8.1's live check
+is z-aware; the `Z_b` side is not. A later move onto the same storage in the same run computes
+the reserve term `f_b·max(Z_b, z_new)` against the understated `Z_b`, so the live check can pass
+a move the plan-time invariant would have refused. The magnitude is the qcow2-lvm metadata
+(~0.0244 % + 8 MiB) when listed and config sizes agree, and the full listed-vs-config delta when
+they do not — the discrepancy the charge code exists to cover. It needs a second converting move
+onto the same enforcing target within one run, which is precisely the shape an
+`enforce_format: qcow2` LUN family invites. `docs/internals/92-execute.md`'s new paragraph claims
+the endpoint, the plan-time check and the live check "cannot disagree about it" — this is the
+one place they can.
+
+The fix is one line (`disk_size_on(disk, storages_by_id[move.to_storage])`, threaded in by the
+callers that already hold `storages_by_id`) plus a regression test with two converting moves onto
+one enforcing target.
+
+### 60.4 AN-02 — the duration rule can strand a small disk alone on the executed endpoint
+
+**Severity:** Low
+**Files:** `src/proxmox_storage_drs/cli.py` (`_apply_payback_gate`'s `kept` filtering), plan
+§5.3 (C8), §7.3, §9.5.
+
+The solver's endpoint satisfies (C8) — a small disk moves only where a larger disk of its VM
+ends. The execution filter does not: `exceeds_max_duration` moves are refused per move
+(`_refused_move_outcomes`, S-02's fix), and a small disk's own move (seconds of mirror) is never
+the one a duration limit refuses — its anchor's is. When the anchor is refused, the small disk
+moves alone to the storage (C8) chose for the pair, and the executed endpoint is the state the
+rule exists to prevent: a sub-64 MiB EFI/TPM disk on a storage its VM is not on. The plan pins
+(C8) to "the plan's *endpoint*" and explicitly accepts the ordering intermediate ("a run that
+stops there leaves the VM split until the next run"), but the duration-refused case is not an
+ordering intermediate — the plan's endpoint never happens, and nothing re-checks
+`small_disk_placement_ok()` on `executed_final_assignment`. The mitigations are real but not
+airtight: payback is scored on the executed endpoint (κ·ΔA counts the new split), so a
+benefit-negative stranded-small-disk plan is vetoed — but a plan with enough compensating spread
+benefit can still ship the split, and `apply` then executes it.
+
+**Recommendation:** the cheap and honest fix is a clause, not code: name the interaction in §5.3
+(C8) or §9.5 and either accept it with the ordering paragraph's reasoning (the next run's κ
+brings the disk back for free, and payback prices the split on the executed endpoint), or state
+that a duration-refused anchor drags its (C8) followers with it — which would need a filter on
+`executed_final_assignment`, not just the refused move. If it is accepted, one sentence in the
+plan is the whole fix.
+
+### 60.5 AN-03 — `format_from`/`format_to` undocumented in the manual's `--json` field list
+
+**Severity:** Low
+**Files:** `docs/manual/27-plan.md` (the `moves[]` list), `docs/manual/28-apply.md` (by
+reference).
+
+`b881244` added `format_from`/`format_to` to every move object `plan --json` emits (and to all
+three committed corpus expected files, which is how the fields are pinned), but `27-plan.md`'s
+`moves[]` enumeration — `disk_key`, `vmid`, `vm_name`, `device`, `from_storage`, `to_storage`,
+`size_bytes`, `imbalance_reduction`, `repair`, `load_per_tib`, `duration_mirror_seconds`,
+`duration_wipe_seconds`, `cost_load_seconds`, `exceeds_max_duration` — was not extended, and
+`28-apply.md` says its `groups[]` shape is identical to `plan`'s, so the gap covers both
+commands. This is the AGENTS.md §8.3 rule (a field that exists in the output but not in the
+manual is a bug) and the V-01/W-05 documentation-staleness family. The fix is two words in one
+list, with a sentence saying both are `null` on a hand-built move and equal unless the move
+converts.
+
+### 60.6 AN-04 — the worked δ threshold does not divide from its own figures
+
+**Severity:** Low
+**Files:** `docs/manual/10-configuration.md` (`objective.delta_capacity_spread`),
+`IMPLEMENTATION_PLAN.md` §5.4, `config/drs.example.yaml` (the `delta_capacity_spread`
+comment).
+
+The manual's worked example is otherwise exactly the standard this review holds it to
+(AB-03's own bar): every figure in it derives from the previous one — 0.5 × 1.12 = 0.56, the gain
+0.5 × 1.06 = 0.53, the cost 0.75 + 0.05 + 0.5 + 0.01 = 1.31 — until the punchline: "it starts to
+pay once this weight exceeds `1.31 / 1.06 ≈ 1.25`". The division it prints is 1.236. The correct
+two-figure threshold is ≈ 1.24 (and with the unrounded γ term, 0.055, still 1.239). The same
+"≈ 1.25" stands in plan §5.4 ("it pays only from `δ ≈ 1.25`"), in the example config's comment
+("needed about 1.25"), and in `d226192`'s commit message. Nothing but the rounding of the
+displayed figures separates them, which is exactly why it is worth fixing: the manual invites the
+operator to re-derive the threshold for their own move set, and the one division it shows them
+does not come out at the answer it prints.
+
+**Recommendation:** re-derive the threshold from the replay's unrounded figures and print that
+division (if the unrounded ratio really is ≈ 1.245–1.25, show the inputs that produce it); if not,
+say ≈ 1.24 in all four places.
+
+### 60.7 AN-05 — a `/cluster/tasks` scan on every lock check
+
+**Severity:** Info
+**Files:** `src/proxmox_storage_drs/execute.py` (`_active_task_on_vm`, `_check_lock_once`).
+
+`7daa9af` made `_check_lock_once` fall back to `_active_task_on_vm` whenever the config lock
+reads clear, and `_active_task_on_vm` reads the whole cluster task list (then a per-task status
+for each candidate entry). In the concurrent executor `_check_lock_once` runs per candidate per
+poll cycle (10 s default), and in `_wait_for_unlocked` per poll (30 s default) — so a run with
+several pending moves against a busy cluster issues one cluster-wide scan per candidate per
+cycle. The W-09 read-amplification class: correct, and cheap on the PVE side, but it could be
+cached per poll cycle (the executor already has a cycle boundary) without changing any
+behaviour. Recorded for the day it shows up in a pveproxy log, not as a defect.
+
+---
+
+## 61. Resolution of thirtieth-pass findings (AN-01..AN-05)
+
+- **AN-01 → fixed.** `_post_move_bookkeeping()` now takes the move's target `Storage` (both the
+  sequential and the concurrent caller already held it) and records the landed disk in
+  `largest_by_storage` at `topology.disk_size_on()`, the same `z_{d,s}` `_move_charge_bytes()`
+  charged, so a second converting move onto one enforcing storage is checked against the right
+  `Z_b`. Regression test `test_a_second_converting_move_sees_the_first_ones_converted_size_as_z_b`
+  (`tests/unit/test_enforce_format.py`). The internals claim ("cannot disagree") is true again.
+- **AN-02 → accepted, with the sentence the finding offers.** Plan §8.2's paragraph on small disks
+  going first now also covers the duration-refused anchor: (C8) constrains the solver's endpoint;
+  the executed endpoint is what payback scores (`κ·ΔA` prices the split), the next run's `κ` returns
+  the small disk for free, and a split of a sub-`tiny_disk_bytes` disk is a balance-quality cost, not
+  a reserve or safety one. No filter on `executed_final_assignment` is added — it would turn a
+  per-move refusal into a dependency graph for a cost the objective already prices.
+- **AN-03 → fixed.** `docs/manual/27-plan.md`'s `moves[]` list gains `format_from`/`format_to`
+  (and says what they are and that they are `null` on a hand-built move); `apply`'s section
+  inherits it by reference.
+- **AN-04 → fixed (accepted as written).** `1.31 / 1.06 = 1.236`; the threshold reads `≈ 1.24` in
+  plan §5.4, the manual and `config/drs.example.yaml`. `d226192`'s commit message keeps its `~1.25`:
+  history is not rewritten.
+- **AN-05 → accepted, no change.** Info. Correct and cheap on the PVE side; caching the task list per
+  poll cycle is the remedy if it ever shows up in a pveproxy log, and is not done speculatively.
 
 ---
 
