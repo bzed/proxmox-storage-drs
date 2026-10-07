@@ -870,6 +870,22 @@ def _check_thick_provisioning(config: Config, errors: list[str]) -> None:
         )
 
 
+def _check_stopped_vms(config: Config, errors: list[str]) -> None:
+    """``exclude.stopped`` survives only so a config that spells it out still
+    loads. A stopped VM's disks are never moved, whatever capacity or reserve
+    violation they cause (section 3.5): replication and backup products such
+    as Veeam track a VM's volumes by location, and moving them breaks the
+    replica. The apply-time pre-move check refuses a stopped VM too, so
+    ``false`` would only plan moves that can never run -- refused rather than
+    silently ignored."""
+    if not config.exclude.stopped:
+        errors.append(
+            "exclude.stopped: false is not supported -- this tool never moves the disks of a "
+            "stopped VM, whatever violation they cause (replication and backup tools such as "
+            "Veeam break when a replicated VM's volumes move). Remove the key, or set it to true"
+        )
+
+
 def _check_metrics(config: Config, errors: list[str]) -> None:
     # Label names non-empty (schema covers empty-string) and pairwise distinct:
     # a duplicate silently collapses series into one.
@@ -999,6 +1015,7 @@ def _validate_semantics(config: Config, *, require_connection: bool = True) -> l
     _check_storage_patterns_compile(config, errors)
     _check_group_size(config, errors)
     _check_thick_provisioning(config, errors)
+    _check_stopped_vms(config, errors)
     _check_metrics(config, errors)
     _check_forecast_window(config, errors)
     _check_payback_horizon(config, warnings)

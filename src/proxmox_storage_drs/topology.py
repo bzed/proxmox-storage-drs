@@ -22,8 +22,8 @@ Terminology, matching the plan exactly: ``D`` is *every* disk this module
 places into a group, pinned or not (section 5.1's own definition: "movable
 disks currently in the group" -- (C2) is what fixes some of their
 placement variables, it does not remove them from ``D``). A disk this
-module never sees at all (a stopped VM excluded by ``exclude.stopped``,
-or a disk whose current storage is not in any configured group) is what
+module never sees at all (a stopped VM, which is never
+considered, or a disk whose current storage is not in any configured group) is what
 "foreign" (`Uˢᵉˣᵗ`, section 5.1.1) means -- not merely "excluded by name".
 """
 
@@ -1317,8 +1317,10 @@ def build_topology(
     for resource in client.vm_resources():
         if resource.get("type") != "qemu":
             continue  # section 3.5 scopes this tool to QEMU VMs only, never LXC
-        if config.exclude.stopped and resource.get("status") != "running":
-            continue  # never fetched: section 3.5's read-path cost note
+        if resource.get("status") != "running":
+            # Never fetched, never movable (section 3.5): a stopped VM's disks stay put
+            # whatever violation they cause. ``exclude.stopped: false`` is refused at load.
+            continue
         considered.append(resource)
 
     # REVIEW.md P-02: `config.proxmox.read_workers` bounds a thread pool for

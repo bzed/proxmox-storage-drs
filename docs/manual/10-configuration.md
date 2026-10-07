@@ -1291,33 +1291,31 @@ it only removes the early, informative warning. Keep this `true`.
 
 ### `exclude.stopped`
 
-Boolean, default `true`.
+Boolean, default `true`, and `true` is the only accepted value.
 
-Whether stopped VMs are left out of the balancing run entirely. It reads
-like the other `exclude.*` keys: `true` means *exclude* stopped VMs.
+Stopped VMs are never touched: whatever violation their disks cause --
+a storage below its snapshot reserve, below the free space you configured,
+or badly out of balance -- the tool does not move a stopped VM's disks. This
+is a safety property rather than a tuning knob. Replication and backup
+products such as Veeam track a VM's volumes by their location, and moving
+the disks of a replicated VM breaks the replica badly.
 
-With `true` (the default) a VM whose status is not `running` is skipped
-before its configuration is even fetched. Its disks are never moved --
-not for balance, and not to repair a capacity shortfall either. They still
-occupy space on their storage, so their bytes are counted as foreign
-volumes and reduce the room the planner has to work with; they simply are
-never candidates for a move. A stopped VM generates no I/O, so there is
-nothing to balance, and moving its disks would be an offline `move_disk`
-for no load benefit.
+A VM whose status is not `running` is skipped before its configuration is
+even fetched. Its disks still occupy space on their storage, so their bytes
+are counted as foreign volumes and reduce the room the planner has to work
+with; the planner then repairs a violation by moving running VMs' disks
+instead, or reports that it cannot. A VM that was running when the plan was
+made but has stopped by the time its move is due is refused at apply time
+and the run asks for a re-plan.
 
-With `false`, stopped VMs are treated like any other VM: their disks can be
-moved, but because they carry zero load the planner only does so to repair
-a capacity violation (the reserve or the configured free space), never for
-balance. Those moves are offline moves.
+The key exists only so that a configuration which spells it out keeps
+loading. `false` is **refused at load time** with an error naming the
+setting, because it would promise a mode that does not exist. There is no
+too-high or too-low: the setting has one value.
 
-Too much (`true` when stopped VMs hold most of a full storage): the planner
-cannot free that space by moving them and may report an unfixable reserve
-violation. Too little (`false`): a larger inventory is fetched on every
-run, and offline moves of VMs nobody is using appear in plans.
-
-Renamed from `running_only`, which had the opposite polarity (`running_only:
-true` is `exclude.stopped: true`). A configuration still carrying the old
-key is rejected at load time as an unknown key.
+Renamed from `running_only`, which meant the same as `exclude.stopped:
+true`. A configuration still carrying the old key is rejected at load time
+as an unknown key; remove it.
 
 ### `exclude.include_unused_disks`
 

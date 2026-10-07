@@ -740,20 +740,6 @@ def test_build_topology_content_queried_from_vm_own_node_not_storage_active_node
     assert "nodes/nodeB/storage/san-a/content" in content_calls
 
 
-def test_build_topology_stopped_vm_included_when_exclude_stopped_false(tmp_path: Path) -> None:
-    config = make_config(tmp_path, exclude={"stopped": False})
-    vm_resources = [_vm(202, "node1", status="stopped")]
-    vm_configs = {202: {"name": "vm202", "scsi0": "san-a:vm-202-disk-0,size=2G"}}
-    content = [_content("san-a", 202, "disk-0", 2 * (1 << 30))]
-    client = build_fake_client(
-        vm_resources, vm_configs, {202: [{"name": "current"}]}, {"san-a": content, "san-b": []}
-    )
-    topology = build_topology(client, config)
-    disk = topology.groups[0].disks[0]
-    assert disk.key == "202:scsi0"
-    assert disk.pinned_reason is None  # movable, just carries zero load later
-
-
 def test_build_topology_non_qemu_resources_are_skipped(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     vm_resources = [{"vmid": 300, "node": "node1", "status": "running", "type": "lxc"}]
