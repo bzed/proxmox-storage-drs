@@ -1,3 +1,30 @@
+pve-storage-drs (0.1.19) trixie; urgency=medium
+
+  * Stopped VMs are never moved, whatever capacity or reserve violation
+    their disks cause. Replication and backup products such as Veeam track a
+    VM's volumes by location, and moving a replicated VM's disks breaks the
+    replica. Such a VM is skipped before its configuration is fetched; its
+    disks count as foreign bytes and the planner works around them. A VM
+    that was running at planning time but has stopped when its move is due
+    is refused at apply time (this check already existed).
+  * Config: the exclude.running_only key is renamed exclude.stopped, which
+    reads like the other exclude.* keys (true means stopped VMs are
+    excluded; the default and behaviour are unchanged). Only true is
+    accepted: exclude.stopped: false is refused at load time, because it
+    could only plan moves that apply always refuses. A configuration that
+    still carries running_only is rejected as an unknown key and needs the
+    key removed (or renamed). Replay bundles written earlier carry the old
+    key in their config snapshot.
+  * docs: the manual's exclude.stopped entry, the plan's operating
+    assumptions, the internals topology page and the example configuration
+    now state this property and its reason. The plan and manual previously
+    claimed a stopped VM's disks could be moved to repair a capacity
+    violation; they could not.
+  * tests: test_enforce_format's imports no longer depend on the installed
+    isort version.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Wed, 07 Oct 2026 22:00:00 +0200
+
 pve-storage-drs (0.1.18) trixie; urgency=medium
 
   * New per-storage option groups[].storages[].enforce_format (raw, qcow2 or
