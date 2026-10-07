@@ -1756,7 +1756,7 @@ def _anonymized_config_dict(config: Config, mapper: Mapper, topology: Topology) 
             "storages": [mapper.storage(s) for s in exclude.storages if s in mapper.known_storages],
             "tags": [mapper.tag(t) for t in exclude.tags],
             "skip_vms_with_snapshots": exclude.skip_vms_with_snapshots,
-            "running_only": exclude.running_only,
+            "stopped": exclude.stopped,
             "include_unused_disks": exclude.include_unused_disks,
         },
         "report": {"warn_pinned_load_fraction": config.report.warn_pinned_load_fraction},

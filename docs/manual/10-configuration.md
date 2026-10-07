@@ -1289,14 +1289,33 @@ they reach the API. Setting this `false` does **not** make such a move
 work — PVE rejects `move_disk delete=1` on a snapshotted volume regardless;
 it only removes the early, informative warning. Keep this `true`.
 
-### `exclude.running_only`
+### `exclude.stopped`
 
-Boolean, default `true`.
+Boolean, default `true`, and `true` is the only accepted value.
 
-Only running VMs generate load to balance; a stopped VM's disks are moved
-only if a capacity constraint requires it. Setting this `false` widens the
-movable set to stopped VMs' disks for capacity purposes but they still
-contribute zero load.
+Stopped VMs are never touched: whatever violation their disks cause --
+a storage below its snapshot reserve, below the free space you configured,
+or badly out of balance -- the tool does not move a stopped VM's disks. This
+is a safety property rather than a tuning knob. Replication and backup
+products such as Veeam track a VM's volumes by their location, and moving
+the disks of a replicated VM breaks the replica badly.
+
+A VM whose status is not `running` is skipped before its configuration is
+even fetched. Its disks still occupy space on their storage, so their bytes
+are counted as foreign volumes and reduce the room the planner has to work
+with; the planner then repairs a violation by moving running VMs' disks
+instead, or reports that it cannot. A VM that was running when the plan was
+made but has stopped by the time its move is due is refused at apply time
+and the run asks for a re-plan.
+
+The key exists only so that a configuration which spells it out keeps
+loading. `false` is **refused at load time** with an error naming the
+setting, because it would promise a mode that does not exist. There is no
+too-high or too-low: the setting has one value.
+
+Renamed from `running_only`, which meant the same as `exclude.stopped:
+true`. A configuration still carrying the old key is rejected at load time
+as an unknown key; remove it.
 
 ### `exclude.include_unused_disks`
 

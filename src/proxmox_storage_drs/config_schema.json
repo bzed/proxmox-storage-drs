@@ -250,7 +250,7 @@
         "storages": { "type": "array", "items": { "type": "string" } },
         "tags": { "type": "array", "items": { "type": "string" } },
         "skip_vms_with_snapshots": { "type": "boolean" },
-        "running_only": { "type": "boolean" },
+        "stopped": { "type": "boolean" },
         "include_unused_disks": { "type": "boolean" }
       }
     },

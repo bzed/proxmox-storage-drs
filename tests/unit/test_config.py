@@ -334,6 +334,24 @@ def test_assume_thick_provisioning_false_is_refused_not_ignored(tmp_path: Path) 
         config.load_config(str(write_config(tmp_path, data)), env={})
 
 
+def test_exclude_stopped_false_is_refused_not_ignored(tmp_path: Path) -> None:
+    """A stopped VM's disks are never moved (Veeam breaks when a replicated VM's
+    volumes move); ``false`` would promise a mode that does not exist."""
+    data = minimal_config_dict()
+    data["exclude"] = {"stopped": False}
+    with pytest.raises(ConfigError, match="exclude.stopped: false is not supported"):
+        config.load_config(str(write_config(tmp_path, data)), env={})
+
+
+def test_exclude_stopped_true_or_absent_loads(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    absent = config.load_config(str(write_config(tmp_path, data)), env={})
+    data["exclude"] = {"stopped": True}
+    explicit = config.load_config(str(write_config(tmp_path, data, "b.yaml")), env={})
+    assert absent.config.exclude.stopped is True
+    assert explicit.config.exclude.stopped is True
+
+
 def test_assume_thick_provisioning_true_or_absent_loads(tmp_path: Path) -> None:
     data = minimal_config_dict()
     absent = config.load_config(str(write_config(tmp_path, data)), env={})

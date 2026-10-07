@@ -168,7 +168,7 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
         _vm(106, "node1"),  # lock-pinned
         _vm(107, "node1"),  # unused0, include_unused_disks=False
         _vm(108, "node1"),  # disk on an ungrouped storage
-        _vm(109, "node1", status="stopped"),  # excluded: running_only default True
+        _vm(109, "node1", status="stopped"),  # excluded: exclude.stopped default True
         _vm(112, "node1"),  # has an orphaned companion volume
         _vm(113, "node1"),  # pending-change-pinned (section 3.8)
     ]
@@ -280,7 +280,7 @@ def test_build_topology_full_scenario(tmp_path: Path) -> None:
     assert "108:scsi0" not in disks_by_key
     assert any("vm108(108):scsi0" in w and "ungrouped" in w for w in topology.warnings)
 
-    # Stopped VM (109, running_only defaults True) is never fetched or pinned.
+    # Stopped VM (109, exclude.stopped defaults True) is never fetched or pinned.
     assert not any(k.startswith("109:") for k in disks_by_key)
 
     # Foreign accounting: san-a's untracked bytes are 109's disk (2 GiB),
@@ -738,20 +738,6 @@ def test_build_topology_content_queried_from_vm_own_node_not_storage_active_node
     assert not any("approximate-size" in w or "VM config" in w for w in topology.warnings)
     content_calls = {path for _method, path, _kwargs in fake.calls if path.endswith("/content")}
     assert "nodes/nodeB/storage/san-a/content" in content_calls
-
-
-def test_build_topology_stopped_vm_included_when_running_only_false(tmp_path: Path) -> None:
-    config = make_config(tmp_path, exclude={"running_only": False})
-    vm_resources = [_vm(202, "node1", status="stopped")]
-    vm_configs = {202: {"name": "vm202", "scsi0": "san-a:vm-202-disk-0,size=2G"}}
-    content = [_content("san-a", 202, "disk-0", 2 * (1 << 30))]
-    client = build_fake_client(
-        vm_resources, vm_configs, {202: [{"name": "current"}]}, {"san-a": content, "san-b": []}
-    )
-    topology = build_topology(client, config)
-    disk = topology.groups[0].disks[0]
-    assert disk.key == "202:scsi0"
-    assert disk.pinned_reason is None  # movable, just carries zero load later
 
 
 def test_build_topology_non_qemu_resources_are_skipped(tmp_path: Path) -> None:
