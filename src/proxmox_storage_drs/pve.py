@@ -16,15 +16,18 @@ imported at module level because there is no meaningful code path in this
 project that does not eventually need the PVE API.
 
 Every method here is exactly one API call, with no caching and no retry
-logic beyond the one reauthenticate-and-retry-once step described on
-:meth:`PveClient._call` (REVIEW.md P-01) -- the per-run topology cache
-belongs to ``topology.py`` (section 3.5: "a per-run topology cache -- one
-snapshot at the start of the run").
+logic beyond what :meth:`PveClient._call` does for every call: the
+reauthenticate-and-retry-once step (REVIEW.md P-01) and a bounded retry of
+transient failures (unreachable, TLS failure, 429/5xx), never of 401/403.
+The per-run topology cache belongs to ``topology.py`` (section 3.5: "a per-run
+topology cache -- one snapshot at the start of the run").
 """
 
 from __future__ import annotations
 
 import logging
+import random
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -179,14 +182,75 @@ def _api_error(message: str, transient: bool) -> PveApiError:
     return PveUnreachableError(message) if transient else PveApiError(message)
 
 
+# Why 429 and 5xx: a rate limit or a proxy/node that could not serve the request says nothing
+# about our credentials or the request itself, and PVE uses 595/596 for "no route to node" /
+# "connection timed out". Every other 4xx is the API answering "no" and is never retried.
+_TRANSIENT_STATUS_FLOOR = 500
+_TOO_MANY_REQUESTS = 429
+
+# proxmoxer words a failed login "... code: <HTTP status>" (backends/https.py). It is the only
+# place the status survives, and it is what separates "wrong credentials" (a hard error,
+# never retried) from "the login endpoint sat behind a failing proxy" (retried).
+_AUTH_CODE_RE = re.compile(r"code: (\d{3})")
+_HARD_AUTH_STATUSES = frozenset({401, 403})
+
+# requests errors that mean *our* request is malformed, not that the network misbehaved:
+# retrying them can never help.
+_PERMANENT_REQUEST_ERRORS = (
+    requests.exceptions.InvalidURL,
+    requests.exceptions.MissingSchema,
+    requests.exceptions.InvalidSchema,
+    requests.exceptions.InvalidHeader,
+)
+
+# Short retry for idempotent calls made outside ``outage_tolerance`` (every read): enough to
+# ride out a TLS reset, a firewall dropping one connection or a VIP moving between nodes,
+# not enough to hide a real outage. Seconds before attempts 2, 3, 4; each is scaled by a
+# random factor in [0.5, 1.5] so parallel read workers do not retry in lockstep.
+_SHORT_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+
+
 def _is_server_error(exc: ResourceException) -> bool:
-    """A 5xx: the proxy or node could not serve the request (PVE itself uses
-    595/596 for "no route to node" / "connection timed out")."""
-    return int(getattr(exc, "status_code", 0) or 0) >= 500
+    """429 or 5xx: the proxy or node could not serve the request right now."""
+    status = int(getattr(exc, "status_code", 0) or 0)
+    return status == _TOO_MANY_REQUESTS or status >= _TRANSIENT_STATUS_FLOOR
 
 
-def _is_unreachable(exc: requests.RequestException) -> bool:
-    return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+def _is_unreachable(exc: Exception) -> bool:
+    """A transport-level failure: connection refused/reset, TLS handshake failure, timeout,
+    a truncated body, or a non-JSON body (a firewall or proxy answering with an HTML page).
+
+    ``ValueError`` covers the last one: ``requests``' JSON decode error is one on every
+    version, and only a subclass of ``RequestException`` on newer ones."""
+    if isinstance(exc, _PERMANENT_REQUEST_ERRORS):
+        return False
+    return isinstance(exc, (requests.RequestException, ValueError))
+
+
+def _auth_failure_is_transient(exc: AuthenticationError) -> bool:
+    """True when the login answered with a status other than 401/403 (e.g. a 502 from a
+    proxy). A message with no status stays a hard error: nothing says it was transient."""
+    match = _AUTH_CODE_RE.search(str(exc))
+    return match is not None and int(match.group(1)) not in _HARD_AUTH_STATUSES
+
+
+_CALL_ERRORS = (ResourceException, AuthenticationError, requests.RequestException, ValueError)
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Whether ``exc``, raised by a ``proxmoxer`` call, is worth asking again about."""
+    if isinstance(exc, ResourceException):
+        return _is_server_error(exc)
+    if isinstance(exc, AuthenticationError):
+        return _auth_failure_is_transient(exc)
+    return _is_unreachable(exc)
+
+
+def _describe(exc: Exception) -> str:
+    """``request failed: ...`` for transport errors, the bare message for API answers."""
+    if isinstance(exc, ResourceException):
+        return str(exc)
+    return f"request failed: {exc}"
 
 
 class PveClient:
@@ -222,88 +286,125 @@ class PveClient:
         # Injection points for tests, like `execute.Clock`.
         self._sleep: Callable[[float], None] = time.sleep
         self._monotonic: Callable[[], float] = time.monotonic
+        self._random: Callable[[], float] = random.random
 
     def _call_once(self, description: str, action: Any) -> Any:
         """Run one ``proxmoxer`` call, wrapping every failure as :class:`PveApiError`.
 
-        ``ResourceException`` covers HTTP-level API errors (4xx/5xx);
-        ``requests.RequestException`` covers transport failures (connection
-        refused, timeout) that ``proxmoxer``'s https backend does not wrap
-        itself. ``AuthenticationError`` gets one extra chance (P-01): rebuild
-        the session from scratch via ``reauthenticate`` and retry ``action``
-        exactly once before giving up -- covers a ticket that expired for a
-        reason external to any single call (the operator took a long time to
-        confirm a plan, the process was suspended, the clock jumped), not
-        just a call that was doomed from the start. ``action`` always reads
-        the API object through ``self._api`` (never a captured local), so
-        reassigning it here is enough for the retried ``action()`` to use
-        the new session with no other change.
+        ``ResourceException`` covers HTTP-level API errors (4xx/5xx; 429 and 5xx are
+        flagged ``transient``); transport failures (connection refused/reset, TLS handshake
+        failure, timeout, a truncated or non-JSON body) that ``proxmoxer``'s https backend
+        does not wrap itself are ``transient`` too. ``AuthenticationError`` is a hard error
+        when the login answered 401/403 (bad credentials) and transient when it answered
+        anything else (a failing proxy in front of the API). A ticket that merely expired
+        gets one extra chance (P-01): rebuild the session from scratch via
+        ``reauthenticate`` and retry ``action`` exactly once before giving up -- covers a
+        ticket that expired for a reason external to any single call (the operator took a
+        long time to confirm a plan, the process was suspended, the clock jumped). ``action``
+        always reads the API object through ``self._api`` (never a captured local), so
+        reassigning it here is enough for the retried ``action()`` to use the new session.
         """
         try:
             return action()
         except AuthenticationError as exc:
+            if _auth_failure_is_transient(exc):
+                raise _api_error(f"{description}: {exc}", True) from exc
             if self._reauthenticate is None:
                 raise PveApiError(f"{description}: {exc}") from exc
-            with self._reauth_lock:
-                try:
-                    self._api = self._reauthenticate()
-                except (AuthenticationError, requests.RequestException) as reauth_exc:
-                    raise _api_error(
-                        f"{description}: authentication ticket was rejected and "
-                        f"re-authenticating failed too: {reauth_exc}",
-                        isinstance(reauth_exc, requests.RequestException)
-                        and _is_unreachable(reauth_exc),
-                    ) from reauth_exc
+            self._relogin(description)
             try:
                 return action()
-            except (ResourceException, AuthenticationError) as retry_exc:
+            except _CALL_ERRORS as retry_exc:
                 raise _api_error(
                     f"{description}: still failed after re-authenticating: {retry_exc}",
-                    isinstance(retry_exc, ResourceException) and _is_server_error(retry_exc),
+                    _is_transient(retry_exc),
                 ) from retry_exc
-            except requests.RequestException as retry_exc:
+        except _CALL_ERRORS as exc:
+            raise _api_error(f"{description}: {_describe(exc)}", _is_transient(exc)) from exc
+
+    def _relogin(self, description: str) -> None:
+        """Replace ``self._api`` with a fresh login, or raise the :class:`PveApiError`
+        that says re-authenticating failed too (transient unless the login said 401/403)."""
+        assert self._reauthenticate is not None
+        with self._reauth_lock:
+            try:
+                self._api = self._reauthenticate()
+            except _CALL_ERRORS as exc:
                 raise _api_error(
-                    f"{description}: request failed after re-authenticating: {retry_exc}",
-                    _is_unreachable(retry_exc),
-                ) from retry_exc
-        except ResourceException as exc:
-            raise _api_error(f"{description}: {exc}", _is_server_error(exc)) from exc
-        except requests.RequestException as exc:
-            raise _api_error(f"{description}: request failed: {exc}", _is_unreachable(exc)) from exc
+                    f"{description}: authentication ticket was rejected and "
+                    f"re-authenticating failed too: {exc}",
+                    _is_transient(exc),
+                ) from exc
+
+    def _refresh_session(self) -> None:
+        """Replace the session after a transport failure, best effort.
+
+        A TLS handshake failure or connection reset can leave a poisoned connection in the
+        ``requests`` pool, and a new session re-resolves DNS / re-connects through whatever
+        balancer or VIP fronts the API, which is what recovers a node switch. A failed login
+        here is ignored: the retry that follows reports the real problem."""
+        if self._reauthenticate is None:
+            return
+        with self._reauth_lock:
+            try:
+                self._api = self._reauthenticate()
+            except (AuthenticationError, requests.RequestException, ValueError) as exc:
+                logger.debug(
+                    "could not rebuild the Proxmox VE session: %s",
+                    exc,
+                    extra={"event": "pve_session_rebuild_failed"},
+                )
 
     def _call(self, description: str, action: Any, *, idempotent: bool = True) -> Any:
-        """:meth:`_call_once`, retried while the API is unreachable.
+        """:meth:`_call_once`, retried while the failure is transient.
 
-        Only inside :meth:`outage_tolerance` (the executor opens one around a
-        run's mutating phase: once a migration is under way, a network
-        maintenance window must not turn into a failed run) and only for
-        ``idempotent`` calls -- a ``move_disk`` POST whose connection dropped
-        may or may not have been accepted, so repeating it could start a
-        second move. Backs off 5s doubling to 60s; re-raises the last error
-        once the tolerance is spent or for any error that is not
-        ``transient`` (the API answered, and said no)."""
+        Only ``idempotent`` calls are ever repeated -- a ``move_disk`` POST whose connection
+        dropped may or may not have been accepted, so repeating it could start a second move.
+        A ``transient`` error is one where the API answered nothing useful (unreachable,
+        TLS failure, 429/5xx, login behind a failing proxy); anything else (401/403, 404, ...)
+        is re-raised at once. Two regimes:
+
+        * inside :meth:`outage_tolerance` (the executor opens one around a run's mutating
+          phase: a network maintenance window must not turn into a failed run), retry with
+          5s doubling to 60s until the tolerance is spent;
+        * otherwise a short retry (1s, 2s, 4s, jittered) -- every read gets it, so one
+          firewall hiccup does not fail a dry run.
+
+        After a transport-level failure the session is rebuilt before the next attempt."""
         outage_start: float | None = None
         delay = 5.0
+        short_delays = iter(_SHORT_RETRY_DELAYS_SECONDS)
         while True:
             try:
                 return self._call_once(description, action)
             except PveApiError as exc:
-                if not (idempotent and exc.transient and self._outage_tolerance > 0):
+                if not (idempotent and exc.transient):
                     raise
-                now = self._monotonic()
-                outage_start = now if outage_start is None else outage_start
-                remaining = self._outage_tolerance - (now - outage_start)
-                if remaining <= 0:
-                    raise
+                if self._outage_tolerance > 0:
+                    now = self._monotonic()
+                    outage_start = now if outage_start is None else outage_start
+                    remaining = self._outage_tolerance - (now - outage_start)
+                    if remaining <= 0:
+                        raise
+                    wait = min(delay, remaining)
+                    delay = min(delay * 2, 60.0)
+                    giving_up = f"giving up in {remaining:.0f}s"
+                else:
+                    base = next(short_delays, None)
+                    if base is None:
+                        raise
+                    wait = base * (0.5 + self._random())
+                    giving_up = "short retry"
                 logger.warning(
-                    "Proxmox VE API unreachable (%s); retrying in %.0fs, giving up in %.0fs",
+                    "Proxmox VE API call failed transiently (%s); retrying in %.1fs (%s)",
                     exc,
-                    delay,
-                    remaining,
+                    wait,
+                    giving_up,
                     extra={"event": "pve_api_unreachable"},
                 )
-                self._sleep(min(delay, remaining))
-                delay = min(delay * 2, 60.0)
+                self._sleep(wait)
+                if not isinstance(exc.__cause__, ResourceException):
+                    self._refresh_session()
 
     @contextmanager
     def outage_tolerance(self, seconds: float) -> Iterator[None]:
