@@ -1156,11 +1156,20 @@ How often an in-flight `move_disk` task's status is polled.
 Duration, default `1h`. `0` disables.
 
 While `apply` executes, a Proxmox VE API read that fails because the API
-cannot be reached — connection refused or timed out, or an HTTP 5xx, as during
-network maintenance or a node restart — is retried with back-off (5 s doubling
-to 60 s) for up to this long, instead of ending the run while a migration may
-still be going on. The clock is per call and restarts after each success. An
-error the API actually answers (4xx) is never retried. `move_disk` itself is
+cannot be reached — connection refused or timed out, a TLS handshake failure,
+an answer that is not valid API output (such as a firewall's error page), or an
+HTTP 429 or 5xx, as during network maintenance or a node restart — is retried
+with back-off (5 s doubling to 60 s) for up to this long, instead of ending the
+run while a migration may still be going on. The clock is per call and restarts
+after each success. An error the API actually answers (4xx, in particular
+401/403 "not authorized") is never retried.
+
+Outside this window, every read still gets a short retry (about 10 s in total:
+1 s, 2 s, 4 s, with jitter), so a single dropped connection or a virtual IP
+moving to another node does not fail a dry run or `show-load`. Each retry
+after a connection-level failure starts from a fresh login and connection.
+Failover between API hosts is not done here: point `proxmox.host` at a name or
+virtual IP that already fails over. `move_disk` itself is
 never retried blindly: a connection that dropped after the request went out
 may still have started the task; if the run does give up, the next run
 discovers a still-running move (`state.json` and the cluster task list) and

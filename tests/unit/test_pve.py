@@ -243,8 +243,10 @@ def test_reports_transport_failure_after_reauthentication() -> None:
     stale = fake_api({}, error=AuthenticationError("ticket expired"))
     unreachable = fake_api({}, error=requests.ConnectionError("refused"))
     client = PveClient(stale, reauthenticate=lambda: unreachable)
-    with pytest.raises(PveApiError, match="request failed after re-authenticating"):
+    client._sleep = lambda seconds: None
+    with pytest.raises(PveApiError, match="request failed") as info:
         client.vm_resources()
+    assert info.value.transient
 
 
 def test_no_reauthenticate_callback_means_no_retry() -> None:
@@ -486,8 +488,11 @@ def _flaky(failures: int, exc: Exception) -> tuple[Callable[[], str], dict[str, 
     return action, calls
 
 
-def _client_with_fake_time() -> tuple[PveClient, list[float]]:
-    client = PveClient(object())
+def _client_with_fake_time(
+    reauthenticate: Callable[[], Any] | None = None,
+) -> tuple[PveClient, list[float]]:
+    client = PveClient(object(), reauthenticate=reauthenticate)
+    client._random = lambda: 0.5  # jitter factor exactly 1.0
     slept: list[float] = []
     now = {"t": 0.0}
 
@@ -517,18 +522,115 @@ def test_outage_longer_than_tolerance_raises_a_transient_error() -> None:
     assert info.value.transient and sum(slept) == 30
 
 
-def test_no_retry_by_default_for_non_transient_errors_or_non_idempotent_calls() -> None:
+def test_non_transient_errors_and_non_idempotent_calls_are_never_retried() -> None:
     client, slept = _client_with_fake_time()
-    action, calls = _flaky(1, requests.ConnectionError("down"))
-    with pytest.raises(PveApiError):
-        client._call("x", action)  # no tolerance opened
-    with client.outage_tolerance(600):
-        with pytest.raises(PveApiError):
-            client._call("x", _flaky(1, ResourceException(403, "no", ""))[0])
-        with pytest.raises(PveApiError):
-            client._call("x", _flaky(1, requests.ConnectionError("down"))[0], idempotent=False)
+    for tolerance in (0, 600):
+        with client.outage_tolerance(tolerance):
+            with pytest.raises(PveApiError):
+                client._call("x", _flaky(1, ResourceException(403, "no", ""))[0])
+            with pytest.raises(PveApiError):
+                client._call("x", _flaky(1, requests.ConnectionError("down"))[0], idempotent=False)
     assert slept == []
-    assert calls["n"] == 1
+
+
+def test_short_retry_rides_out_a_blip_without_outage_tolerance() -> None:
+    client, slept = _client_with_fake_time()
+    action, calls = _flaky(3, requests.exceptions.SSLError("handshake failure"))
+    assert client._call("x", action) == "ok"
+    assert calls["n"] == 4 and slept == [1.0, 2.0, 4.0]
+
+
+def test_short_retry_gives_up_and_reports_a_transient_error() -> None:
+    client, slept = _client_with_fake_time()
+    action, calls = _flaky(10, requests.ConnectionError("down"))
+    with pytest.raises(PveApiError) as info:
+        client._call("x", action)
+    assert info.value.transient and calls["n"] == 4 and len(slept) == 3
+
+
+def test_short_retry_delays_are_jittered() -> None:
+    client, slept = _client_with_fake_time()
+    client._random = lambda: 1.0  # upper bound: factor 1.5
+    client._call("x", _flaky(1, requests.ConnectionError("down"))[0])
+    assert slept == [1.5]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        requests.exceptions.ChunkedEncodingError("truncated"),
+        requests.exceptions.SSLError("tls"),
+        requests.exceptions.ConnectionError("reset"),
+        ValueError("Expecting value: line 1 column 1 (char 0)"),  # an HTML page, not JSON
+        ResourceException(429, "Too Many Requests", ""),
+        ResourceException(502, "Bad Gateway", ""),
+        AuthenticationError("Couldn't authenticate user: u to https://h/access/ticket code: 502"),
+    ],
+)
+def test_flaky_network_failures_are_transient_and_retried(exc: Exception) -> None:
+    client, _ = _client_with_fake_time()
+    assert client._call("x", _flaky(1, exc)[0]) == "ok"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        requests.exceptions.InvalidURL("bad"),
+        requests.exceptions.MissingSchema("bad"),
+        ResourceException(400, "Bad Request", ""),
+        ResourceException(401, "Unauthorized", ""),
+        ResourceException(403, "Forbidden", ""),
+        ResourceException(404, "Not Found", ""),
+        AuthenticationError("Couldn't authenticate user: u to https://h/access/ticket code: 401"),
+        AuthenticationError("Couldn't authenticate user: u to https://h/access/ticket code: 403"),
+    ],
+)
+def test_authorization_and_malformed_requests_are_hard_errors(exc: Exception) -> None:
+    client, slept = _client_with_fake_time()
+    action, calls = _flaky(1, exc)
+    with pytest.raises(PveApiError) as info:
+        client._call("x", action)
+    assert not info.value.transient and calls["n"] == 1 and slept == []
+
+
+def test_not_authorized_login_is_not_retried_after_reauthenticating_either() -> None:
+    bad = "Couldn't authenticate user: u to https://h/access/ticket code: 401"
+    api = fake_api({}, error=AuthenticationError(bad))
+    logins: list[int] = []
+
+    def reauth() -> Any:
+        logins.append(1)
+        raise AuthenticationError(bad)
+
+    client, slept = _client_with_fake_time(reauth)
+    client._api = api
+    with pytest.raises(PveApiError) as info:
+        client.vm_resources()
+    assert not info.value.transient and len(logins) == 1 and slept == []
+
+
+def test_transport_failure_rebuilds_the_session_before_retrying() -> None:
+    broken = fake_api({}, error=requests.exceptions.SSLError("handshake"))
+    fresh = fake_api({"cluster/resources": [{"vmid": 7}]})
+    client, _ = _client_with_fake_time(lambda: fresh)
+    client._api = broken
+    assert client.vm_resources() == [{"vmid": 7}]
+    assert client._api is fresh
+
+
+def test_failed_session_rebuild_does_not_mask_the_retry() -> None:
+    def reauth() -> Any:
+        raise requests.ConnectionError("still down")
+
+    client, _ = _client_with_fake_time(reauth)
+    assert client._call("x", _flaky(1, requests.ConnectionError("down"))[0]) == "ok"
+
+
+def test_server_errors_do_not_rebuild_the_session() -> None:
+    rebuilt: list[int] = []
+    client, _ = _client_with_fake_time(lambda: rebuilt.append(1))
+    client._call("x", _flaky(1, ResourceException(503, "unavailable", ""))[0])
+    assert rebuilt == []
 
 
 def test_5xx_is_transient_and_tolerance_is_restored() -> None:

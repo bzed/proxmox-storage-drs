@@ -44,20 +44,44 @@ caches anything, and the per-run topology cache belongs to `topology.py`
 (section 3.5), which is also where the bounded thread pool for the O(VMs)
 config fetch lives (`60-topology.md`, REVIEW.md P-02).
 
-`_call()` does retry exactly one failure mode: `proxmoxer.AuthenticationError`
-gets one reauthenticate-and-retry cycle (REVIEW.md P-01) before becoming a
-`PveApiError`, via a `reauthenticate` callback `build_client()` wires in —
-a full fresh login through `_build_api()` again, not a reuse of the
-rejected ticket. This is not a general retry policy (a `ResourceException`
-or a transport failure still fails immediately, on the first attempt); it
-exists specifically because a ticket can expire for reasons with nothing to
-do with the call that hits it — a long `apply --confirm` wait, a suspended
-process, a clock jump — and `proxmoxer`'s own lazy per-request renewal only
-notices the age of its *own* clock, not whether the server-side ticket
-actually outlived a gap that long. A test double built with a bare
-`PveClient(fake_api)` (no `reauthenticate=`) gets none of this — it behaves
-exactly as it did before P-01, which is what every existing fake in
-`tests/unit/fakes.py` relies on.
+`_call()` retries two failure modes, and nothing else.
+
+**1. Expired ticket (REVIEW.md P-01).** `proxmoxer.AuthenticationError` gets
+one reauthenticate-and-retry cycle via a `reauthenticate` callback
+`build_client()` wires in — a full fresh login through `_build_api()` again,
+not a reuse of the rejected ticket. A ticket can expire for reasons with
+nothing to do with the call that hits it — a long `apply --confirm` wait, a
+suspended process, a clock jump — and `proxmoxer`'s own lazy renewal only
+notices the age of its *own* clock. A test double built with a bare
+`PveClient(fake_api)` (no `reauthenticate=`) gets no re-login.
+
+**2. Transient failures.** The API (or whatever sits in front of it: a
+firewall, a load balancer, a VIP that moves between nodes) did not give a
+usable answer, so asking again may work. The line between transient and hard:
+
+| Failure | Class |
+|---|---|
+| connection refused/reset, timeout, TLS handshake failure, truncated body, a non-JSON body (a firewall's HTML page) | transient |
+| HTTP 429 or 5xx (PVE's 595/596 included) | transient |
+| login answered with a status other than 401/403 (a failing proxy) | transient |
+| login answered 401/403, API answered 401/403 (**not authorized**) | **hard** |
+| any other 4xx, a malformed URL/scheme/header | hard |
+
+`proxmoxer` words a failed login `... code: <HTTP status>`, the only place the
+status survives; `_auth_failure_is_transient()` parses it. A login failure
+with no status in the message stays hard.
+
+Only `idempotent` calls are repeated (`move_disk` passes `idempotent=False`:
+a dropped POST is ambiguous and a blind repeat could start a second move).
+Two regimes: inside `outage_tolerance()` the long 5 s→60 s loop below; outside
+it (every read) a short retry of 1 s, 2 s and 4 s, each scaled by a random
+factor in [0.5, 1.5] so the `read_workers` threads do not retry in lockstep —
+about 10 s, enough for a TLS reset or a VIP failover, short enough not to
+hide a real outage. Before every retry after a *transport* failure (not
+after a 5xx the API answered) `_refresh_session()` rebuilds the session via
+`reauthenticate`, best effort: that drops a poisoned pooled connection and
+re-resolves DNS and the VIP. There is deliberately no list of fallback hosts;
+failover belongs to whatever serves `proxmox.host`.
 
 `build_client()` also applies `proxmox.ticket_refresh_seconds` to the
 constructed session, best-effort: `proxmoxer` 2.x has no constructor
