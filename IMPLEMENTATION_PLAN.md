@@ -1822,11 +1822,11 @@ Scope of the sum, stated so it is not re-derived differently in two places:
   `v`, but that room is those storages' own `F_{v,s'}` and is charged there. This is what keeps the
   per-group decomposition of §5 intact: `F_{v,s}` only ever involves disks on `s`, which all belong to
   `s`'s group.
-- **Foreign volumes contribute bytes, not footprint.** Disks of stopped or ungrouped VMs are in
-  `Uˢᵉˣᵗ` (§5.1.1) and, exactly as they never contributed a largest disk, contribute no footprint.
-  A stopped VM can be snapshotted too; covering it would need the content listing to be resolved to
-  VMs for volumes outside `D`, which §5.1.1 deliberately does not do. This gap is unchanged by the
-  footprint rule, and named so it is not mistaken for a decision.
+- **Foreign volumes contribute bytes, not footprint — by decision.** Disks of stopped or ungrouped
+  VMs count in full toward used space through `Uˢᵉˣᵗ` (§5.1.1), but contribute no footprint, as
+  they never contributed a largest disk. A stopped VM is planned neither for snapshots nor for I/O
+  (operator direction): the snapshot reserve exists for running workloads, and a stopped VM is not
+  one. Its bytes are what matter, and those are counted.
 
 **Upgrade consequence: the reserve gets larger, and a cluster can be in violation on the first run.**
 Any storage holding two disks of one VM now reserves more than before, and one that was compliant
