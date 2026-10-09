@@ -14,14 +14,20 @@ Given configurable **groups** of shared storages, continuously equalize **disk I
 storages within each group by live-migrating individual VM disks, subject to:
 
 - a disk may only move between storages in **its own group**;
-- every storage must always retain free space for snapshots — by default **2× its largest disk** —
-  and this must hold *during* migrations, not merely before and after;
+- every storage must always retain free space for snapshots — by default **2× the largest per-VM
+  footprint on it**, where a VM's footprint on a storage is the sum of *all* its disks there,
+  because a snapshot of a VM always snapshots every disk of that VM at once (§5.3.3) — and this
+  must hold *during* migrations, not merely before and after;
+- a VM whose disks add up to more than a configured size (default 2 TiB) should be **split** over
+  several storages so that no single storage has to hold the snapshot reserve for all of it — a
+  preference, weighted above the affinity preference below (§5.3.3);
 - every storage must retain its **configured free space** — an absolute byte count or a percentage
   of its capacity, per storage or per LUN family (§5.3.1) — and when a new volume has eaten it, the
   engine migrates disks away until it is free again: the requirement is repaired, never traded
   (§5.3), and the larger of it and the snapshot reserve always wins;
 - the number of migrations must be **minimal**;
-- a VM's disks should stay **together** on one storage unless space or I/O forces otherwise — a
+- a VM's disks should stay **together** on one storage unless space, I/O or the split rule above
+  forces otherwise — a
   preference weighted by the VM's own I/O (§5.4) and backed by the cost model: reuniting a VM
   counts as benefit in the payback test, and disks too small to cost anything move for free
   (§7.1–§7.3);
@@ -839,7 +845,9 @@ should do silently.
 
 **`pve-storage-drs verify-storages`.** A companion to `verify-metrics` (§3.3), run once per storage before
 relying on any plan. For every storage in every group it reports `type`, `shared`, `content`,
-`saferemove`, `saferemove_throughput`, total/used, the largest disk currently on it, and the
+`saferemove`, `saferemove_throughput`, total/used, the largest disk currently on it, the largest
+per-VM footprint currently on it with the VM it belongs to (`Z_s`, §5.3.3 — the quantity the snapshot
+reserve is computed from, which is not the largest disk once a VM has two disks there), and the
 **resolved** free-space requirement `soft_s`/`hard_s` with the level each came from (§5.3.1), and
 the resolved `enforce_format` with the entry it came from plus the number and bytes of disks
 currently on the storage in another format (§5.3.2 — non-conforming, informational, never a
@@ -1258,6 +1266,10 @@ four groups is four small problems, not one large one.
 | `Uˢᵉˣᵗ` | bytes on `s` consumed by volumes DRS does not manage (§5.1.1) |
 | `c_s` | capability weight of `s` |
 | `f_s` | snapshot reserve factor for `s` (default 2.0) |
+| `F_{v,s}` | footprint of VM `v` on `s`: `Σ_{d∈D : v(d)=v} z_{d,s}·x_{d,s}`, the bytes a snapshot of `v` doubles on `s` (§5.3.3) |
+| `T` | split threshold, `snapshot_reserve.split_vm_footprint` (default 2 TiB; `null` disables, §5.3.3) |
+| `T_v` | per-VM footprint cap, `max(T, max_{d∈D : v(d)=v} z_d)` — a single disk larger than `T` cannot be split (§5.3.3) |
+| `V^split` | the VMs whose total size in the group exceeds `T`: `{ v : Σ_{d∈D : v(d)=v} z_d > T }` (§5.3.3) |
 | `soft_s` | configured free-space requirement for `s`, in bytes — the plan endpoint (§5.3.1) |
 | `hard_s` | transient free-space floor for `s`, in bytes, `≤ soft_s` (§5.3.1, §8.1) |
 | `fmt_d` | current format of disk `d` (`raw`, `qcow2`, …; §3.5) |
@@ -1311,7 +1323,8 @@ Set `Uˢᵉˣᵗ = 0` only if `snapshot_reserve.count_foreign_volumes` is false,
 |---|---|---|
 | `x_{d,s}` | `{0,1}` | disk `d` is placed on storage `s` |
 | `y_{v,s}` | `{0,1}` | VM `v` has at least one disk on `s` |
-| `Z_s` | `≥ 0` | size of the largest disk on `s` |
+| `Z_s` | `≥ 0` | largest per-VM footprint on `s`, `max_v F_{v,s}` (§5.3.3) |
+| `o_v` | `≥ 0` | split excess of `v ∈ V^split`: how far its largest footprint on any storage exceeds `T_v` (§5.3.3 (C9)) |
 | `e_s` | `≥ 0` | absolute deviation of `u_s` from target (L1 objective) |
 | `d_s` | `≥ 0` | relative deviation of `s`'s fill fraction from the group mean fill `b̄` (capacity-spread objective, §5.3 (C7)) |
 | `t` | `≥ 0` | maximum utilization (min–max objective) |
@@ -1365,13 +1378,20 @@ still anchors its VM: `y_{v,σ₀(p)} = 1` is fixed for every pinned `p`, and `�
 the VM's movable disks to that storage instead of being blind to where they go. §3.6 carries the
 full argument, including why the opposite default silently penalized affinity repair.
 
-**(C4) Largest-disk linearization.** `Z_s = max{ z_d : x_{d,s}=1 }` is not linear, but because the
-reserve constraint pushes `Z_s` *down* while this pushes it *up*, a one-sided bound is exact at the
-optimum:
+**(C4) Largest-footprint linearization.** `Z_s = max_v F_{v,s}` — the largest *per-VM footprint* on
+`s`, the sum of every disk one VM has there (§5.3.3 says why it is the sum and not the largest single
+disk) — is not linear, but because the reserve constraint pushes `Z_s` *down* while this pushes it
+*up*, a one-sided bound is exact at the optimum:
 
 ```
-Z_s  ≥  z_d · x_{d,s}                                  ∀ d ∈ D, s ∈ S
+Z_s  ≥  Σ_{d∈D : v(d)=v} z_{d,s} · x_{d,s}               ∀ v ∈ V_all, s ∈ S
 ```
+
+`V_all` is every VM owning a disk in `D`, pinned-only VMs included — a pinned disk's bytes are
+snapshotted with its VM exactly like a movable one's. For a VM with one disk in the group the row is
+the old per-disk bound `Z_s ≥ z_d·x_{d,s}`; the model gets *smaller*, not larger, since there is one
+row per VM and storage rather than one per disk and storage. (This constraint was the per-disk
+`Z_s ≥ z_d·x_{d,s}` until the per-VM footprint replaced it, §5.3.3.)
 
 **(C5) Capacity, snapshot reserve and free space.** The core safety constraint. The reserve is the
 **larger** of the snapshot term and the configured free-space floor, so introduce `R_s ≥ 0`:
@@ -1396,12 +1416,13 @@ infeasible on every group whose minimum shortfall was not a round number of MiB,
 it to the heuristic; found on a real bundle and fixed by this integer definition.
 
 Two one-sided bounds are exact for `R_s = max(f_s·Z_s, soft_s)` because (C5) pushes `R_s`
-*down* while both bounds push it *up*. The `f_s · Z_s` term is the "always keep 2× the largest disk
-free" rule, and (C4) is what makes it expressible in a linear model at all. `soft_s` is the storage's
+*down* while both bounds push it *up*. The `f_s · Z_s` term is the "always keep 2× the largest VM
+footprint free" rule — enough room to snapshot the VM with the most bytes on `s`, all of its disks
+there at once (§5.3.3) — and (C4) is what makes it expressible in a linear model at all. `soft_s` is the storage's
 **configured free-space requirement** (§5.3.1): the number of bytes that must be free on `s` when the
 plan has fully run, whether the operator asked for it as an absolute byte count or as a percentage of
-the storage's capacity. It replaces the old global `min_free_bytes` floor (removed, no compatibility shim) — a storage whose largest disk
-is small needed one (with `f=2` and a 10 GiB largest disk, the snapshot term alone would reserve only
+the storage's capacity. It replaces the old global `min_free_bytes` floor (removed, no compatibility shim) — a storage whose largest VM footprint
+is small needed one (with `f=2` and a 10 GiB largest footprint, the snapshot term alone would reserve only
 20 GiB on a 20 TiB LUN), but so does a storage that must keep headroom for reasons the snapshot rule
 cannot see: a thin-provisioning safety margin, a quota for volumes this tool does not manage, or the
 operator's plain policy that a LUN is not allowed to run full. **If the snapshot reserve is bigger
@@ -1540,9 +1561,11 @@ effectively hard:
 
    ```
    U_obj  =  2·α·T_g  +  β·|D|  +  γ·Σ_d z_d  +  κ·|V|·(|S|−1)  +  δ·2·|S|
+          +  μ·Σ_{v∈V^split} (Σ_{d : v(d)=v} z_d − T_v)
                                                                      (upper bound on the
                                                                      non-reserve objective;
-                                                                     Σ_s d_s ≤ 2|S| by (C7))
+                                                                     Σ_s d_s ≤ 2|S| by (C7),
+                                                                     o_v ≤ Σ z_d − T_v by (C9))
    P_min  =  U_obj / ε_r          with  ε_r = the smallest reserve shortfall we refuse to trade
    ```
 
@@ -1552,7 +1575,8 @@ effectively hard:
    balance. Config `objective.reserve_violation_penalty` is then a *floor*, not the value used:
    the model uses `P = max(configured, P_min)` and logs a warning when it had to raise it. That
    warning must be *checkable*, not just an announcement: log `P_configured`, `P_min`, `P_used`,
-   and the four inputs the bound came from — `T_g`, `|D|`, `Σ_d z_d`, `|V|·(|S|−1)` — plus the `ε_r`
+   and the five inputs the bound came from — `T_g`, `|D|`, `Σ_d z_d`, `|V|·(|S|−1)` and the summed
+   split headroom `Σ_{v∈V^split} (Σ z_d − T_v)` (§5.3.3) — plus the `ε_r`
    granularity, and repeat them in `pve-storage-drs explain`. `P_min` moves with `T_g`, so the same config file
    legitimately yields different effective penalties on a quiet group and a busy one, and on the
    same group at different times of day. An operator who sets `reserve_violation_penalty: 5000` and
@@ -1560,7 +1584,8 @@ effectively hard:
    faith.
 
    Worked against §14 (`T_g = 7.4`, `|D| = 6`, `Σz = 6.5 TiB`, `|V| = 5`, `|S| = 3`, `δ = 0.5`, sizes
-   in TiB): `U_obj = 14.8 + 1.5 + 0.325 + 5.0 + 3.0 = 24.6`, so `P_min = 24.6 · 2²⁰ ≈ 2.58×10⁷`. The
+   in TiB, and the split rule off as that fixture sets it, so the `μ` term is 0):
+   `U_obj = 14.8 + 1.5 + 0.325 + 5.0 + 3.0 = 24.6`, so `P_min = 24.6 · 2²⁰ ≈ 2.58×10⁷`. The
    configured default `P = 1000` is **four orders of magnitude too small** to be provably dominant at
    mebibyte granularity — it is dominant for violations above roughly 25 GiB and silently tradeable
    below that. This is precisely why option 1 is the default and this option needs the computed `P`.
@@ -1763,6 +1788,147 @@ volume-chain snapshots on that storage; converting `raw → qcow2` adds a qcow2 
 Both are the point of the option, and both are the operator's policy, stated once in config. Disks
 with snapshots are pinned by (C2) regardless (§3.7), so no existing snapshot chain is ever converted.
 
+#### 5.3.3 The per-VM snapshot footprint, and splitting large VMs
+
+**A snapshot is taken of a VM, not of a disk.** Creating a snapshot snapshots *every* disk of the VM
+at once (confirmed by the operator; §3.7 relies on the same fact when one VM-level snapshot pins all
+of a VM's disks). On a volume-chain storage each snapshotted disk gets a new full-size volume on the
+storage the disk lives on, so what a snapshot of VM `v` needs on storage `s` is not the size of
+`v`'s largest disk but the sum of all of `v`'s disks *on `s`* — its **footprint** there:
+
+```
+F_{v,s}  =  Σ_{d∈D : v(d)=v} z_{d,s} · x_{d,s}
+Z_s      =  max_v F_{v,s}
+```
+
+An earlier revision defined `Z_s` as the largest single disk on `s`. That under-reserves every
+storage holding two or more disks of the same VM: a VM with five 2 TiB disks on one storage needs
+10 TiB for one snapshot, and the per-disk rule reserved for 2 TiB of it. The footprint replaces the
+largest disk everywhere the reserve is computed — (C4)/(C5), §8.1's transient predicate, §9.2's
+live re-check, `reserve.compute_reserve_status()` and therefore `show-load`, the gate, the
+heuristic and §7.3's repair test. `f_s` keeps its meaning (the number of snapshots' worth of room to
+keep, default 2.0) and its default; what it multiplies is now the right quantity. The per-disk
+`z_max` survives in one place only, the wipe-time estimate of §7.1/§9.3, because a source wipe is
+per volume.
+
+Scope of the sum, stated so it is not re-derived differently in two places:
+
+- **Every disk of `v` in `D` on `s` counts**, movable or pinned (§3.6) — a pinned disk is
+  snapshotted with its VM like any other. `efidisk0` and `tpmstate0` count; at under a few MiB they
+  never matter. `unused{N}` volumes count when `exclude.include_unused_disks` brings them into `D`;
+  whether PVE snapshots an `unused` volume has **not been verified** against the source here, and
+  counting it errs toward more reserve, never less.
+- **Only `s` itself.** A snapshot of `v` also needs room on every *other* storage holding a disk of
+  `v`, but that room is those storages' own `F_{v,s'}` and is charged there. This is what keeps the
+  per-group decomposition of §5 intact: `F_{v,s}` only ever involves disks on `s`, which all belong to
+  `s`'s group.
+- **Foreign volumes contribute bytes, not footprint — by decision.** Disks of stopped or ungrouped
+  VMs count in full toward used space through `Uˢᵉˣᵗ` (§5.1.1), but contribute no footprint, as
+  they never contributed a largest disk. A stopped VM is planned neither for snapshots nor for I/O
+  (operator direction): the snapshot reserve exists for running workloads, and a stopped VM is not
+  one. Its bytes are what matter, and those are counted.
+
+**Upgrade consequence: the reserve gets larger, and a cluster can be in violation on the first run.**
+Any storage holding two disks of one VM now reserves more than before, and one that was compliant
+under the per-disk rule can show an `r_s > 0` it did not have yesterday. That is the rule being
+right, not the cluster changing — and the consequence is a **repair**: §6's reserve override opens
+the group and §7.3 exempts the plan from payback, so the first run after the upgrade can plan
+substantial migrations. Dry-run is the default (§9.1); `show-load` and `verify-storages` print the
+new `Z_s` and the VM it comes from before anything moves, and the manual must tell an upgrading
+operator to read them first.
+
+**Splitting large VMs.** The footprint rule alone makes a large VM expensive to keep on one storage
+only when space binds: (C5) then forces a split, as a repair. On a storage with room to spare the
+reserve is satisfied, nothing moves, and the storage carries `f·10 TiB` of free space for one VM
+that would need only `f·2 TiB` per storage if its disks were spread. The **split rule** makes
+spreading a large VM a standing preference rather than a last resort:
+
+- `T = snapshot_reserve.split_vm_footprint` (byte grammar as `free_space`, §5.3.1: integer bytes or
+  a byte-unit string; default `"2TiB"`; `null` disables the rule, and with it (C9), the `μ` term
+  and the split gate) is the most of one VM that one storage should hold.
+- `T_v = max(T, max_{d∈D : v(d)=v} z_d)` is VM `v`'s cap. A disk larger than `T` cannot be split,
+  so its own storage may hold it in full; anything *added* to it there is excess.
+- `V^split = { v : Σ_{d∈D : v(d)=v} z_d > T }` are the VMs the rule applies to. A VM no larger than
+  `T` in total can never exceed it on one storage, so restricting the rows below to `V^split` only
+  keeps the model small; it changes no optimum.
+
+**(C9) Split excess.** One continuous variable per large VM, bounded below by its footprint on every
+storage:
+
+```
+o_v  ≥  Σ_{d∈D : v(d)=v} z_{d,s} · x_{d,s}  −  T_v          ∀ v ∈ V^split, s ∈ S
+o_v  ≥  0
+```
+
+The objective (§5.4) charges `μ · Σ_{v∈V^split} o_v`, so the bound is exact at the optimum by the same
+one-sided argument as (C4). `o_v` is the *peak*, not a sum over storages, on purpose: the reserve a
+storage needs is driven by the largest footprint on it, so the quantity to drive down is the
+largest share any one storage holds. A sum of per-storage excesses would score five 2 TiB disks on
+three storages as `6+2+2` and `4+4+2` alike (excess 4 TiB either way, at `T = 2 TiB`), and the first
+needs half again as much reserve on its fullest storage.
+
+**Fewer storages than disks is the normal case, and the rule copes with it.** Five 2 TiB disks,
+`T = 2 TiB`:
+
+| Storages available | Best split | Footprints (TiB) | `o_v` | Snapshot reserve on the fullest, `f = 2` |
+|---|---|---|---|---|
+| 1 | — | 10 | 8 | 20 TiB |
+| 3 | 2 + 2 + 1 disks | 4, 4, 2 | 2 | 8 TiB |
+| 4 | 2 + 1 + 1 + 1 or 2 + 2 + 1 | 4, 2, 2, 2 or 4, 4, 2 | 2 | 8 TiB |
+| 5 | 1 each | 2, 2, 2, 2, 2 | 0 | 4 TiB |
+
+The cap is unattainable with fewer than five storages, and that is not a failure: `o_v` is minimised,
+not required to reach zero, so the solver lands on the smallest peak the storages allow. Where two
+splits reach the same peak (the four-storage row), `κ` (§5.4) breaks the tie toward fewer storages —
+the affinity preference survives inside the split rule, so a large VM is spread only as far as the
+cap requires. The reserve, not the split rule, is what prefers the wider of two equal-peak splits
+when space is tight, through (C5). §14.9 works the three-storage row as a fixture.
+
+**Weight, and how it meets affinity.** `μ = objective.mu_vm_split_per_tib` (default 1.0, per TiB of
+`o_v`, in the same TiB scaling as `γ`; `0` disables the term and the split gate). Three rules make it
+the *strong* preference §1 asks for rather than one `κ` can veto:
+
+1. **A large VM's affinity is not I/O-weighted.** `w_v = 1` for every `v ∈ V^split` (§5.4 otherwise
+   gives `w_v = max(1, ℓ_v/ℓ̄)`). The weight exists to keep a busy VM together; for a VM above `T` the
+   operator has said it should not be together, and its I/O must not veto that policy. `κ` still
+   counts its extra storages at weight 1 — that is the tie-break above.
+2. **Break-even, at the defaults.** Moving disk `d` of a large VM off its peak storage lowers `o_v` by
+   up to `z_d`, and costs `β + γ·z_d`, plus `κ` if it opens a storage the VM did not use yet. So the
+   move pays on the objective when `μ·z_d > 0.25 + 0.05·z_d` — any disk above about 0.26 TiB — onto a
+   storage the VM already uses, and when `μ·z_d > 0.75 + 0.05·z_d` — above about 0.79 TiB — onto a new
+   one (`α`/`δ` effects aside: a split that wrecks I/O balance still has to pay for that). A VM made of
+   many small disks therefore splits more reluctantly than one made of a few large ones; raising `μ`
+   is the knob, and §11.1 warns when it is below `κ`, where a single TiB of excess no longer buys a
+   new storage.
+3. **The split is a preference, not a mandate.** `o_v` is in stage 2 of the lexicographic solve
+   (§5.3), never stage 1: a split never displaces a reserve or free-space repair, and a split that
+   would itself create a shortfall is never chosen. Cooldowns, (C8), the transient invariant (§8.1)
+   and the hard per-move rules of §7.3 all apply.
+
+**The split gate.** A group with I/O in balance and data evenly spread would never be planned (§6),
+so a large VM sitting on one storage would never be split. §6 gains a gate that opens the group when
+the split rule can make progress — see §6 for its exact test, which is chosen so that a VM already at
+the best split its storages allow does not hold the group open on every run.
+
+**Payback.** `o_v` persists for as long as the placement does, like `E`, `F` and `A`, so §7.2's benefit
+gains `μ·(O_before − O_after)·H` with `O = Σ_{v∈V^split} o_v`, and a move that piles a large VM back
+onto one storage pays for it out of its other gains. At `H = 365d` the term dwarfs any mirror cost —
+one TiB of excess removed is worth `3.15×10⁷` load·s against `~1.0×10⁴` to mirror a TiB — so, as for
+`κ`, the aggregate test defers to the solver's own `μ`-versus-`β`/`γ` pricing. A split is *not* a
+repair: it gets no §7.3 exemption of its own, and a plan that both splits and repairs is exempt
+because it repairs.
+
+**Transient states.** While disk `d` of VM `v` is mirroring onto `b`, it is counted on both storages
+(§8.1), and so is its share of `v`'s footprint: `v`'s footprint on `b` rises by `z_{d,b}` the moment
+the move starts, and its footprint on the source does not fall until the source volume is observed
+gone. §8.1 states the predicate.
+
+**Heuristic.** The heuristic (§5.5) evaluates the same objective, `μ` term included, through the
+shared `evaluate_assignment()`, so its single-disk moves already split a large VM. Two of its steps
+need saying: the repair step's "most reduces the violation per byte moved" now counts the drop in
+`f_s·Z_s` a move causes as well as the bytes it frees, and the polish step never reunites a
+`V^split` VM's disks past `T_v` — a reunion that raises `o_v` is not polish.
+
 ### 5.4 Objective
 
 ```
@@ -1771,11 +1937,13 @@ min   α · Σ_{s∈S} e_s                            (imbalance)
     + γ · Σ_{d∈D^big} z_d · (1 − x_{d,σ₀(d)})    (bytes migrated)
     + κ · Σ_{v∈V} w_v · ( Σ_{s∈S} y_{v,s} − 1 )  (VM disk fragmentation)
     + δ · Σ_{s∈S} d_s                            (data spread / failure risk)
+    + μ · Σ_{v∈V^split} o_v                      (large-VM split excess, §5.3.3)
     + P · Σ_{s∈S} r_s                            (reserve violation)
 ```
 
-with `D^big = { d ∈ D : z_d ≥ migration.tiny_disk_bytes }` (default 64 MiB) and
-`w_v = max(1, ℓ_v / ℓ̄)` defined below.
+with `D^big = { d ∈ D : z_d ≥ migration.tiny_disk_bytes }` (default 64 MiB),
+`w_v = max(1, ℓ_v / ℓ̄)` defined below — except `w_v = 1` for `v ∈ V^split` (§5.3.3) — and `μ`,
+`V^split`, `o_v` from §5.3.3.
 
 `(1 − x_{d,σ₀(d)})` is exactly 1 when disk `d` moves and 0 when it stays, so `β` directly implements
 "minimize the number of migrations" and `γ` biases against moving *large* disks specifically. Both
@@ -1790,7 +1958,9 @@ rewards keeping the spread as narrow as possible. Two strengthenings of the affi
 motivated by the same live finding (a plan of four pure affinity repairs rejected by the payback
 rule, §7.2):
 
-- **The preference is weighted by the VM's own I/O.** `w_v = max(1, ℓ_v / ℓ̄)`, where
+- **The preference is weighted by the VM's own I/O** — for every VM not in `V^split`; a VM the
+  split rule says should be spread keeps `w_v = 1`, so its I/O cannot veto that rule (§5.3.3).
+  `w_v = max(1, ℓ_v / ℓ̄)`, where
   `ℓ_v = Σ_{d ∈ D : v(d)=v} ℓ_d` is the VM's total load within the group (pinned disks included —
   their I/O is the VM's I/O) and `ℓ̄ = T_g / |V_all|` the group's mean per-VM load, with `V_all`
   **every distinct VM owning a disk in the group, pinned-only VMs included** — deliberately wider
@@ -1860,7 +2030,7 @@ applying the weights, so the defaults in the example config are meaningful.
 **CBC via PuLP — the one MILP backend.** Direct transcription of §5.3's constraint set and §5.4's
 objective; continuous `e_s`, `Z_s`, `r_s` are fine, so there is no scaling discipline at all. Two
 unit rules still apply, both for conditioning rather than correctness: size-valued quantities are
-expressed in whole MiB (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`, `Uˢᵉˣᵗ`, `soft_s`) and loads in average
+expressed in whole MiB (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`, `Uˢᵉˣᵗ`, `soft_s`, `T_v`, `o_v`) and loads in average
 in-flight I/O requests (§4), so raw bytes (~10¹²-10¹⁴) never sit next to load values (~1-10) in the
 LP matrix — CBC's simplex does not error on a badly conditioned matrix, it silently returns a
 numerically poor "optimal" (confirmed on a real corpus bundle, where an unscaled model made CBC's
@@ -1967,8 +2137,8 @@ have it ignore exactly the change the forecast exists to anticipate.
 (max_s u_s − min_s u_s) / u*   ≥   gates.imbalance_threshold   (default 0.20)
 ```
 
-Evaluated per group; a group that passes it — or the capacity gate below — is planned, others are
-skipped.
+Evaluated per group; a group that passes it — or the capacity gate or split gate below — is
+planned, others are skipped.
 
 **Capacity gate** — the data-spread counterpart of the imbalance gate, on fill fractions rather
 than loads:
@@ -1987,6 +2157,26 @@ safety property: cooldowns, payback (§7) and the transient invariant (§8.1) al
 empty group has nothing to spread. Passing it opens the group for planning and nothing more: at
 the default `δ` the plan is often empty, which §5.4 accepts and §9.5's "no moves made" line
 explains.
+
+**Split gate** — the counterpart of the capacity gate for §5.3.3's split rule. It fires when some
+VM `v ∈ V^split` has a movable disk `d` and an eligible storage `s ≠ σ₀(d)` ((C2), not in cooldown)
+such that moving `d` alone to `s`
+
+1. strictly lowers `v`'s peak footprint `max_s F_{v,s}`, and
+2. leaves `s` without a (C5) shortfall, by the one shared reserve function.
+
+It bypasses the drift and imbalance gates, like the capacity gate and for the same reason: a stable
+workload is no reason to keep a large VM's snapshot reserve on one storage. It is a preference gate,
+not a safety one — cooldowns, payback and the transient invariant still apply — and it is off when
+`snapshot_reserve.split_vm_footprint` is `null` or `objective.mu_vm_split_per_tib` is 0. The
+single-move test is what keeps it quiet once the job is done: a VM at the best split its storages
+allow (§5.3.3's `4, 4, 2` on three storages) has no single move that lowers its peak, so the gate
+does not hold the group open on every run, and a VM whose every disk is pinned never opens it. The
+test is `|D_v| · |S|` reserve evaluations per large VM, cheap enough to run every time. It is a
+sufficient test, not an exact one: a split that only a *pair* of moves can improve does not open
+the group by itself — the next run that passes any other gate gets it — and that is accepted for a
+preference. Passing it opens the group for planning and nothing more; at the default weights the
+plan may still be empty (§5.3.3's break-even), which §9.5's "no moves made" line explains.
 
 **Cooldowns** — a disk moved within `cooldown_per_disk` (default 24h) is pinned in place; a storage
 involved in a migration within `cooldown_per_storage` accepts no new incoming moves.
@@ -2082,19 +2272,22 @@ storage-level lock while it runs.
 
 ### 7.2 Benefit
 
-The plan improves the three *persistent* parts of the §5.4 objective — load balance, data spread and
-VM affinity — from `(E_before, F_before, A_before)` to `(E_after, F_after, A_after)`, where
-`E = Σ_s e_s`, `F = Σ_s d_s` (§5.3 (C7)), and `A = Σ_{v∈V} w_v · ( Σ_{s∈S} y_{v,s} − 1 )` is the
+The plan improves the four *persistent* parts of the §5.4 objective — load balance, data spread,
+VM affinity and large-VM splitting — from `(E_before, F_before, A_before, O_before)` to
+`(E_after, F_after, A_after, O_after)`, where
+`E = Σ_s e_s`, `F = Σ_s d_s` (§5.3 (C7)), `A = Σ_{v∈V} w_v · ( Σ_{s∈S} y_{v,s} − 1 )` is the
 objective's affinity debt, weights included — the same sum the `κ` term charges, from the one
-shared implementation (AGENTS.md §5). All three improvements persist for as long as the workloads
+shared implementation (AGENTS.md §5) — and `O = Σ_{v∈V^split} o_v` the summed split excess of
+§5.3.3, in TiB. All four improvements persist for as long as the workloads
 keep running on the new placement, and we account them over the payback horizon `H`:
 
 ```
-benefit  =  ( α·(E_before − E_after)  +  δ·(F_before − F_after)  +  κ·(A_before − A_after) )  ·  H
+benefit  =  ( α·(E_before − E_after)  +  δ·(F_before − F_after)  +  κ·(A_before − A_after)
+                                      +  μ·(O_before − O_after) )  ·  H
 ```
 
-also in load-seconds — `δ` converts relative fill deviation, and `κ·w_v` a busy VM's fragmentation,
-into load-deviation equivalents (§5.4), so both sides of §7.3's comparison stay in the unit that
+also in load-seconds — `δ` converts relative fill deviation, `κ·w_v` a busy VM's fragmentation and
+`μ` a TiB of split excess into load-deviation equivalents (§5.4), so both sides of §7.3's comparison stay in the unit that
 is the whole point of using I/O time as the load metric. `β` and `γ` charge the move itself and
 belong on the cost side.
 
@@ -2142,6 +2335,10 @@ long as balance does, and its worth is measurable — the fragmented VM's own I/
   cost/benefit test in objective units, not a rubber stamp — and the test's remaining job stays
   the one the second bullet above gives it: rejecting plans whose *physical* benefit is
   negligible.
+
+`μ·ΔO` behaves exactly like `κ·ΔA` in both respects: it may be negative (a balance move that
+gathers a large VM onto one storage pays for it), and at `H = 365d` it outweighs any mirror cost,
+so a split the solver chose is not vetoed here (§5.3.3).
 
 ### 7.3 Acceptance
 
@@ -2196,7 +2393,7 @@ repair. (The marker and the trigger are allowed to disagree, in either direction
 redundant-repair plan above repairs with no marked move, and the converse exists too: a move can
 be load-bearing on a plan that does not repair — holding it back raises the plan's *final* `Σ r_s`
 above zero while the current assignment was already at zero, e.g. one half of a swap whose other
-half lands a new largest disk and needs the room this move frees. Such a move is marked
+half lands a new largest VM footprint and needs the room this move frees. Such a move is marked
 `repair: true` — and, once §8.2's exception 2 is implemented (it is spec-only today, as §14.8
 records), scheduled first, because it frees space a later move needs — but
 its plan is *not* exempt — the plan leaves the group no better than it found it, and a plan that
@@ -2227,23 +2424,32 @@ which is what makes "deliberately narrower" a provable claim rather than a compa
 that cannot finish inside `max_single_move_duration`, or that breaches the transient invariant,
 is rejected like any other move and the shortfall reported as unfixable.
 
-**The shipped `fc-tier1` fixture survives this unchanged, and its plan is exactly the
-redundant-repair case.** san-a starts `r = 0.5` (4.5 used + 4.0 snapshot reserve > 8.0 TiB); the
-§14 two-move plan ends at `Σ r_s = 0`, so the outcome trigger exempts it — as the built
-`has_reserve_override` already does (`102:scsi0`'s source is violating when it is scheduled).
-Neither move passes the revert test, though: holding `102:scsi0` back leaves san-a at
-`3.5 + 4.0 = 7.5 ≤ 8`, holding `101:scsi1` back at `3.0 + 4.0 = 7.0 ≤ 8` — either move alone
-repairs, so both are marked `repair: false`. The fixture's recorded payback numbers
-(`fc-tier1.expected.json`: cost 26 214.4, benefit 1.93×10⁸, ratio 7 344.4, `accepted: true`) are
-untouched — the sums are computed in full whatever the trigger, and this plan clears the
-aggregate test on its own anyway (7 344 ≥ 10). Only the per-move flag changes (`102:scsi0` is
-`resolves_reserve_violation: true` before phase 13, unmarked under the revert test).
+**The shipped `fc-tier1` fixture was the redundant-repair case under the per-disk reserve, and is
+not under the per-VM footprint (§5.3.3).** Under the per-disk rule san-a started `r = 0.5`
+(4.5 used + 2 × 2.0 largest disk > 8.0 TiB), and either move alone repaired it, so both were marked
+`repair: false`. Under the footprint rule san-a holds both of VM 101's disks, `Z_a = 2.0 + 1.0 =
+3.0`, and starts `r = 2.5` (`4.5 + 2 × 3.0 = 10.5 > 8.0`). The §14 two-move plan still ends at
+`Σ r_s = 0` and is still exempt by the outcome trigger — as the built `has_reserve_override` is
+(`102:scsi0`'s source is violating when it is scheduled). The revert test now separates the two
+moves: holding `102:scsi0` back leaves san-a with `101:scsi0` and `102:scsi0`, `3.5 + 2 × 2.0 = 7.5
+≤ 8`, still compliant, so it stays `repair: false`; holding `101:scsi1` back leaves VM 101 whole on
+san-a, `3.0 + 2 × 3.0 = 9.0 > 8`, short by 1.0, so **`101:scsi1` is `repair: true`** — it is the
+move that splits VM 101, and splitting VM 101 is what the repair needs. The recorded payback
+shortfall pair becomes `reserve_shortfall_tib_before`/`_after` 2.5 → 0.0; every recorded payback
+*number* is unchanged (the fixture keeps the split rule off, §14.1), and the expected file is
+regenerated, never hand-edited.
+
+**The redundant-repair case therefore lost its fixture, and needs a new one.** Nothing else shipped
+exercises a plan that repairs with no marked move. Phase 17 (§12) adds it as a unit case: two
+single-disk VMs on one violating storage, each of whose moves alone repairs it — both moves
+`repair: false`, the plan `repair_exempt: true`.
+
 **As built (AH-02):** `fc-tier1.expected.json` never recorded the old flag, but it does record the
 new surface — per-move `disk_key`, the plan's `aggregate_ok`, the `reserve_shortfall_tib_before`/
-`_after` pair (0.5 → 0.0), `repair_exempt: true` (the outcome trigger fires; the plan would have
-cleared the aggregate test regardless) and `repair_markers` (both `false`, the redundant-repair
-case) — with every recorded payback *number* unchanged; the corpus expected files record the same
-fields.
+`_after` pair, `repair_exempt: true` (the outcome trigger fires; the plan would have
+cleared the aggregate test regardless) and `repair_markers` — recorded under the per-disk reserve as
+0.5 → 0.0 with both markers `false`, and to be regenerated by phase 17 as 2.5 → 0.0 with
+`101:scsi1: true`; the corpus expected files record the same fields.
 
 **A plan of nothing but tiny disks has no economic gate at all, and that is deliberate — but it
 means the objective is the only thing holding it.** `Σ_d cost_d` is then 0, so — outside the repair
@@ -2321,27 +2527,34 @@ target is fully allocated before the switchover, and the source is only removed 
 `delete=1`. So while a single move is in flight, `b` must satisfy:
 
 ```
-used_b + z_d + f_b · max(Z_b, z_d)   ≤   C_b
+used_b + z_d + f_b · max(Z_b, F_{v(d),b} + z_d)   ≤   C_b
 ```
 
-Note the `max(Z_b, z_d)`: if the incoming disk is the new largest on `b`, the required reserve grows
-at the same moment the disk arrives. (For a move that converts the disk's format onto an
+`Z_b` is the largest per-VM footprint on `b` and `F_{v(d),b}` the footprint `d`'s own VM already has
+there (§5.3.3), both in the current state. Note the `max(Z_b, F_{v(d),b} + z_d)`: if the incoming
+disk makes its VM's footprint the new largest on `b`, the required reserve grows at the same moment
+the disk arrives — and with the per-VM footprint that happens not only when the disk is large but
+whenever it joins enough of its own VM's other disks. (For a move that converts the disk's format onto an
 `enforce_format` storage, `z_d` here and below reads `z_{d,b}`, the converted size — §5.3.2.) This is the case most likely to be missed, and the one most
 likely to fill a SAN LUN.
+
+The disk counts toward its VM's footprint on **both** storages while it is in flight: on `b` from the
+start of the mirror, on the source until its volume is observed gone (§8.2's `draining`). Counting it
+twice is conservative, which is the direction a transient check must err in.
 
 **The transient free-space floor.** The snapshot term above is not the only thing `b` must keep: a
 storage with a configured free-space requirement (§5.3.1) must not dip below its **hard** floor
 while the move is in flight. The full single-move predicate is therefore:
 
 ```
-used_b + z_d + max( f_b · max(Z_b, z_d) , hard_b )   ≤   C_b
+used_b + z_d + max( f_b · max(Z_b, F_{v(d),b} + z_d) , hard_b )   ≤   C_b
 ```
 
 `hard_b ≤ soft_b` always (§5.3.1 validation), so the *floor component* of this predicate is a
 relaxation of the endpoint constraint (C5) — the endpoint demands `max(f_b·Z_b, soft_b)` free, the
-transient state demands only `max(f_b·max(Z_b,z_d), hard_b)` of floor. The rest of the predicate
+transient state demands only `max(f_b·max(Z_b, F_{v(d),b}+z_d), hard_b)` of floor. The rest of the predicate
 is **stronger** than (C5), not weaker, and must not be read as implied by it: the snapshot term
-grows to `f_b·max(Z_b, z_d)` the moment the incoming disk is the new largest, and the source is
+grows to `f_b·max(Z_b, F_{v(d),b}+z_d)` the moment the incoming disk makes the new largest footprint, and the source is
 still charged in full — the two facts that make §8.1 a separate invariant rather than a corollary.
 With the default `hard: null` (i.e. `hard_b = soft_b`) the floor component does not relax at all
 and the transient check is exactly as strong as before §5.3.1; an operator who sets `hard`
@@ -2363,10 +2576,12 @@ must satisfy:
 
 ```
 used_b  +  Σ_{m∈M : dst(m)=b} z_{disk(m)}
-        +  max( f_b · max( Z_b , max_{m∈M : dst(m)=b} z_{disk(m)} ) , hard_b )   ≤   C_b
+        +  max( f_b · max( Z_b , max_v ( F_{v,b} + Σ_{m∈M : dst(m)=b, v(disk(m))=v} z_{disk(m)} ) ) ,
+                hard_b )   ≤   C_b
 ```
 
-Both the sum and the inner `max` are over the same in-flight set, and the `max(…, hard_b)` floor of
+Both sums and the inner `max` are over the same in-flight set — two disks of one VM landing on `b`
+together raise that VM's footprint by both — and the `max(…, hard_b)` floor of
 the single-move form carries over unchanged. Implement this as the single
 feasibility predicate and call it with `M = {m}` for the sequential case, so there is only one
 version of this rule in the codebase.
@@ -2399,7 +2614,7 @@ while pending:
         else: report deadlock with the blocking storages; break
 
     m ← argmax over feasible of  (persistent-objective reduction) / cost_m
-                                 # the α, δ and κ·w terms of §5.4 — the parts whose
+                                 # the α, δ, κ·w and μ terms of §5.4 — the parts whose
                                  # improvement persists; β/γ are one-time costs.
                                  # cost_m = 0 (a tiny disk, §7.1) ranks first:
                                  # free value, delivered before anything pays
@@ -2522,12 +2737,13 @@ Before **every** move, re-read the live state rather than trusting the plan:
    `Σ size(vol) : vol ∈ GET /nodes/{node}/storage/{target}/content` — the same quantity
    `schedule.transient_invariant_ok()` sums from the model (`Σ z_d + Uˢᵉˣᵗ`), read fresh — while `C_b`
    still comes from `/status`'s `total`, since the LUN may have been resized. The third model input,
-   `Z_b`, is **not** re-read: it stays the planning-time largest managed disk on the target, raised only by
-   this run's own completed moves, because a listing entry cannot say whether a volume belongs to a managed
-   disk (§5.3 (C4) defines `Z_b` over managed disks). A managed disk that something else lands on the target
-   after planning is therefore counted in full in `used_b` but does not raise `Z_b`, so only the reserve
-   multiplier's growth on the new largest disk, `f_b·(Z_live − Z_model)`, goes uncounted — never the disk's
-   own bytes (AJ-03). A listing entry without
+   `Z_b`, is **not** re-read: it stays the planning-time largest per-VM footprint of managed disks on the
+   target (§5.3.3), raised only by this run's own completed moves, because a listing entry cannot say whether
+   a volume belongs to a managed disk (§5.3 (C4) defines `Z_b` over managed disks). The footprint the
+   predicate charges for the moving disk's own VM, `F_{v(d),b}`, is likewise the model's. A managed disk that
+   something else lands on the target after planning is therefore counted in full in `used_b` but does not
+   raise `Z_b`, so only the reserve multiplier's growth on the new largest footprint, `f_b·(Z_live − Z_model)`,
+   goes uncounted — never the disk's own bytes (AJ-03). A listing entry without
    `size` counts at its `approximate-size`; one with neither makes the figure unknowable, and the move is
    refused. Any failure to read either endpoint refuses the move too: the check never passes on a partial
    figure. Those two refusals are *errors*, not mismatches — see "Errors are not mismatches" below: they fail
@@ -2740,17 +2956,16 @@ is the section 14 fixture at `beta_move_count: 0.5` (the two-move variant):
 
 ```
 Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
-  san-a  u=6.50  ██████████████████████  used 4.5/8.0 TiB  ⚠ reserve short by 0.5 TiB
+  san-a  u=6.50  ██████████████████████  used 4.5/8.0 TiB  ⚠ reserve short by 2.5 TiB
   san-b  u=0.70  ██                      used 1.5/8.0 TiB
   san-c  u=0.20  █                       used 0.5/8.0 TiB
 
   1. 102:scsi0  san-a → san-c   1.5 TiB   ~2.2h   Δimbalance −4.53   ℓ/z 1.67
-  2. 101:scsi1  san-a → san-b   1.0 TiB   ~1.5h   Δimbalance −2.00   ℓ/z 1.00
+  2. 101:scsi1  san-a → san-b   1.0 TiB   ~1.5h   Δimbalance −2.00   ℓ/z 1.00   [repair]
 
   after: san-a u=3.00  san-b u=1.70  san-c u=2.70   spread 53% (from 255%)
   payback: benefit 1.93e8 load·s vs cost 2.62e4 load·s → ratio 7344 (need 10) ✓
-           plan repairs san-a's reserve (Σ r_s 0.5 → 0) — §7.3-exempt; both moves
-           marked repair: false (either alone repairs — redundant repairs, §7.3)
+           plan repairs san-a's reserve (Σ r_s 2.5 → 0) — §7.3-exempt
 
   pinned (not movable this run):
     106  snapshots present (2)      1.0 TiB  ℓ 0.9  on san-a  → clear snapshots to unblock
@@ -2805,6 +3020,19 @@ the two `Σ r_s` sums the trigger already has in hand at the call site. That pai
 first instalment on §16.6's X-07/Y-04 gap: with it, check 4's "payback arithmetic" per variant
 records a verdict a regression diff can read, and check 2's `Σ r_s` invariant (final ≤ current) becomes
 checkable from `plan --json` without the emitted order.
+
+**A split says so.** Whenever the plan changes the split excess of any `v ∈ V^split` (§5.3.3), the
+group's output carries one `split:` line per such VM — its largest footprint before and after, its
+cap `T_v`, and `o_v` before and after — and `--json` carries the same as `groups[].vm_splits[]`
+(`vmid`, `cap_bytes`, `peak_footprint_bytes_before`/`_after`, `excess_bytes_before`/`_after`), plus
+the summed `split_excess_bytes_before`/`_after` in the payback block beside the reserve pair. A VM
+still above its cap after the plan is listed too, whether or not anything moved, so an operator
+can see which large VMs the storages cannot spread further. `show-load` prints each storage's `Z_s`
+with the VM it comes from. For §14.9's fixture:
+
+```
+  split: VM 701 largest footprint 10.0 → 4.0 TiB (cap 2.0 TiB, excess 8.0 → 2.0 — the best 3 storages allow)
+```
 
 **A converting move says so.** A move onto an `enforce_format` storage whose source is in another
 format (§5.3.2) carries the conversion on its plan line, after the size — `1.5 TiB  raw→qcow2` — and
@@ -2983,7 +3211,8 @@ requirement-to-setting mapping:
 | Requirement | Setting |
 |---|---|
 | Storage groups VMs may not leave | `groups[].storages[]` — literal ids or `/regex/` patterns (§11.4) |
-| 2× largest disk free for snapshots | `snapshot_reserve.factor` (default `2.0`), per-storage override |
+| 2× the largest per-VM footprint free for snapshots | `snapshot_reserve.factor` (default `2.0`), per-storage override |
+| Split a large VM over several storages | `snapshot_reserve.split_vm_footprint` (default `2TiB`, `null` = off), `objective.mu_vm_split_per_tib` (§5.3.3) |
 | Keep N bytes / N% of each storage free | `free_space.soft` — global, per-storage or per-pattern (§5.3.1) |
 | Convert disks to a storage's format when moving them onto it | `groups[].storages[].enforce_format` (default `null` = preserve, §5.3.2) |
 | Min % changed traffic before migrating | `gates.drift_threshold` (default `0.10`) |
@@ -3016,6 +3245,8 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | Within a group, no storage is matched by two pattern entries | Which entry's options apply would be arbitrary; a literal entry overriding a pattern is allowed and is not this error (§11.4) |
 | `capability_weight > 0` | Appears in a denominator |
 | `reserve_factor ≥ 0` | Negative reserve is meaningless |
+| `snapshot_reserve.split_vm_footprint` is `null` or a parseable byte value `> 0` | §5.3.3. `0` would make every multi-disk VM's cap its largest disk and spread every one of them — a typo, not a policy |
+| `mu_vm_split_per_tib ≥ 0`; warn when `> 0` and `< kappa_vm_affinity` | A negative weight would reward gathering large VMs; below `κ`, a TiB of split excess no longer pays for opening a new storage and the rule rarely acts (§5.3.3's break-even) |
 | `free_space.soft/hard`: absolute values `≥ 0` and parseable (bytes or byte-unit string); percentages `"N%"` with `0 ≤ N < 100`; `hard ≤ soft` after per-storage resolution and percent-to-bytes conversion | §5.3.1. A `hard` above `soft` makes every plan for a compliant storage infeasible; a percentage of 100 or more is a typo, not a policy |
 | `enforce_format ∈ {raw, qcow2, null}`, and for every storage the entry resolves to (after pattern expansion) the value is in the formats that storage's type can hold (§5.3 (C2)) | §5.3.2. `qcow2` on an RBD, ZFS or LVM-thin storage could never be honoured; a pattern entry that matches one such storage is the same error, named with the storage, because the cluster changed under the pattern rather than the file |
 | `free_space.soft < C_s` for every storage, after resolution | A requirement no disk could leave room for is a typo; caught only once the inventory is loaded, like the pattern rules of §11.4 |
@@ -3204,6 +3435,7 @@ Each phase is independently testable and useful on its own.
 | 14 | Holt-Winters-driven placement; §7.3 saturation guard removed (§12.1; REVIEW.md T-03, AL-01, AL-04) | Two commits, in order. **14a** deletes the saturation guard — `migration.bwlimit_bytes_per_sec` is the only throttle a migration needs — deleting `saturation_load`/`saturation_ceiling` from the schema outright (no compatibility shim: a config that sets them fails validation, and the committed bundles' `config.yaml` were edited). **14b** scales each disk's `ℓ_d` by a backtest-validated Holt-Winters forecast of its p95 over the next `window.lookback`, at the one point gates, solver, payback and ordering all read it. The default `forecast.model: quantile` is unchanged: §14 fixtures and quantile corpus variants byte-identical apart from the removed saturation fields. Done when §12.1's checklist holds |
 | 15 | Single-source configuration defaults (§11.1; REVIEW.md AL-03) | Every default exists **exactly once, on the dataclass field**; the loader constructs each config class from the raw mapping by passing **only the keys the operator actually wrote**, through field-level converters (duration/byte/percent strings, list→tuple), so no `.get(key, default)` ever restates a default — today's twin copies in `config.py` (e.g. `model: str = "quantile"` on `ForecastConfig` beside `fc_raw.get("model", "quantile")` in the loader, and the same shape for every other knob) are gone; `config_schema.json`, the third copy of the shape, is generated from the same field/type/enum source — or, if generation proves heavier than checking, a check target fails on drift between schema and dataclasses — so it cannot rot either; **zero operator-visible behaviour change**: `--help`, the manual's option tables and `config/drs.example.yaml` values are byte-identical before and after, proven by the fixture and corpus checks running green untouched |
 | 16 | Per-storage target format, `enforce_format` (§5.3.2) | **Implemented, not yet live-tested.** The `qcow2`-on-`lvm` allocation rule was read from `LVMPlugin.pm` (`alloc_lvm_image`/`calculate_lvm_size`) and recorded in §5.3.2, and `z_{d,s}` has its third term (`topology.qcow2_lvm_allocation_bytes()`, an upper bound). Built as follows: `config_schema.json` gains `enforce_format` (`enum [raw, qcow2, null]`) on `groups[].storages[]` — no top-level key; `config.py` resolves it per expanded storage with §11.4's literal-beats-pattern precedence and runs §11.1's type check once the inventory is loaded; `topology.target_format()` and a per-pair `disk_size_on()` are the single implementations of `φ(d,s)` and `z_{d,s}`, and `storage_accepts_format()`'s callers in `optimize.py`, `heuristic.py` and `execute.py` pass `φ(d,s)` instead of `fmt_d`; the MILP's (C4)/(C5)/(C7) rows and `schedule.transient_invariant_ok()` use `z_{d,s}`; `execute.py` sends `format=` iff `φ ≠ fmt_d` (§9.2), and its existing conversion charge becomes the planned case; `verify-storages`, the plan line and `--json` show it (§3.5, §9.5). The cases of that fixture — one enforcing target makes an otherwise ineligible move feasible, and the converted `z_{d,s}` changes which disk fits — are covered by `tests/unit/test_enforce_format.py` against both solver backends (an exhaustive-enumeration fixture from `generate_expected.py` is not added); every existing fixture and corpus bundle must reproduce the same decisions (no `enforce_format` ⇒ `z_{d,s} = z_d`); the corpus `expected.json` files change only by the two new per-move keys `format_from`/`format_to` (§9.5), which is the whole diff. The manual, `config/drs.example.yaml` and `docs/internals/` move in the same commit (no CLI option is added, so the manpage's `OPTIONS` is unchanged). **Done when** additionally a live `confirm` run on the dev cluster converts one data disk and one `efidisk0` in each direction onto shared LVM, the source volume is observed gone (§9.3), and the target's listed size matches `z_{d,s}` |
+| 17 | Per-VM snapshot footprint and large-VM splitting (§5.3.3, (C4), (C9), §5.4 `μ`, §6 split gate, §7.2, §8.1, §9.2, §9.5) | `Z_s` is the largest per-VM footprint in one shared function that `reserve.compute_reserve_status()`, `schedule.transient_invariant_ok()`, `execute.py`'s live re-check, `optimize.py`'s (C4) rows and the heuristic all call — a second copy of the footprint sum is the same bug as a second reserve check (AGENTS.md §5); `config_schema.json`, `config.py`, `config/drs.example.yaml` and the manual gain `snapshot_reserve.split_vm_footprint` (default `2TiB`, `null` off) and `objective.mu_vm_split_per_tib` (default 1.0) with §11.1's two rules, and `drs.example.yaml`'s `snapshot_reserve.factor` comment stops saying "largest disk"; `optimize.py` adds `o_v` and (C9) and the `μ` term, `heuristic.compute_vm_weights()` returns `w_v = 1` for `V^split`, the heuristic's repair and polish steps follow §5.3.3; `loadmodel.py` gains the split gate; `payback.py`'s benefit gains `μ·ΔO·H`; `schedule.py`'s ordering ratio gains the `μ` term; `plan`/`apply`/`explain` print the `split:` line and `--json` carries `vm_splits[]` and the split-excess pair (§9.5); `show-load` and `verify-storages` print `Z_s` with its VM (§3.5). Fixtures: the generator's independent restatement of the reserve uses the footprint; the four existing fixtures state `split_vm_footprint_tib: null` explicitly (§14.1 says why), and the new `large-vm-split.yaml` of §14.9 states `2.0` and `mu_vm_split_per_tib: 1.0`; `generate_expected.py` regenerates every expected file — `fc-tier1` changes only as §14 records (initial `Z_a` 3.0 and `r_a` 2.5, shortfall pair 2.5 → 0.0, `101:scsi1` `repair: true`; optimum, objectives, order, transient targets and every payback number unchanged), `affinity-repair`'s stor-a reserve basis rises by its two tiny disks' bytes, `reserve-tradeoff` and `free-space-repair` (single-disk VMs only) do not change — and the per-storage `largest_tib` field is renamed `largest_footprint_tib`; a unit case covers §7.3's redundant-repair plan, which `fc-tier1` no longer exercises; the committed corpus bundles are replayed and their expected files regenerated, with any plan change explained in the commit. Every file matching `git grep -il 'largest disk'` is swept, the manual and internals included |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
@@ -3384,6 +3616,8 @@ Holt-Winters.
 | A move converts a disk's format | Only onto a storage with `enforce_format` set, only as a side effect of a move the plan makes anyway, never for `tpmstate0`, never for a disk with snapshots (§5.3.2); the converted size `z_{d,s}` is what the reserve and the transient invariant count; the conversion is printed on the move line |
 | Orphaned target volume after a failure | Detected and reported, never auto-deleted (§9.3) |
 | Storage already violating the reserve | Soft slack `r_s` keeps the model feasible; violation bypasses gates and is scheduled first |
+| Storage holding several disks of one VM | The reserve is the largest per-VM footprint, all of that VM's disks there summed (§5.3.3) — one snapshot covers every disk at once. After the upgrade from the per-disk rule a storage can show a shortfall it did not have before; it is repaired like any other, so read `show-load` in dry-run first |
+| Large VM on one storage, plenty of space | The split rule (§5.3.3) spreads a VM above `snapshot_reserve.split_vm_footprint` so that no storage holds more of it than the cap, or the smallest peak the storages allow; the split gate (§6) opens the group for it; `null` switches it off |
 | Storage below its configured free-space requirement (`free_space.soft`, §5.3.1) | Same handling as a reserve violation: slack keeps the model feasible, the §6 override bypasses drift/imbalance, a repairing plan is payback-exempt (§7.3) and the *direct* repair — the move off the short storage — is scheduled first (§8.2 exception 1); an *indirect* repair, one that frees the space the direct repair needs, waits for the spec-only exception 2, as §14.8's second move shows; an unrepairable shortfall is reported with the byte amount |
 | Group I/O-balanced but data concentrated on few storages | The capacity gate (§6) triggers planning anyway and the `δ` term (§5.4) does the spreading; it still honours cooldowns, payback and the transient invariant |
 | Plan's entire value is affinity repair (`Δimbalance ≈ 0`) | Affinity improvement counts in the payback benefit and tiny moves are payback-exempt (§7.2, §7.3); acting with near-zero balance benefit is a correct outcome, not a defect |
@@ -3438,7 +3672,8 @@ distinction the two options of §5.3 exist to make. `tests/fixtures/reserve-trad
 companion fixture that does; see §14.6. §14.7's `affinity-repair.yaml` covers a third gap of the
 same kind: the payback rule's treatment of plans whose value is affinity. §14.8's
 `free-space-repair.yaml` covers a fourth: the free-space repair mandate of §5.3.1, a plan payback
-rejects and the requirement executes anyway.
+rejects and the requirement executes anyway. §14.9's `large-vm-split.yaml` covers a fifth: the
+large-VM split rule of §5.3.3, on a group with nothing else to fix.
 
 ### 14.1 Input
 
@@ -3447,6 +3682,14 @@ no foreign volumes. `config/drs.example.yaml` uses the same group and storage na
 weights, so the example config and this fixture agree; the differing-weight feature is illustrated on
 `fc-tier2` there instead. `ℓ_d` is in average in-flight I/O requests (§4), *not* normalized to sum to
 one — which is what makes the `ω = 1.0` per mirror endpoint in §14.5 commensurable with it.
+
+**The split rule is off here** (`split_vm_footprint: null`, stated in the fixture like every other
+weight). This is the balancing example, and §14.3 uses VM 101 to demonstrate the I/O weighting
+`w_v`; at the default 2 TiB cap VM 101 (3.0 TiB in total) would be in `V^split` with `w₁₀₁ = 1`
+(§5.3.3), every plan below that splits it would score `κ·(2.703 − 1) = 0.851` lower, and the
+optimum would be the same two moves. The split rule has its own fixture, §14.9. The per-VM
+footprint of §5.3.3 is *not* a knob and applies here as everywhere: it is what makes san-a's
+violation 2.5 TiB rather than the 0.5 TiB the per-disk rule computed.
 
 | Disk | VM | `z_d` (TiB) | `ℓ_d` | On |
 |---|---|---|---|---|
@@ -3461,9 +3704,11 @@ one — which is what makes the `ω = 1.0` per mirror endpoint in §14.5 commens
 
 ### 14.2 Initial state
 
+`Z_s` is the largest per-VM footprint (§5.3.3): on san-a, VM 101's two disks together.
+
 | Storage | `L_s` | used | `Z_s` | `used + f·Z_s` | vs `C_s` |
 |---|---|---|---|---|---|
-| san-a | 6.50 | 4.5 | 2.0 | **8.5** | 8.0 → **violates by 0.5 TiB** |
+| san-a | 6.50 | 4.5 | 3.0 (VM 101: 2.0 + 1.0) | **10.5** | 8.0 → **violates by 2.5 TiB** |
 | san-b | 0.70 | 1.5 | 1.0 | 3.5 | 8.0 ✓ |
 | san-c | 0.20 | 0.5 | 0.5 | 1.5 | 8.0 ✓ |
 
@@ -3473,7 +3718,10 @@ one — which is what makes the `ω = 1.0` per mirror endpoint in §14.5 commens
   alone holds 69% of the group's bytes. `(0.5625 − 0.0625)/0.2708 = 1.85`, far above the 25%
   capacity gate.
 - san-a already breaches the snapshot reserve. This is why (C5) carries slack `r_s` rather than being
-  hard — a hard constraint would report *infeasible* here and refuse to help.
+  hard — a hard constraint would report *infeasible* here and refuse to help. Under the per-disk rule
+  of earlier revisions the breach was 0.5 TiB (`4.5 + 2 × 2.0`); summing VM 101's disks makes it
+  2.5 TiB, and makes VM 101 impossible to keep whole on *any* storage of this group: its 3.0 TiB
+  plus `2 × 3.0` of reserve is 9.0 TiB, more than a whole 8 TiB storage.
 
 ### 14.3 Solution
 
@@ -3490,6 +3738,10 @@ With default weights (`α=1.0, β=0.25, γ=0.05/TiB, κ=0.5, δ=0.5`) the optimu
 
 `E_after = 0.5333 + 0.7667 + 0.2333 = 1.5333`, spread (3.00−1.70)/2.4667 = **53%**; the fill
 deviation drops from `F_before = 2.154` to `F_after = 0.308`. The reserve violation is repaired.
+The footprint rule leaves this optimum, and every other optimum the fixture records, exactly where
+the per-disk rule had it: every one of them already splits VM 101, so its final `Z_s` values are the
+same under both rules, and the assignments the footprint rule newly marks short are ones that keep
+VM 101 whole, none of which was optimal.
 
 **The `β` knob, demonstrated at `δ = 0`.** Switch the capacity term off and a third move becomes
 worth taking: `105:scsi0 san-c → san-b` improves the imbalance by `1.5333 − 1.1333 = 0.400`,
@@ -3524,18 +3776,28 @@ two-move plan wins with or without `δ`.)
 **The affinity trade-off, demonstrated.** The two-move plan splits VM 101 (`scsi0` on san-a,
 `scsi1` on san-b). VM 101 carries `ℓ_v = 4.0` against a group mean of `ℓ̄ = 7.4/5 = 1.48`, so
 `w₁₀₁ = 2.703` and the split incurs `κ·w = 1.351` where an unweighted term would charge `0.5` —
-the group's heaviest VM is worth 2.7 average ones to keep together (§5.4). Keeping VM 101
-together forces san-a to `L = 4.0` and the best reachable `E` becomes `3.133`. Comparing on the
-persistent terms (`E + κ·w + δ·F`): `3.133 + 0 + 0.5·0.769 = 3.52` (together) against
+the group's heaviest VM is worth 2.7 average ones to keep together (§5.4). Under the footprint
+rule the reserve settles the question before `κ` is consulted: VM 101 whole needs 9.0 TiB on one
+8 TiB storage (§14.2), so every assignment that keeps it together carries a shortfall, and stage 1
+of the lexicographic solve discards them all. The comparison is still worth making on the
+persistent terms, because it shows what the weighting does wherever space does *not* decide (it
+did here under the per-disk rule, with VM 101 whole on san-c within its reserve). Keeping VM 101
+together forces san-a to `L = 4.0` and the best reachable `E` becomes `3.133`. Comparing
+`E + κ·w + δ·F`: `3.133 + 0 + 0.5·0.769 = 3.52` (together) against
 `1.5333 + 1.351 + 0.5·0.308 = 3.04` (split). Splitting still wins — high I/O legitimately
 overrides the preference — but by 0.48 rather than the 1.3 an unweighted `κ` would have given, and
 a somewhat busier VM 101 would flip the comparison entirely, which is what the weighting is for.
 
 ### 14.4 Ordering
 
-`102:scsi0` is scheduled first: it alone repairs san-a's reserve violation (`4.5 → 3.0` used, so
-`3.0 + 4.0 = 7.0 ≤ 8.0`), and it also has the largest persistent-objective reduction per unit
-cost. Transient checks for the two-move plan:
+`102:scsi0` is scheduled first. Both moves leave san-a while it is violating (C5), so both rank
+under §8.2's first exception, and among them `102:scsi0` has the larger persistent-objective
+reduction per unit cost (`5.23` per `15 729 load·s` against `0.96` per `10 486` — VM 101's
+fragmentation is charged to the second move). It does **not** repair san-a on its own: with
+`102:scsi0` gone san-a holds 3.0 TiB, all of it VM 101, so `3.0 + 2 × 3.0 = 9.0 > 8.0` — still
+1.0 TiB short until `101:scsi1` leaves and san-a's footprint drops to 2.0 (`2.0 + 4.0 = 6.0`).
+(Under the per-disk rule `102:scsi0` alone repaired it, `3.0 + 4.0 = 7.0`; the order is the same
+either way.) Transient checks for the two-move plan:
 
 ```
 move 1 → san-c:  used 0.5 + 1.5 = 2.0,  max(Z_c, 1.5) = 1.5,  2.0 + 3.0 = 5.0 ≤ 8.0  ✓
@@ -3819,6 +4081,76 @@ One further assertion the fixture makes: with `free_space.hard` above `free_spac
 storage, `config.py` rejects the file (§11.1) — the sweep values are chosen so the invalid
 configuration is a one-token edit away, and the error is part of the test.
 
+### 14.9 Companion fixture: splitting a large VM
+
+`tests/fixtures/large-vm-split.yaml` isolates §5.3.3's split rule: a group with balanced I/O, every
+reserve satisfied, and one large VM sitting whole on one storage. Nothing but the split rule can make
+the engine move, so the fixture shows the rule, the split gate and the payback term on their own.
+
+Three 40 TiB storages `st-a`/`st-b`/`st-c`, `f = 2.0`, equal capabilities, `saferemove` off,
+`split_vm_footprint: 2 TiB`, `μ = 1.0`, and — to keep data spread from doing any of the work —
+`delta_capacity_spread: 0` and `gates.capacity_spread_threshold: null`, stated in the fixture:
+
+| Disk | VM | `z_d` | `ℓ_d` | On |
+|---|---|---|---|---|
+| `701:scsi0` … `701:scsi4` | 701 | 2.0 TiB each | 0.0 | st-a |
+| `702:scsi0` | 702 | 1.0 TiB | 1.0 | st-a |
+| `703:scsi0` | 703 | 1.0 TiB | 1.0 | st-b |
+| `704:scsi0` | 704 | 1.0 TiB | 1.0 | st-c |
+
+VM 701 is a quiet 10 TiB file server: five disks, no I/O worth balancing. Loads read 1.0/1.0/1.0,
+`E = 0`, so the drift and imbalance gates stay shut. Every reserve is satisfied — st-a holds 11 TiB
+and keeps `2 × 10 = 20 TiB` free for VM 701's snapshot, `31 ≤ 40` — so there is nothing to repair
+either. VM 701 is in `V^split` (`10 > 2`), `T₇₀₁ = max(2, 2) = 2`, and its excess is
+`o₇₀₁ = 10 − 2 = 8`.
+
+**The split gate opens the group**: moving one of VM 701's disks to st-b lowers its peak from 10 to
+8 TiB and leaves st-b compliant (§6).
+
+**The optimum is three moves**, two of VM 701's disks to one storage and one to the other, leaving
+footprints 4, 4, 2 — the best split three storages allow (§5.3.3's table). With `α` and `δ` silent,
+the candidates differ only in `μ·o₇₀₁ + β·moves + γ·bytes + κ·w₇₀₁·(storages − 1)`, and `w₇₀₁ = 1`:
+
+| Disks of 701 on (a, b, c) | Footprints | `o₇₀₁` | Objective |
+|---|---|---|---|
+| 5, 0, 0 (current) | 10, 0, 0 | 8 | **8.00** |
+| 4, 1, 0 | 8, 2, 0 | 6 | 6 + 0.35 + 0.5 = 6.85 |
+| 3, 2, 0 | 6, 4, 0 | 4 | 4 + 0.70 + 0.5 = 5.20 |
+| 3, 1, 1 | 6, 2, 2 | 4 | 4 + 0.70 + 1.0 = 5.70 |
+| **2, 2, 1** | **4, 4, 2** | **2** | 2 + 1.05 + 1.0 = **4.05** |
+| 1, 2, 2 | 2, 4, 4 | 2 | 2 + 1.40 + 1.0 = 4.40 |
+
+Each move costs `β + γ·2 TiB = 0.25 + 0.10 = 0.35`. `1, 2, 2` reaches the same peak with one more
+move, and loses on `β`/`γ` — the rule spreads only as far as the cap requires. Moving any of the
+single-disk VMs only adds imbalance. `2, 2, 1` and `2, 1, 2` are the same plan with st-b and st-c
+exchanged, and score identically; the expected file records the enumerator's tie-break, and — as for
+§14.6 — the harness asserts the footprint multiset `{4, 4, 2}` and the move count, not which storage
+got two disks or which of the five interchangeable disks moved.
+
+Final reserves, all compliant, VM 701's footprint the largest on each storage: st-a and the
+two-disk storage `5 + 2 × 4 = 13 ≤ 40`, the one-disk storage `3 + 2 × 2 = 7 ≤ 40`. The fullest
+storage now keeps 8 TiB free for VM 701 instead of 20.
+
+**The gate shuts on the result.** No single move lowers a peak of 4 on three storages — moving a
+disk from a 4 to the 2 turns `4, 4, 2` into `2, 4, 4` — so the next run's split gate does not fire,
+and the group is left alone until some other gate opens it.
+
+**Payback accepts on merit** — the plan repairs nothing, so §7.3's exemption does not apply:
+
+```
+cost    = 3 × 2 × (2.0 TiB / 200 MiB/s) = 3 × 20 971.52 = 62 914.56 load·s
+benefit = (μ·ΔO + κ·ΔA) · H = (1.0 × (8 − 2) − 0.5 × (2 − 0)) × 31 536 000
+        = 5.0 × 31 536 000 = 157 680 000 load·s
+ratio   ≈ 2 506   ≥  λ = 10   → ACCEPT
+```
+
+`κ·ΔA` is negative — the plan spreads VM 701 over two extra storages — and is paid out of the split
+term, at `w₇₀₁ = 1` because VM 701 is in `V^split`.
+
+**Counterfactual, recorded in the expected file:** with `split_vm_footprint: null` the same cluster
+passes no gate at all and the run ends "no action" — the split rule, and nothing else, is what moves
+VM 701.
+
 ---
 
 ## 15. Requirements traceability
@@ -3830,7 +4162,8 @@ configuration is a one-token edit away, and the error is part of the test.
 | Equalize I/O across storages in a group | §4, §5.3 (C6), §5.4 |
 | VMs confined to their storage group | §5.1, §5.3 (C1, C2) |
 | Restrict to shared storages | §5.3 (C2) |
-| 2× largest disk free for snapshots | §5.3 (C5) |
+| 2× largest disk free for snapshots — as the per-VM footprint, since a snapshot covers all of a VM's disks | §5.3 (C4)/(C5), §5.3.3 |
+| Split VMs larger than a set size over several storages | §5.3.3 (C9), §5.4 `μ`, §6 split gate, §7.2 benefit; demonstrated §14.9 |
 | …including *during* migrations | §8.1 transient invariant |
 | Reserve factor configurable | `snapshot_reserve.factor`, per-storage override |
 | Configurable free space per storage (bytes or %), kept free by migration | `free_space.soft` (§5.3.1), §5.3 (C5), §6 override, §7.3 repair exemption; demonstrated §14.8 |
@@ -3860,7 +4193,8 @@ bug waiting to happen; this table is the audit.
 | `window.min_coverage` | §3.4, disk data rejection |
 | `groups[].storages[].id` in pattern form (`/…/`) | §11.4 expansion into group membership; the entry's options apply to every matched storage |
 | `groups[].storages[].capability_weight` | §4, `u_s = L_s / c_s` |
-| `snapshot_reserve.factor` | §5.3 (C5), `R_s ≥ f_s·Z_s` |
+| `snapshot_reserve.factor` | §5.3 (C5), `R_s ≥ f_s·Z_s`, `Z_s` the largest per-VM footprint (§5.3.3) |
+| `snapshot_reserve.split_vm_footprint` | §5.3.3, `T` in `T_v` and `V^split`; (C9); §6 split gate |
 | `free_space.soft` (global, per-storage, per-pattern) | §5.3 (C5), `R_s ≥ soft_s`; §6 reserve override; §7.3 repair exemption |
 | `free_space.hard` (global, per-storage, per-pattern) | §8.1 transient invariant, `max(f_b·…, hard_b)` floor |
 | `snapshot_reserve.count_foreign_volumes` | §5.1.1, `Uˢᵉˣᵗ` |
@@ -3882,7 +4216,7 @@ bug waiting to happen; this table is the audit.
 | `exclude.skip_vms_with_snapshots` | §3.7, §5.3 (C2) pinning |
 | `objective.affinity_counts_pinned_disks` | §5.3 (C3) range: all of `D` (default) or `D^mov` |
 | `report.warn_pinned_load_fraction` | §3.7 unreachable-goal warning |
-| `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity/delta_capacity_spread` | §5.4 (the `δ` term and the I/O-weighted `κ` term also enter §7.2's benefit) |
+| `objective.alpha_spread/beta_move_count/gamma_move_bytes_per_tib/kappa_vm_affinity/delta_capacity_spread/mu_vm_split_per_tib` | §5.4 (the `δ` term, the I/O-weighted `κ` term and the `μ` term also enter §7.2's benefit; `μ` also §6's split gate) |
 | `objective.reserve_violation_penalty` | §5.3 (C5), *floor* for the single-stage `P` alternative |
 | `metrics.pvestatd_push_interval` | §11.1 `rate_window` validation; §3.3 `verify-metrics` |
 | `objective.spread_metric` | §5.3 (C6), L1 vs min–max |
