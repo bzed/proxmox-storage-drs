@@ -28,7 +28,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from proxmox_storage_drs import __version__, collect, optimize, replay
@@ -831,7 +831,7 @@ def _render_storage_and_disk_load_lines(
             f"  {storage.id}  provisioned {format_bytes(status.managed_used_bytes)}/"
             f"{format_bytes(storage.capacity_bytes)}{allocated_note}  "
             f"{load_prefix}{reserve_str}  "
-            f"(largest disk {format_bytes(status.largest_disk_bytes)}, "
+            f"(largest VM footprint {_footprint_text(status, group.disks)}, "
             f"requires {format_bytes(status.required_reserve_bytes)} free)"
         )
         disks_here = sorted(
@@ -934,7 +934,8 @@ def _render_show_load_json(
                 "provisioned_used_bytes": status.managed_used_bytes,
                 "capacity_bytes": storage.capacity_bytes,
                 "foreign_used_bytes": storage.foreign_used_bytes,
-                "largest_disk_bytes": status.largest_disk_bytes,
+                "largest_footprint_bytes": status.largest_footprint_bytes,
+                "largest_footprint_vmid": status.largest_footprint_vmid,
                 "required_reserve_bytes": status.required_reserve_bytes,
                 "reserve_violated": status.violated,
                 "reserve_shortfall_bytes": status.shortfall_bytes,
@@ -2080,7 +2081,8 @@ def _render_group_explain_json(
             "provisioned_used_bytes": status.managed_used_bytes,
             "capacity_bytes": storage.capacity_bytes,
             "foreign_used_bytes": storage.foreign_used_bytes,
-            "largest_disk_bytes": status.largest_disk_bytes,
+            "largest_footprint_bytes": status.largest_footprint_bytes,
+            "largest_footprint_vmid": status.largest_footprint_vmid,
             "required_reserve_bytes": status.required_reserve_bytes,
             "reserve_violated": status.violated,
             "reserve_shortfall_bytes": status.shortfall_bytes,
@@ -3725,6 +3727,18 @@ def _source_suffix(source: str) -> str:
     return f" ({source})" if source else ""
 
 
+def _footprint_text(status: Any, disks: Iterable[Disk]) -> str:
+    """``Z_s`` with the VM it comes from, e.g. ``10.0 TiB (puppet001, VM 101)`` -- the
+    snapshot reserve is driven by that one VM (section 5.3.3), so the operator needs its name."""
+    if status.largest_footprint_vmid is None:
+        return format_bytes(0)
+    name = next((d.vm_name for d in disks if d.vmid == status.largest_footprint_vmid), "")
+    who = f"{name}, " if name else ""
+    return (
+        f"{format_bytes(status.largest_footprint_bytes)} ({who}VM {status.largest_footprint_vmid})"
+    )
+
+
 def _render_verify_storages_human(topology: Topology, config: Any) -> str:
     lines: list[str] = []
     for group in topology.groups:
@@ -3733,6 +3747,10 @@ def _render_verify_storages_human(topology: Topology, config: Any) -> str:
             largest = largest_disk_bytes(group.disks, storage.id)
             state = "on" if storage.saferemove else "off"
             lines.append(f"  {storage.id}  saferemove={state}")
+            footprint = compute_reserve_status(storage, group.disks)
+            lines.append(
+                f"    largest VM footprint (Z_s): {_footprint_text(footprint, group.disks)}"
+            )
             if storage.enforce_format is not None:
                 bad_count, bad_bytes = nonconforming_disks(storage, group.disks)
                 lines.append(
@@ -3792,6 +3810,7 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
         storages_out = []
         for storage in group.storages:
             largest = largest_disk_bytes(group.disks, storage.id)
+            footprint = compute_reserve_status(storage, group.disks)
             nonconforming = nonconforming_disks(storage, group.disks)
             wipe_seconds = compute_wipe_duration_seconds(
                 largest, storage.saferemove_throughput_bytes_per_sec
@@ -3812,6 +3831,8 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
                     "nonconforming_disks": nonconforming[0],
                     "nonconforming_bytes": nonconforming[1],
                     "largest_disk_bytes": largest,
+                    "largest_footprint_bytes": footprint.largest_footprint_bytes,
+                    "largest_footprint_vmid": footprint.largest_footprint_vmid,
                     "implied_wipe_seconds": wipe_seconds,
                     "cooldown_per_storage_too_short": (
                         wipe_seconds is not None

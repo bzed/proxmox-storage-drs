@@ -73,7 +73,11 @@ from proxmox_storage_drs.config import ExcludeConfig, ExecutionConfig, LocksConf
 from proxmox_storage_drs.exceptions import PveApiError
 from proxmox_storage_drs.payback import MoveCost, compute_wipe_duration_seconds
 from proxmox_storage_drs.pve import PveClient
-from proxmox_storage_drs.reserve import largest_disk_bytes, transient_charge_ok
+from proxmox_storage_drs.reserve import (
+    largest_footprint,
+    transient_charge_ok,
+    vm_footprints_bytes,
+)
 from proxmox_storage_drs.schedule import ScheduledMove, ScheduleResult
 from proxmox_storage_drs.topology import (
     DISK_KEY_RE,
@@ -637,15 +641,18 @@ def _live_transient_check(
     client: PveClient,
     node: str,
     target: Storage,
+    vmid: int,
     charge_bytes: int,
-    existing_largest_bytes: int,
+    existing_footprints_bytes: Mapping[int, int],
     inflight_here: Sequence[_InflightMove] = (),
 ) -> _LiveCheck:
     """Section 9.2 step 2 -- section 8.1's transient invariant re-derived
     from *live* figures, via the shared :func:`reserve.transient_charge_ok`
     (one arithmetic core, AGENTS.md section 5), for a move that puts
-    ``charge_bytes`` (:func:`_move_charge_bytes`) onto ``target`` and has
-    not been issued yet.
+    ``charge_bytes`` (:func:`_move_charge_bytes`) of VM ``vmid`` onto ``target`` and has
+    not been issued yet. ``existing_footprints_bytes`` is this run's own ``{vmid: F_{v,b}}``
+    for ``target`` (section 5.3.3): the invariant's snapshot term is the largest *per-VM*
+    footprint, so the landing disk is added to its own VM's footprint, not to the largest disk.
 
     **Provisioned, never allocated** (section 5.1, domain rule 8): the
     ``used`` this feeds the rule is the sum of ``size`` over the target's
@@ -700,14 +707,15 @@ def _live_transient_check(
         )
     live_total = int(status["total"])
     charges = [
-        _move_charge_bytes(im.disk, im.config_size_bytes, im.source, im.target)
+        (im.disk.vmid, _move_charge_bytes(im.disk, im.config_size_bytes, im.source, im.target))
         for im in inflight_here
-    ] + [charge_bytes]
+    ] + [(vmid, charge_bytes)]
     if transient_charge_ok(
         target.reserve_factor,
         live_total,
         live_used,
-        existing_largest_bytes,
+        largest_footprint(existing_footprints_bytes)[0],
+        existing_footprints_bytes,
         charges,
         target.free_space_hard_bytes,
     ):
@@ -975,7 +983,7 @@ def _execute_one_move(
     storages_by_id: dict[str, Storage],
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    largest_by_storage: dict[str, int],
+    footprints_by_storage: dict[str, dict[int, int]],
     clock: Clock,
     exclude: ExcludeConfig,
     deadline: datetime | None,
@@ -1039,10 +1047,11 @@ def _execute_one_move(
         client,
         preflight.node,
         target,
+        disk.vmid,
         _move_charge_bytes(
             disk, preflight.config_size_bytes, storages_by_id[move.from_storage], target
         ),
-        largest_by_storage[move.to_storage],
+        footprints_by_storage[move.to_storage],
     )
     if live.refusal is not None:
         return _pre_move_refusal(move, live.refusal, fatal=live.fatal)
@@ -1214,12 +1223,12 @@ def _post_move_bookkeeping(
     result: MoveOutcome,
     move: ScheduledMove,
     disk: Disk,
-    largest_by_storage: dict[str, int],
+    footprints_by_storage: dict[str, dict[int, int]],
     drained_storages: set[str],
     execution: ExecutionConfig,
     target: Storage,
 ) -> str | None:
-    """Updates this run's own (C4) largest-disk tracking and drained
+    """Updates this run's own (C4) per-VM footprint tracking and drained
     -storage exclusion after one move's outcome, returning a stop reason
     when the run must end here (a `"replan_needed"` mismatch, or a
     `"failed"` move that must stop it) or ``None`` to continue --
@@ -1228,15 +1237,14 @@ def _post_move_bookkeeping(
     if result.status in ("moved", "draining"):
         # The mirror itself is done either way (the task reported OK) --
         # "draining" only means the *source* has not released yet, so
-        # the target's own (C4) largest-disk accounting already needs to
+        # the target's own (C4) footprint accounting already needs to
         # include this disk for any later move's live transient check
         # against the same target.
         # Recorded at ``z_{d,s}`` (section 5.3.2), the size the live check charged the move
         # at, not the listed size: for a converting move the landed volume is larger, and a
         # later move onto the same storage must see that ``Z_b`` (REVIEW.md AN-01).
-        largest_by_storage[move.to_storage] = max(
-            largest_by_storage[move.to_storage], disk_size_on(disk, target)
-        )
+        landed = footprints_by_storage[move.to_storage]
+        landed[disk.vmid] = landed.get(disk.vmid, 0) + disk_size_on(disk, target)
         if result.status == "draining":
             drained_storages.add(move.from_storage)
         return None
@@ -1383,7 +1391,7 @@ def _execute_sequential(
     # check, tracked as *this run's own* moves land -- a move earlier in
     # this same plan can already have changed a target's largest resident
     # disk before a later move checks the same storage.
-    largest_by_storage = {s.id: largest_disk_bytes(group.disks, s.id) for s in group.storages}
+    footprints_by_storage = {s.id: vm_footprints_bytes(group.disks, s.id) for s in group.storages}
 
     outcomes: list[MoveOutcome] = []
     # Section 9.3: a `source_release.timeout` "does not fail the run:
@@ -1444,7 +1452,7 @@ def _execute_sequential(
             storages_by_id,
             migration,
             execution,
-            largest_by_storage,
+            footprints_by_storage,
             clock,
             exclude,
             deadline,
@@ -1467,7 +1475,7 @@ def _execute_sequential(
             result,
             move,
             disk,
-            largest_by_storage,
+            footprints_by_storage,
             drained_storages,
             execution,
             storages_by_id[move.to_storage],
@@ -1547,7 +1555,7 @@ def _poll_inflight_once(
     migration: MigrationConfig,
     execution: ExecutionConfig,
     clock: Clock,
-    largest_by_storage: dict[str, int],
+    footprints_by_storage: dict[str, dict[int, int]],
     drained_storages: set[str],
     on_inflight_started: InflightCallback | None,
     on_inflight_finished: InflightCallback | None,
@@ -1559,7 +1567,7 @@ def _poll_inflight_once(
     per in-flight move per cycle here instead of once, blocking, per
     move). Returns the still-in-flight subset, any outcomes newly
     resolved this cycle (in resolution order, each already run through
-    `_post_move_bookkeeping()` for the (C4) largest-disk/drained-storage
+    `_post_move_bookkeeping()` for the (C4) footprint/drained-storage
     side effects), and a stop reason if one of them requires the run to
     stop launching further moves (only a `"failed"` move needing
     `execution.abort_on_failure`/`always_stop` can set this --
@@ -1691,7 +1699,7 @@ def _poll_inflight_once(
         )
         resolved.append(outcome)
         reason = _post_move_bookkeeping(
-            outcome, im.move, im.disk, largest_by_storage, drained_storages, execution, im.target
+            outcome, im.move, im.disk, footprints_by_storage, drained_storages, execution, im.target
         )
         if reason is not None and stop_reason is None:
             stop_reason = reason
@@ -1782,7 +1790,7 @@ def _launch_decision(
     disk: Disk,
     storages_by_id: dict[str, Storage],
     execution: ExecutionConfig,
-    largest_by_storage: dict[str, int],
+    footprints_by_storage: dict[str, dict[int, int]],
     exclude: ExcludeConfig,
     inflight: Sequence[_InflightMove],
     clock: Clock,
@@ -1817,10 +1825,11 @@ def _launch_decision(
         client,
         preflight.node,
         target,
+        disk.vmid,
         _move_charge_bytes(
             disk, preflight.config_size_bytes, storages_by_id[candidate.from_storage], target
         ),
-        largest_by_storage[target.id],
+        footprints_by_storage[target.id],
         _inflight_onto(inflight, target.id),
     )
     if live.refusal is not None:
@@ -1839,7 +1848,7 @@ def _advance_pending(
     storages_by_id: dict[str, Storage],
     migration: MigrationConfig,
     execution: ExecutionConfig,
-    largest_by_storage: dict[str, int],
+    footprints_by_storage: dict[str, dict[int, int]],
     drained_storages: set[str],
     exclude: ExcludeConfig,
     clock: Clock,
@@ -1852,7 +1861,7 @@ def _advance_pending(
 ) -> tuple[_LockWaitTracker, int, str | None]:
     """One poll cycle's attempt to move ``pending[0]`` forward -- mutates
     ``pending``/``outcomes``/``inflight`` in place (the same style
-    `_post_move_bookkeeping()` already uses for ``largest_by_storage``/
+    `_post_move_bookkeeping()` already uses for ``footprints_by_storage``/
     ``drained_storages``) and returns the (possibly reset)
     :class:`_LockWaitTracker`, the updated ``migrations_used`` count, and
     a stop reason if this cycle's outcome requires one. Does nothing
@@ -1890,7 +1899,7 @@ def _advance_pending(
         disk,
         storages_by_id,
         execution,
-        largest_by_storage,
+        footprints_by_storage,
         exclude,
         inflight,
         clock,
@@ -1962,7 +1971,7 @@ def _advance_pending(
         decision.outcome,
         candidate,
         disk,
-        largest_by_storage,
+        footprints_by_storage,
         drained_storages,
         execution,
         storages_by_id[candidate.to_storage],
@@ -2018,7 +2027,7 @@ def _execute_concurrent(
     """
     disks_by_key = {d.key: d for d in group.disks}
     storages_by_id = {s.id: s for s in group.storages}
-    largest_by_storage = {s.id: largest_disk_bytes(group.disks, s.id) for s in group.storages}
+    footprints_by_storage = {s.id: vm_footprints_bytes(group.disks, s.id) for s in group.storages}
 
     outcomes: list[MoveOutcome] = []
     drained_storages: set[str] = set()
@@ -2035,7 +2044,7 @@ def _execute_concurrent(
             migration,
             execution,
             clock,
-            largest_by_storage,
+            footprints_by_storage,
             drained_storages,
             on_inflight_started,
             on_inflight_finished,
@@ -2056,7 +2065,7 @@ def _execute_concurrent(
                 storages_by_id,
                 migration,
                 execution,
-                largest_by_storage,
+                footprints_by_storage,
                 drained_storages,
                 exclude,
                 clock,

@@ -112,17 +112,15 @@ def test_section_14_4_ordering_reproduced_exactly() -> None:
     result = order_moves(group, heuristic_result.assignment, _SECTION_14_LOADS, DEFAULT_OBJECTIVE)
 
     assert not result.deadlocked
-    # 102:scsi0 first (resolves the reserve violation), same as before.
-    # 105:scsi0 now ranks ahead of 101:scsi1 -- section 5.4's fragmentation
-    # term joined the persistent-objective ranking (section 8.2), and
-    # applying 101:scsi1's own move splits VM 101 (still whole on san-a
-    # after move 1), a cost 105:scsi0's move does not pay, so its
-    # persistent_reduction is now the larger one.
-    assert [m.disk_key for m in result.order] == ["102:scsi0", "105:scsi0", "101:scsi1"]
+    # 102:scsi0 first, then 101:scsi1, and 105:scsi0 last (section 14.4). Under the per-VM
+    # footprint 102:scsi0 alone no longer repairs san-a (VM 101's 3.0 TiB footprint stays),
+    # so 101:scsi1 leaves san-a while it is still violating and ranks under the first
+    # exception too; 105:scsi0 is the pure balance move and comes last.
+    assert [m.disk_key for m in result.order] == ["102:scsi0", "101:scsi1", "105:scsi0"]
     assert result.order[0].from_storage == "san-a"
     assert result.order[0].to_storage == "san-c"
     assert result.order[0].resolves_reserve_violation
-    assert not result.order[1].resolves_reserve_violation
+    assert result.order[1].resolves_reserve_violation
     assert not result.order[2].resolves_reserve_violation
 
 

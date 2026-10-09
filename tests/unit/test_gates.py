@@ -32,13 +32,21 @@ NO_CAPACITY_GROUP = Group(name="g", storages=(), disks=())
 
 def ok_reserve() -> ReserveStatus:
     return ReserveStatus(
-        largest_disk_bytes=0, required_reserve_bytes=0, managed_used_bytes=0, shortfall_bytes=0
+        largest_footprint_bytes=0,
+        largest_footprint_vmid=None,
+        required_reserve_bytes=0,
+        managed_used_bytes=0,
+        shortfall_bytes=0,
     )
 
 
 def violated_reserve() -> ReserveStatus:
     return ReserveStatus(
-        largest_disk_bytes=0, required_reserve_bytes=0, managed_used_bytes=0, shortfall_bytes=1
+        largest_footprint_bytes=0,
+        largest_footprint_vmid=None,
+        required_reserve_bytes=0,
+        managed_used_bytes=0,
+        shortfall_bytes=1,
     )
 
 

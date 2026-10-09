@@ -952,7 +952,10 @@ def test_live_transient_check_helper_directly() -> None:
     client, _api = client_with({"nodes/pve01/storage/san-b/status": {"total": 8 * TIB, "used": 0}})
     target = make_storage("san-b", capacity_tib=8.0)
     disk = default_group().disks[0]
-    assert _live_transient_check(client, "pve01", target, disk.size_bytes, 0).refusal is None
+    assert (
+        _live_transient_check(client, "pve01", target, disk.vmid, disk.size_bytes, {}).refusal
+        is None
+    )
 
 
 def test_live_transient_check_applies_the_target_storages_hard_free_space_floor() -> None:
@@ -970,12 +973,18 @@ def test_live_transient_check_applies_the_target_storages_hard_free_space_floor(
     )
     disk = default_group().disks[0]  # 1 TiB
     # used(0) + z(1) + max(f*max(Z,z), hard(7.5)) = 0+1+7.5 = 8.5 > 8.0 capacity.
-    assert _live_transient_check(client, "pve01", target, disk.size_bytes, 0).refusal is not None
+    assert (
+        _live_transient_check(client, "pve01", target, disk.vmid, disk.size_bytes, {}).refusal
+        is not None
+    )
 
     client2, _api2 = client_with(
         {"nodes/pve01/storage/san-b/content": [_vol("san-b:vm-900-disk-0", 900, 7.9)]}
     )
-    assert _live_transient_check(client2, "pve01", target, disk.size_bytes, 0).refusal is not None
+    assert (
+        _live_transient_check(client2, "pve01", target, disk.vmid, disk.size_bytes, {}).refusal
+        is not None
+    )
 
 
 def test_live_transient_check_counts_approximate_size_when_size_is_missing() -> None:

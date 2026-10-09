@@ -211,7 +211,8 @@ def test_initial_imbalance_term_matches_section_14_2_e_before() -> None:
     breakdown = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 7.4 / 3, 0, 0)
     assert breakdown.imbalance_term == pytest.approx(8.0667, abs=1e-4)
     assert breakdown.reserve_statuses["san-a"].violated
-    assert breakdown.reserve_statuses["san-a"].shortfall_bytes == round(0.5 * TIB)
+    # 3.0 TiB footprint (VM 101: 2.0 + 1.0): 4.95 TiB used + 2 x 3.0 = 10.95 - 8.0 -- section 14.1
+    assert breakdown.reserve_statuses["san-a"].shortfall_bytes == round(2.5 * TIB)
     assert breakdown.utilization["san-a"] == pytest.approx(6.5)  # c_s=1.0 -> u_s == L_s
 
 
@@ -360,18 +361,20 @@ def test_heuristic_iterations_bounds_the_descend_search() -> None:
     local optimum -- a real, bounded-computation guarantee worth its own
     test, not just an implementation detail.
 
-    Repair moves `101:scsi1` off san-a (san-a -> san-c) to fix the reserve
-    violation, splitting VM 101. With section 5.4's w_v reweighting VM 101's
-    fragmentation at 2.7027 (its load is well above the group's mean), the
-    single most valuable move descend can make in one step is now a *swap*
-    that reunites VM 101 on san-a while relocating `102:scsi0` to san-c in
-    the same step -- one net move from the original assignment (`102:scsi0`
-    only), not two, since it also undoes repair's own move."""
+    Under the per-VM footprint (section 5.3.3) san-a's only repair is `101:scsi1`
+    (its leaving drops VM 101's footprint from 3.0 to 2.0 TiB and frees a TiB, a
+    2.5 TiB shortfall repaired in one move; moving `102:scsi0` would leave the footprint
+    at 3.0). Descend, capped at one step, then makes the single most valuable move,
+    `102:scsi0` to san-b: two net moves from the original. Uncapped, the same
+    run keeps going and ends on the three-move local optimum."""
     group = section_14_group()
     loads = section_14_loads()
     result = run_heuristic(group, loads, DEFAULT_OBJECTIVE, heuristic_iterations=1)
     assert result.repair_moves == 1
-    assert result.breakdown.moves == 1  # the swap above nets to one move from the original
+    assert result.assignment["101:scsi1"] == "san-c"
+    assert result.breakdown.moves == 2
+    uncapped = run_heuristic(group, loads, DEFAULT_OBJECTIVE)
+    assert uncapped.breakdown.moves == 3
 
 
 def test_reserve_violation_is_repaired_even_with_beta_high_enough_to_forbid_balance_moves() -> None:
