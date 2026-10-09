@@ -70,7 +70,12 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
 from proxmox_storage_drs.config import ObjectiveConfig
-from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status
+from proxmox_storage_drs.reserve import (
+    ReserveStatus,
+    compute_reserve_status,
+    split_peak_footprints_bytes,
+    split_vm_caps,
+)
 from proxmox_storage_drs.topology import (
     Disk,
     Group,
@@ -95,7 +100,7 @@ Assignment = dict[str, str]  # topology.Disk.key -> storage id
 @dataclass(frozen=True, slots=True)
 class ObjectiveBreakdown:
     """The section 5.4 objective, evaluated for one candidate assignment,
-    broken into its six terms -- kept separate rather than collapsed into
+    broken into its seven terms -- kept separate rather than collapsed into
     only ``total`` because ``explain`` (``cli._render_group_explain_human()``'s
     "objective:" line) needs to show the arithmetic, not just the answer,
     and because tests cross-checking this against the section 14 worked
@@ -119,6 +124,11 @@ class ObjectiveBreakdown:
     # (REVIEW.md R-01's discipline: never pass an already-weighted quantity across that boundary).
     affinity_debt: float = 0.0
     vm_weights: dict[int, float] = field(default_factory=dict)  # vmid -> w_v
+    # Section 5.3.3 (C9): mu * sum(o_v) in TiB, and the o_v behind it (bytes, per VM in V^split).
+    split_excess_term: float = 0.0
+    split_excess_bytes: dict[int, int] = field(default_factory=dict)  # vmid -> o_v
+    split_caps_bytes: dict[int, int] = field(default_factory=dict)  # vmid -> T_v
+    split_peak_bytes: dict[int, int] = field(default_factory=dict)  # vmid -> max_s F_{v,s}
 
     @property
     def total(self) -> float:
@@ -128,6 +138,7 @@ class ObjectiveBreakdown:
             + self.bytes_moved_term
             + self.fragmentation_term
             + self.capacity_spread_term
+            + self.split_excess_term
             + self.reserve_penalty_term
         )
 
@@ -193,8 +204,22 @@ def group_average_fill(group: Group) -> float:
     return total_used / total_capacity if total_capacity else 0.0
 
 
+def active_split_caps(group: Group, objective: ObjectiveConfig) -> dict[int, int]:
+    """``{vmid: T_v}`` for ``V^split`` (section 5.3.3), or empty when the rule is off --
+    either ``snapshot_reserve.split_vm_footprint`` is ``null`` (``group.
+    split_vm_footprint_bytes is None``) or ``objective.mu_vm_split_per_tib`` is 0, which
+    disables the term, the weight rule and the gate together. The one place that decision
+    is made, for the heuristic, both MILP stages, the gate and payback."""
+    if objective.mu_vm_split_per_tib <= 0:
+        return {}
+    return split_vm_caps(group.disks, group.split_vm_footprint_bytes)
+
+
 def compute_vm_weights(
-    group: Group, load_by_key: Mapping[str, float], vmids: Iterable[int]
+    group: Group,
+    load_by_key: Mapping[str, float],
+    vmids: Iterable[int],
+    split_vmids: Iterable[int] = (),
 ) -> dict[int, float]:
     """Section 5.4's `w_v = max(1, l_v / l_bar)` -- the per-VM weight that
     scales `kappa`'s fragmentation term, shared by `evaluate_assignment()`
@@ -224,8 +249,13 @@ def compute_vm_weights(
     weighted up. Returns an empty dict for an empty `vmids` (no VMs to
     weight) and weights every VM at 1.0 when the group's total load is 0
     (division would otherwise be undefined, and an idle group has no basis
-    to weight one VM over another)."""
+    to weight one VM over another).
+
+    ``split_vmids`` is ``V^split`` (section 5.3.3): a VM the split rule says should be
+    spread gets ``w_v = 1`` whatever its I/O -- the weight exists to keep a busy VM
+    together, and its I/O must not veto the policy."""
     vmid_list = list(vmids)
+    split = frozenset(split_vmids)
     if not vmid_list:
         return {}
     all_vmids = {disk.vmid for disk in group.disks}
@@ -237,7 +267,9 @@ def compute_vm_weights(
     average_load_per_vm = total_load / len(all_vmids)
     if not average_load_per_vm:
         return {v: 1.0 for v in vmid_list}
-    return {v: max(1.0, load_per_vm[v] / average_load_per_vm) for v in vmid_list}
+    return {
+        v: 1.0 if v in split else max(1.0, load_per_vm[v] / average_load_per_vm) for v in vmid_list
+    }
 
 
 def raw_capacity_spread(breakdown: ObjectiveBreakdown) -> float:
@@ -264,6 +296,13 @@ def raw_spread(breakdown: ObjectiveBreakdown, spread_metric: str) -> float:
     if spread_metric == "minmax":
         return max(breakdown.utilization.values()) if breakdown.utilization else 0.0
     return sum(breakdown.spread_e.values())
+
+
+def raw_split_excess_tib(breakdown: ObjectiveBreakdown) -> float:
+    """Section 7.2's unweighted ``O = sum_{v in V^split} o_v`` in TiB, as distinct from
+    ``breakdown.split_excess_term`` (already scaled by ``mu``) -- the same raw-quantity
+    discipline as ``raw_spread()`` (REVIEW.md R-01)."""
+    return sum(breakdown.split_excess_bytes.values()) / _BYTES_PER_TIB
 
 
 def raw_affinity_debt(breakdown: ObjectiveBreakdown) -> float:
@@ -359,10 +398,18 @@ def evaluate_assignment(
     # VM's *entire* load, pinned disks included (compute_vm_weights()'s own
     # docstring) -- affinity_counts_pinned_disks only decides V's
     # membership, never which disks count toward a member's own l_v.
-    vm_weights = compute_vm_weights(group, load_by_key, sorted(storages_per_vm))
+    split_caps = active_split_caps(group, objective)
+    vm_weights = compute_vm_weights(group, load_by_key, sorted(storages_per_vm), split_caps)
     affinity_debt = sum(
         vm_weights[v] * max(0, len(storages) - 1) for v, storages in storages_per_vm.items()
     )
+
+    # Section 5.3.3 (C9): o_v is the peak footprint beyond the cap, charged at mu per TiB.
+    peaks = split_peak_footprints_bytes(
+        group.storages, group.disks, split_caps, storage_of=storage_of
+    )
+    excess = {vmid: max(0, peaks[vmid] - cap) for vmid, cap in split_caps.items()}
+    split_excess_term = objective.mu_vm_split_per_tib * sum(excess.values()) / _BYTES_PER_TIB
 
     return ObjectiveBreakdown(
         imbalance_term=objective.alpha_spread * spread,
@@ -379,6 +426,10 @@ def evaluate_assignment(
         moved_disk_keys=moved,
         affinity_debt=affinity_debt,
         vm_weights=vm_weights,
+        split_excess_term=split_excess_term,
+        split_excess_bytes=excess,
+        split_caps_bytes=dict(split_caps),
+        split_peak_bytes=peaks,
     )
 
 

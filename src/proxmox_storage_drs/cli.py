@@ -28,7 +28,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from proxmox_storage_drs import __version__, collect, optimize, replay
@@ -64,6 +64,7 @@ from proxmox_storage_drs.heuristic import (
     group_average_utilization,
     raw_affinity_debt,
     raw_capacity_spread,
+    raw_split_excess_tib,
     raw_spread,
     run_heuristic,
 )
@@ -831,7 +832,7 @@ def _render_storage_and_disk_load_lines(
             f"  {storage.id}  provisioned {format_bytes(status.managed_used_bytes)}/"
             f"{format_bytes(storage.capacity_bytes)}{allocated_note}  "
             f"{load_prefix}{reserve_str}  "
-            f"(largest disk {format_bytes(status.largest_disk_bytes)}, "
+            f"(largest VM footprint {_footprint_text(status, group.disks)}, "
             f"requires {format_bytes(status.required_reserve_bytes)} free)"
         )
         disks_here = sorted(
@@ -887,6 +888,7 @@ def _render_show_load_human(
                 group,
                 config.gates,
                 last_load=last_loads_by_group.get(group.name),
+                objective=config.objective,
             )
             verdict = "ACT" if decision.act else "NO ACTION"
             header += f" → {verdict}: {decision.reason}"
@@ -934,7 +936,8 @@ def _render_show_load_json(
                 "provisioned_used_bytes": status.managed_used_bytes,
                 "capacity_bytes": storage.capacity_bytes,
                 "foreign_used_bytes": storage.foreign_used_bytes,
-                "largest_disk_bytes": status.largest_disk_bytes,
+                "largest_footprint_bytes": status.largest_footprint_bytes,
+                "largest_footprint_vmid": status.largest_footprint_vmid,
                 "required_reserve_bytes": status.required_reserve_bytes,
                 "reserve_violated": status.violated,
                 "reserve_shortfall_bytes": status.shortfall_bytes,
@@ -967,6 +970,7 @@ def _render_show_load_json(
                 group,
                 config.gates,
                 last_load=last_loads_by_group.get(group.name),
+                objective=config.objective,
             )
             gate_out = {
                 "act": decision.act,
@@ -975,6 +979,7 @@ def _render_show_load_json(
                 "drift_fraction": decision.drift_fraction,
                 "imbalance_fraction": decision.imbalance_fraction,
                 "capacity_fraction": decision.capacity_fraction,
+                "split_vmid": decision.split_vmid,
             }
         group_out: dict[str, object] = {
             "name": group.name,
@@ -1115,6 +1120,75 @@ def _render_plan_move_line(
         # second rendering of it (AGENTS.md section 5).
         line += f"  → {outcome.status}: {outcome.detail}"
     return line
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _VmSplit:
+    """One large VM's (``V^split``, section 5.3.3) before/after numbers for the report."""
+
+    vmid: int
+    cap_bytes: int
+    peak_bytes_before: int
+    peak_bytes_after: int
+    excess_bytes_before: int
+    excess_bytes_after: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "vmid": self.vmid,
+            "cap_bytes": self.cap_bytes,
+            "peak_footprint_bytes_before": self.peak_bytes_before,
+            "peak_footprint_bytes_after": self.peak_bytes_after,
+            "excess_bytes_before": self.excess_bytes_before,
+            "excess_bytes_after": self.excess_bytes_after,
+        }
+
+
+def _vm_splits(before: ObjectiveBreakdown, after: ObjectiveBreakdown) -> list[_VmSplit]:
+    """Section 9.5: every ``v in V^split`` whose split excess the plan changes, plus every one
+    still above its cap afterwards (so an operator can see which large VMs the storages cannot
+    spread further), lowest vmid first."""
+    splits = []
+    for vmid in sorted(after.split_caps_bytes):
+        excess_before = before.split_excess_bytes.get(vmid, 0)
+        excess_after = after.split_excess_bytes.get(vmid, 0)
+        if excess_before == excess_after and excess_after == 0:
+            continue
+        splits.append(
+            _VmSplit(
+                vmid,
+                after.split_caps_bytes[vmid],
+                before.split_peak_bytes.get(vmid, 0),
+                after.split_peak_bytes.get(vmid, 0),
+                excess_before,
+                excess_after,
+            )
+        )
+    return splits
+
+
+def _render_split_lines(
+    splits: list[_VmSplit], storage_count: int, solver_settled: bool
+) -> list[str]:
+    """Section 9.5's ``split:`` lines. A result still above its cap says the solver found no
+    better split only when the MILP settled on it, else that it is still above the cap; a *proven*
+    best split is never claimed (REVIEW.md AO-03)."""
+    lines = []
+    for split in splits:
+        note = ""
+        if split.excess_bytes_after > 0:
+            note = (
+                f" — the solver found no better split across {storage_count} storages"
+                if solver_settled
+                else " — still above the cap"
+            )
+        lines.append(
+            f"  split: VM {split.vmid} largest footprint {format_bytes(split.peak_bytes_before)} → "
+            f"{format_bytes(split.peak_bytes_after)} (cap {format_bytes(split.cap_bytes)}, excess "
+            f"{format_bytes(split.excess_bytes_before)} → "
+            f"{format_bytes(split.excess_bytes_after)}{note})"
+        )
+    return lines
 
 
 def _render_plan_payback_lines(
@@ -1411,6 +1485,14 @@ def _render_group_plan_human(
         lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
         if payback_result is not None:
             lines.extend(_render_plan_payback_lines(payback_result, payback_ratio, vm_name_by_key))
+    solved = solve_outcomes[group.name]
+    lines.extend(
+        _render_split_lines(
+            _vm_splits(solved.initial_breakdown, final_breakdown),
+            len(group.storages),
+            solver_settled=solved.status == "optimal",
+        )
+    )
     unfixable = _unfixable_shortfall(group, final_breakdown, solve_outcomes[group.name])
     lines.extend(_render_unfixable_shortfall_lines(unfixable, vm_name_by_key))
     # `explain` passes explain_no_moves=False: it prints its own, richer
@@ -1554,6 +1636,7 @@ def _render_group_plan_json(
             "drift_fraction": decision.drift_fraction,
             "imbalance_fraction": decision.imbalance_fraction,
             "capacity_fraction": decision.capacity_fraction,
+            "split_vmid": decision.split_vmid,
         }
     before_spread = after_spread = None
     if group_load is not None:
@@ -1581,7 +1664,7 @@ def _render_group_plan_json(
             after_capacity_spread = _spread_fraction(final_breakdown.fill_fraction, average_fill)
     # REVIEW.md AA-01's own recommendation: "re-score every backend's
     # returned assignment through evaluate_assignment() at true weights" --
-    # the full six-term objective (section 5.4), not one spread axis in
+    # the full seven-term objective (section 5.4), not one spread axis in
     # isolation, so a solver that is worse on the objective it was actually
     # asked to optimize is visible even when neither before_spread/
     # before_capacity_spread axis alone would show it.
@@ -1602,7 +1685,18 @@ def _render_group_plan_json(
             "repair_exempt": payback_result.repair_exempt,
             "reserve_shortfall_bytes_before": payback_result.reserve_shortfall_bytes_before,
             "reserve_shortfall_bytes_after": payback_result.reserve_shortfall_bytes_after,
+            "split_excess_bytes_before": sum(
+                solve_outcome.initial_breakdown.split_excess_bytes.values() if solve_outcome else ()
+            ),
+            "split_excess_bytes_after": sum(
+                final_breakdown.split_excess_bytes.values() if final_breakdown else ()
+            ),
         }
+    vm_splits = (
+        [sp.as_dict() for sp in _vm_splits(solve_outcome.initial_breakdown, final_breakdown)]
+        if solve_outcome is not None and final_breakdown is not None
+        else []
+    )
     unfixable = (
         _unfixable_shortfall(group, final_breakdown, solve_outcome)
         if final_breakdown is not None
@@ -1624,6 +1718,7 @@ def _render_group_plan_json(
         "before_objective_total": before_objective_total,
         "after_objective_total": after_objective_total,
         "payback": payback_out,
+        "vm_splits": vm_splits,
         "unfixable_shortfall": unfixable.as_dict() if unfixable is not None else None,
     }
     if forecast is not None:
@@ -1782,7 +1877,7 @@ def _render_fragmentation_lines(group: Group, assignment: Assignment | None) -> 
 
 
 def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
-    """The section 5.4 objective's six terms, individually -- the reason
+    """The section 5.4 objective's seven terms, individually -- the reason
     :class:`ObjectiveBreakdown` keeps them apart instead of collapsing to
     only ``.total`` in the first place (that class's own docstring)."""
     return (
@@ -1792,6 +1887,7 @@ def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
         f"bytes {breakdown.bytes_moved_term:.3g} + "
         f"fragmentation {breakdown.fragmentation_term:.3g} + "
         f"spread {breakdown.capacity_spread_term:.3g} + "
+        f"split {breakdown.split_excess_term:.3g} + "
         f"reserve {breakdown.reserve_penalty_term:.3g} = {breakdown.total:.3g}"
     )
 
@@ -1799,7 +1895,7 @@ def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
 def _objective_breakdown_json(breakdown: ObjectiveBreakdown) -> dict[str, float]:
     """The one implementation ``explain --json``'s ``objective`` and
     ``rejected_alternative.{baseline,objective}`` fields all share (AGENTS.md
-    section 5) -- so a third caller never has to guess which six keys a
+    section 5) -- so a third caller never has to guess which seven keys a
     breakdown serializes to."""
     return {
         "imbalance_term": breakdown.imbalance_term,
@@ -1807,6 +1903,7 @@ def _objective_breakdown_json(breakdown: ObjectiveBreakdown) -> dict[str, float]
         "bytes_moved_term": breakdown.bytes_moved_term,
         "fragmentation_term": breakdown.fragmentation_term,
         "capacity_spread_term": breakdown.capacity_spread_term,
+        "split_excess_term": breakdown.split_excess_term,
         "reserve_penalty_term": breakdown.reserve_penalty_term,
         "total": breakdown.total,
     }
@@ -1875,6 +1972,7 @@ def _render_no_moves_lines(
                 f"bytes {b.bytes_moved_term:.3g}→{c.bytes_moved_term:.3g}",
                 f"fragmentation {b.fragmentation_term:.3g}→{c.fragmentation_term:.3g}",
                 f"spread {b.capacity_spread_term:.3g}→{c.capacity_spread_term:.3g}",
+                f"split {b.split_excess_term:.3g}→{c.split_excess_term:.3g}",
                 f"reserve {b.reserve_penalty_term:.3g}→{c.reserve_penalty_term:.3g}",
             ]
         ),
@@ -2080,7 +2178,8 @@ def _render_group_explain_json(
             "provisioned_used_bytes": status.managed_used_bytes,
             "capacity_bytes": storage.capacity_bytes,
             "foreign_used_bytes": storage.foreign_used_bytes,
-            "largest_disk_bytes": status.largest_disk_bytes,
+            "largest_footprint_bytes": status.largest_footprint_bytes,
+            "largest_footprint_vmid": status.largest_footprint_vmid,
             "required_reserve_bytes": status.required_reserve_bytes,
             "reserve_violated": status.violated,
             "reserve_shortfall_bytes": status.shortfall_bytes,
@@ -2559,6 +2658,7 @@ def _log_gate_decision(group: Group, decision: GateDecision, gates: GatesConfig)
             "drift_fraction": decision.drift_fraction,
             "imbalance_fraction": decision.imbalance_fraction,
             "capacity_fraction": decision.capacity_fraction,
+            "split_vmid": decision.split_vmid,
             "drift_threshold": gates.drift_threshold,
             "imbalance_threshold": gates.imbalance_threshold,
             "capacity_spread_threshold": gates.capacity_spread_threshold,
@@ -2679,12 +2779,19 @@ def _plan_group(
     reserve_statuses: dict[str, ReserveStatus] = {
         storage.id: compute_reserve_status(storage, group.disks) for storage in group.storages
     }
+    cooldown_storages = frozenset(
+        active_storage_cooldowns(
+            state, group.name, resolved.config.gates.cooldown_per_storage_seconds, now
+        )
+    )
     decision = evaluate_group_gates(
         group_load,
         reserve_statuses,
         group,
         resolved.config.gates,
         last_load=last_loads_by_group.get(group.name),
+        objective=resolved.config.objective,
+        cooldown_storages=cooldown_storages,
     )
     _log_gate_decision(group, decision, resolved.config.gates)
     if not decision.act:
@@ -2695,11 +2802,6 @@ def _plan_group(
             forecast=forecast,
         )
 
-    cooldown_storages = frozenset(
-        active_storage_cooldowns(
-            state, group.name, resolved.config.gates.cooldown_per_storage_seconds, now
-        )
-    )
     solve_outcome = _solve_group(group, group_load.load_by_disk_key(), resolved, cooldown_storages)
     schedule_result = order_moves(
         group,
@@ -2744,6 +2846,9 @@ def _plan_group(
         resolved.config.objective.kappa_vm_affinity,
         raw_affinity_debt(solve_outcome.initial_breakdown),
         raw_affinity_debt(final_breakdown),
+        resolved.config.objective.mu_vm_split_per_tib,
+        raw_split_excess_tib(solve_outcome.initial_breakdown),
+        raw_split_excess_tib(final_breakdown),
     )
     # Section 7.3's outcome trigger and revert test both score the plan's
     # *executed* endpoint -- final_assignment with every disk a hard
@@ -3725,6 +3830,17 @@ def _source_suffix(source: str) -> str:
     return f" ({source})" if source else ""
 
 
+def _footprint_text(status: Any, disks: Iterable[Disk]) -> str:
+    """``Z_s`` with the VM it comes from, e.g. ``3.00 TiB = puppet001(101)`` -- the snapshot
+    reserve is driven by that one VM (section 5.3.3), so the operator needs to know which."""
+    if status.largest_footprint_vmid is None:
+        return format_bytes(0)
+    vmid = status.largest_footprint_vmid
+    name = next((d.vm_name for d in disks if d.vmid == vmid), "")
+    who = f"{name}({vmid})" if name else f"VM {vmid}"
+    return f"{format_bytes(status.largest_footprint_bytes)} = {who}"
+
+
 def _render_verify_storages_human(topology: Topology, config: Any) -> str:
     lines: list[str] = []
     for group in topology.groups:
@@ -3733,6 +3849,10 @@ def _render_verify_storages_human(topology: Topology, config: Any) -> str:
             largest = largest_disk_bytes(group.disks, storage.id)
             state = "on" if storage.saferemove else "off"
             lines.append(f"  {storage.id}  saferemove={state}")
+            footprint = compute_reserve_status(storage, group.disks)
+            lines.append(
+                f"    largest VM footprint (Z_s): {_footprint_text(footprint, group.disks)}"
+            )
             if storage.enforce_format is not None:
                 bad_count, bad_bytes = nonconforming_disks(storage, group.disks)
                 lines.append(
@@ -3792,6 +3912,7 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
         storages_out = []
         for storage in group.storages:
             largest = largest_disk_bytes(group.disks, storage.id)
+            footprint = compute_reserve_status(storage, group.disks)
             nonconforming = nonconforming_disks(storage, group.disks)
             wipe_seconds = compute_wipe_duration_seconds(
                 largest, storage.saferemove_throughput_bytes_per_sec
@@ -3812,6 +3933,8 @@ def _render_verify_storages_json(topology: Topology, config: Any) -> dict[str, o
                     "nonconforming_disks": nonconforming[0],
                     "nonconforming_bytes": nonconforming[1],
                     "largest_disk_bytes": largest,
+                    "largest_footprint_bytes": footprint.largest_footprint_bytes,
+                    "largest_footprint_vmid": footprint.largest_footprint_vmid,
                     "implied_wipe_seconds": wipe_seconds,
                     "cooldown_per_storage_too_short": (
                         wipe_seconds is not None

@@ -12,6 +12,8 @@ ratio 7.5, rejected).
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from proxmox_storage_drs.config import MigrationConfig
@@ -821,3 +823,92 @@ def test_repair_markers_marks_false_when_reverting_changes_nothing() -> None:
 
     markers = repair_markers(group, [move_], final_assignment)
     assert markers == {"101:scsi0": False}
+
+
+# ------------------------------------------- section 7.3's redundant-repair plan
+
+
+def _two_single_disk_vms_on_a_short_storage() -> Group:
+    """Storage `a` (6 TiB, f=2) holds two single-disk 2 TiB VMs: 4 + 2*2 = 8 > 6, short by 2.
+    Either VM leaving alone repairs it (2 + 2*2 = 6 <= 6). `b` has plenty of room."""
+    small = dataclasses.replace(no_saferemove_storage("a"), capacity_bytes=6 * TIB)
+    roomy = dataclasses.replace(no_saferemove_storage("b"), capacity_bytes=20 * TIB)
+    disks = tuple(
+        Disk(
+            key=f"{vmid}:scsi0",
+            vmid=vmid,
+            device="scsi0",
+            vm_name=f"vm{vmid}",
+            node="pve01",
+            size_bytes=2 * TIB,
+            current_storage="a",
+            format="raw",
+            pinned_reason=None,
+        )
+        for vmid in (101, 102)
+    )
+    return Group(name="g", storages=(small, roomy), disks=disks)
+
+
+def test_a_redundant_repair_plan_is_exempt_with_no_marked_move() -> None:
+    """Section 7.3: two moves from a violating storage, either of which alone repairs it. Holding
+    either one back still leaves the storage compliant, so neither passes the revert test
+    (`repair: false` on both) -- yet the plan repairs and is exempt by the *outcome* trigger,
+    even with a benefit of zero. `fc-tier1` used to be this case under the per-disk reserve;
+    under the per-VM footprint it is not, so this is its unit case."""
+    group = _two_single_disk_vms_on_a_short_storage()
+    moves = [move("101:scsi0", "a", "b", 2.0), move("102:scsi0", "a", "b", 2.0)]
+    final_assignment = {"101:scsi0": "b", "102:scsi0": "b"}
+
+    assert repair_markers(group, moves, final_assignment) == {
+        "101:scsi0": False,
+        "102:scsi0": False,
+    }
+
+    costs = [compute_move_cost(m, group.storages[0], SECTION_14_5_MIGRATION) for m in moves]
+    result = evaluate_plan_payback(
+        costs, 0.0, 10.0, current_shortfall_bytes=2 * TIB, final_shortfall_bytes=0
+    )
+    assert result.repair_exempt
+    assert result.aggregate_ok
+    assert result.accepted
+
+
+def test_repair_markers_mark_the_move_that_breaks_up_a_vms_footprint() -> None:
+    """Per-VM footprint (section 5.3.3): VM 101's two disks on `a` make a 3 TiB footprint;
+    moving only `101:scsi1` shrinks it, and holding that move back is what leaves `a` short."""
+    small = dataclasses.replace(no_saferemove_storage("a"), capacity_bytes=8 * TIB)
+    roomy = dataclasses.replace(no_saferemove_storage("b"), capacity_bytes=20 * TIB)
+
+    def disk(key: str, size_tib: float) -> Disk:
+        vmid, device = key.split(":")
+        return Disk(
+            key, int(vmid), device, f"vm{vmid}", "pve01", round(size_tib * TIB), "a", "raw", None
+        )
+
+    group = Group(
+        name="g",
+        storages=(small, roomy),
+        disks=(disk("101:scsi0", 2.0), disk("101:scsi1", 1.0), disk("102:scsi0", 1.5)),
+    )
+    final_assignment = {"101:scsi1": "b", "102:scsi0": "b"}
+    moves = [move("102:scsi0", "a", "b", 1.5), move("101:scsi1", "a", "b", 1.0)]
+    markers = repair_markers(group, moves, final_assignment)
+    assert markers == {"102:scsi0": False, "101:scsi1": True}
+
+
+def test_benefit_gains_the_split_excess_term() -> None:
+    """Section 7.2: `mu * (O_before - O_after) * H`, and a negative `dO` reduces the benefit."""
+    horizon = 31_536_000.0
+    paid = compute_benefit_load_seconds(
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, horizon, 0.0, 0.0, 0.0, 2.0, 5.0, 3.0
+    )
+    assert paid == pytest.approx(4.0 * horizon)
+    piled_back = compute_benefit_load_seconds(
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, horizon, 0.0, 0.0, 0.0, 2.0, 3.0, 5.0
+    )
+    assert piled_back == pytest.approx(-4.0 * horizon)
+    # With mu = 0 the excess figures are inert.
+    assert compute_benefit_load_seconds(
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, horizon, 0.0, 0.0, 0.0, 0.0, 9.0, 1.0
+    ) == pytest.approx(0.0)

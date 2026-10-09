@@ -11,12 +11,12 @@ are pending moves, find the ones that are transient-feasible right now,
 schedule the best by persistent-objective-reduction-per-byte (moves that
 resolve a currently-violating storage win outright, regardless of that
 ratio), apply it, repeat. "Persistent-objective reduction" sums the
-`alpha`, `delta` **and** `kappa*w_v` terms — the parts of section 5.4's
+`alpha`, `delta`, `kappa*w_v` **and** `mu` (the large-VM split excess) terms — the parts of section 5.4's
 objective whose improvement outlives the plan, as opposed to `beta`/`gamma`,
 which are one-time migration costs a completed move has already paid —
 computed by calling `heuristic.evaluate_assignment()` twice (before/after
 the candidate move) and diffing `.imbalance_term + .capacity_spread_term +
-.fragmentation_term`. Not a second formula: the same one `heuristic.py`
+.fragmentation_term + .split_excess_term`. Not a second formula: the same one `heuristic.py`
 already computes, so a plan's ordering agrees with whatever
 `objective.spread_metric`/`kappa_vm_affinity` is configured exactly the way
 the assignment that produced it did. The `kappa*w_v` term joined this sum
@@ -81,16 +81,18 @@ need to, since `execute.py`'s own live re-checks (below) are what
 actually enforce the invariant against whatever really ends up running
 together.
 
-The actual arithmetic — `used_b + sum(z_m) + f_b * max(Z_b, max(z_m)) <=
-C_b` (storage `b`'s bytes already used, plus every in-flight charge
-landing on it, plus its reserve headroom sized off the larger of what
-already resides there and the largest single charge in flight, must not
-exceed its capacity — `f_b` is the storage's own `reserve_factor`, `z_m`
-each in-flight move's disk size, `Z_b` the largest disk already resident,
-`C_b` the storage's capacity in bytes) — lives in
+The actual arithmetic — `used_b + sum(z_m) + f_b * max(Z_b, max_v(F_{v,b} + sum z_m of v))
+<= C_b` (storage `b`'s bytes already used, plus every in-flight charge
+landing on it, plus its reserve headroom sized off the larger of the biggest
+per-VM footprint already resident and the biggest footprint any in-flight
+charge creates — a landing disk joins its *own* VM's footprint, so a disk that
+reunites a VM on `b` can raise the reserve even when it is small — must not
+exceed its capacity; `f_b` is the storage's own `reserve_factor`, `z_m`
+each in-flight move's disk size, `Z_b` the largest per-VM footprint already
+resident, `F_{v,b}` VM `v`'s footprint there, `C_b` the storage's capacity in bytes) — lives in
 `reserve.transient_charge_ok()`, taking a *list* of
 charges rather than one disk, so it degenerates to section 8.1's original
-single-move form when called with `[disk.size_bytes]` (what this module
+single-move form when called with `[(disk.vmid, disk.size_bytes)]` (what this module
 does) and generalizes correctly to several moves landing on the same
 storage at once when `execute._launch_decision()` calls it with more than
 one, for real, under concurrent execution (AGENTS.md section 5: this is

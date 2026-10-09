@@ -17,14 +17,14 @@
       "roomy": {
         "load": 10.0,
         "used_tib": 2.0,
-        "largest_tib": 1.0,
+        "largest_footprint_tib": 1.0,
         "required_tib": 4.0,
         "violates_reserve": false
       },
       "cramped": {
         "load": 0,
         "used_tib": 3.0,
-        "largest_tib": 0.0,
+        "largest_footprint_tib": 0,
         "required_tib": 3.0,
         "violates_reserve": false
       }
@@ -53,14 +53,14 @@
         "roomy": {
           "load": 10.0,
           "used_tib": 2.0,
-          "largest_tib": 1.0,
+          "largest_footprint_tib": 1.0,
           "required_tib": 4.0,
           "violates_reserve": false
         },
         "cramped": {
           "load": 0,
           "used_tib": 3.0,
-          "largest_tib": 0.0,
+          "largest_footprint_tib": 0,
           "required_tib": 3.0,
           "violates_reserve": false
         }

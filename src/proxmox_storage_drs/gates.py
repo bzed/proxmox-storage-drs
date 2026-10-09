@@ -28,11 +28,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from proxmox_storage_drs.config import GatesConfig
-from proxmox_storage_drs.heuristic import group_average_fill
+from proxmox_storage_drs.config import GatesConfig, ObjectiveConfig
+from proxmox_storage_drs.heuristic import active_split_caps, group_average_fill
 from proxmox_storage_drs.loadmodel import GroupLoad
-from proxmox_storage_drs.reserve import ReserveStatus
-from proxmox_storage_drs.topology import Group
+from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, vm_footprints_bytes
+from proxmox_storage_drs.topology import (
+    Disk,
+    Group,
+    disk_size_on,
+    storage_accepts_format,
+    target_format,
+)
+from proxmox_storage_drs.units import format_bytes
 
 # Section 6's "treat as fully drifted, proceed" degenerate case has no
 # well-defined ratio (0/0) -- 1.0 (100%) is the sentinel used to mean
@@ -57,6 +64,8 @@ class GateDecision:
     # None means "not evaluated": gates.capacity_spread_threshold is null,
     # or the group holds no data at all (mean fill 0, section 5.3 (C7)).
     capacity_fraction: float | None = None
+    # The large VM that opened the group through the split gate (section 6), None otherwise.
+    split_vmid: int | None = None
 
 
 def _l1_drift(load_now: Mapping[str, float], load_last: Mapping[str, float]) -> tuple[float, float]:
@@ -93,15 +102,75 @@ def _capacity_spread(group: Group, reserve_statuses: Mapping[str, ReserveStatus]
     return (max(fills) - min(fills)) / b_bar
 
 
+def split_gate(
+    group: Group,
+    objective: ObjectiveConfig,
+    cooldown_storages: frozenset[str] = frozenset(),
+) -> tuple[int, str] | None:
+    """Section 6's split gate: ``(vmid, reason)`` for the first large VM (``V^split``,
+    section 5.3.3) with a movable disk ``d`` and an eligible storage ``s != sigma_0(d)`` (C2,
+    not in cooldown) such that moving ``d`` alone to ``s`` strictly lowers the VM's peak
+    footprint and leaves ``s`` without a (C5) shortfall, by the one shared reserve function.
+    ``None`` when none does -- or when the rule is off (``active_split_caps`` is empty).
+
+    A sufficient test, not an exact one: a split only a *pair* of moves improves does not open
+    the group by itself. The single-move test is what keeps the gate quiet once the job is
+    done -- a VM at the best split its storages allow has no single move that lowers its peak.
+
+    Cost: one footprint pass per large VM, then ``O(|S|)`` per (disk, target) pair to find the
+    peak after the move, and a reserve evaluation only for the pairs that do lower it.
+    """
+    caps = active_split_caps(group, objective)
+    storages_by_id = {s.id: s for s in group.storages}
+    for vmid in sorted(caps):
+        footprints = {
+            s.id: vm_footprints_bytes(group.disks, s.id, storage=s).get(vmid, 0)
+            for s in group.storages
+        }
+        current = max(footprints.values(), default=0)
+        for disk in group.disks:
+            if disk.vmid != vmid or disk.pinned_reason is not None:
+                continue
+            source = storages_by_id.get(disk.current_storage)
+            for target in group.storages:
+                if (
+                    source is None
+                    or target.id == disk.current_storage
+                    or target.id in cooldown_storages
+                    or not storage_accepts_format(target, target_format(disk, target))
+                ):
+                    continue
+                after = dict(footprints)
+                after[source.id] -= disk_size_on(disk, source)
+                after[target.id] += disk_size_on(disk, target)
+                if max(after.values()) >= current:
+                    continue
+
+                def trial(d: Disk, _disk: Disk = disk, _to: str = target.id) -> str:
+                    return _to if d.key == _disk.key else d.current_storage
+
+                if compute_reserve_status(target, group.disks, storage_of=trial).violated:
+                    continue
+                return vmid, (
+                    f"VM {vmid} holds {format_bytes(current)} on one storage against a "
+                    f"{format_bytes(caps[vmid])} cap (snapshot_reserve.split_vm_footprint), and "
+                    f"moving {disk.display_id} to {target.id} would lower that -- acting now "
+                    "regardless of I/O drift/imbalance"
+                )
+    return None
+
+
 def evaluate_group_gates(
     group_load: GroupLoad,
     reserve_statuses: Mapping[str, ReserveStatus],
     group: Group,
     gates: GatesConfig,
     last_load: Mapping[str, float] | None,
+    objective: ObjectiveConfig | None = None,
+    cooldown_storages: frozenset[str] = frozenset(),
 ) -> GateDecision:
     """Section 6, applied in the order it lists: reserve override, then
-    the capacity gate, then drift, then imbalance. Any gate that decides
+    the capacity gate, then the split gate, then drift, then imbalance. Any gate that decides
     ends evaluation there.
 
     ``reserve_statuses`` is keyed by storage id -- one entry per
@@ -156,6 +225,21 @@ def evaluate_group_gates(
                 drift_fraction=None,
                 imbalance_fraction=None,
                 capacity_fraction=capacity_fraction,
+            )
+
+    # Split gate (section 6): off unless the caller supplies the objective weights, so a caller
+    # that does not know them cannot open a group on a rule it cannot price.
+    if objective is not None:
+        opened = split_gate(group, objective, cooldown_storages)
+        if opened is not None:
+            return GateDecision(
+                act=True,
+                reason=opened[1],
+                reserve_override=False,
+                drift_fraction=None,
+                imbalance_fraction=None,
+                capacity_fraction=capacity_fraction,
+                split_vmid=opened[0],
             )
 
     load_now = group_load.load_by_disk_key()

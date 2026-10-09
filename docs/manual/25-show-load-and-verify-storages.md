@@ -14,16 +14,26 @@ section rather than invented for this page:
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml show-load
 Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the normal drift/imbalance thresholds -- a capacity shortfall is never delayed by them
-  san-a  provisioned 4.50 TiB/8.00 TiB  L=6.50 u=6.50  ⚠ reserve short by 512.00 GiB  (largest disk 2.00 TiB, requires 4.00 TiB free)
+  san-a  provisioned 4.50 TiB/8.00 TiB  L=6.50 u=6.50  ⚠ reserve short by 2.50 TiB  (largest VM footprint 3.00 TiB = web01(101), requires 6.00 TiB free)
     web01(101):scsi0             2.00 TiB  raw     ℓ 3.00
     web01(101):scsi1             1.00 TiB  raw     ℓ 1.00
     db01(102):scsi0              1.50 TiB  raw     ℓ 2.50
-  san-b  provisioned 1.50 TiB/8.00 TiB  L=0.70 u=0.70  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
+  san-b  provisioned 1.50 TiB/8.00 TiB  L=0.70 u=0.70  reserve OK  (largest VM footprint 1.00 TiB = app01(104), requires 2.00 TiB free)
     mail01(103):scsi0          512.00 GiB  raw     ℓ 0.40
     app01(104):scsi0             1.00 TiB  raw     ℓ 0.30
-  san-c  provisioned 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest disk 512.00 GiB, requires 1.00 TiB free)
+  san-c  provisioned 512.00 GiB/8.00 TiB  L=0.20 u=0.20  reserve OK  (largest VM footprint 512.00 GiB = cache01(105), requires 1.00 TiB free)
     cache01(105):scsi0         512.00 GiB  raw     ℓ 0.20
 ```
+
+`largest VM footprint` is the quantity the snapshot reserve is computed from: a snapshot
+is taken of a whole VM, so what it needs on a storage is the sum of **all of that VM's disks
+on that storage** — here VM 101 holds a 2 TiB and a 1 TiB disk on san-a, a 3 TiB footprint, so
+san-a must keep `2.0 × 3.00 = 6.00 TiB` free, not the 4 TiB a rule looking only at the
+largest disk would ask for — and the VM named beside it is the one that drives the figure.
+Upgrading from a release that reserved only for the largest *disk*: a storage holding two or
+more disks of one VM can show a shortfall here that it did not have before. That is the
+rule being right, not the cluster changing, and `plan` treats it as a repair like any other —
+read this output first.
 
 `provisioned` on a storage's line is the sum of every disk's *provisioned*
 size on it (the managed disks, plus any foreign volumes — templates, ISOs,
@@ -38,7 +48,7 @@ storage one byte short shows `⚠ reserve short by 1.00 MiB`, never `reserve
 OK`:
 
 ```
-  ceph-a  provisioned 3.36 TiB/9.48 TiB (pool reports 1.45 TiB allocated)  L=2.10 u=2.10  reserve OK  (largest disk 1.00 TiB, requires 2.00 TiB free)
+  ceph-a  provisioned 3.36 TiB/9.48 TiB (pool reports 1.45 TiB allocated)  L=2.10 u=2.10  reserve OK  (largest VM footprint 1.00 TiB = app02(204), requires 2.00 TiB free)
 ```
 
 Only the provisioned figure ever enters a decision; the allocated one is
@@ -192,7 +202,9 @@ exists on the storage and, if it genuinely does not, remove the stale
 reference (`qm unlink <vmid> <device>` for an `unusedN` entry).
 
 `--json` emits the same information as one object with `groups[].storages[]`
-(including the exact byte counts behind the reserve check, plus `load` and
+(including the exact byte counts behind the reserve check —
+`largest_footprint_bytes`/`largest_footprint_vmid`, the largest VM footprint on the storage
+and the VM it belongs to — plus `load` and
 `utilization` when available) and `groups[].disks[]` (plus `load` and
 `load_flagged_reason` when available), with each group carrying its own
 `load_computed`, `idle`, `load_error` and `gate` fields (plus a `forecast`
@@ -207,7 +219,9 @@ after the arrow), `reserve_override` (bool), and `drift_fraction`/
 that gate was never reached, not that it evaluated to zero;
 `capacity_fraction` is the capacity gate's own ratio described above —
 `null` whenever `gates.capacity_spread_threshold` is unset or the group's
-mean fill is 0, the same two cases in which the gate itself never fires).
+mean fill is 0, the same two cases in which the gate itself never fires),
+and `split_vmid` (the id of the large VM that opened the group through the split gate —
+see `snapshot_reserve.split_vm_footprint` — or `null`).
 
 **A config with several groups issues Prometheus queries per group.**
 Computing one group's load takes seven queries (six raw metrics plus one
@@ -231,13 +245,17 @@ For a storage that sets `enforce_format` it also prints that value, the entry it
 disks already on the storage are in a different format (and their total size) — not an error, only how far
 the storage is from its policy, since enforcement applies to moves and never moves a disk by itself. The
 `--json` form carries the same as `enforce_format`, `enforce_format_source`, `nonconforming_disks` and
-`nonconforming_bytes`.
+`nonconforming_bytes`. It also carries `largest_footprint_bytes` and
+`largest_footprint_vmid` (the figure the snapshot reserve is computed from, and the VM it
+belongs to) beside `largest_disk_bytes` (the per-volume figure the wipe time is estimated from).
 
 Reports the resolved `free_space.soft`/`.hard` bytes for each storage,
 each with the level it came from (`IMPLEMENTATION_PLAN.md` section 5.3.1) —
 the derivation an operator cannot otherwise predict, once inheritance,
-`/…/` patterns and percentages are all in play — plus `saferemove`
-and the wipe time it implies for the largest disk on each storage, warning
+`/…/` patterns and percentages are all in play — plus the largest VM
+footprint on each storage with the VM it belongs to (what the snapshot reserve is computed
+from), `saferemove` and the wipe time it implies for the largest *disk* on each storage (a
+wipe is per volume), warning
 when your configured cooldown or move-duration limits are shorter than that implied wipe — the condition
 `IMPLEMENTATION_PLAN.md` section 9.3 describes as "the next run plans onto a
 storage that is still draining". Section 14's fixture has `saferemove` off
@@ -250,14 +268,17 @@ warning looks like:
 $ pve-storage-drs -c /etc/pve/drs.yaml verify-storages
 Group fc-tier1
   san-a  saferemove=off
+    largest VM footprint (Z_s): 3.00 TiB = web01(101)
     free_space: soft=0 B (global)  hard=0 B (= soft (no dip))
     saferemove is off or throughput unknown; no wipe-time check
   san-b  saferemove=on
+    largest VM footprint (Z_s): 1.00 TiB = app01(104)
     free_space: soft=0 B (global)  hard=0 B (= soft (no dip))
     implied wipe time for the largest disk (1.00 TiB): 1.2d
     ⚠ gates.cooldown_per_storage (1.0h) is shorter than the implied wipe time -- the next run may plan onto a still-draining storage
     ⚠ migration.max_single_move_duration (6.0h) is shorter than the implied wipe time -- a move of the largest disk would be rejected outright
   san-c  saferemove=off
+    largest VM footprint (Z_s): 512.00 GiB = cache01(105)
     free_space: soft=0 B (global)  hard=0 B (= soft (no dip))
     saferemove is off or throughput unknown; no wipe-time check
 ```

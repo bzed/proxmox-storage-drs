@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "generated_by": "tests/fixtures/generate_expected.py (exhaustive enumeration)",
+  "assumptions": {
+    "account_saferemove_wipe": false,
+    "wipe_load_weight": 1.0,
+    "saferemove_by_storage": {
+      "st-a": false,
+      "st-b": false,
+      "st-c": false
+    }
+  },
+  "derived": {
+    "total_load": 3.0,
+    "u_star": 1.0,
+    "b_bar": 0.108333,
+    "initial": {
+      "st-a": {
+        "load": 1.0,
+        "used_tib": 11.0,
+        "largest_footprint_tib": 10.0,
+        "required_tib": 31.0,
+        "violates_reserve": false
+      },
+      "st-b": {
+        "load": 1.0,
+        "used_tib": 1.0,
+        "largest_footprint_tib": 1.0,
+        "required_tib": 3.0,
+        "violates_reserve": false
+      },
+      "st-c": {
+        "load": 1.0,
+        "used_tib": 1.0,
+        "largest_footprint_tib": 1.0,
+        "required_tib": 3.0,
+        "violates_reserve": false
+      }
+    },
+    "E_before": 0.0,
+    "F_before": 3.076923,
+    "spread_before": 0.0,
+    "capacity_spread_before": 2.307692
+  },
+  "cases": [
+    {
+      "beta_move_count": 0.25,
+      "delta_capacity_spread": 0.0,
+      "expected_objective": 4.05,
+      "expected_move_count": 3,
+      "expected_E_after": 0.0,
+      "expected_F_after": 0.615385,
+      "expected_fragmentation": 2.0,
+      "expected_moves": [
+        "701:scsi2:st-a->st-b",
+        "701:scsi3:st-a->st-b",
+        "701:scsi4:st-a->st-c"
+      ],
+      "expected_order": [
+        {
+          "disk_key": "701:scsi2",
+          "move": "701:scsi2:st-a->st-b",
+          "transient_target_used_tib": 3.0,
+          "transient_reserve_basis_tib": 2.0,
+          "transient_required_tib": 7.0,
+          "capacity_tib": 40.0,
+          "ok": true
+        },
+        {
+          "disk_key": "701:scsi3",
+          "move": "701:scsi3:st-a->st-b",
+          "transient_target_used_tib": 5.0,
+          "transient_reserve_basis_tib": 4.0,
+          "transient_required_tib": 13.0,
+          "capacity_tib": 40.0,
+          "ok": true
+        },
+        {
+          "disk_key": "701:scsi4",
+          "move": "701:scsi4:st-a->st-c",
+          "transient_target_used_tib": 3.0,
+          "transient_reserve_basis_tib": 2.0,
+          "transient_required_tib": 7.0,
+          "capacity_tib": 40.0,
+          "ok": true
+        }
+      ],
+      "expected_final_loads": {
+        "st-a": 1.0,
+        "st-b": 1.0,
+        "st-c": 1.0
+      },
+      "expected_final_reserve": {
+        "st-a": {
+          "load": 1.0,
+          "used_tib": 5.0,
+          "largest_footprint_tib": 4.0,
+          "required_tib": 13.0,
+          "violates_reserve": false
+        },
+        "st-b": {
+          "load": 1.0,
+          "used_tib": 5.0,
+          "largest_footprint_tib": 4.0,
+          "required_tib": 13.0,
+          "violates_reserve": false
+        },
+        "st-c": {
+          "load": 1.0,
+          "used_tib": 3.0,
+          "largest_footprint_tib": 2.0,
+          "required_tib": 7.0,
+          "violates_reserve": false
+        }
+      },
+      "expected_spread_after": 0.0,
+      "expected_capacity_spread_after": 0.461538,
+      "lexicographic": {
+        "min_total_slack_tib": 0.0,
+        "expected_objective_nonreserve": 4.05,
+        "expected_move_count": 3,
+        "expected_moves": [
+          "701:scsi2:st-a->st-b",
+          "701:scsi3:st-a->st-b",
+          "701:scsi4:st-a->st-c"
+        ],
+        "agrees_with_big_m_at_configured_p": true,
+        "big_m_agreement_threshold_p": null,
+        "big_m_p_configured": 1000.0,
+        "big_m_p_min_computed": 23051195.733
+      },
+      "expected_split_excess_after_tib": 2.0,
+      "expected_vm_footprints_tib": {
+        "701": [
+          4.0,
+          4.0,
+          2.0
+        ]
+      },
+      "split_gate_opens_after": false
+    }
+  ],
+  "payback_split_plan": {
+    "beta_move_count": 0.25,
+    "delta_capacity_spread": 0.0,
+    "per_move": [
+      {
+        "disk": "701:scsi2",
+        "size_tib": 2.0,
+        "duration_mirror_seconds": 10485.76,
+        "duration_wipe_seconds": 0.0,
+        "duration_seconds": 10485.76,
+        "cost_load_seconds": 20971.52
+      },
+      {
+        "disk": "701:scsi3",
+        "size_tib": 2.0,
+        "duration_mirror_seconds": 10485.76,
+        "duration_wipe_seconds": 0.0,
+        "duration_seconds": 10485.76,
+        "cost_load_seconds": 20971.52
+      },
+      {
+        "disk": "701:scsi4",
+        "size_tib": 2.0,
+        "duration_mirror_seconds": 10485.76,
+        "duration_wipe_seconds": 0.0,
+        "duration_seconds": 10485.76,
+        "cost_load_seconds": 20971.52
+      }
+    ],
+    "total_cost_load_seconds": 62914.56,
+    "benefit_load_seconds": 157680000.0,
+    "ratio": 2506.26,
+    "aggregate_ok": true,
+    "reserve_shortfall_tib_before": 0.0,
+    "reserve_shortfall_tib_after": 0.0,
+    "repair_exempt": false,
+    "accepted": true,
+    "repair_markers": {
+      "701:scsi2": false,
+      "701:scsi3": false,
+      "701:scsi4": false
+    }
+  },
+  "split": {
+    "split_vm_footprint_tib": 2.0,
+    "mu_vm_split_per_tib": 1.0,
+    "caps_tib": {
+      "701": 2.0
+    },
+    "excess_before_tib": 8.0,
+    "gate_opens_initial": true,
+    "counterfactual_split_off": {
+      "expected_objective": 0.0,
+      "expected_moves": [],
+      "gate_opens_initial": false
+    }
+  }
+}

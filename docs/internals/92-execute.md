@@ -48,10 +48,12 @@ pending-change pin").
 
 `_live_transient_check()`'s arithmetic is the identical section 8.1
 formula `schedule.transient_invariant_ok()` checks against the in-memory
-model — the target must still hold `used_b + Σ z_m + max(f_b·max(Z_b, max
-z_m), hard_b) ≤ C_b` while the move is in flight, `z_m` each move's disk
-size, `f_b` the storage's snapshot-reserve factor, `Z_b` the largest disk
-already resident and `hard_b` the transient free-space floor. Both call the
+model — the target must still hold `used_b + Σ z_m + max(f_b·max(Z_b, max_v(F_{v,b} +
+Σ z_m of v)), hard_b) ≤ C_b` while the move is in flight, `z_m` each move's disk
+size, `f_b` the storage's snapshot-reserve factor, `Z_b` the largest per-VM
+footprint already resident, `F_{v,b}` the footprint VM `v` already has there (an
+incoming disk joins its *own* VM's footprint — two disks of one VM landing together
+raise it by both) and `hard_b` the transient free-space floor. Both call the
 same `reserve.transient_charge_ok()` (see `95-schedule.md`); the live
 check differs only in where `used_b` and `C_b` come from. The same *rule*,
 a different *data source*, not a second implementation of it (AGENTS.md
@@ -90,15 +92,16 @@ Two properties keep the listing figure safe to trust:
 
 **`Z_b` is a planning-time figure, on purpose.** Of the three inputs the
 formula takes from the world, `used_b` and `C_b` are read fresh; `Z_b`, the
-largest managed disk resident on the target, is not. It comes from
-`execute_plan()`'s `largest_by_storage`, which starts as the model's
-`largest_disk_bytes()` and is raised only by this run's own completed moves.
-The listing cannot replace it: `Z_b` is defined over *managed* disks
+largest per-VM footprint resident on the target, is not. It comes from
+`execute_plan()`'s `footprints_by_storage` (`{storage: {vmid: F_{v,b}}}`), which starts as the
+model's `reserve.vm_footprints_bytes()` and is raised only by this run's own completed moves
+(a landed disk is added to its VM's footprint; the source's is never lowered, which can only
+make the check more conservative). The listing cannot replace it: `Z_b` is defined over *managed* disks
 (section 5.3's (C4)), and a listing entry does not say whether a volume
 belongs to a managed disk. The residual: a managed disk that something else
 lands on the target between planning and the move appears in `used_b` at its
 full provisioned size, but does not raise `Z_b`, so only the reserve
-multiplier's growth on the new largest disk, `f_b·(Z_live − Z_model)`, goes
+multiplier's growth on the new largest footprint, `f_b·(Z_live − Z_model)`, goes
 uncounted — never the disk's own bytes. That is narrower than the staleness
 the check had before it read the listing, and it is a bound, not a bug.
 
@@ -208,8 +211,8 @@ at all, whenever the storage has no configured `saferemove_throughput` —
 this only tightens the criterion where PVE's own config gives an exact
 number to tighten it with.
 
-`execute_plan()`'s own `largest_by_storage` bookkeeping (section 8.1's
-`Z_s`, the largest resident disk on a storage — needed for *later* moves
+`execute_plan()`'s own `footprints_by_storage` bookkeeping (section 8.1's
+`Z_s`, the largest per-VM footprint on a storage — needed for *later* moves
 in the same run that check the same target's live transient invariant)
 updates on `"moved"` **and** `"draining"`, not `"moved"` alone: the mirror
 itself is physically complete either way, so a target storage's own
@@ -608,7 +611,7 @@ assemble its inputs, and it does so by calling the same
 `_live_transient_check()` the sequential executor uses, passing the
 in-flight moves whose target is the candidate's (`_inflight_onto()`):
 the check reads the live provisioned `used_b` and capacity, takes `Z_b`
-from this run's own (C4) `largest_by_storage` tracking, and charges every
+from this run's own (C4) `footprints_by_storage` tracking, and charges every
 other in-flight move's disk size alongside the candidate's own — see "The
 live transient check" above for why the in-flight targets are left out of
 the listing sum. On a `"launch"` verdict the target's listing at that

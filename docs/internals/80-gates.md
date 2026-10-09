@@ -24,7 +24,23 @@ decides:
    `act=True` immediately, bypassing drift and imbalance entirely — section
    13's "safety is not subject to hysteresis" made literal, not just
    documented intent.
-2. **Drift gate.** `‖ℓ_now − ℓ_last‖₁ / ‖ℓ_last‖₁ ≥ gates.drift_threshold` —
+2. **Capacity gate.** `(max_s b_s − min_s b_s) / b̄ ≥ gates.capacity_spread_threshold` on
+   fill fractions rather than loads (`b̄` the group's mean fill; inactive when it is 0 or the
+   threshold is `null`). It bypasses drift and imbalance, like the reserve override, but is a
+   preference: cooldowns, payback and the transient invariant still apply.
+3. **Split gate** (`gates.split_gate()`, only when `evaluate_group_gates()` is handed the
+   objective weights). Opens the group when the large-VM split rule (`snapshot_reserve.
+   split_vm_footprint`, `objective.mu_vm_split_per_tib`) can make progress: some VM above the
+   threshold (`V^split`) has a movable disk and an eligible storage (accepts the disk's format,
+   not in storage cooldown) such that moving *that one disk alone* strictly lowers the VM's
+   peak footprint on any one storage and leaves the target without a reserve shortfall (the
+   shared `reserve.compute_reserve_status()`). It bypasses drift and imbalance and is off when
+   the rule is. The single-move test is deliberate: once a VM sits at the best split its
+   storages allow (four, four and two TiB on three storages) no single move lowers its peak, so
+   the gate stops holding the group open on every run. It is sufficient, not exact — a split only
+   a *pair* of moves improves does not open the group by itself; the next run that passes any
+   other gate picks it up. `GateDecision.split_vmid` names the VM that opened it.
+4. **Drift gate.** `‖ℓ_now − ℓ_last‖₁ / ‖ℓ_last‖₁ ≥ gates.drift_threshold` —
    `ℓ_now`/`ℓ_last` are this run's and the last-executed-balance's per-disk
    load vectors (each entry one disk's `ℓ_d`, section 4; see
    `docs/internals/70-loadmodel.md`), and `‖·‖₁` is the sum of absolute
@@ -39,7 +55,7 @@ decides:
    payback still gates execution. `last_load=None` skips this gate outright, per
    section 6's own degenerate-case table — not "treat as zero drift", which would make an
    operator's very first run fail to act on an already-imbalanced cluster.
-3. **Imbalance gate.** `(max_s u_s − min_s u_s) / u* ≥ gates.imbalance_threshold` —
+5. **Imbalance gate.** `(max_s u_s − min_s u_s) / u* ≥ gates.imbalance_threshold` —
    `u_s` is each storage's own fill fraction and `u*` the group's average
    across storages (`GroupLoad.average_utilization`; both section 4, see
    `docs/internals/70-loadmodel.md`), so the gate fires once the spread

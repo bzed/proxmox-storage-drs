@@ -62,9 +62,10 @@ from proxmox_storage_drs.heuristic import (
 )
 from proxmox_storage_drs.reserve import (
     compute_reserve_status,
-    largest_disk_bytes,
+    largest_footprint,
     managed_used_bytes,
     transient_charge_ok,
+    vm_footprints_bytes,
 )
 from proxmox_storage_drs.topology import Disk, Group, Storage, disk_size_on, target_format
 
@@ -135,7 +136,8 @@ def transient_invariant_ok(
     target_storage: Storage,
 ) -> bool:
     """Section 8.1's transient invariant, called with the single-move set
-    ``{disk}`` -- ``used_b + z_d + max(f_b * max(Z_b, z_d), hard_b) <= C_b``,
+    ``{disk}`` -- ``used_b + z_d + max(f_b * max(Z_b, F_{v(d),b} + z_d), hard_b) <= C_b``
+    (``Z_b`` the largest per-VM footprint on ``b``, section 5.3.3),
     via :func:`reserve.transient_charge_ok`, the one arithmetic core section
     8.1's own generalized (concurrent) form and this single-move form both
     reduce to (AGENTS.md section 5; see that function's docstring).
@@ -159,15 +161,16 @@ def transient_invariant_ok(
         )
         + target_storage.foreign_used_bytes
     )
-    existing_largest = largest_disk_bytes(
+    footprints = vm_footprints_bytes(
         group.disks, target_storage.id, storage_of=storage_of, storage=target_storage
     )
     return transient_charge_ok(
         target_storage.reserve_factor,
         target_storage.capacity_bytes,
         used_b,
-        existing_largest,
-        [disk_size_on(disk, target_storage)],
+        largest_footprint(footprints)[0],
+        footprints,
+        [(disk.vmid, disk_size_on(disk, target_storage))],
         target_storage.free_space_hard_bytes,
     )
 
@@ -176,7 +179,7 @@ def _resolves_reserve_violation(group: Group, state: Assignment, disk: Disk) -> 
     """Section 8.2 priority 1: is ``disk``'s *current* (in ``state``)
     storage presently violating (C5)? Moving any disk off a violating
     storage always helps or leaves it unchanged (removing bytes cannot
-    increase `used`, and cannot increase the largest-disk-driven reserve
+    increase `used`, and cannot increase the largest-footprint-driven reserve
     term either) -- see ``heuristic._repair``'s identical reasoning -- so
     "source currently violates" is sufficient to qualify without needing
     to re-check the reduction amount here."""
@@ -221,8 +224,8 @@ def order_moves(
             group, state, load_by_key, objective, u_star, b_bar, tiny_disk_bytes
         )
         current_imbalance = current_breakdown.imbalance_term
-        # Section 8.2's revised ranking: "the alpha, delta and kappa*w
-        # terms of section 5.4 -- the parts whose improvement persists;
+        # Section 8.2's revised ranking: "the alpha, delta, kappa*w and
+        # mu terms of section 5.4 -- the parts whose improvement persists;
         # beta/gamma are one-time costs". `imbalance_term`/
         # `capacity_spread_term`/`fragmentation_term` are already
         # alpha-/delta-/kappa*w-weighted (heuristic.ObjectiveBreakdown), so
@@ -234,6 +237,7 @@ def order_moves(
             current_imbalance
             + current_breakdown.capacity_spread_term
             + current_breakdown.fragmentation_term
+            + current_breakdown.split_excess_term
         )
 
         feasible: list[str] = []
@@ -271,6 +275,7 @@ def order_moves(
                 trial_breakdown.imbalance_term
                 + trial_breakdown.capacity_spread_term
                 + trial_breakdown.fragmentation_term
+                + trial_breakdown.split_excess_term
             )
             reduction = current_imbalance - trial_breakdown.imbalance_term
             persistent_reduction = current_persistent - trial_persistent

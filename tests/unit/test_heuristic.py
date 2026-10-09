@@ -20,11 +20,13 @@ import pytest
 from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.heuristic import (
     _repair,
+    active_split_caps,
     best_single_disk_alternative,
     compute_vm_weights,
     evaluate_assignment,
     group_average_utilization,
     raw_affinity_debt,
+    raw_split_excess_tib,
     run_heuristic,
     seed_assignment,
 )
@@ -211,7 +213,8 @@ def test_initial_imbalance_term_matches_section_14_2_e_before() -> None:
     breakdown = evaluate_assignment(group, assignment, loads, DEFAULT_OBJECTIVE, 7.4 / 3, 0, 0)
     assert breakdown.imbalance_term == pytest.approx(8.0667, abs=1e-4)
     assert breakdown.reserve_statuses["san-a"].violated
-    assert breakdown.reserve_statuses["san-a"].shortfall_bytes == round(0.5 * TIB)
+    # 3.0 TiB footprint (VM 101: 2.0 + 1.0): 4.95 TiB used + 2 x 3.0 = 10.95 - 8.0 -- section 14.1
+    assert breakdown.reserve_statuses["san-a"].shortfall_bytes == round(2.5 * TIB)
     assert breakdown.utilization["san-a"] == pytest.approx(6.5)  # c_s=1.0 -> u_s == L_s
 
 
@@ -360,18 +363,20 @@ def test_heuristic_iterations_bounds_the_descend_search() -> None:
     local optimum -- a real, bounded-computation guarantee worth its own
     test, not just an implementation detail.
 
-    Repair moves `101:scsi1` off san-a (san-a -> san-c) to fix the reserve
-    violation, splitting VM 101. With section 5.4's w_v reweighting VM 101's
-    fragmentation at 2.7027 (its load is well above the group's mean), the
-    single most valuable move descend can make in one step is now a *swap*
-    that reunites VM 101 on san-a while relocating `102:scsi0` to san-c in
-    the same step -- one net move from the original assignment (`102:scsi0`
-    only), not two, since it also undoes repair's own move."""
+    Under the per-VM footprint (section 5.3.3) san-a's only repair is `101:scsi1`
+    (its leaving drops VM 101's footprint from 3.0 to 2.0 TiB and frees a TiB, a
+    2.5 TiB shortfall repaired in one move; moving `102:scsi0` would leave the footprint
+    at 3.0). Descend, capped at one step, then makes the single most valuable move,
+    `102:scsi0` to san-b: two net moves from the original. Uncapped, the same
+    run keeps going and ends on the three-move local optimum."""
     group = section_14_group()
     loads = section_14_loads()
     result = run_heuristic(group, loads, DEFAULT_OBJECTIVE, heuristic_iterations=1)
     assert result.repair_moves == 1
-    assert result.breakdown.moves == 1  # the swap above nets to one move from the original
+    assert result.assignment["101:scsi1"] == "san-c"
+    assert result.breakdown.moves == 2
+    uncapped = run_heuristic(group, loads, DEFAULT_OBJECTIVE)
+    assert uncapped.breakdown.moves == 3
 
 
 def test_reserve_violation_is_repaired_even_with_beta_high_enough_to_forbid_balance_moves() -> None:
@@ -747,3 +752,106 @@ def test_best_single_disk_alternative_returns_none_when_every_disk_is_pinned() -
     baseline = evaluate_assignment(group, seed_assignment(group), loads, DEFAULT_OBJECTIVE, 0.25, 0)
 
     assert best_single_disk_alternative(group, loads, DEFAULT_OBJECTIVE, 0, 0.25, baseline) is None
+
+
+# --------------------------------------------- large-VM split term (section 5.3.3)
+
+
+def _large_vm_group(split_bytes: int | None) -> Group:
+    def storage(id_: str) -> Storage:
+        return dataclasses.replace(make_storage(id_, capacity_tib=40.0))
+
+    disks = tuple(make_disk(f"701:scsi{i}", 2.0, 0.0, "san-a") for i in range(3))
+    return Group(
+        name="g",
+        storages=(storage("san-a"), storage("san-b")),
+        disks=disks,
+        split_vm_footprint_bytes=split_bytes,
+    )
+
+
+def test_split_excess_term_charges_mu_per_tib_of_peak_beyond_the_cap() -> None:
+    """Three 2 TiB disks of one VM on one storage: peak 6 TiB, cap 2 TiB, excess 4 TiB."""
+    group = _large_vm_group(2 * TIB)
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, mu_vm_split_per_tib=1.5)
+    breakdown = evaluate_assignment(group, seed_assignment(group), {}, objective, 0.0, 0.0)
+    assert breakdown.split_excess_bytes == {701: 4 * TIB}
+    assert breakdown.split_peak_bytes == {701: 6 * TIB}
+    assert breakdown.split_caps_bytes == {701: 2 * TIB}
+    assert breakdown.split_excess_term == pytest.approx(1.5 * 4.0)
+    assert raw_split_excess_tib(breakdown) == pytest.approx(4.0)
+    assert breakdown.total >= breakdown.split_excess_term
+    # Spreading one disk off lowers the peak to 4 TiB: excess 2.
+    moved = dict(seed_assignment(group), **{"701:scsi2": "san-b"})
+    after = evaluate_assignment(group, moved, {}, objective, 0.0, 0.0)
+    assert after.split_excess_bytes == {701: 2 * TIB}
+
+
+def test_split_term_is_peak_not_a_sum_over_storages() -> None:
+    """6 TiB over two storages as 4 + 2 and as 2 + 4 are equally good; 6 + 0 is worse."""
+    group = _large_vm_group(2 * TIB)
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, mu_vm_split_per_tib=1.0)
+    even = dict(seed_assignment(group), **{"701:scsi2": "san-b"})
+    assert evaluate_assignment(group, even, {}, objective, 0.0, 0.0).split_excess_term == 2.0
+
+
+@pytest.mark.parametrize(
+    ("split_bytes", "mu"), [(None, 1.0), (2 * TIB, 0.0)], ids=["rule-off", "mu-zero"]
+)
+def test_split_term_is_absent_when_the_rule_is_off(split_bytes: int | None, mu: float) -> None:
+    group = _large_vm_group(split_bytes)
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, mu_vm_split_per_tib=mu)
+    assert active_split_caps(group, objective) == {}
+    breakdown = evaluate_assignment(group, seed_assignment(group), {}, objective, 0.0, 0.0)
+    assert breakdown.split_excess_term == 0.0
+    assert breakdown.split_excess_bytes == {}
+
+
+def test_a_vm_no_larger_than_the_cap_is_never_in_v_split() -> None:
+    group = _large_vm_group(6 * TIB)  # total 6 TiB is not above 6 TiB
+    assert active_split_caps(group, DEFAULT_OBJECTIVE) == {}
+
+
+def test_a_disk_larger_than_the_cap_raises_its_vms_cap_to_its_own_size() -> None:
+    group = dataclasses.replace(
+        _large_vm_group(2 * TIB),
+        disks=(
+            make_disk("701:scsi0", 5.0, 0.0, "san-a"),
+            make_disk("701:scsi1", 1.0, 0.0, "san-a"),
+        ),
+    )
+    assert active_split_caps(group, DEFAULT_OBJECTIVE) == {701: 5 * TIB}
+
+
+def test_a_large_vms_affinity_weight_is_one_whatever_its_io() -> None:
+    group = _large_vm_group(2 * TIB)
+    loads = {"701:scsi0": 9.0, "701:scsi1": 0.0, "701:scsi2": 0.0}
+    busy = Group(
+        name="g",
+        storages=group.storages,
+        disks=group.disks + (make_disk("702:scsi0", 0.5, 0.1, "san-b"),),
+        split_vm_footprint_bytes=2 * TIB,
+    )
+    loads["702:scsi0"] = 0.1
+    assert compute_vm_weights(busy, loads, [701, 702])[701] > 1.0
+    assert compute_vm_weights(busy, loads, [701, 702], split_vmids=[701])[701] == 1.0
+
+
+def test_mu_zero_restores_the_io_weight_of_a_large_vm() -> None:
+    """REVIEW.md AO-04: `mu = 0` empties V^split for the weights too (plan 5.3.3)."""
+    group = _large_vm_group(2 * TIB)
+    busy = Group(
+        name="g",
+        storages=group.storages,
+        disks=group.disks + (make_disk("702:scsi0", 0.5, 0.1, "san-b"),),
+        split_vm_footprint_bytes=2 * TIB,
+    )
+    loads = {"701:scsi0": 9.0, "701:scsi1": 0.0, "701:scsi2": 0.0, "702:scsi0": 0.1}
+    off = dataclasses.replace(DEFAULT_OBJECTIVE, mu_vm_split_per_tib=0.0)
+    on = dataclasses.replace(DEFAULT_OBJECTIVE, mu_vm_split_per_tib=1.0)
+    assert (
+        evaluate_assignment(busy, seed_assignment(busy), loads, off, 1.0, 0.0).vm_weights[701] > 1
+    )
+    assert (
+        evaluate_assignment(busy, seed_assignment(busy), loads, on, 1.0, 0.0).vm_weights[701] == 1
+    )

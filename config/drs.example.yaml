@@ -182,10 +182,20 @@ groups:
 
 # --------------------------------------------------------- snapshot reserve
 snapshot_reserve:
-  # Keep factor * (largest disk on the storage) free at all times, including
-  # transiently during a migration. PVE 9 volume-chain snapshots allocate a new
-  # full-size LV per snapshot, which is what this protects.
+  # Keep factor * (the largest VM footprint on the storage) free at all times,
+  # including transiently during a migration. A VM's footprint on a storage is the
+  # SUM of all its disks there: a snapshot is taken of the whole VM, and PVE 9
+  # volume-chain snapshots allocate a new full-size volume per snapshotted disk.
+  # A VM with five 2 TiB disks on one storage needs 10 TiB free for one snapshot.
   factor: 2.0
+  # The most of ONE VM that ONE storage should hold. A VM whose disks add up to more
+  # than this is spread over several storages until no storage holds more than this
+  # of it -- or as little as the available storages allow (five 2 TiB disks on three
+  # storages end up 4 + 4 + 2 TiB; the cap is a preference, never a requirement). A
+  # single disk larger than this cannot be split and is simply allowed to stay.
+  # A byte count or a byte-unit string ("2TiB"); null switches the rule off.
+  # How strongly it is pursued: objective.mu_vm_split_per_tib.
+  split_vm_footprint: 2TiB
   # Count volumes not managed by DRS (templates, orphans, other clusters)
   # against capacity. Strongly recommended.
   count_foreign_volumes: true
@@ -289,6 +299,13 @@ objective:
   # open a group and plan prints "no moves made". Raise it to spread data on its
   # own; above alpha_spread, data evenness outweighs I/O in every comparison.
   delta_capacity_spread: 0.5
+  # Weight of the large-VM split rule (snapshot_reserve.split_vm_footprint), per TiB
+  # of "excess" -- the most of a large VM any one storage holds beyond the cap. The
+  # default 1.0 lets a split win against I/O-balance and affinity preferences for
+  # any disk above roughly 0.3-0.8 TiB. 0 turns the term off; below
+  # kappa_vm_affinity the rule rarely acts (config validation warns). A large VM's
+  # affinity is not weighted by its I/O, so a busy VM cannot veto the policy.
+  mu_vm_split_per_tib: 1.0
   # Disks that cannot move THIS RUN (snapshot-blocked, config-excluded, or on a
   # locked VM) still count toward the affinity term by default: such a disk still
   # occupies a storage, so the VM really is spread, and its fixed location anchors

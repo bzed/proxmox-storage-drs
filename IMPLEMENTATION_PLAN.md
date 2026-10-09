@@ -1560,11 +1560,13 @@ effectively hard:
    number**, because the bound depends on the group's absolute load `T_g` (§4):
 
    ```
-   U_obj  =  2·α·T_g  +  β·|D|  +  γ·Σ_d z_d  +  κ·|V|·(|S|−1)  +  δ·2·|S|
+   U_obj  =  2·α·T_g  +  β·|D|  +  γ·Σ_d z_d  +  κ·w_max·|V|·(|S|−1)  +  δ·2·|S|
           +  μ·Σ_{v∈V^split} (Σ_{d : v(d)=v} z_d − T_v)
                                                                      (upper bound on the
                                                                      non-reserve objective;
                                                                      Σ_s d_s ≤ 2|S| by (C7),
+                                                                     w_max = max_v w_v, since the κ
+                                                                     term is w_v-weighted (§5.4),
                                                                      o_v ≤ Σ z_d − T_v by (C9))
    P_min  =  U_obj / ε_r          with  ε_r = the smallest reserve shortfall we refuse to trade
    ```
@@ -1575,7 +1577,7 @@ effectively hard:
    balance. Config `objective.reserve_violation_penalty` is then a *floor*, not the value used:
    the model uses `P = max(configured, P_min)` and logs a warning when it had to raise it. That
    warning must be *checkable*, not just an announcement: log `P_configured`, `P_min`, `P_used`,
-   and the five inputs the bound came from — `T_g`, `|D|`, `Σ_d z_d`, `|V|·(|S|−1)` and the summed
+   and the six inputs the bound came from — `T_g`, `|D|`, `Σ_d z_d`, `w_max`, `|V|·(|S|−1)` and the summed
    split headroom `Σ_{v∈V^split} (Σ z_d − T_v)` (§5.3.3) — plus the `ε_r`
    granularity, and repeat them in `pve-storage-drs explain`. `P_min` moves with `T_g`, so the same config file
    legitimately yields different effective penalties on a quiet group and a busy one, and on the
@@ -1583,9 +1585,12 @@ effectively hard:
    sees the engine using 2.3×10⁷ needs to be able to reconstruct that number rather than take it on
    faith.
 
-   Worked against §14 (`T_g = 7.4`, `|D| = 6`, `Σz = 6.5 TiB`, `|V| = 5`, `|S| = 3`, `δ = 0.5`, sizes
-   in TiB, and the split rule off as that fixture sets it, so the `μ` term is 0):
-   `U_obj = 14.8 + 1.5 + 0.325 + 5.0 + 3.0 = 24.6`, so `P_min = 24.6 · 2²⁰ ≈ 2.58×10⁷`. The
+   Worked against §14 (`T_g = 7.4`, `|D| = 6`, `Σz = 6.5 TiB`, `|V| = 5`, `|S| = 3`, `δ = 0.5`,
+   `w_max = w₁₀₁ = 2.703` (§14.3), sizes in TiB, and the split rule off as that fixture sets it, so
+   the `μ` term is 0): `U_obj = 14.8 + 1.5 + 0.325 + 13.51 + 3.0 = 33.14`, so
+   `P_min = 33.14 · 2²⁰ ≈ 3.47×10⁷` (the figure `fc-tier1.expected.json` records as
+   `big_m_p_min_computed`; an earlier revision of this bound used a flat `κ` weight of 1 and read
+   `24.6`, `2.58×10⁷` — REVIEW.md AO-05). The
    configured default `P = 1000` is **four orders of magnitude too small** to be provably dominant at
    mebibyte granularity — it is dominant for violations above roughly 25 GiB and silently tradeable
    below that. This is precisely why option 1 is the default and this option needs the computed `P`.
@@ -1885,7 +1890,7 @@ cap requires. The reserve, not the split rule, is what prefers the wider of two 
 when space is tight, through (C5). §14.9 works the three-storage row as a fixture.
 
 **Weight, and how it meets affinity.** `μ = objective.mu_vm_split_per_tib` (default 1.0, per TiB of
-`o_v`, in the same TiB scaling as `γ`; `0` disables the term and the split gate). Three rules make it
+`o_v`, in the same TiB scaling as `γ`; `0` disables the term, the split gate **and** rule 1 below — with the policy off there is nothing for the weight to defer to, so `V^split` is empty for every purpose, the weights included). Three rules make it
 the *strong* preference §1 asks for rather than one `κ` can veto:
 
 1. **A large VM's affinity is not I/O-weighted.** `w_v = 1` for every `v ∈ V^split` (§5.4 otherwise
@@ -2172,7 +2177,7 @@ not a safety one — cooldowns, payback and the transient invariant still apply 
 single-move test is what keeps it quiet once the job is done: a VM at the best split its storages
 allow (§5.3.3's `4, 4, 2` on three storages) has no single move that lowers its peak, so the gate
 does not hold the group open on every run, and a VM whose every disk is pinned never opens it. The
-test is `|D_v| · |S|` reserve evaluations per large VM, cheap enough to run every time. It is a
+test costs one footprint pass per large VM plus `O(|S|)` per (movable disk, target) pair to find the peak after the move, and a reserve evaluation only for the pairs that lower it (REVIEW.md AO-06) — cheap enough to run every time, and a group with no VM above the cap pays nothing. It is a
 sufficient test, not an exact one: a split that only a *pair* of moves can improve does not open
 the group by itself — the next run that passes any other gate gets it — and that is accepted for a
 preference. Passing it opens the group for planning and nothing more; at the default weights the
@@ -3031,8 +3036,10 @@ can see which large VMs the storages cannot spread further. `show-load` prints e
 with the VM it comes from. For §14.9's fixture:
 
 ```
-  split: VM 701 largest footprint 10.0 → 4.0 TiB (cap 2.0 TiB, excess 8.0 → 2.0 — the best 3 storages allow)
+  split: VM 701 largest footprint 10.0 → 4.0 TiB (cap 2.0 TiB, excess 8.0 → 2.0 — the solver found no better split across 3 storages)
 ```
+
+**As built (phase 17):** the line never claims a *proven* best split (REVIEW.md AO-03: `solver_status: "optimal"` means within `solver.mip_gap`, and the objective optimum trades the peak against `β`/`γ`/`κ`, so even a gap of 0 would not prove the peak minimal). When the MILP settled (`solver_status: "optimal"`) a result still above its cap ends "— the solver found no better split across N storages"; any other result (the heuristic, a `feasible` incumbent) ends "— still above the cap". The gate's `GateDecision.split_vmid` reaches the log record and the `gate` object of `show-load`/`plan --json` as `split_vmid`.
 
 **A converting move says so.** A move onto an `enforce_format` storage whose source is in another
 format (§5.3.2) carries the conversion on its plan line, after the size — `1.5 TiB  raw→qcow2` — and
@@ -3069,16 +3076,16 @@ and names the one closest to being worth it, with the section 5.4 term-by-term a
 rejected it:
 
 ```
-  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + spread 0 + reserve 0 = 0.576
+  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + spread 0 + split 0 + reserve 0 = 0.576
   no moves made: the objective is lowest at the current assignment
   closest alternative: 110:scsi1 VM-krbd → VM
-    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, spread 0→0, reserve 0→0
+    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, spread 0→0, split 0→0, reserve 0→0
     total 0.576 → 0.8  (worse by 0.223 -- rejected)
 ```
 
 `--json` carries the same information as `rejected_alternative` (`null` unless this case applies),
 alongside `disk_key`/`vmid`/`device`/`from_storage`/`to_storage`, `baseline` and `objective` (each
-the six-term breakdown `objective` above already serializes), and `worse_by`. `plan`/`apply` still
+the seven-term breakdown `objective` above already serializes), and `worse_by`. `plan`/`apply` still
 print none of it, for the same reason as everything else in this section (V-02, above) — it is
 narration for a human, not a machine-checked verdict.
 
@@ -3246,7 +3253,7 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `capability_weight > 0` | Appears in a denominator |
 | `reserve_factor ≥ 0` | Negative reserve is meaningless |
 | `snapshot_reserve.split_vm_footprint` is `null` or a parseable byte value `> 0` | §5.3.3. `0` would make every multi-disk VM's cap its largest disk and spread every one of them — a typo, not a policy |
-| `mu_vm_split_per_tib ≥ 0`; warn when `> 0` and `< kappa_vm_affinity` | A negative weight would reward gathering large VMs; below `κ`, a TiB of split excess no longer pays for opening a new storage and the rule rarely acts (§5.3.3's break-even) |
+| `mu_vm_split_per_tib ≥ 0` (`0` switches off the term, the split gate and the `w_v = 1` rule together); warn when `> 0` and `< kappa_vm_affinity` | A negative weight would reward gathering large VMs; below `κ`, a TiB of split excess no longer pays for opening a new storage and the rule rarely acts (§5.3.3's break-even) |
 | `free_space.soft/hard`: absolute values `≥ 0` and parseable (bytes or byte-unit string); percentages `"N%"` with `0 ≤ N < 100`; `hard ≤ soft` after per-storage resolution and percent-to-bytes conversion | §5.3.1. A `hard` above `soft` makes every plan for a compliant storage infeasible; a percentage of 100 or more is a typo, not a policy |
 | `enforce_format ∈ {raw, qcow2, null}`, and for every storage the entry resolves to (after pattern expansion) the value is in the formats that storage's type can hold (§5.3 (C2)) | §5.3.2. `qcow2` on an RBD, ZFS or LVM-thin storage could never be honoured; a pattern entry that matches one such storage is the same error, named with the storage, because the cluster changed under the pattern rather than the file |
 | `free_space.soft < C_s` for every storage, after resolution | A requirement no disk could leave room for is a typo; caught only once the inventory is loaded, like the pattern rules of §11.4 |
@@ -3435,7 +3442,7 @@ Each phase is independently testable and useful on its own.
 | 14 | Holt-Winters-driven placement; §7.3 saturation guard removed (§12.1; REVIEW.md T-03, AL-01, AL-04) | Two commits, in order. **14a** deletes the saturation guard — `migration.bwlimit_bytes_per_sec` is the only throttle a migration needs — deleting `saturation_load`/`saturation_ceiling` from the schema outright (no compatibility shim: a config that sets them fails validation, and the committed bundles' `config.yaml` were edited). **14b** scales each disk's `ℓ_d` by a backtest-validated Holt-Winters forecast of its p95 over the next `window.lookback`, at the one point gates, solver, payback and ordering all read it. The default `forecast.model: quantile` is unchanged: §14 fixtures and quantile corpus variants byte-identical apart from the removed saturation fields. Done when §12.1's checklist holds |
 | 15 | Single-source configuration defaults (§11.1; REVIEW.md AL-03) | Every default exists **exactly once, on the dataclass field**; the loader constructs each config class from the raw mapping by passing **only the keys the operator actually wrote**, through field-level converters (duration/byte/percent strings, list→tuple), so no `.get(key, default)` ever restates a default — today's twin copies in `config.py` (e.g. `model: str = "quantile"` on `ForecastConfig` beside `fc_raw.get("model", "quantile")` in the loader, and the same shape for every other knob) are gone; `config_schema.json`, the third copy of the shape, is generated from the same field/type/enum source — or, if generation proves heavier than checking, a check target fails on drift between schema and dataclasses — so it cannot rot either; **zero operator-visible behaviour change**: `--help`, the manual's option tables and `config/drs.example.yaml` values are byte-identical before and after, proven by the fixture and corpus checks running green untouched |
 | 16 | Per-storage target format, `enforce_format` (§5.3.2) | **Implemented, not yet live-tested.** The `qcow2`-on-`lvm` allocation rule was read from `LVMPlugin.pm` (`alloc_lvm_image`/`calculate_lvm_size`) and recorded in §5.3.2, and `z_{d,s}` has its third term (`topology.qcow2_lvm_allocation_bytes()`, an upper bound). Built as follows: `config_schema.json` gains `enforce_format` (`enum [raw, qcow2, null]`) on `groups[].storages[]` — no top-level key; `config.py` resolves it per expanded storage with §11.4's literal-beats-pattern precedence and runs §11.1's type check once the inventory is loaded; `topology.target_format()` and a per-pair `disk_size_on()` are the single implementations of `φ(d,s)` and `z_{d,s}`, and `storage_accepts_format()`'s callers in `optimize.py`, `heuristic.py` and `execute.py` pass `φ(d,s)` instead of `fmt_d`; the MILP's (C4)/(C5)/(C7) rows and `schedule.transient_invariant_ok()` use `z_{d,s}`; `execute.py` sends `format=` iff `φ ≠ fmt_d` (§9.2), and its existing conversion charge becomes the planned case; `verify-storages`, the plan line and `--json` show it (§3.5, §9.5). The cases of that fixture — one enforcing target makes an otherwise ineligible move feasible, and the converted `z_{d,s}` changes which disk fits — are covered by `tests/unit/test_enforce_format.py` against both solver backends (an exhaustive-enumeration fixture from `generate_expected.py` is not added); every existing fixture and corpus bundle must reproduce the same decisions (no `enforce_format` ⇒ `z_{d,s} = z_d`); the corpus `expected.json` files change only by the two new per-move keys `format_from`/`format_to` (§9.5), which is the whole diff. The manual, `config/drs.example.yaml` and `docs/internals/` move in the same commit (no CLI option is added, so the manpage's `OPTIONS` is unchanged). **Done when** additionally a live `confirm` run on the dev cluster converts one data disk and one `efidisk0` in each direction onto shared LVM, the source volume is observed gone (§9.3), and the target's listed size matches `z_{d,s}` |
-| 17 | Per-VM snapshot footprint and large-VM splitting (§5.3.3, (C4), (C9), §5.4 `μ`, §6 split gate, §7.2, §8.1, §9.2, §9.5) | `Z_s` is the largest per-VM footprint in one shared function that `reserve.compute_reserve_status()`, `schedule.transient_invariant_ok()`, `execute.py`'s live re-check, `optimize.py`'s (C4) rows and the heuristic all call — a second copy of the footprint sum is the same bug as a second reserve check (AGENTS.md §5); `config_schema.json`, `config.py`, `config/drs.example.yaml` and the manual gain `snapshot_reserve.split_vm_footprint` (default `2TiB`, `null` off) and `objective.mu_vm_split_per_tib` (default 1.0) with §11.1's two rules, and `drs.example.yaml`'s `snapshot_reserve.factor` comment stops saying "largest disk"; `optimize.py` adds `o_v` and (C9) and the `μ` term, `heuristic.compute_vm_weights()` returns `w_v = 1` for `V^split`, the heuristic's repair and polish steps follow §5.3.3; `loadmodel.py` gains the split gate; `payback.py`'s benefit gains `μ·ΔO·H`; `schedule.py`'s ordering ratio gains the `μ` term; `plan`/`apply`/`explain` print the `split:` line and `--json` carries `vm_splits[]` and the split-excess pair (§9.5); `show-load` and `verify-storages` print `Z_s` with its VM (§3.5). Fixtures: the generator's independent restatement of the reserve uses the footprint; the four existing fixtures state `split_vm_footprint_tib: null` explicitly (§14.1 says why), and the new `large-vm-split.yaml` of §14.9 states `2.0` and `mu_vm_split_per_tib: 1.0`; `generate_expected.py` regenerates every expected file — `fc-tier1` changes only as §14 records (initial `Z_a` 3.0 and `r_a` 2.5, shortfall pair 2.5 → 0.0, `101:scsi1` `repair: true`; optimum, objectives, order, transient targets and every payback number unchanged), `affinity-repair`'s stor-a reserve basis rises by its two tiny disks' bytes, `reserve-tradeoff` and `free-space-repair` (single-disk VMs only) do not change — and the per-storage `largest_tib` field is renamed `largest_footprint_tib`; a unit case covers §7.3's redundant-repair plan, which `fc-tier1` no longer exercises; the committed corpus bundles are replayed and their expected files regenerated, with any plan change explained in the commit. Every file matching `git grep -il 'largest disk'` is swept, the manual and internals included |
+| 17 | Per-VM snapshot footprint and large-VM splitting (§5.3.3, (C4), (C9), §5.4 `μ`, §6 split gate, §7.2, §8.1, §9.2, §9.5) | **Implemented.** `Z_s` is the largest per-VM footprint in one shared function that `reserve.compute_reserve_status()`, `schedule.transient_invariant_ok()`, `execute.py`'s live re-check, `optimize.py`'s (C4) rows and the heuristic all call — a second copy of the footprint sum is the same bug as a second reserve check (AGENTS.md §5); `config_schema.json`, `config.py`, `config/drs.example.yaml` and the manual gain `snapshot_reserve.split_vm_footprint` (default `2TiB`, `null` off) and `objective.mu_vm_split_per_tib` (default 1.0) with §11.1's two rules, and `drs.example.yaml`'s `snapshot_reserve.factor` comment stops saying "largest disk"; `optimize.py` adds `o_v` and (C9) and the `μ` term, `heuristic.compute_vm_weights()` returns `w_v = 1` for `V^split`, the heuristic's repair and polish steps follow §5.3.3; `gates.py` gains the split gate (`split_gate()`, handed the objective weights and the storage cooldowns by `evaluate_group_gates()`); `payback.py`'s benefit gains `μ·ΔO·H`; `schedule.py`'s ordering ratio gains the `μ` term; `plan`/`apply`/`explain` print the `split:` line and `--json` carries `vm_splits[]` and the split-excess pair (§9.5); `show-load` and `verify-storages` print `Z_s` with its VM (§3.5). Fixtures: the generator's independent restatement of the reserve uses the footprint; the four existing fixtures state `split_vm_footprint_tib: null` explicitly (§14.1 says why), and the new `large-vm-split.yaml` of §14.9 states `2.0` and `mu_vm_split_per_tib: 1.0`; `generate_expected.py` regenerates every expected file — `fc-tier1` changes only as §14 records (initial `Z_a` 3.0 and `r_a` 2.5, shortfall pair 2.5 → 0.0, `101:scsi1` `repair: true`; optimum, objectives, order, transient targets and every payback number unchanged), `affinity-repair`'s stor-a reserve basis rises by its two tiny disks' bytes, `reserve-tradeoff` and `free-space-repair` (single-disk VMs only) do not change — and the per-storage `largest_tib` field is renamed `largest_footprint_tib`; a unit case covers §7.3's redundant-repair plan, which `fc-tier1` no longer exercises; the committed corpus bundles are replayed and their expected files regenerated, with any plan change explained in the commit. Every file matching `git grep -il 'largest disk'` is swept, the manual and internals included |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
@@ -4656,7 +4663,7 @@ Four kinds of assertion that do hold:
    `check_invariants()` asserts the part of it that is an invariant: the plan never *raises* the
    shortfall. Not `= 0`: a group with no feasible
    repair legitimately ends above zero); "the objective the scheduler was handed
-   equals the objective recomputed from the final assignment" needs the six-term breakdown, which
+   equals the objective recomputed from the final assignment" needs the seven-term breakdown, which
    today only `explain --json` emits. A real and deliberate gap, named here rather than discovered
    later (the same shape as this section's own pattern-expansion gap above) — either sweep
    `explain --json` too or add the missing fields to `plan --json`'s group report to close it.
@@ -4671,12 +4678,12 @@ Four kinds of assertion that do hold:
    `after_spread` against `solver.mip_gap` as a relative tolerance produced real disagreement on a
    committed bundle under `--full-matrix` (cbc 0.0016 vs. cpsat 0.0034-0.0112 across several
    variants) that was legitimate under `mip_gap` on the *objective* the solvers actually optimize —
-   `mip_gap` bounds suboptimality of the six-term objective, not of any one derived quantity taken
+   `mip_gap` bounds suboptimality of the seven-term objective, not of any one derived quantity taken
    in isolation, and a tiny baseline spread turns a small absolute gap into a large relative one.
    Getting this right needs the objective breakdown itself, the same gap named in check 2 above.
 4. **Regression.** `<name>.expected.json` records, per variant, the gate verdict, the plan (as a
    sorted list of moves with their per-move costs), the payback arithmetic and the findings —
-   as built: `plan --json`'s group report carries neither an emitted *order* nor the six-term
+   as built: `plan --json`'s group report carries neither an emitted *order* nor the seven-term
    objective breakdown (Y-04; the exact gaps checks 2 and 3 above name), so no expected file can
    record those two — it *does* record the payback block's `reserve_shortfall_bytes_before`/
    `_after` and `repair_exempt` since phase 13. It is generated by `validate_corpus.py` and asserted current by

@@ -18,21 +18,21 @@
       "stor-a": {
         "load": 2.0,
         "used_tib": 1.0,
-        "largest_tib": 1.0,
+        "largest_footprint_tib": 1.0,
         "required_tib": 3.0,
         "violates_reserve": false
       },
       "stor-b": {
         "load": 2.0,
         "used_tib": 1.000001,
-        "largest_tib": 1.0,
+        "largest_footprint_tib": 1.0,
         "required_tib": 3.000001,
         "violates_reserve": false
       },
       "stor-c": {
         "load": 2.0,
         "used_tib": 5.0,
-        "largest_tib": 1.0,
+        "largest_footprint_tib": 1.0,
         "required_tib": 7.0,
         "violates_reserve": false
       }
@@ -61,7 +61,7 @@
           "move": "301:efidisk0:stor-c->stor-a",
           "transient_target_used_tib": 1.0,
           "transient_reserve_basis_tib": 1.0,
-          "transient_required_tib": 3.0,
+          "transient_required_tib": 3.000001,
           "capacity_tib": 8.0,
           "ok": true
         },
@@ -69,8 +69,8 @@
           "disk_key": "301:tpmstate0",
           "move": "301:tpmstate0:stor-b->stor-a",
           "transient_target_used_tib": 1.000001,
-          "transient_reserve_basis_tib": 1.0,
-          "transient_required_tib": 3.000001,
+          "transient_reserve_basis_tib": 1.000001,
+          "transient_required_tib": 3.000004,
           "capacity_tib": 8.0,
           "ok": true
         }
@@ -84,21 +84,21 @@
         "stor-a": {
           "load": 2.0,
           "used_tib": 1.000001,
-          "largest_tib": 1.0,
-          "required_tib": 3.000001,
+          "largest_footprint_tib": 1.000001,
+          "required_tib": 3.000004,
           "violates_reserve": false
         },
         "stor-b": {
           "load": 2.0,
           "used_tib": 1.0,
-          "largest_tib": 1.0,
+          "largest_footprint_tib": 1.0,
           "required_tib": 3.0,
           "violates_reserve": false
         },
         "stor-c": {
           "load": 2.0,
           "used_tib": 5.0,
-          "largest_tib": 1.0,
+          "largest_footprint_tib": 1.0,
           "required_tib": 7.0,
           "violates_reserve": false
         }
@@ -114,7 +114,7 @@
           "301:tpmstate0:stor-b->stor-a"
         ],
         "agrees_with_big_m_at_configured_p": true,
-        "big_m_agreement_threshold_p": -9.45713,
+        "big_m_agreement_threshold_p": -9.457102,
         "big_m_p_configured": 1000.0,
         "big_m_p_min_computed": 20080230.476
       }

@@ -197,9 +197,18 @@ def compute_benefit_load_seconds(
     kappa_vm_affinity: float = 0.0,
     affinity_debt_before: float = 0.0,
     affinity_debt_after: float = 0.0,
+    mu_vm_split_per_tib: float = 0.0,
+    split_excess_tib_before: float = 0.0,
+    split_excess_tib_after: float = 0.0,
 ) -> float:
     """Section 7.2: ``benefit = (alpha*(E_before - E_after) +
-    delta*(F_before - F_after) + kappa*(A_before - A_after)) * H``.
+    delta*(F_before - F_after) + kappa*(A_before - A_after) +
+    mu*(O_before - O_after)) * H``, ``O = sum_{v in V^split} o_v`` in TiB (section 5.3.3):
+    the split excess persists for as long as the placement does, like the others, so a move
+    that piles a large VM back onto one storage pays for it out of its other gains.
+    ``split_excess_tib_before``/``_after`` are ``heuristic.raw_split_excess_tib()``'s raw
+    quantity, never ``split_excess_term`` (already scaled by ``mu``). A split is **not** a
+    repair and gets no section 7.3 exemption of its own.
     ``imbalance_before``/``imbalance_after``, ``capacity_spread_before``/
     ``capacity_spread_after`` and ``affinity_debt_before``/
     ``affinity_debt_after`` must be the *raw*, unweighted section 7.2
@@ -238,6 +247,7 @@ def compute_benefit_load_seconds(
         alpha_spread * (imbalance_before - imbalance_after)
         + delta_capacity_spread * (capacity_spread_before - capacity_spread_after)
         + kappa_vm_affinity * (affinity_debt_before - affinity_debt_after)
+        + mu_vm_split_per_tib * (split_excess_tib_before - split_excess_tib_after)
     ) * payback_horizon_seconds
 
 

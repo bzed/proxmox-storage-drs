@@ -40,6 +40,9 @@ description: A group whose I/O is already balanced and whose only improving
 group:
   name: affinity-repair
   reserve_factor: 2.0
+  # Section 5.3.3's split rule is off here: this fixture carries a different section's worked
+  # arithmetic (section 14.9 has the split rule's own fixture). Stated, never inherited.
+  split_vm_footprint_tib: null
   storages:
   - id: stor-a
     capability_weight: 1.0

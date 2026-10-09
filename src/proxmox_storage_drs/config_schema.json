@@ -135,7 +135,8 @@
       "additionalProperties": false,
       "properties": {
         "factor": { "type": "number", "minimum": 0 },
-        "count_foreign_volumes": { "type": "boolean" }
+        "count_foreign_volumes": { "type": "boolean" },
+        "split_vm_footprint": { "type": ["string", "number", "null"] }
       }
     },
     "gates": {
@@ -175,6 +176,7 @@
         "gamma_move_bytes_per_tib": { "type": "number", "minimum": 0 },
         "kappa_vm_affinity": { "type": "number", "minimum": 0 },
         "delta_capacity_spread": { "type": "number", "minimum": 0 },
+        "mu_vm_split_per_tib": { "type": "number", "minimum": 0 },
         "affinity_counts_pinned_disks": { "type": "boolean" },
         "reserve_violation_penalty": { "type": "number", "minimum": 0 }
       }

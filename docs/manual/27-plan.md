@@ -172,12 +172,35 @@ only *some* moves deadlock, the `after:`/`spread:`/`payback:` lines report
 the state reachable by the moves that did schedule, never the fuller
 picture the undeliverable ones would have produced.
 
+## The `split:` line
+
+When a group holds a VM larger than `snapshot_reserve.split_vm_footprint` (default 2 TiB), the
+group's output carries one line per such VM that the plan changes, or that is still above its cap
+afterwards:
+
+```
+  split: VM 701 largest footprint 10.00 TiB → 4.00 TiB (cap 2.00 TiB, excess 8.00 TiB → 2.00 TiB — the solver found no better split across 3 storages)
+```
+
+*Largest footprint* is the most of that VM any one storage holds (the sum of its disks there —
+the figure a snapshot of the VM has to find room for, doubled at the default reserve factor).
+*Cap* is the threshold the VM is spread towards (a single disk larger than the threshold raises
+its own VM's cap to that disk's size). *Excess* is how far the largest footprint is above the cap.
+With fewer storages than disks the cap is usually unreachable, and the line says so: a result still above the cap ends "the solver found no better split across 3
+storages" when the MILP settled on it (the solver minimizes the whole objective within
+`solver.mip_gap`, so this is not a proof that no other split has a lower peak), and "still above the
+cap" otherwise. A group is planned for this reason even when its I/O and data are in
+balance (the gate reads "VM 701 holds … against a … cap … acting now regardless of I/O
+drift/imbalance"), and such a plan has to pay for itself like any balance plan — splitting is a
+preference, not a repair, and gets no exemption from the `payback:` test below.
+
 ## The `payback:` line
 
 Section 7.3's acceptance test: `benefit >= migration.payback_ratio * cost`,
 both sides in load-seconds. `benefit` is `(alpha_spread * ΔE +
-delta_capacity_spread * ΔF + kappa_vm_affinity * ΔA) *
-migration.payback_horizon` (section 7.2's own *unweighted* `E`/`F`/`A`, not the
+delta_capacity_spread * ΔF + kappa_vm_affinity * ΔA + mu_vm_split_per_tib * ΔO) *
+migration.payback_horizon` (`O` is the summed split excess of large VMs, see "The `split:`
+line" below; section 7.2's own *unweighted* `E`/`F`/`A`/`O`, not the
 solver's already-scaled objective terms — passing those instead would
 double-apply the weight); `ΔA` may be negative, and then it reduces the
 benefit — a balance move that splits a VM pays for that fragmentation out
@@ -276,6 +299,8 @@ arrives in — equal unless the target storage sets `enforce_format`; `null` on
 a hand-built move), `repair` (the section 7.3 revert-test marker — see "The `payback:` line"
 above), `load_per_tib`, `duration_mirror_seconds`,
 `duration_wipe_seconds`, `cost_load_seconds`, `exceeds_max_duration`),
+`vm_splits[]` (one entry per `split:` line: `vmid`, `cap_bytes`,
+`peak_footprint_bytes_before`/`_after`, `excess_bytes_before`/`_after`),
 `deadlocked` (a list of disk keys) and `deadlock_message` (`null` if none),
 `before_spread`/`after_spread` (the section 6 spread fraction, before the
 plan and after every scheduled move), `before_capacity_spread`/
@@ -290,7 +315,9 @@ full `.total`, `evaluate_assignment()` re-scored at the same true weights
 (the economic test alone, or `true` if exempted), `repair_exempt` (the
 outcome trigger itself — see above), `reserve_shortfall_bytes_before`/
 `_after` (`Σ r_s` on the current assignment and on the plan's executed
-endpoint, what `repair_exempt` is decided from), `rejected_moves` (disk
+endpoint, what `repair_exempt` is decided from), `split_excess_bytes_before`/
+`_after` (the summed split excess of the group's large VMs, in bytes, the same
+pair of figures the `split:` lines are drawn from), `rejected_moves` (disk
 keys failing the hard duration rule) and `accepted` (`aggregate_ok` and
 `rejected_moves` empty). `unfixable_shortfall` is `null` unless the plan
 leaves a storage short, and then an object with `total_bytes`,

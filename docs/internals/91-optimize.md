@@ -210,6 +210,22 @@ rather than trying to mutate one model's objective in place — simpler to
 reason about than partial reuse, at the cost of building the constraint
 set twice per solve (irrelevant next to a MILP solve's own running time).
 
+(C4) is one row per VM and storage: `Z_s ≥ F_{v,s}` for every VM with any disk in the group,
+where `F_{v,s}` is the sum of the VM's movable disks that land on `s` (at `z_{d,s}`, times
+`x_{d,s}`) plus its pinned disks already there — `_cbc_vm_footprint()`, the one place the model
+sums a VM's disks on a storage. A VM whose disks are all pinned still contributes its constant
+footprint. `Z_s` is only bounded from below, which is exact at the optimum by the same
+one-sided argument as before: `r_s ≥ f_s·Z_s` pushes it down.
+
+(C9), the large-VM split rule, lives in stage 2 only (`_cbc_split_excess_term()`): one continuous
+`o_v ≥ 0` per `v ∈ V^split` (`heuristic.active_split_caps()` — empty when
+`snapshot_reserve.split_vm_footprint` is `null` or `objective.mu_vm_split_per_tib` is `0`), bounded
+below by `F_{v,s} − T_v` on every storage and charged at `μ` per TiB (the variable is in TiB, the
+unit `μ` and `γ` are quoted in). Stage 2 only because a split is a preference: it must never
+displace a reserve repair, which stage 1 settles first. `compute_vm_weights()` returns `w_v = 1`
+for every `v ∈ V^split`, so a busy large VM's I/O cannot veto its own split. The big-M variant
+of the plan is not built, so its `U_obj` bound has no counterpart here.
+
 (C3)'s `y_{v,s}` linking honors `objective.affinity_counts_pinned_disks`
 exactly as the plan's own text describes it: **false** links
 `y` to `x` over `D^mov` only, so a pinned disk never forces `y_{v,s}=1`

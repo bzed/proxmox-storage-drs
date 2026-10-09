@@ -608,3 +608,63 @@ def test_multiple_errors_are_all_reported(tmp_path: Path) -> None:
     message = str(excinfo.value)
     assert "schema_version" in message
     assert "assume_thick_provisioning" in message
+
+
+# ------------------------------------------------ large-VM split (section 5.3.3)
+
+
+def test_split_defaults_are_two_tib_and_mu_one(tmp_path: Path) -> None:
+    resolved = config.load_config(str(write_config(tmp_path, minimal_config_dict())), env={})
+    assert resolved.config.snapshot_reserve.split_vm_footprint_bytes == 2 * (1 << 40)
+    assert resolved.config.objective.mu_vm_split_per_tib == pytest.approx(1.0)
+    assert not any("mu_vm_split" in w for w in resolved.warnings)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("500GiB", 500 * (1 << 30)), (1_000_000, 1_000_000), (None, None)],
+)
+def test_split_vm_footprint_accepts_bytes_units_and_null(
+    tmp_path: Path, value: object, expected: int | None
+) -> None:
+    data = minimal_config_dict()
+    data["snapshot_reserve"] = {"split_vm_footprint": value}
+    resolved = config.load_config(str(write_config(tmp_path, data)), env={})
+    assert resolved.config.snapshot_reserve.split_vm_footprint_bytes == expected
+
+
+def test_split_vm_footprint_zero_is_an_error(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["snapshot_reserve"] = {"split_vm_footprint": 0}
+    with pytest.raises(ConfigError, match="split_vm_footprint"):
+        config.load_config(str(write_config(tmp_path, data)), env={})
+
+
+def test_split_vm_footprint_garbage_is_an_error(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["snapshot_reserve"] = {"split_vm_footprint": "lots"}
+    with pytest.raises(ConfigError):
+        config.load_config(str(write_config(tmp_path, data)), env={})
+
+
+def test_mu_negative_is_a_structural_error(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["objective"] = {"mu_vm_split_per_tib": -1}
+    with pytest.raises(ConfigError, match="mu_vm_split_per_tib"):
+        config.load_config(str(write_config(tmp_path, data)), env={})
+
+
+def test_mu_below_kappa_warns_only_while_the_rule_is_on(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    data["objective"] = {"mu_vm_split_per_tib": 0.1, "kappa_vm_affinity": 0.5}
+    resolved = config.load_config(str(write_config(tmp_path, data)), env={})
+    assert any("mu_vm_split_per_tib" in w for w in resolved.warnings)
+
+    data["snapshot_reserve"] = {"split_vm_footprint": None}
+    resolved = config.load_config(str(write_config(tmp_path, data)), env={})
+    assert not any("mu_vm_split_per_tib" in w for w in resolved.warnings)
+
+    data = minimal_config_dict()
+    data["objective"] = {"mu_vm_split_per_tib": 0}
+    resolved = config.load_config(str(write_config(tmp_path, data)), env={})
+    assert not any("mu_vm_split_per_tib" in w for w in resolved.warnings)

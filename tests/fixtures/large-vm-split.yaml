@@ -1,0 +1,68 @@
+# Machine-readable form of IMPLEMENTATION_PLAN.md section 14.9: a group with balanced
+# I/O, every reserve satisfied, and one large VM (701: five 2 TiB disks) sitting whole on
+# one storage. Nothing but section 5.3.3's split rule can make the engine move, so this
+# fixture shows the rule, the split gate and the mu*dO payback term on their own.
+#
+# Same contract as fc-tier1.yaml; regenerate expectations with
+# `python3 tests/fixtures/generate_expected.py`, never by hand. Sizes and capacities are
+# TiB; loads are in average-in-flight-I/O units (plan section 4).
+#
+# The five 701 disks are interchangeable, so the optimum is only determined up to which
+# of them moves and which storage gets two disks: a harness asserts the footprint
+# multiset (expected_vm_footprints_tib) and the move count, not the move list.
+schema_version: 1
+description: Section 14.9 worked example. Numbers verified by exhaustive enumeration
+  of all 3^8 assignments.
+group:
+  name: large-vm-split
+  capacity_tib: 40.0
+  reserve_factor: 2.0
+  split_vm_footprint_tib: 2.0
+  storages:
+  - id: st-a
+    capability_weight: 1.0
+    capacity_tib: 40.0
+    foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+  - id: st-b
+    capability_weight: 1.0
+    capacity_tib: 40.0
+    foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+  - id: st-c
+    capability_weight: 1.0
+    capacity_tib: 40.0
+    foreign_used_tib: 0.0
+    saferemove: false
+    saferemove_throughput_bytes_per_sec: 10485760
+disks:
+- {key: "701:scsi0", vmid: 701, device: scsi0, size_tib: 2.0, load: 0.0, current_storage: st-a}
+- {key: "701:scsi1", vmid: 701, device: scsi1, size_tib: 2.0, load: 0.0, current_storage: st-a}
+- {key: "701:scsi2", vmid: 701, device: scsi2, size_tib: 2.0, load: 0.0, current_storage: st-a}
+- {key: "701:scsi3", vmid: 701, device: scsi3, size_tib: 2.0, load: 0.0, current_storage: st-a}
+- {key: "701:scsi4", vmid: 701, device: scsi4, size_tib: 2.0, load: 0.0, current_storage: st-a}
+- {key: "702:scsi0", vmid: 702, device: scsi0, size_tib: 1.0, load: 1.0, current_storage: st-a}
+- {key: "703:scsi0", vmid: 703, device: scsi0, size_tib: 1.0, load: 1.0, current_storage: st-b}
+- {key: "704:scsi0", vmid: 704, device: scsi0, size_tib: 1.0, load: 1.0, current_storage: st-c}
+migration:
+  bwlimit_bytes_per_sec: 209715200
+  source_load_weight: 1.0
+  target_load_weight: 1.0
+  wipe_load_weight: 1.0
+  # saferemove is off on every storage, so duration_wipe_d = 0 (see fc-tier1.yaml).
+  account_saferemove_wipe: false
+  payback_horizon_seconds: 31536000  # 365d, section 12 default
+  payback_ratio: 10.0
+objective:
+  alpha_spread: 1.0
+  beta_values: [0.25]
+  # delta = 0 keeps data spread from doing any of the work (section 14.9); the matching
+  # config sets gates.capacity_spread_threshold: null so the capacity gate stays shut too.
+  delta_values: [0.0]
+  gamma_move_bytes_per_tib: 0.05
+  kappa_vm_affinity: 0.5
+  mu_vm_split_per_tib: 1.0
+  affinity_counts_pinned_disks: false
+  reserve_violation_penalty: 1000.0

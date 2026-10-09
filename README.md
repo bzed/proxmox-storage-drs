@@ -196,7 +196,7 @@ pve-storage-drs -c /etc/pve/drs.yaml explain    # the same plan, narrated
 
 `plan` never executes anything, in any mode. `explain` runs the identical pipeline and then
 narrates what `plan`'s output does not print: every disk pinned this run and why, VMs a pin leaves
-spread across storages, the objective's six terms individually, the payback arithmetic, and —
+spread across storages, the objective's seven terms individually, the payback arithmetic, and —
 when a group's gate said "act" but the solver still chose to move nothing — the closest move it
 rejected and what it would have cost. That last one answers the most common question this tool
 gets asked.

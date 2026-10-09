@@ -18,21 +18,21 @@
       "packed": {
         "load": 2.05,
         "used_tib": 7.5,
-        "largest_tib": 1.0,
+        "largest_footprint_tib": 1.0,
         "required_tib": 10.5,
         "violates_reserve": true
       },
       "roomy": {
         "load": 2.05,
         "used_tib": 6.8,
-        "largest_tib": 1.0,
+        "largest_footprint_tib": 1.0,
         "required_tib": 9.8,
         "violates_reserve": false
       },
       "swapme": {
         "load": 2.05,
         "used_tib": 1.0,
-        "largest_tib": 1.0,
+        "largest_footprint_tib": 1.0,
         "required_tib": 4.0,
         "violates_reserve": false
       }
@@ -84,21 +84,21 @@
         "packed": {
           "load": 2.0,
           "used_tib": 7.0,
-          "largest_tib": 1.0,
+          "largest_footprint_tib": 1.0,
           "required_tib": 10.0,
           "violates_reserve": false
         },
         "roomy": {
           "load": 0.05,
           "used_tib": 6.3,
-          "largest_tib": 0.5,
+          "largest_footprint_tib": 0.5,
           "required_tib": 9.3,
           "violates_reserve": false
         },
         "swapme": {
           "load": 4.1,
           "used_tib": 2.0,
-          "largest_tib": 1.0,
+          "largest_footprint_tib": 1.0,
           "required_tib": 5.0,
           "violates_reserve": false
         }
