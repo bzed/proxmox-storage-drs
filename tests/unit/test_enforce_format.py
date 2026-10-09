@@ -662,8 +662,8 @@ def test_a_hand_built_move_without_formats_shows_nothing_extra() -> None:
 
 
 def test_a_second_converting_move_sees_the_first_ones_converted_size_as_z_b() -> None:
-    """REVIEW.md AN-01: the (C4) per-VM footprint bookkeeping records ``z_{d,s}``, not the listed size,
-    so a later move onto the same enforcing storage is checked against the right ``Z_b``."""
+    """REVIEW.md AN-01: the (C4) per-VM footprint bookkeeping records ``z_{d,s}``, not the
+    listed size, so a later move onto the same enforcing storage sees the right ``Z_b``."""
     from proxmox_storage_drs.config import ExecutionConfig
     from proxmox_storage_drs.execute import MoveOutcome, _post_move_bookkeeping
 

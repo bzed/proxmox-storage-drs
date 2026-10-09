@@ -11,6 +11,7 @@ correctness check, not just a unit test in isolation.
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import pytest
 
@@ -407,7 +408,7 @@ def test_transient_incoming_disk_joins_its_own_vms_footprint() -> None:
     footprint to 4 TiB -- bigger than any other VM's 3.5 -- so the reserve term is f * 4,
     not f * max(3.5, 1). used 6.5 + 1 + 2*4 = 15.5 > 15, but 15.5 <= 16."""
     existing = {7: 3 * TIB, 8: round(3.5 * TIB)}
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         reserve_factor=2.0,
         used_bytes=round(6.5 * TIB),
         existing_largest_bytes=round(3.5 * TIB),
@@ -422,7 +423,7 @@ def test_transient_incoming_disk_joins_its_own_vms_footprint() -> None:
 
 
 def test_transient_two_disks_of_one_vm_landing_together_raise_its_footprint_by_both() -> None:
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         reserve_factor=1.0,
         used_bytes=0,
         existing_largest_bytes=0,

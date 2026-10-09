@@ -6,10 +6,10 @@
         "groups": [
           {
             "after_capacity_spread": 0.8857368970180028,
-            "after_objective_total": 0.46702781490557854,
+            "after_objective_total": 0.5178090649055785,
             "after_spread": 0.004162436765510138,
             "before_capacity_spread": 1.1214477053592502,
-            "before_objective_total": 0.8477021513291862,
+            "before_objective_total": 0.8984834013291862,
             "before_spread": 0.09794050704271742,
             "deadlock_message": null,
             "deadlocked": [],
@@ -19,7 +19,8 @@
               "drift_fraction": null,
               "imbalance_fraction": null,
               "reason": "capacity spread 112.1% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance",
-              "reserve_override": false
+              "reserve_override": false,
+              "split_vmid": null
             },
             "load_error": null,
             "moves": [
@@ -124,11 +125,23 @@
               "repair_exempt": false,
               "reserve_shortfall_bytes_after": 0,
               "reserve_shortfall_bytes_before": 0,
+              "split_excess_bytes_after": 55834574848,
+              "split_excess_bytes_before": 55834574848,
               "total_cost_load_seconds": 2508.8
             },
             "solver_backend": "heuristic",
             "solver_status": null,
-            "unfixable_shortfall": null
+            "unfixable_shortfall": null,
+            "vm_splits": [
+              {
+                "cap_bytes": 2199023255552,
+                "excess_bytes_after": 55834574848,
+                "excess_bytes_before": 55834574848,
+                "peak_footprint_bytes_after": 2254857830400,
+                "peak_footprint_bytes_before": 2254857830400,
+                "vmid": 843425
+              }
+            ]
           }
         ],
         "warnings": []
@@ -146,10 +159,10 @@
         "groups": [
           {
             "after_capacity_spread": 0.8857368970180028,
-            "after_objective_total": 0.46702781490557854,
+            "after_objective_total": 0.5178090649055785,
             "after_spread": 0.004162436765510138,
             "before_capacity_spread": 1.1214477053592502,
-            "before_objective_total": 0.8477021513291862,
+            "before_objective_total": 0.8984834013291862,
             "before_spread": 0.09794050704271742,
             "deadlock_message": null,
             "deadlocked": [],
@@ -167,7 +180,8 @@
               "drift_fraction": null,
               "imbalance_fraction": null,
               "reason": "capacity spread 112.1% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance",
-              "reserve_override": false
+              "reserve_override": false,
+              "split_vmid": null
             },
             "load_error": null,
             "moves": [
@@ -272,11 +286,23 @@
               "repair_exempt": false,
               "reserve_shortfall_bytes_after": 0,
               "reserve_shortfall_bytes_before": 0,
+              "split_excess_bytes_after": 55834574848,
+              "split_excess_bytes_before": 55834574848,
               "total_cost_load_seconds": 2508.8
             },
             "solver_backend": "heuristic",
             "solver_status": null,
-            "unfixable_shortfall": null
+            "unfixable_shortfall": null,
+            "vm_splits": [
+              {
+                "cap_bytes": 2199023255552,
+                "excess_bytes_after": 55834574848,
+                "excess_bytes_before": 55834574848,
+                "peak_footprint_bytes_after": 2254857830400,
+                "peak_footprint_bytes_before": 2254857830400,
+                "vmid": 843425
+              }
+            ]
           }
         ],
         "warnings": []
@@ -294,10 +320,10 @@
         "groups": [
           {
             "after_capacity_spread": 0.4778119463117781,
-            "after_objective_total": 0.3327191164057616,
+            "after_objective_total": 0.3835003664057616,
             "after_spread": 0.012536331285301796,
             "before_capacity_spread": 1.1214477053592502,
-            "before_objective_total": 0.8477021513291862,
+            "before_objective_total": 0.8984834013291862,
             "before_spread": 0.09794050704271742,
             "deadlock_message": null,
             "deadlocked": [],
@@ -307,7 +333,8 @@
               "drift_fraction": null,
               "imbalance_fraction": null,
               "reason": "capacity spread 112.1% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance",
-              "reserve_override": false
+              "reserve_override": false,
+              "split_vmid": null
             },
             "load_error": null,
             "moves": [
@@ -556,11 +583,23 @@
               "repair_exempt": false,
               "reserve_shortfall_bytes_after": 0,
               "reserve_shortfall_bytes_before": 0,
+              "split_excess_bytes_after": 55834574848,
+              "split_excess_bytes_before": 55834574848,
               "total_cost_load_seconds": 11970.56
             },
             "solver_backend": "cbc",
             "solver_status": "optimal",
-            "unfixable_shortfall": null
+            "unfixable_shortfall": null,
+            "vm_splits": [
+              {
+                "cap_bytes": 2199023255552,
+                "excess_bytes_after": 55834574848,
+                "excess_bytes_before": 55834574848,
+                "peak_footprint_bytes_after": 2254857830400,
+                "peak_footprint_bytes_before": 2254857830400,
+                "vmid": 843425
+              }
+            ]
           }
         ],
         "warnings": []
@@ -578,10 +617,10 @@
         "groups": [
           {
             "after_capacity_spread": 0.4778119463117781,
-            "after_objective_total": 0.3327191164057616,
+            "after_objective_total": 0.3835003664057616,
             "after_spread": 0.012536331285301796,
             "before_capacity_spread": 1.1214477053592502,
-            "before_objective_total": 0.8477021513291862,
+            "before_objective_total": 0.8984834013291862,
             "before_spread": 0.09794050704271742,
             "deadlock_message": null,
             "deadlocked": [],
@@ -599,7 +638,8 @@
               "drift_fraction": null,
               "imbalance_fraction": null,
               "reason": "capacity spread 112.1% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance",
-              "reserve_override": false
+              "reserve_override": false,
+              "split_vmid": null
             },
             "load_error": null,
             "moves": [
@@ -848,11 +888,23 @@
               "repair_exempt": false,
               "reserve_shortfall_bytes_after": 0,
               "reserve_shortfall_bytes_before": 0,
+              "split_excess_bytes_after": 55834574848,
+              "split_excess_bytes_before": 55834574848,
               "total_cost_load_seconds": 11970.56
             },
             "solver_backend": "cbc",
             "solver_status": "optimal",
-            "unfixable_shortfall": null
+            "unfixable_shortfall": null,
+            "vm_splits": [
+              {
+                "cap_bytes": 2199023255552,
+                "excess_bytes_after": 55834574848,
+                "excess_bytes_before": 55834574848,
+                "peak_footprint_bytes_after": 2254857830400,
+                "peak_footprint_bytes_before": 2254857830400,
+                "vmid": 843425
+              }
+            ]
           }
         ],
         "warnings": []

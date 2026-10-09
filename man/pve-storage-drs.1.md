@@ -19,7 +19,7 @@ API, solves for a placement, and either prints the resulting plan or executes it
 **move_disk**.
 
 Two properties are guaranteed and are not configurable away. Every storage keeps free space for
-snapshots -- by default twice its largest disk -- and that reserve holds *during* a migration, not
+snapshots -- by default twice the most space any one VM's snapshot would need there (the sum of all of that VM's disks on the storage) -- and that reserve holds *during* a migration, not
 merely before and after it, because a mirrored disk occupies both storages until the move
 completes. And a plan whose own migration cost exceeds the imbalance it removes is rejected
 outright rather than merely penalized.
@@ -75,8 +75,8 @@ the same file on every node.
   series. Run this before relying on any plan; Telegraf and InfluxDB naming varies by deployment.
 
 **verify-storages**
-: Report per storage: type, shared flag, content types, **saferemove** and its throughput, capacity
-  and the largest disk on it, and warn where the implied wipe time exceeds the configured move
+: Report per storage: type, shared flag, content types, **saferemove** and its throughput, capacity,
+  the largest VM footprint and the largest disk on it, and warn where the implied wipe time exceeds the configured move
   duration or storage cooldown.
 
 **collect-testdata**

@@ -20,8 +20,9 @@ considered, never moved), or a disk whose current storage is not in any
 configured group — is what "foreign" (`Uˢᵉˣᵗ`, section 5.1.1) means.
 Config-excluded disks (`exclude.vmids`/`exclude.disks`/tags) are *not*
 foreign: (C2) pins them into `D` specifically so their bytes still count
-toward a storage's reserve check — **(C4)/(C5)**: `Z_s`, the largest disk
-resident on a storage, sets a reserve floor `R_s = max(reserve_factor_s ·
+toward a storage's reserve check — **(C4)/(C5)**: `Z_s`, the largest per-VM
+*footprint* on a storage — the sum of all of one VM's disks there, since a snapshot
+covers every disk of the VM at once — sets a reserve floor `R_s = max(reserve_factor_s ·
 Z_s, soft_s)` that must stay free on top of every disk's actual usage
 there (`soft_s` is section 5.3.1's configured free-space requirement,
 resolved per storage onto `Storage.free_space_soft_bytes` below — the
@@ -304,6 +305,20 @@ of it, needs to know a pattern was ever involved.
 
 ## `reserve.py`: one (C4)/(C5) evaluator, shared
 
+**The footprint.** A snapshot is taken of a VM and snapshots every disk of it at once,
+so what a snapshot of VM `v` needs on storage `s` is `F_{v,s} = Σ z_{d,s}` over `v`'s
+disks *on `s`*, and `Z_s = max_v F_{v,s}` (`vm_footprints_bytes()`,
+`largest_footprint()`). Every disk in `D` counts, movable or pinned; only `s` itself is
+summed (the room on the VM's *other* storages is those storages' own footprint); foreign
+volumes and disks of stopped VMs contribute bytes to `used` but no footprint — a stopped
+VM is planned neither for snapshots nor for I/O. `ReserveStatus` carries `Z_s` as
+`largest_footprint_bytes` together with the VM it comes from (`largest_footprint_vmid`,
+lowest vmid on a tie) so `show-load` can name it. The per-disk maximum
+(`largest_disk_bytes()`) survives for exactly one purpose: the saferemove wipe-time
+estimate, which really is per volume. `split_vm_caps()` and `split_excess_bytes()` derive
+`V^split`, each VM's cap `T_v = max(T, largest disk)` and its excess `o_v` — the peak
+footprint beyond the cap — for the large-VM split rule (`91-optimize.md`, `80-gates.md`).
+
 `compute_reserve_status()` computes, for one storage: `used = Σ_{d∈D on s} z_d
 + Uˢᵉˣᵗ_s` (every managed disk's bytes plus the foreign/unreferenced bytes
 from "`Uˢᵉˣᵗ`: everything not referenced" above), `shortfall = max(0, used +
@@ -328,7 +343,7 @@ already exercised end-to-end (see `cli.py`'s
 `_render_show_load_human`/`_json`). `optimize.py`'s MILP path needs the
 same (C4)/(C5) invariant but cannot call a Python function from inside a
 solver's constraint system — see `91-optimize.md` for how it encodes the
-equivalent bound directly as a scaled linear constraint instead. The
+equivalent bound directly as scaled linear constraints (one per VM and storage) instead. The
 section 14 worked example's initial state (`tests/unit/test_reserve.py`)
 is the proof this reproduces the plan's own arithmetic exactly, not merely
 a self-consistent unit test.

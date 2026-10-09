@@ -456,6 +456,8 @@ def test_show_load_human_output(
     # san-b: nothing provisioned, nothing allocated -- they agree, no note.
     assert "san-b  provisioned 0 B/8.00 TiB  " in out
     assert "ℓ 3.00" in out  # 101:scsi0's DiskLoad
+    # Section 5.3.3: Z_s is named with the VM that drives it.
+    assert "largest VM footprint 3.00 TiB = web01(101)" in out
     assert "db01(102):scsi0: sample coverage 40%" in out  # the flagged disk
     # san-a's reserve is violated in this fixture (see the json test's own
     # comment) -- the gate must show the reserve override, not imbalance.
@@ -490,6 +492,9 @@ def test_show_load_json_output(
     san_a = next(s for s in group_payload["storages"] if s["id"] == "san-a")
     # managed_used 3+2=5 TiB, largest=3 TiB, reserve=2.0*3=6 TiB, 5+6=11 > capacity 8 TiB.
     assert san_a["reserve_violated"] is True
+    assert san_a["largest_footprint_bytes"] == 3 * (1 << 40)
+    assert san_a["largest_footprint_vmid"] == 101
+    assert group_payload["gate"]["split_vmid"] is None
     assert san_a["used_bytes"] == 3 * (1 << 40)  # the pool's own, allocated figure
     assert san_a["provisioned_used_bytes"] == 5 * (1 << 40)  # what the shortfall is computed from
     assert san_a["load"] == 3.0
@@ -863,6 +868,7 @@ def test_verify_storages_human_output(
     assert cli.main(["-c", str(path), "verify-storages"]) == 0
     out = capsys.readouterr().out
     assert "san-a  saferemove=on" in out
+    assert "largest VM footprint (Z_s): 3.00 TiB = web01(101)" in out
     assert "implied wipe time" in out
     assert "gates.cooldown_per_storage" in out  # 1s is far shorter than the implied wipe
     assert "san-b  saferemove=off" in out
@@ -881,6 +887,10 @@ def test_verify_storages_json_output(
     payload = json.loads(capsys.readouterr().out)
     san_a = next(s for s in payload["groups"][0]["storages"] if s["id"] == "san-a")
     assert san_a["saferemove"] is True
+    # The snapshot reserve is computed from the footprint, the wipe from the largest disk.
+    assert san_a["largest_footprint_vmid"] == 101
+    assert san_a["largest_footprint_bytes"] == 3 * (1 << 40)
+    assert san_a["largest_disk_bytes"] == 3 * (1 << 40)
     assert san_a["implied_wipe_seconds"] == pytest.approx(3 * (1 << 40) / (10 * (1 << 20)))
     san_b = next(s for s in payload["groups"][0]["storages"] if s["id"] == "san-b")
     assert san_b["implied_wipe_seconds"] is None
@@ -1223,6 +1233,9 @@ def test_plan_json_output(
     assert payback["reserve_shortfall_bytes_after"] == payback["reserve_shortfall_bytes_before"]
     assert payback["rejected_moves"] == ["101:scsi0"]
     assert payback["accepted"] is False  # but still blocked by the hard duration rule
+    # Section 9.5: the split-excess pair is always present, and the plan changes no VM's excess.
+    assert payback["split_excess_bytes_before"] == payback["split_excess_bytes_after"]
+    assert isinstance(group_payload["vm_splits"], list)
     # The *solver* closes the shortfall; the duration rule blocking the move
     # is reported by its own line, not as an unfixable shortfall.
     assert group_payload["unfixable_shortfall"] is None
@@ -4756,3 +4769,64 @@ def test_plan_output_explains_an_empty_plan_and_explain_does_not_repeat_it(
 
     assert cli.main(["-c", str(path), "explain"]) == 0
     assert capsys.readouterr().out.count("no moves made") == 1
+
+
+# ------------------------------------------------ split: lines (section 9.5, 5.3.3)
+
+
+def _breakdown_with_split(
+    peak_tib: float, excess_tib: float, cap_tib: float = 2.0
+) -> ObjectiveBreakdown:
+    tib = 1 << 40
+    return ObjectiveBreakdown(
+        imbalance_term=0.0,
+        move_count_term=0.0,
+        bytes_moved_term=0.0,
+        fragmentation_term=0.0,
+        capacity_spread_term=0.0,
+        reserve_penalty_term=0.0,
+        spread_e={},
+        utilization={},
+        fill_fraction={},
+        fill_deviation={},
+        reserve_statuses={},
+        moved_disk_keys=frozenset(),
+        split_excess_bytes={701: round(excess_tib * tib)},
+        split_caps_bytes={701: round(cap_tib * tib)},
+        split_peak_bytes={701: round(peak_tib * tib)},
+    )
+
+
+def test_vm_splits_lists_a_vm_the_plan_changes_and_one_still_above_its_cap() -> None:
+    before = _breakdown_with_split(10.0, 8.0)
+    after = _breakdown_with_split(4.0, 2.0)
+    (split,) = cli._vm_splits(before, after)
+    assert split.vmid == 701
+    assert split.as_dict() == {
+        "vmid": 701,
+        "cap_bytes": 2 * (1 << 40),
+        "peak_footprint_bytes_before": 10 * (1 << 40),
+        "peak_footprint_bytes_after": 4 * (1 << 40),
+        "excess_bytes_before": 8 * (1 << 40),
+        "excess_bytes_after": 2 * (1 << 40),
+    }
+    # Unchanged but still above the cap: listed too, "whether or not anything moved".
+    assert cli._vm_splits(after, after)
+    # At or below the cap before and after: nothing to say.
+    at_cap = _breakdown_with_split(2.0, 0.0)
+    assert cli._vm_splits(at_cap, at_cap) == []
+
+
+def test_split_line_claims_the_best_split_only_when_it_was_proven() -> None:
+    splits = cli._vm_splits(_breakdown_with_split(10.0, 8.0), _breakdown_with_split(4.0, 2.0))
+    (proven,) = cli._render_split_lines(splits, 3, proven_best=True)
+    assert proven == (
+        "  split: VM 701 largest footprint 10.00 TiB → 4.00 TiB "
+        "(cap 2.00 TiB, excess 8.00 TiB → 2.00 TiB — the best 3 storages allow)"
+    )
+    (unproven,) = cli._render_split_lines(splits, 3, proven_best=False)
+    assert unproven.endswith("— still above the cap)")
+    # Reaching the cap needs no qualifier at all.
+    done = cli._vm_splits(_breakdown_with_split(10.0, 8.0), _breakdown_with_split(2.0, 0.0))
+    (line,) = cli._render_split_lines(done, 5, proven_best=True)
+    assert line.endswith("excess 8.00 TiB → 0 B)")

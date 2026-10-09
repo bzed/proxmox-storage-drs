@@ -98,7 +98,9 @@ def _disk(key: str, size_tib: int, storage: str) -> Disk:
     )
 
 
-def _group(split_vm_footprint_bytes: int | None = 2 * TIB, placement: dict[str, str] | None = None):
+def _group(
+    split_vm_footprint_bytes: int | None = 2 * TIB, placement: dict[str, str] | None = None
+) -> Group:
     placement = placement or {}
     disks = tuple(
         _disk(f"701:scsi{i}", 2, placement.get(f"701:scsi{i}", "st-a")) for i in range(5)

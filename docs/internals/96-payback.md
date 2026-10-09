@@ -27,8 +27,11 @@ be throttled hard enough; only the economic charge is waived.
 
 `compute_benefit_load_seconds()` implements section 7.2's `benefit =
 (alpha_spread*(E_before-E_after) + delta_capacity_spread*(F_before-F_after) +
-kappa_vm_affinity*(A_before-A_after)) * H` (sections 12 and, for the third
-term, 5.4/7.2's affinity-payback fix). `H` is
+kappa_vm_affinity*(A_before-A_after) + mu_vm_split_per_tib*(O_before-O_after)) * H`
+(sections 12 and, for the third term, 5.4/7.2's affinity-payback fix; `O` is the summed split
+excess of the large VMs in TiB, from `heuristic.raw_split_excess_tib()` — the excess persists for
+as long as the placement does, so a move that piles a large VM back onto one storage pays for it
+out of its other gains. A split is *not* a repair and gets no exemption of its own). `H` is
 `migration.payback_horizon_seconds` (default `365d`, converted to
 seconds) — the length of time the plan's improvement is assumed to keep
 paying off, which is why both sides of the payback ratio end up in the

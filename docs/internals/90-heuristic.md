@@ -51,9 +51,13 @@ is the regression test for this: `beta=100` (so no purely-cosmetic balance
 move could ever be worth a migration) still sees the repair move happen.
 
 **A candidate is judged by the group-wide total shortfall, not the source
-storage's own.** Moving a disk off a violating storage always reduces
+storage's own** — a total that already counts what a move does to `f_s·Z_s`: a disk whose
+leaving lowers its VM's footprint on the source frees the reserve that footprint drove as well
+as its own bytes, which is why under the per-VM footprint the repair of a storage holding
+two disks of one VM prefers the move that breaks the footprint down (`101:scsi1` in the
+section 14 example), not the biggest disk. Moving a disk off a violating storage always reduces
 *that* storage's own shortfall — it has fewer bytes, and if anything a
-smaller largest-disk requirement — which makes "does the source's
+smaller or equal largest-footprint requirement — which makes "does the source's
 shortfall fall" a tempting but wrong test: it says yes even when the disk
 only relocates the problem to whichever storage receives it, or makes the
 group's total worse. An earlier version of `_repair` used exactly that

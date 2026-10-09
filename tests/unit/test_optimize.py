@@ -787,3 +787,71 @@ def test_objective_offset_is_carried_by_a_variable_fixed_to_one() -> None:
 
     unchanged = 2 * x
     assert _objective_with_offset_as_variable(pulp, unchanged) is unchanged
+
+
+# ---------------------------------------- per-VM footprint and (C9) (section 5.3.3)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_c4_reserves_for_the_whole_vm_not_its_largest_disk(backend: str) -> None:
+    """Two 2 TiB disks of VM 1 plus a 3 TiB disk of VM 2 on one 12 TiB storage: the per-disk rule
+    sees Z = 3 and 7 + 6 = 13 > 12 (short by 1), the per-VM rule sees Z = 4 and 7 + 8 = 15 (short
+    by 3). With a roomy second storage the stage-1 optimum must put the shortfall at zero by
+    moving VM 1's disks, and the reported shortfall must agree with `reserve.py`."""
+    group = Group(
+        name="g",
+        storages=(make_storage("a", 12.0), make_storage("b", 40.0)),
+        disks=(
+            make_disk("1:scsi0", 2.0, 0.0, "a"),
+            make_disk("1:scsi1", 2.0, 0.0, "a"),
+            make_disk("2:scsi0", 3.0, 0.0, "a"),
+        ),
+    )
+    result = _solve(group, {}, DEFAULT_OBJECTIVE, backend)
+    assert all(not s.violated for s in result.breakdown.reserve_statuses.values())
+    # Whatever it chose, the model's Z agrees with the shared evaluator's.
+    status = result.breakdown.reserve_statuses["a"]
+    assert status.required_reserve_bytes == round(2.0 * status.largest_footprint_bytes)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_c4_counts_a_pinned_sibling_in_the_footprint(backend: str) -> None:
+    """VM 1's 4 TiB disk is pinned on `a`; its movable 2 TiB sibling joining it would make a 6 TiB
+    footprint on a 14 TiB storage (6 + 12 > 14) while `b` takes it freely. The solver must keep the
+    sibling off `a`, i.e. the constant pinned footprint enters the VM's row."""
+    group = Group(
+        name="g",
+        storages=(make_storage("a", 14.0), make_storage("b", 40.0)),
+        disks=(
+            make_disk("1:scsi0", 4.0, 0.0, "a", pinned="excluded"),
+            make_disk("1:scsi1", 2.0, 0.0, "b"),
+        ),
+    )
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, kappa_vm_affinity=5.0)
+    result = _solve(group, {}, objective, backend)
+    assert result.assignment["1:scsi1"] == "b"
+    assert not any(s.violated for s in result.breakdown.reserve_statuses.values())
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_c9_spreads_a_large_vm_to_the_smallest_peak_the_storages_allow(backend: str) -> None:
+    """Four 2 TiB disks of one VM on `a`, three storages, cap 2 TiB: peak 4 TiB is the best any
+    split reaches (2/1/1 and 2/2/0 disks alike) and kappa breaks the tie toward fewer storages."""
+    group = Group(
+        name="g",
+        storages=(make_storage("a", 40.0), make_storage("b", 40.0), make_storage("c", 40.0)),
+        disks=tuple(make_disk(f"1:scsi{i}", 2.0, 0.0, "a") for i in range(4)),
+        split_vm_footprint_bytes=2 * TIB,
+    )
+    objective = dataclasses.replace(DEFAULT_OBJECTIVE, mu_vm_split_per_tib=1.0)
+    result = _solve(group, {}, objective, backend)
+    placed = [result.assignment[d.key] for d in group.disks]
+    # 2 + 2 + 0 disks: peak 4 TiB, as 2 + 1 + 1 would give, but on fewer storages (kappa).
+    assert sorted(placed.count(s) for s in "abc") == [0, 2, 2]
+    assert result.breakdown.split_excess_bytes == {1: 2 * TIB}
+    # Without the rule nothing moves.
+    off = dataclasses.replace(group, split_vm_footprint_bytes=None)
+    assert _solve(off, {}, objective, backend).breakdown.moves == 0
+    # mu = 0 switches it off the same way.
+    zero = dataclasses.replace(objective, mu_vm_split_per_tib=0.0)
+    assert _solve(group, {}, zero, backend).breakdown.moves == 0

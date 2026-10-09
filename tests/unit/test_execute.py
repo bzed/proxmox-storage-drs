@@ -2528,3 +2528,26 @@ def test_a_dry_run_issues_no_move_and_logs_none(caplog: pytest.LogCaptureFixture
         result = run(client, default_group(), (make_move(),), mode="dry-run")
     assert result.outcomes[0].status == "would_move"
     assert [r for r in caplog.records if getattr(r, "event", None) == "move_started"] == []
+
+
+def test_live_transient_check_joins_the_incoming_disk_to_its_own_vms_footprint() -> None:
+    """Section 8.1 / 5.3.3: VM 101 already has 3 TiB on san-b, another VM 3.5 TiB. A 1 TiB disk
+    of VM 101 raises its footprint to 4 TiB, the new largest, so the reserve term is 2 * 4 -- the
+    same disk belonging to a VM with nothing on san-b would leave the old 2 * 3.5."""
+    # Other provisioned volumes of 6.5 TiB: 6.5 + 1 + 2*4 = 15.5 <= 16 (ok); at 7.5 TiB:
+    # 16.5 > 16 (refused).
+    target = make_storage("san-b", capacity_tib=16.0)
+    footprints = {101: 3 * TIB, 900: round(3.5 * TIB)}
+    ok = {"nodes/pve01/storage/san-b/content": [_vol("san-b:vm-900-disk-0", 900, 6.5)]}
+    client, _api = client_with({"nodes/pve01/storage/san-b/status": {"total": 16 * TIB}, **ok})
+    assert _live_transient_check(client, "pve01", target, 101, TIB, footprints).refusal is None
+    too_full = {"nodes/pve01/storage/san-b/content": [_vol("san-b:vm-900-disk-0", 900, 7.5)]}
+    client, _api = client_with(
+        {"nodes/pve01/storage/san-b/status": {"total": 16 * TIB}, **too_full}
+    )
+    assert _live_transient_check(client, "pve01", target, 101, TIB, footprints).refusal is not None
+    # The same figures for a VM with nothing on san-b: 7.5 + 1 + 2*3.5 = 15.5 <= 16.
+    client, _api = client_with(
+        {"nodes/pve01/storage/san-b/status": {"total": 16 * TIB}, **too_full}
+    )
+    assert _live_transient_check(client, "pve01", target, 777, TIB, footprints).refusal is None

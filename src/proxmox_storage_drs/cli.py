@@ -979,6 +979,7 @@ def _render_show_load_json(
                 "drift_fraction": decision.drift_fraction,
                 "imbalance_fraction": decision.imbalance_fraction,
                 "capacity_fraction": decision.capacity_fraction,
+                "split_vmid": decision.split_vmid,
             }
         group_out: dict[str, object] = {
             "name": group.name,
@@ -1481,12 +1482,12 @@ def _render_group_plan_human(
         lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
         if payback_result is not None:
             lines.extend(_render_plan_payback_lines(payback_result, payback_ratio, vm_name_by_key))
-    outcome = solve_outcomes[group.name]
+    solved = solve_outcomes[group.name]
     lines.extend(
         _render_split_lines(
-            _vm_splits(outcome.initial_breakdown, final_breakdown),
+            _vm_splits(solved.initial_breakdown, final_breakdown),
             len(group.storages),
-            proven_best=outcome.status == "optimal",
+            proven_best=solved.status == "optimal",
         )
     )
     unfixable = _unfixable_shortfall(group, final_breakdown, solve_outcomes[group.name])
@@ -1632,6 +1633,7 @@ def _render_group_plan_json(
             "drift_fraction": decision.drift_fraction,
             "imbalance_fraction": decision.imbalance_fraction,
             "capacity_fraction": decision.capacity_fraction,
+            "split_vmid": decision.split_vmid,
         }
     before_spread = after_spread = None
     if group_load is not None:
@@ -3823,15 +3825,14 @@ def _source_suffix(source: str) -> str:
 
 
 def _footprint_text(status: Any, disks: Iterable[Disk]) -> str:
-    """``Z_s`` with the VM it comes from, e.g. ``10.0 TiB (puppet001, VM 101)`` -- the
-    snapshot reserve is driven by that one VM (section 5.3.3), so the operator needs its name."""
+    """``Z_s`` with the VM it comes from, e.g. ``3.00 TiB = puppet001(101)`` -- the snapshot
+    reserve is driven by that one VM (section 5.3.3), so the operator needs to know which."""
     if status.largest_footprint_vmid is None:
         return format_bytes(0)
-    name = next((d.vm_name for d in disks if d.vmid == status.largest_footprint_vmid), "")
-    who = f"{name}, " if name else ""
-    return (
-        f"{format_bytes(status.largest_footprint_bytes)} ({who}VM {status.largest_footprint_vmid})"
-    )
+    vmid = status.largest_footprint_vmid
+    name = next((d.vm_name for d in disks if d.vmid == vmid), "")
+    who = f"{name}({vmid})" if name else f"VM {vmid}"
+    return f"{format_bytes(status.largest_footprint_bytes)} = {who}"
 
 
 def _render_verify_storages_human(topology: Topology, config: Any) -> str:

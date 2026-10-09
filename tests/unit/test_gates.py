@@ -10,10 +10,12 @@ not just self-consistent numbers.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
-from proxmox_storage_drs.config import GatesConfig
-from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates
+from proxmox_storage_drs.config import GatesConfig, ObjectiveConfig
+from proxmox_storage_drs.gates import GateDecision, evaluate_group_gates, split_gate
 from proxmox_storage_drs.loadmodel import DiskLoad, GroupLoad, StorageLoad
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status
 from proxmox_storage_drs.topology import Disk, Group, Storage
@@ -495,3 +497,114 @@ def test_capacity_fraction_still_reported_when_below_threshold() -> None:
 
     assert decision.capacity_fraction == pytest.approx(0.0, abs=1e-9)
     assert not decision.act
+
+
+# ------------------------------------------------------- split gate (section 6)
+
+
+# The capacity gate is switched off, as in section 14.9's fixture: the data is concentrated on
+# st-a on purpose, and the split gate is what is under test.
+SPLIT_GATES = GatesConfig(
+    drift_threshold=0.10, imbalance_threshold=0.20, capacity_spread_threshold=None
+)
+
+
+def _split_group(*, split_bytes: int | None = 2 * TIB) -> Group:
+    """VM 701 (five 2 TiB disks) whole on st-a of three 40 TiB storages: balanced I/O,
+    every reserve satisfied -- only the split rule can open it."""
+
+    def storage(id_: str) -> Storage:
+        return Storage(
+            id=id_,
+            capability_weight=1.0,
+            reserve_factor=2.0,
+            capacity_bytes=40 * TIB,
+            used_bytes=0,
+            foreign_used_bytes=0,
+            saferemove=False,
+            saferemove_throughput_bytes_per_sec=None,
+            free_space_soft_bytes=0,
+            free_space_hard_bytes=0,
+            storage_type="dir",
+            allowed_formats=frozenset({"raw", "qcow2"}),
+        )
+
+    disks = tuple(
+        Disk(f"701:scsi{i}", 701, f"scsi{i}", "vm701", "pve01", 2 * TIB, "st-a", "raw", None)
+        for i in range(5)
+    )
+    return Group(
+        name="g",
+        storages=(storage("st-a"), storage("st-b"), storage("st-c")),
+        disks=disks,
+        split_vm_footprint_bytes=split_bytes,
+    )
+
+
+def _balanced_load() -> GroupLoad:
+    return GroupLoad(
+        group_name="g",
+        idle=False,
+        average_utilization=1.0,
+        disks=(),
+        storages=(
+            StorageLoad("st-a", 1.0, 1.0),
+            StorageLoad("st-b", 1.0, 1.0),
+            StorageLoad("st-c", 1.0, 1.0),
+        ),
+    )
+
+
+def _statuses(group: Group) -> dict[str, ReserveStatus]:
+    return {s.id: compute_reserve_status(s, group.disks) for s in group.storages}
+
+
+def test_the_split_gate_opens_a_balanced_group_and_names_the_vm() -> None:
+    group = _split_group()
+    objective = ObjectiveConfig()
+    decision = evaluate_group_gates(
+        _balanced_load(), _statuses(group), group, SPLIT_GATES, None, objective=objective
+    )
+    assert decision.act
+    assert decision.split_vmid == 701
+    assert not decision.reserve_override
+    assert "VM 701" in decision.reason and "split_vm_footprint" in decision.reason
+
+
+def test_without_objective_weights_the_split_gate_does_not_exist() -> None:
+    group = _split_group()
+    decision = evaluate_group_gates(_balanced_load(), _statuses(group), group, SPLIT_GATES, None)
+    assert not decision.act
+    assert decision.split_vmid is None
+
+
+def test_the_reserve_override_outranks_the_split_gate() -> None:
+    group = _split_group()
+    statuses = {**_statuses(group), "st-b": violated_reserve()}
+    decision = evaluate_group_gates(
+        _balanced_load(), statuses, group, SPLIT_GATES, None, objective=ObjectiveConfig()
+    )
+    assert decision.reserve_override
+    assert decision.split_vmid is None
+
+
+def test_split_gate_ignores_a_target_that_would_itself_fall_short() -> None:
+    """Moving a 2 TiB disk onto a storage that cannot take it (and keep its reserve) does not
+    count as progress: with both targets full, the gate stays shut."""
+    group = _split_group()
+    full = tuple(
+        dataclasses.replace(s, capacity_bytes=3 * TIB) if s.id != "st-a" else s
+        for s in group.storages
+    )
+    group = dataclasses.replace(group, storages=full)
+    assert split_gate(group, ObjectiveConfig()) is None
+
+
+def test_split_gate_respects_format_eligibility() -> None:
+    group = _split_group()
+    qcow_only = tuple(
+        dataclasses.replace(s, allowed_formats=frozenset({"qcow2"})) if s.id != "st-a" else s
+        for s in group.storages
+    )
+    group = dataclasses.replace(group, storages=qcow_only)
+    assert split_gate(group, ObjectiveConfig()) is None
