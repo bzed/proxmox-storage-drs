@@ -295,3 +295,47 @@ def compute_reserve_status(
         managed_used_bytes=used,
         shortfall_bytes=shortfall,
     )
+
+
+def split_vm_caps(disks: Iterable[Disk], split_vm_footprint_bytes: int | None) -> dict[int, int]:
+    """``{vmid: T_v}`` for every VM in ``V^split`` (section 5.3.3), empty when the rule is off.
+
+    ``V^split`` is every VM whose disks in ``disks`` add up (at their listed size ``z_d``)
+    to more than ``T``; a VM no larger than ``T`` can never exceed it on one storage.
+    ``T_v = max(T, largest disk of v)``: a disk larger than ``T`` cannot be split, so its own
+    storage may hold it in full."""
+    if split_vm_footprint_bytes is None:
+        return {}
+    total: dict[int, int] = {}
+    largest: dict[int, int] = {}
+    for d in disks:
+        total[d.vmid] = total.get(d.vmid, 0) + d.size_bytes
+        largest[d.vmid] = max(largest.get(d.vmid, 0), d.size_bytes)
+    return {
+        vmid: max(split_vm_footprint_bytes, largest[vmid])
+        for vmid, size in total.items()
+        if size > split_vm_footprint_bytes
+    }
+
+
+def split_excess_bytes(
+    storages: Iterable[Storage],
+    disks: Iterable[Disk],
+    caps: Mapping[int, int],
+    *,
+    storage_of: StorageOf = _current_storage,
+) -> dict[int, int]:
+    """``o_v`` for every VM in ``caps`` (section 5.3.3, (C9)): the peak footprint any one
+    storage holds of the VM beyond its cap, ``max(0, max_s F_{v,s} - T_v)``. The peak, not a
+    sum over storages, because the reserve a storage needs is driven by the largest footprint
+    on it. Each disk counts at ``z_{d,s}`` for the storage it sits on under ``storage_of``."""
+    storages = list(storages)
+    disks = list(disks)
+    excess = {vmid: 0 for vmid in caps}
+    for storage in storages:
+        for vmid, footprint in vm_footprints_bytes(
+            disks, storage.id, storage_of=storage_of, storage=storage
+        ).items():
+            if vmid in caps:
+                excess[vmid] = max(excess[vmid], footprint - caps[vmid])
+    return excess

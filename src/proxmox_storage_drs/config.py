@@ -201,6 +201,9 @@ class GroupConfig:
 class SnapshotReserveConfig:
     factor: float = 2.0
     count_foreign_volumes: bool = True
+    # Section 5.3.3's ``T``: the most of one VM that one storage should hold. ``None`` switches
+    # the split rule (C9), the ``mu`` term and the split gate off.
+    split_vm_footprint_bytes: int | None = 2 * (1 << 40)
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +255,8 @@ class ObjectiveConfig:
     gamma_move_bytes_per_tib: float = 0.05
     kappa_vm_affinity: float = 0.50
     delta_capacity_spread: float = 0.5
+    # Section 5.3.3 ``mu``: weight, per TiB of split excess, of the large-VM split rule.
+    mu_vm_split_per_tib: float = 1.0
     # Section 5.3 (C3): default True -- a pinned disk is a fixed anchor its
     # VM's movable disks can be drawn back to, not a veto. See the plan's
     # own note on why the opposite default was wrong.
@@ -619,6 +624,11 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
     snapshot_reserve = SnapshotReserveConfig(
         factor=sr_raw.get("factor", 2.0),
         count_foreign_volumes=sr_raw.get("count_foreign_volumes", True),
+        split_vm_footprint_bytes=(
+            None
+            if "split_vm_footprint" in sr_raw and sr_raw["split_vm_footprint"] is None
+            else parse_size_bytes(sr_raw.get("split_vm_footprint", "2TiB"))
+        ),
     )
 
     fs_raw = raw.get("free_space", {})
@@ -663,6 +673,7 @@ def _build_config(raw: dict[str, Any], environ: Mapping[str, str]) -> Config:
         gamma_move_bytes_per_tib=obj_raw.get("gamma_move_bytes_per_tib", 0.05),
         kappa_vm_affinity=obj_raw.get("kappa_vm_affinity", 0.50),
         delta_capacity_spread=obj_raw.get("delta_capacity_spread", 0.5),
+        mu_vm_split_per_tib=obj_raw.get("mu_vm_split_per_tib", 1.0),
         affinity_counts_pinned_disks=obj_raw.get("affinity_counts_pinned_disks", True),
         reserve_violation_penalty=obj_raw.get("reserve_violation_penalty", 1000.0),
     )
@@ -953,6 +964,27 @@ def _check_objective_weights(config: Config, warnings: list[str]) -> None:
         )
 
 
+def _check_vm_split(config: Config, errors: list[str], warnings: list[str]) -> None:
+    """Section 11.1: ``split_vm_footprint`` is ``null`` or a byte value above 0 (a ``0`` would
+    cap every multi-disk VM at its largest disk and spread all of them -- a typo, not a
+    policy); warn when ``mu_vm_split_per_tib`` is above 0 but below ``kappa_vm_affinity``,
+    where one TiB of split excess no longer pays for opening a new storage.
+    ``mu >= 0`` is already enforced structurally by the schema."""
+    threshold = config.snapshot_reserve.split_vm_footprint_bytes
+    if threshold is not None and threshold <= 0:
+        errors.append(
+            "snapshot_reserve.split_vm_footprint must be null (rule off) or a size above 0, "
+            f"got {threshold}"
+        )
+    mu = config.objective.mu_vm_split_per_tib
+    if threshold is not None and 0 < mu < config.objective.kappa_vm_affinity:
+        warnings.append(
+            f"objective.mu_vm_split_per_tib ({mu:g}) is below objective.kappa_vm_affinity "
+            f"({config.objective.kappa_vm_affinity:g}) -- one TiB of split excess no longer "
+            "pays for opening a new storage, so the large-VM split rule will rarely act"
+        )
+
+
 def _check_time_windows(config: Config, errors: list[str]) -> None:
     for tw in config.execution.time_windows:
         if tw.start == tw.end:
@@ -1020,6 +1052,7 @@ def _validate_semantics(config: Config, *, require_connection: bool = True) -> l
     _check_forecast_window(config, errors)
     _check_payback_horizon(config, warnings)
     _check_objective_weights(config, warnings)
+    _check_vm_split(config, errors, warnings)
     _check_time_windows(config, errors)
     _check_support(config, errors)
 

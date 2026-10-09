@@ -64,6 +64,7 @@ from proxmox_storage_drs.heuristic import (
     group_average_utilization,
     raw_affinity_debt,
     raw_capacity_spread,
+    raw_split_excess_tib,
     raw_spread,
     run_heuristic,
 )
@@ -887,6 +888,7 @@ def _render_show_load_human(
                 group,
                 config.gates,
                 last_load=last_loads_by_group.get(group.name),
+                objective=config.objective,
             )
             verdict = "ACT" if decision.act else "NO ACTION"
             header += f" → {verdict}: {decision.reason}"
@@ -968,6 +970,7 @@ def _render_show_load_json(
                 group,
                 config.gates,
                 last_load=last_loads_by_group.get(group.name),
+                objective=config.objective,
             )
             gate_out = {
                 "act": decision.act,
@@ -2561,6 +2564,7 @@ def _log_gate_decision(group: Group, decision: GateDecision, gates: GatesConfig)
             "drift_fraction": decision.drift_fraction,
             "imbalance_fraction": decision.imbalance_fraction,
             "capacity_fraction": decision.capacity_fraction,
+            "split_vmid": decision.split_vmid,
             "drift_threshold": gates.drift_threshold,
             "imbalance_threshold": gates.imbalance_threshold,
             "capacity_spread_threshold": gates.capacity_spread_threshold,
@@ -2681,12 +2685,19 @@ def _plan_group(
     reserve_statuses: dict[str, ReserveStatus] = {
         storage.id: compute_reserve_status(storage, group.disks) for storage in group.storages
     }
+    cooldown_storages = frozenset(
+        active_storage_cooldowns(
+            state, group.name, resolved.config.gates.cooldown_per_storage_seconds, now
+        )
+    )
     decision = evaluate_group_gates(
         group_load,
         reserve_statuses,
         group,
         resolved.config.gates,
         last_load=last_loads_by_group.get(group.name),
+        objective=resolved.config.objective,
+        cooldown_storages=cooldown_storages,
     )
     _log_gate_decision(group, decision, resolved.config.gates)
     if not decision.act:
@@ -2697,11 +2708,6 @@ def _plan_group(
             forecast=forecast,
         )
 
-    cooldown_storages = frozenset(
-        active_storage_cooldowns(
-            state, group.name, resolved.config.gates.cooldown_per_storage_seconds, now
-        )
-    )
     solve_outcome = _solve_group(group, group_load.load_by_disk_key(), resolved, cooldown_storages)
     schedule_result = order_moves(
         group,
@@ -2746,6 +2752,9 @@ def _plan_group(
         resolved.config.objective.kappa_vm_affinity,
         raw_affinity_debt(solve_outcome.initial_breakdown),
         raw_affinity_debt(final_breakdown),
+        resolved.config.objective.mu_vm_split_per_tib,
+        raw_split_excess_tib(solve_outcome.initial_breakdown),
+        raw_split_excess_tib(final_breakdown),
     )
     # Section 7.3's outcome trigger and revert test both score the plan's
     # *executed* endpoint -- final_assignment with every disk a hard

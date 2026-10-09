@@ -112,6 +112,7 @@ from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.heuristic import (
     Assignment,
     ObjectiveBreakdown,
+    active_split_caps,
     compute_vm_weights,
     evaluate_assignment,
     group_average_fill,
@@ -442,6 +443,31 @@ def _cbc_small_disks_follow_their_vm(
             prob += x[d.key, s.id] <= anchors
 
 
+def _cbc_vm_footprint(
+    pulp: Any,
+    movable: tuple[Disk, ...],
+    pinned_by_storage: dict[str, tuple[Disk, ...]],
+    x: dict[Any, Any],
+    vmid: int,
+    s: Storage,
+    bytes_per_unit: int,
+) -> Any:
+    """``F_{v,s}`` (section 5.3.3) as a linear expression in ``x``, in units of
+    ``bytes_per_unit``: the VM's movable disks that land on ``s`` at ``z_{d,s}``, plus its
+    pinned disks already there. The one place the model sums a VM's disks on a storage --
+    (C4) and (C9) both call it, as `reserve.vm_footprints_bytes()` is the one place the
+    reported figure does."""
+    pinned_bytes = sum(d.size_bytes for d in pinned_by_storage[s.id] if d.vmid == vmid)
+    return (
+        pulp.lpSum(
+            (disk_size_on(d, s) / bytes_per_unit) * x[d.key, s.id]
+            for d in movable
+            if d.vmid == vmid
+        )
+        + pinned_bytes / bytes_per_unit
+    )
+
+
 def _cbc_feasibility_constraints(
     pulp: Any,
     prob: Any,
@@ -496,12 +522,17 @@ def _cbc_feasibility_constraints(
             if any(d.current_storage == s.id for d in pinned_of_v):
                 prob += y[v, s.id] == 1
 
+    # (C4), section 5.3.3: Z_s is the largest per-VM footprint, so one row per (VM, storage)
+    # over *every* VM with a disk in the group -- a VM whose disks are all pinned still
+    # contributes its constant footprint.
     for s in group.storages:
-        pinned_largest = max((d.size_bytes for d in pinned_by_storage[s.id]), default=0)
-        if pinned_largest:
-            prob += z[s.id] >= pinned_largest / _BYTES_PER_MIB
-        for d in movable:
-            prob += z[s.id] >= (disk_size_on(d, s) / _BYTES_PER_MIB) * x[d.key, s.id]
+        for v in sorted({d.vmid for d in group.disks}):
+            has_movable = any(d.vmid == v for d in movable)
+            has_pinned = any(d.vmid == v for d in pinned_by_storage[s.id])
+            if has_movable or has_pinned:
+                prob += z[s.id] >= _cbc_vm_footprint(
+                    pulp, movable, pinned_by_storage, x, v, s, _BYTES_PER_MIB
+                )
 
     for s in group.storages:
         prob += r[s.id] >= s.reserve_factor * z[s.id]
@@ -592,8 +623,9 @@ def _cbc_objective_terms(
     # computed from the same load vector everything else here uses and
     # folded per vmid at full float precision (CBC's coefficients are
     # continuous, so there is nothing to round).
+    split_caps = active_split_caps(group, objective)
     if objective.kappa_vm_affinity:
-        vm_weights = compute_vm_weights(group, load_by_key, vmids)
+        vm_weights = compute_vm_weights(group, load_by_key, vmids, split_caps)
         for v in vmids:
             terms.append(
                 objective.kappa_vm_affinity
@@ -619,7 +651,36 @@ def _cbc_objective_terms(
     _cbc_capacity_spread_term(
         pulp, prob, group, movable, pinned_by_storage, objective, average_fill, x, terms
     )
+    _cbc_split_excess_term(pulp, prob, group, movable, pinned_by_storage, objective, x, terms)
     return terms
+
+
+def _cbc_split_excess_term(
+    pulp: Any,
+    prob: Any,
+    group: Group,
+    movable: tuple[Disk, ...],
+    pinned_by_storage: dict[str, tuple[Disk, ...]],
+    objective: ObjectiveConfig,
+    x: dict[Any, Any],
+    terms: list[Any],
+) -> None:
+    """(C9), section 5.3.3: one continuous ``o_v >= 0`` per large VM, bounded below by its
+    footprint on every storage less its cap, and ``mu * sum(o_v)`` in the objective. In TiB,
+    the unit ``mu`` and ``gamma`` are quoted in. Stage 2 only, with the rest of the objective:
+    a split is a preference and never displaces a reserve repair (stage 1). Appends to
+    ``terms`` in place; adds nothing when the rule is off."""
+    caps = active_split_caps(group, objective)
+    if not caps:
+        return
+    o = {v: _lp_variable(pulp, f"o_{v}", lowBound=0) for v in sorted(caps)}
+    for v, cap_bytes in sorted(caps.items()):
+        for s in group.storages:
+            prob += o[v] >= (
+                _cbc_vm_footprint(pulp, movable, pinned_by_storage, x, v, s, _BYTES_PER_TIB)
+                - cap_bytes / _BYTES_PER_TIB
+            )
+    terms.append(objective.mu_vm_split_per_tib * pulp.lpSum(o.values()))
 
 
 def _cbc_capacity_spread_term(

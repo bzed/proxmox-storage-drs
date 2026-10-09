@@ -224,8 +224,8 @@ def order_moves(
             group, state, load_by_key, objective, u_star, b_bar, tiny_disk_bytes
         )
         current_imbalance = current_breakdown.imbalance_term
-        # Section 8.2's revised ranking: "the alpha, delta and kappa*w
-        # terms of section 5.4 -- the parts whose improvement persists;
+        # Section 8.2's revised ranking: "the alpha, delta, kappa*w and
+        # mu terms of section 5.4 -- the parts whose improvement persists;
         # beta/gamma are one-time costs". `imbalance_term`/
         # `capacity_spread_term`/`fragmentation_term` are already
         # alpha-/delta-/kappa*w-weighted (heuristic.ObjectiveBreakdown), so
@@ -237,6 +237,7 @@ def order_moves(
             current_imbalance
             + current_breakdown.capacity_spread_term
             + current_breakdown.fragmentation_term
+            + current_breakdown.split_excess_term
         )
 
         feasible: list[str] = []
@@ -274,6 +275,7 @@ def order_moves(
                 trial_breakdown.imbalance_term
                 + trial_breakdown.capacity_spread_term
                 + trial_breakdown.fragmentation_term
+                + trial_breakdown.split_excess_term
             )
             reduction = current_imbalance - trial_breakdown.imbalance_term
             persistent_reduction = current_persistent - trial_persistent

@@ -524,11 +524,52 @@ per storage, not one number shared across the family.
 
 Weight `>= 0`, default `2.0`.
 
-Keep this many times the largest disk on a storage free at all times,
-including *during* a migration, not merely before and after — PVE 9's
-volume-chain snapshots allocate a new full-size volume per snapshot, which
-is what this protects against. This is the constraint the tool never trades
-against balance (`IMPLEMENTATION_PLAN.md` section 5.3, (C5)).
+Keep this many times the **largest VM footprint** on a storage free at
+all times, including *during* a migration, not merely before and after.
+A snapshot is taken of a whole VM — every one of its disks at once — and
+PVE 9's volume-chain snapshots allocate a new full-size volume per
+snapshotted disk. So what a snapshot of VM *v* needs on storage *s* is the
+sum of all of *v*'s disks that live on *s* (its *footprint* there), not its
+largest single disk: a VM with five 2 TiB disks on one storage needs 10 TiB
+free for one snapshot, and at the default `2.0` the storage keeps 20 TiB
+free for it. The footprint is counted per storage — the room a snapshot
+needs on *another* storage holding some of the same VM's disks is that
+storage's own footprint figure. Pinned disks count (they are snapshotted
+with their VM); disks of stopped VMs count toward used space but carry no
+footprint, because stopped VMs are not planned for snapshots. `show-load`
+and `verify-storages` print the largest footprint on each storage and the VM
+it belongs to. This is the constraint the tool never trades against balance.
+
+**Upgrading from a release that reserved only the largest disk:** any
+storage holding two or more disks of one VM now reserves more than before,
+and one that was compliant can report a reserve shortfall it did not have
+yesterday. That is the rule being right, not the cluster changing, and the
+tool treats it as a repair like any other shortfall — the first run after
+the upgrade can plan substantial migrations. Read `show-load` (and a
+dry-run `plan`) first.
+
+### `snapshot_reserve.split_vm_footprint`
+
+Size, byte-unit string, or `null`, default `2TiB`.
+
+The most of **one VM** that **one storage** should hold. A VM whose disks
+add up to more than this is spread over several storages until no storage
+holds more than this much of it — or as little as the storages available
+allow. With fewer storages than disks, which is the usual case, the cap is
+not reachable and need not be: five 2 TiB disks on three storages end up
+2 + 2 + 1 disks (4 + 4 + 2 TiB), the smallest peak three storages allow, and
+the fullest storage then needs `2.0 × 4 TiB = 8 TiB` free for a snapshot
+instead of `20 TiB`. A single disk larger than the cap cannot be split, so
+its own storage may hold it in full; only what is *added* to it there counts
+as excess. The rule is a standing preference, not a repair: it never
+displaces a reserve or free-space repair, and it never creates a shortfall.
+`objective.mu_vm_split_per_tib` sets how strongly it is pursued; a group
+holding such a VM on one storage is planned even when its I/O and data are
+in balance. `null` turns the rule, that weight and the planning trigger off.
+Must be `null` or above `0` (a `0` would spread every multi-disk VM — a typo,
+not a policy). **Too low** spreads many VMs for little gain and costs
+migrations; **too high** keeps large VMs together and leaves their snapshot
+reserve large.
 
 ### `snapshot_reserve.count_foreign_volumes`
 
@@ -556,7 +597,7 @@ Size, byte-unit string, or percentage string (`"N%"`, `0 <= N < 100`),
 default `0`.
 
 The **plan-endpoint** requirement: the number of bytes that must be free on
-a storage once the plan has fully run. `R_s = max(factor * largest_disk,
+a storage once the plan has fully run. `R_s = max(factor * largest_vm_footprint,
 soft)` — the *larger* of the snapshot term and this floor wins, on every
 storage, always; neither term can erode the other. The default `0` changes
 nothing for a config that sets no knob in this block at all: the resulting
@@ -844,10 +885,11 @@ minimizes one weighted sum, evaluated per group:
 + gamma_move_bytes_per_tib * (TiB actually migrated)
 + kappa_vm_affinity       * (VM disk fragmentation, I/O-weighted — see below)
 + delta_capacity_spread   * (data spread: summed deviation of each storage's fill fraction from the group's mean)
++ mu_vm_split_per_tib     * (split excess: TiB of each large VM beyond the cap on its fullest storage)
 + reserve_violation_penalty * (reserve violation, heuristic backend only — see below)
 ```
 
-The first five terms are calibrated to share one scale, in units of average
+The first six terms are calibrated to share one scale, in units of average
 in-flight I/O per storage (see `metrics.read_time_ns` above) — which is
 what makes the weights directly comparable: at the defaults, a migration
 must buy at least a 0.25-request reduction in summed imbalance just to
@@ -913,6 +955,26 @@ I/O, for example, is effectively weighted as if `kappa_vm_affinity` were
 2.7 times higher for that VM alone. A soft preference: a strong imbalance
 or a capacity constraint can legitimately override it.
 (`IMPLEMENTATION_PLAN.md` section 5.4.)
+
+### `objective.mu_vm_split_per_tib`
+
+Weight `>= 0`, default `1.0`.
+
+Weight, per TiB, of the large-VM split rule (`snapshot_reserve.split_vm_footprint`
+above). For every VM above that threshold, the *excess* is how far its
+footprint on its **fullest** storage exceeds the VM's cap — the peak, not a sum
+over storages, because the reserve a storage needs is driven by the largest
+footprint on it. Moving a disk off the fullest storage lowers the excess by up
+to the disk's size and costs `beta_move_count + gamma_move_bytes_per_tib × TiB`
+(plus `kappa_vm_affinity` when it opens a storage the VM did not use yet), so at
+the defaults a move pays above about 0.26 TiB onto a storage the VM already
+uses and above about 0.79 TiB onto a new one; a VM made of many small disks
+splits more reluctantly than one with a few large disks. Raise the weight to
+split harder. A large VM's affinity weight is fixed at 1 (the I/O-weighting of
+`kappa_vm_affinity` does not apply to it), so a busy VM's I/O cannot veto the
+policy. `0` disables the term and the planning trigger; configuration
+validation warns when it is above `0` but below `kappa_vm_affinity`, where a
+TiB of excess no longer buys a new storage and the rule rarely acts.
 
 ### `objective.delta_capacity_spread`
 

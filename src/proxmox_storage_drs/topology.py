@@ -231,6 +231,10 @@ class Group:
     name: str
     storages: tuple[Storage, ...]
     disks: tuple[Disk, ...]  # every d in D for this group, pinned or not
+    # Section 5.3.3's ``T`` (``snapshot_reserve.split_vm_footprint``) resolved to bytes; None
+    # means the split rule is off for this group (which is also what every Group built
+    # without it means).
+    split_vm_footprint_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1377,6 +1381,7 @@ def build_topology(
             disks=pin_lone_small_disks(
                 disks_by_group[group_cfg.name], config.migration.tiny_disk_bytes
             ),
+            split_vm_footprint_bytes=config.snapshot_reserve.split_vm_footprint_bytes,
         )
         for group_cfg in config.groups
     )
