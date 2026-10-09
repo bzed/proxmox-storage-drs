@@ -86,7 +86,7 @@ architecture-independent `pve-storage-drs_<version>_all.deb`, with a
 trixie archive the host already uses:
 
 ```sh
-VERSION=0.1.19      # the newest release on the releases page
+VERSION=0.1.20      # the newest release on the releases page
 BASE=https://github.com/bzed/proxmox-storage-drs/releases/download/debian/$VERSION
 wget "$BASE/pve-storage-drs_${VERSION}_all.deb" "$BASE/SHA256SUMS"
 sha256sum -c SHA256SUMS

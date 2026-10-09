@@ -1,3 +1,43 @@
+pve-storage-drs (0.1.20) trixie; urgency=medium
+
+  * The snapshot reserve is now computed from the largest per-VM footprint
+    on a storage, not its largest disk. A snapshot covers every disk of a
+    VM, so what it needs on a storage is the sum of all of that VM's disks
+    there: a VM with five 2 TiB disks on one storage needs 10 TiB free for
+    one snapshot, not 2 TiB. This applies everywhere the reserve is used:
+    the reserve check, the transient check during a move (an incoming disk
+    joins its own VM's footprint), the live re-check before each move, the
+    solver and the heuristic. show-load and verify-storages name the VM
+    that drives each storage's figure. Disks of stopped VMs still count
+    toward used space but carry no footprint. UPGRADE NOTE: a storage that
+    holds two or more disks of one VM can now report a reserve shortfall it
+    did not have before, and the first run is then a repair that may plan
+    substantial migrations. Read show-load and a dry-run plan first.
+  * New large-VM split rule. A VM whose disks add up to more than
+    snapshot_reserve.split_vm_footprint (default 2TiB, null turns the rule
+    off) is spread over several storages until no storage holds more than
+    that of it, or as little as the storages allow. New knob
+    objective.mu_vm_split_per_tib (default 1.0, 0 turns the rule off, a
+    warning below kappa_vm_affinity). A new split gate plans a group for
+    this reason even when I/O and data are balanced; the split is a
+    preference, never a repair: it never displaces a reserve repair and has
+    to pay back like any balance plan. plan, apply and explain print a
+    split: line, and --json carries vm_splits[], split_excess_bytes_before
+    and _after and gate.split_vmid. explain's objective breakdown gains the
+    seventh (split) term. show-load and verify-storages JSON gain
+    largest_footprint_bytes and largest_footprint_vmid.
+  * The PVE client retries every idempotent call briefly (1s/2s/4s) on
+    transient failures (TLS resets, truncated bodies, HTTP 429, odd login
+    answers) and rebuilds its session before retrying, so one network
+    hiccup no longer fails a dry run. 401/403 and other 4xx stay hard
+    errors.
+  * Review: REVIEW.md passes 31 (AO-01..AO-06) addressed; one finding
+    refuted with a regression test.
+  * New fixture large-vm-split and regenerated fixtures and corpus
+    expectations; docs, manual, manpage and example configuration updated.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Fri, 09 Oct 2026 13:45:00 +0200
+
 pve-storage-drs (0.1.19) trixie; urgency=medium
 
   * Stopped VMs are never moved, whatever capacity or reserve violation
