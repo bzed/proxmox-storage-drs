@@ -4817,16 +4817,34 @@ def test_vm_splits_lists_a_vm_the_plan_changes_and_one_still_above_its_cap() -> 
     assert cli._vm_splits(at_cap, at_cap) == []
 
 
-def test_split_line_claims_the_best_split_only_when_it_was_proven() -> None:
+def test_split_line_never_claims_a_proven_best_split() -> None:
     splits = cli._vm_splits(_breakdown_with_split(10.0, 8.0), _breakdown_with_split(4.0, 2.0))
-    (proven,) = cli._render_split_lines(splits, 3, proven_best=True)
+    (proven,) = cli._render_split_lines(splits, 3, solver_settled=True)
     assert proven == (
         "  split: VM 701 largest footprint 10.00 TiB → 4.00 TiB "
-        "(cap 2.00 TiB, excess 8.00 TiB → 2.00 TiB — the best 3 storages allow)"
+        "(cap 2.00 TiB, excess 8.00 TiB → 2.00 TiB — "
+        "the solver found no better split across 3 storages)"
     )
-    (unproven,) = cli._render_split_lines(splits, 3, proven_best=False)
+    (unproven,) = cli._render_split_lines(splits, 3, solver_settled=False)
     assert unproven.endswith("— still above the cap)")
     # Reaching the cap needs no qualifier at all.
     done = cli._vm_splits(_breakdown_with_split(10.0, 8.0), _breakdown_with_split(2.0, 0.0))
-    (line,) = cli._render_split_lines(done, 5, proven_best=True)
+    (line,) = cli._render_split_lines(done, 5, solver_settled=True)
     assert line.endswith("excess 8.00 TiB → 0 B)")
+
+
+def test_the_explain_objective_terms_sum_to_the_printed_total() -> None:
+    """REVIEW.md AO-01: the split term is the seventh, so the printed terms must add up."""
+    breakdown = dataclasses.replace(
+        _breakdown_with_split(6.0, 4.0),
+        imbalance_term=0.5,
+        move_count_term=0.25,
+        split_excess_term=4.0,
+        reserve_penalty_term=0.125,
+    )
+    line = cli._render_objective_breakdown_line(breakdown)
+    assert "split 4 + reserve 0.125 = 4.88" in line
+    as_json = cli._objective_breakdown_json(breakdown)
+    terms = [v for k, v in as_json.items() if k != "total"]
+    assert len(terms) == 7
+    assert sum(terms) == pytest.approx(as_json["total"])

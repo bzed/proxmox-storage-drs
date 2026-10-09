@@ -26,13 +26,19 @@ act/no-act-per-group question.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Mapping
+from typing import Mapping
 
 from proxmox_storage_drs.config import GatesConfig, ObjectiveConfig
 from proxmox_storage_drs.heuristic import active_split_caps, group_average_fill
 from proxmox_storage_drs.loadmodel import GroupLoad
 from proxmox_storage_drs.reserve import ReserveStatus, compute_reserve_status, vm_footprints_bytes
-from proxmox_storage_drs.topology import Disk, Group, storage_accepts_format, target_format
+from proxmox_storage_drs.topology import (
+    Disk,
+    Group,
+    disk_size_on,
+    storage_accepts_format,
+    target_format,
+)
 from proxmox_storage_drs.units import format_bytes
 
 # Section 6's "treat as fully drifted, proceed" degenerate case has no
@@ -96,18 +102,6 @@ def _capacity_spread(group: Group, reserve_statuses: Mapping[str, ReserveStatus]
     return (max(fills) - min(fills)) / b_bar
 
 
-def _peak_footprint_bytes(group: Group, vmid: int, storage_of: Callable[[Disk], str]) -> int:
-    """``max_s F_{v,s}`` for one VM under ``storage_of``, with every disk at its listed
-    size -- the quantity the split gate asks a single move to lower."""
-    return max(
-        (
-            vm_footprints_bytes(group.disks, s.id, storage_of=storage_of, storage=s).get(vmid, 0)
-            for s in group.storages
-        ),
-        default=0,
-    )
-
-
 def split_gate(
     group: Group,
     objective: ObjectiveConfig,
@@ -122,26 +116,39 @@ def split_gate(
     A sufficient test, not an exact one: a split only a *pair* of moves improves does not open
     the group by itself. The single-move test is what keeps the gate quiet once the job is
     done -- a VM at the best split its storages allow has no single move that lowers its peak.
+
+    Cost: one footprint pass per large VM, then ``O(|S|)`` per (disk, target) pair to find the
+    peak after the move, and a reserve evaluation only for the pairs that do lower it.
     """
     caps = active_split_caps(group, objective)
+    storages_by_id = {s.id: s for s in group.storages}
     for vmid in sorted(caps):
-        current = _peak_footprint_bytes(group, vmid, lambda d: d.current_storage)
+        footprints = {
+            s.id: vm_footprints_bytes(group.disks, s.id, storage=s).get(vmid, 0)
+            for s in group.storages
+        }
+        current = max(footprints.values(), default=0)
         for disk in group.disks:
             if disk.vmid != vmid or disk.pinned_reason is not None:
                 continue
+            source = storages_by_id.get(disk.current_storage)
             for target in group.storages:
                 if (
-                    target.id == disk.current_storage
+                    source is None
+                    or target.id == disk.current_storage
                     or target.id in cooldown_storages
                     or not storage_accepts_format(target, target_format(disk, target))
                 ):
+                    continue
+                after = dict(footprints)
+                after[source.id] -= disk_size_on(disk, source)
+                after[target.id] += disk_size_on(disk, target)
+                if max(after.values()) >= current:
                     continue
 
                 def trial(d: Disk, _disk: Disk = disk, _to: str = target.id) -> str:
                     return _to if d.key == _disk.key else d.current_storage
 
-                if _peak_footprint_bytes(group, vmid, trial) >= current:
-                    continue
                 if compute_reserve_status(target, group.disks, storage_of=trial).violated:
                     continue
                 return vmid, (

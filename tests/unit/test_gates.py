@@ -608,3 +608,28 @@ def test_split_gate_respects_format_eligibility() -> None:
     )
     group = dataclasses.replace(group, storages=qcow_only)
     assert split_gate(group, ObjectiveConfig()) is None
+
+
+def test_split_gate_charges_a_converting_move_at_its_converted_size() -> None:
+    """REVIEW.md AO-02 (refuted, pinned): the reserve check inside the gate is
+    `compute_reserve_status(target, ...)`, which already counts every disk at `z_{d,s}` for the
+    storage it is evaluated on. A 2 TiB disk whose config size is 3 TiB lands as 3 TiB on an
+    `enforce_format: qcow2` target (2 + 2*... fits at 2 TiB, not at 3), so the gate stays shut."""
+    group = _split_group()
+    disks = tuple(dataclasses.replace(d, config_size_bytes=3 * TIB) for d in group.disks)
+    strict = tuple(
+        (
+            dataclasses.replace(s, capacity_bytes=8 * TIB, enforce_format="qcow2")
+            if s.id != "st-a"
+            else s
+        )
+        for s in group.storages
+    )
+    converting = dataclasses.replace(group, disks=disks, storages=strict)
+    # 3 TiB landed + 2 * 3 TiB footprint = 9 TiB > 8 TiB; at the listed 2 TiB it would be 6 <= 8.
+    assert split_gate(converting, ObjectiveConfig()) is None
+    plain = dataclasses.replace(
+        converting,
+        storages=tuple(dataclasses.replace(s, enforce_format=None) for s in strict),
+    )
+    assert split_gate(plain, ObjectiveConfig()) is not None

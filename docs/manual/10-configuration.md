@@ -1067,7 +1067,7 @@ The reserve-violation weight in the **heuristic backend**'s objective
 (`solver.backend: heuristic`, or `auto` falling back to it when neither a
 MILP backend is installed): multiplied straight into
 `reserve_penalty_term = objective.reserve_violation_penalty *
-reserve_shortfall_tib`, one of the six terms `explain`'s `objective:`
+reserve_shortfall_tib`, one of the seven terms `explain`'s `objective:`
 line prints. It is used exactly as configured — no floor, no automatic
 raise, no warning.
 

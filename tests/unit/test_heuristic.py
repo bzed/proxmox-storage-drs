@@ -835,3 +835,23 @@ def test_a_large_vms_affinity_weight_is_one_whatever_its_io() -> None:
     loads["702:scsi0"] = 0.1
     assert compute_vm_weights(busy, loads, [701, 702])[701] > 1.0
     assert compute_vm_weights(busy, loads, [701, 702], split_vmids=[701])[701] == 1.0
+
+
+def test_mu_zero_restores_the_io_weight_of_a_large_vm() -> None:
+    """REVIEW.md AO-04: `mu = 0` empties V^split for the weights too (plan 5.3.3)."""
+    group = _large_vm_group(2 * TIB)
+    busy = Group(
+        name="g",
+        storages=group.storages,
+        disks=group.disks + (make_disk("702:scsi0", 0.5, 0.1, "san-b"),),
+        split_vm_footprint_bytes=2 * TIB,
+    )
+    loads = {"701:scsi0": 9.0, "701:scsi1": 0.0, "701:scsi2": 0.0, "702:scsi0": 0.1}
+    off = dataclasses.replace(DEFAULT_OBJECTIVE, mu_vm_split_per_tib=0.0)
+    on = dataclasses.replace(DEFAULT_OBJECTIVE, mu_vm_split_per_tib=1.0)
+    assert (
+        evaluate_assignment(busy, seed_assignment(busy), loads, off, 1.0, 0.0).vm_weights[701] > 1
+    )
+    assert (
+        evaluate_assignment(busy, seed_assignment(busy), loads, on, 1.0, 0.0).vm_weights[701] == 1
+    )

@@ -6,7 +6,7 @@ scheduler, same payback test, byte-for-byte the same numbers — and prints
 everything `plan` already shows, plus the "why" `plan` itself never does:
 the measured load every one of those numbers derives from, which disks are
 pinned and the exact reason, which VMs a pin leaves spread across more than
-one storage, the section 5.4 objective broken into its six terms, and
+one storage, the section 5.4 objective broken into its seven terms, and
 whether the pinned load is large enough that the residual imbalance is
 structural rather than a planning shortfall. `-v` additionally names
 exactly which Prometheus query produced all of it. It never changes
@@ -29,7 +29,7 @@ Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   after: san-a=2.50  san-b=2.90  san-c=3.00
   spread: 257.1% → 17.9%
   payback: benefit 2.52e+08 load·s vs cost 4.72e+04 load·s → ratio 5.34e+03 (need 10) ✓
-  objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 1.43 + spread 0.25 + reserve 0 = 3.5
+  objective: imbalance 0.6 + moves 1 + bytes 0.225 + fragmentation 1.43 + spread 0.25 + split 0 + reserve 0 = 3.5
   measured load:
   san-a  provisioned 5.50 TiB/8.00 TiB  L=7.40 u=7.40  ⚠ reserve short by 3.50 TiB  (largest VM footprint 3.00 TiB = web01(101), requires 6.00 TiB free)
     web01(101):scsi0             2.00 TiB  raw     ℓ 3.00
@@ -74,16 +74,18 @@ line (and `--json` object) so its loads are never mistaken for observed ones.
 ## The `objective:` line
 
 The section 5.4 objective the solver actually minimized, broken into its
-six terms rather than only the total — `imbalance` (`alpha` times the
+seven terms rather than only the total — `imbalance` (`alpha` times the
 spread metric), `moves` (`beta` times the move count), `bytes` (`gamma`
 times TiB moved), `fragmentation` (`kappa` times each VM's I/O-weighted
 extra storage count beyond one — section 5.4's `w_v`, so a VM doing
 several times the group's average I/O costs correspondingly more to
 split), `spread` (`delta` times the section 5.3 (C7) data-spread
-deviation), and `reserve` (the penalty for any remaining (C5) shortfall,
+deviation), `split` (`mu` times the TiB by which a VM above
+`snapshot_reserve.split_vm_footprint` exceeds its cap on its fullest storage —
+zero when no VM is that large), and `reserve` (the penalty for any remaining (C5) shortfall,
 zero on a plan that resolves or never had one). This is the same
 `heuristic.ObjectiveBreakdown` the solver itself compares candidate
-assignments with — the reason that class keeps the six terms apart
+assignments with — the reason that class keeps the seven terms apart
 instead of collapsing to only `.total` in the first place. Only printed
 when the gate said `ACT`; a `NO ACTION` group solved nothing this run, so
 there is no objective to show.
@@ -106,10 +108,10 @@ one-move neighbourhood) — and shows the term-by-term arithmetic that
 rejected it:
 
 ```
-  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + spread 0 + reserve 0 = 0.576
+  objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + spread 0 + split 0 + reserve 0 = 0.576
   no moves made: the objective is lowest at the current assignment
   closest alternative: vm110(110):scsi1 VM-krbd → VM
-    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, spread 0→0, reserve 0→0
+    imbalance 0.576→0.0426, moves 0→0.25, bytes 0→0.00732, fragmentation 0→0.5, spread 0→0, split 0→0, reserve 0→0
     total 0.576 → 0.8  (worse by 0.223 -- rejected)
 ```
 
@@ -223,11 +225,11 @@ not the plan, so there is no reason to withhold them just because the gate
 found nothing to balance this run.
 
 `--json` emits everything `plan --json` does (`docs/manual/27-plan.md`'s
-own field list) plus `objective` (the six terms above, `null` when the
+own field list) plus `objective` (the seven terms above, `null` when the
 gate said `NO ACTION`), `rejected_alternative` (`null` unless the
 "`no moves made`" case above applies, otherwise `disk_key`, `vmid`,
 `vm_name`, `device`, `from_storage`, `to_storage`, `baseline` and
-`objective` — each the same six-term breakdown `objective` above
+`objective` — each the same seven-term breakdown `objective` above
 serializes, for the current assignment and the candidate respectively —
 and `worse_by`, the difference between the two totals), `storages`/`disks`
 (the measured-load section above, identical shape to `show-load --json`'s

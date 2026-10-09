@@ -1167,16 +1167,19 @@ def _vm_splits(before: ObjectiveBreakdown, after: ObjectiveBreakdown) -> list[_V
     return splits
 
 
-def _render_split_lines(splits: list[_VmSplit], storage_count: int, proven_best: bool) -> list[str]:
-    """Section 9.5's ``split:`` lines. "The best N storages allow" is only claimed when the
-    MILP proved the result optimal; otherwise the line says it is still above the cap."""
+def _render_split_lines(
+    splits: list[_VmSplit], storage_count: int, solver_settled: bool
+) -> list[str]:
+    """Section 9.5's ``split:`` lines. A result still above its cap says the solver found no
+    better split only when the MILP settled on it, else that it is still above the cap; a *proven*
+    best split is never claimed (REVIEW.md AO-03)."""
     lines = []
     for split in splits:
         note = ""
         if split.excess_bytes_after > 0:
             note = (
-                f" — the best {storage_count} storages allow"
-                if proven_best
+                f" — the solver found no better split across {storage_count} storages"
+                if solver_settled
                 else " — still above the cap"
             )
         lines.append(
@@ -1487,7 +1490,7 @@ def _render_group_plan_human(
         _render_split_lines(
             _vm_splits(solved.initial_breakdown, final_breakdown),
             len(group.storages),
-            proven_best=solved.status == "optimal",
+            solver_settled=solved.status == "optimal",
         )
     )
     unfixable = _unfixable_shortfall(group, final_breakdown, solve_outcomes[group.name])
@@ -1661,7 +1664,7 @@ def _render_group_plan_json(
             after_capacity_spread = _spread_fraction(final_breakdown.fill_fraction, average_fill)
     # REVIEW.md AA-01's own recommendation: "re-score every backend's
     # returned assignment through evaluate_assignment() at true weights" --
-    # the full six-term objective (section 5.4), not one spread axis in
+    # the full seven-term objective (section 5.4), not one spread axis in
     # isolation, so a solver that is worse on the objective it was actually
     # asked to optimize is visible even when neither before_spread/
     # before_capacity_spread axis alone would show it.
@@ -1874,7 +1877,7 @@ def _render_fragmentation_lines(group: Group, assignment: Assignment | None) -> 
 
 
 def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
-    """The section 5.4 objective's six terms, individually -- the reason
+    """The section 5.4 objective's seven terms, individually -- the reason
     :class:`ObjectiveBreakdown` keeps them apart instead of collapsing to
     only ``.total`` in the first place (that class's own docstring)."""
     return (
@@ -1884,6 +1887,7 @@ def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
         f"bytes {breakdown.bytes_moved_term:.3g} + "
         f"fragmentation {breakdown.fragmentation_term:.3g} + "
         f"spread {breakdown.capacity_spread_term:.3g} + "
+        f"split {breakdown.split_excess_term:.3g} + "
         f"reserve {breakdown.reserve_penalty_term:.3g} = {breakdown.total:.3g}"
     )
 
@@ -1891,7 +1895,7 @@ def _render_objective_breakdown_line(breakdown: ObjectiveBreakdown) -> str:
 def _objective_breakdown_json(breakdown: ObjectiveBreakdown) -> dict[str, float]:
     """The one implementation ``explain --json``'s ``objective`` and
     ``rejected_alternative.{baseline,objective}`` fields all share (AGENTS.md
-    section 5) -- so a third caller never has to guess which six keys a
+    section 5) -- so a third caller never has to guess which seven keys a
     breakdown serializes to."""
     return {
         "imbalance_term": breakdown.imbalance_term,
@@ -1899,6 +1903,7 @@ def _objective_breakdown_json(breakdown: ObjectiveBreakdown) -> dict[str, float]
         "bytes_moved_term": breakdown.bytes_moved_term,
         "fragmentation_term": breakdown.fragmentation_term,
         "capacity_spread_term": breakdown.capacity_spread_term,
+        "split_excess_term": breakdown.split_excess_term,
         "reserve_penalty_term": breakdown.reserve_penalty_term,
         "total": breakdown.total,
     }
@@ -1967,6 +1972,7 @@ def _render_no_moves_lines(
                 f"bytes {b.bytes_moved_term:.3g}→{c.bytes_moved_term:.3g}",
                 f"fragmentation {b.fragmentation_term:.3g}→{c.fragmentation_term:.3g}",
                 f"spread {b.capacity_spread_term:.3g}→{c.capacity_spread_term:.3g}",
+                f"split {b.split_excess_term:.3g}→{c.split_excess_term:.3g}",
                 f"reserve {b.reserve_penalty_term:.3g}→{c.reserve_penalty_term:.3g}",
             ]
         ),

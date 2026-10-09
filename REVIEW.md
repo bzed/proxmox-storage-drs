@@ -402,6 +402,30 @@ small disk's own move runs, leaving the *executed* endpoint in the state (C8) ex
 manual's worked `delta_capacity_spread` threshold "≈ 1.25" does not divide from its own displayed
 figures — `1.31 / 1.06 = 1.236`); one Info.
 
+A **thirty-first pass** (section 62) reviews the large-VM snapshot-reserve feature as a whole: the
+plan redesign that landed on `main` as `docs/vm-snapshot-reserve` (§5.3.3's per-VM snapshot
+footprint and `Z_s = max_v F_{v,s}`, (C9) with the `μ` objective term and the §6 split gate, §7.2's
+`μ·ΔO`, §8.1's footprint-joining transient predicate, the §14 re-derivation, and the new §14.9
+fixture) and its implementation on `feat/vm-snapshot-reserve` — four commits at HEAD (`14004eb`):
+the reserve rework, the split rule in config/heuristic/MILP/gate/payback, the fixtures, and phase 17.
+Six findings (AO-01..AO-06): one Medium — `explain`'s `objective:` line, its `--json` breakdown and
+the closest-rejected-move's term-by-term arithmetic still print six terms against a `.total` that
+now includes the seventh (the μ split term), so the displayed terms do not sum to the displayed
+total whenever a large VM is present — the feature's own flagship case — and §9.5's as-built block
+plus nine shipped doc locations still say "six terms"; three Low (the split gate's (C5) test
+counts a converted move at its listed size, not the `z_{d,s}` (C5) itself charges; the
+`split:` line's "the best N storages allow" is printed on a solver status that means
+within-`mip_gap` (default 2%), not proven optimal — the exact distinction S-07 forced stage 1 to
+make; and at `mu_vm_split_per_tib: 0` the plan's letter keeps `w_v = 1` for every VM above `T`
+while the built code restores I/O weighting — the plan never says the weight rule goes too); one
+further Low on §5.3's `U_obj`, whose `κ·|V|·(|S|−1)` term is not an upper bound of the `w_v`-weighted
+`κ` term it must dominate (the generator's own `computed_p_min` has used `max_w·|V|·(|S|−1)` since
+the `w_v` rework); one Info (the split gate's cost claim under-counts the built per-pair
+peak-footprint passes). The five `main` commits since the thirtieth pass that are not this
+feature (the `exclude.stopped` rename and its refusal, the PVE-client resilience work, releases
+0.1.18/0.1.19 and the isort test fix) remain unreviewed by this pass and are flagged for the
+next one.
+
 ---
 
 ## 0. Overall assessment
@@ -8466,6 +8490,274 @@ behaviour. Recorded for the day it shows up in a pveproxy log, not as a defect.
   history is not rewritten.
 - **AN-05 → accepted, no change.** Info. Correct and cheap on the PVE side; caching the task list per
   poll cycle is the remedy if it ever shows up in a pveproxy log, and is not done speculatively.
+
+---
+
+## 62. Thirty-first-pass review — §5.3.3's per-VM snapshot footprint, the large-VM split rule, and phase 17
+
+Reviewed the large-VM snapshot-reserve feature end to end, specification and implementation
+together, as one unit: the plan redesign that reached `main` as the `docs/vm-snapshot-reserve`
+merge (`66ab623`, carrying `695c63c` "Specify per-VM snapshot footprint and large-VM splitting"
+and `1ec7874` "State that stopped VMs get no snapshot footprint by decision") and the four
+implementation commits on `feat/vm-snapshot-reserve` at HEAD (`14004eb`: `482e3a3` the reserve
+rework, `1d62a86` the split rule across config/schema/MILP/heuristic/gate/payback, `6757ec7` the
+fixtures, `14004eb` phase 17 proper — the CLI/JSON surface, the corpus replays, the documentation
+and the plan's own phase row).
+
+**Scope note, stated rather than glossed:** the thirtieth pass ended at `eba7821`. Between there
+and this feature sit the `main` commits that are not this feature — the isort test fix
+(`511501c`), the `exclude.running_only`→`exclude.stopped` rename and its refusal
+(`9d8ad99`, `33dfb4f`), the PVE-client resilience work (`b8d6b4e`), and releases 0.1.18 and
+0.1.19 (`62adf6a`, `f5c6c8a`). This pass was tasked with the branch and its plan, so those are
+**not reviewed here** and should be picked up by the next pass; the plan material this pass
+covers is exactly the `docs/vm-snapshot-reserve` diff and the two plan edits `14004eb` itself
+makes (the §9.5 as-built paragraph and phase 17's row).
+
+The design itself is sound and the plan's derivations verify — this is a careful specification.
+`Z_s = max_v F_{v,s}` is the right quantity (a PVE snapshot of a VM snapshots every disk at once,
+the same fact §3.7's VM-level snapshot pin already relies on), the (C9) variable is correctly the
+*peak* rather than a per-storage sum (the plan's own counter-example — `6+2+2` and `4+4+2` scoring
+alike under a sum — is what forces it), the `w_v = 1` rule for `V^split` correctly stops a busy
+VM's I/O from vetoing the operator's stated policy, and putting `o_v` in stage 2 only — never
+stage 1 — keeps the split a preference that cannot displace a repair.
+
+### 62.1 Verification run
+
+- **`make check`'s substance, green at HEAD (`14004eb`)**: black/flake8 clean, mypy clean (65
+  files), **1220 passed**, **96.99% line coverage**, `generate_expected.py --check` OK,
+  `validate_corpus.py --check` OK, `make pdf-check` OK, `make docs-check` OK (all three PDF
+  stamps and the manpage match their Markdown — the regenerated plan PDF is committed in
+  `14004eb` with its stamp, as §7.4 requires).
+- **§14.9 re-derived in full, independently.** The candidate table: `o₇₀₁` = peak − 2 for every
+  row; each move costs `β + γ·2 TiB = 0.25 + 0.10 = 0.35`; the `κ` term is `0.5·(storages − 1)`
+  at `w₇₀₁ = 1`. Every objective cell checks: 8.00, 6.85, 5.20, 5.70, **4.05**, 4.40 — and the
+  enumeration is complete for moves of VM 701's disks (any move of 702–704 only adds imbalance).
+  The cost is `3 × 2 × (2 TiB / 200 MiB/s) = 62 914.56` load·s; the benefit is
+  `(1.0×(8−2) − 0.5×(2−0)) × 31 536 000 = 157 680 000` — the negative `κ·ΔA` is paid out of the
+  split term, exactly as the plan says; ratio ≈ 2 506. Final reserves 13/13/7 against 40. The
+  committed `large-vm-split.expected.json` reproduces all of it, and the committed generator —
+  the independent restatement — agrees, including `computed_p_min = 23 051 195.733`
+  (`U_obj = 6 + 2 + 0.65 + 5.33 + 8 = 21.98` in TiB, ×2²⁰; the `max_w = 4/3` κ bound and the new
+  μ·Σ(Σz − T_v) = 8 term both verified) and the counterfactual: rule off → no gate opens,
+  objective 0.0, no moves.
+- **§14's re-derivation under the footprint verifies.** `Z_a = 3.0` (VM 101: 2.0 + 1.0),
+  `r_a = 4.5 + 2×3.0 − 8.0 = 2.5`; after `102:scsi0` alone san-a still holds VM 101 whole
+  (`3.0 + 6.0 = 9.0 > 8.0`) so it is *not* the sole repair any more — the plan's §14.4 rewrite is
+  correct and the reverted §7.3 arithmetic checks: holding `102:scsi0` back leaves
+  `3.5 + 2×2.0 = 7.5 ≤ 8` (marker `false`), holding `101:scsi1` back leaves `3.0 + 6.0 = 9.0`
+  (marker `true`). The committed `fc-tier1.expected.json` records exactly this (shortfall pair
+  2.5 → 0.0, `101:scsi1` marked), every recorded payback number is unchanged, and the
+  three-move variant's new order — `101:scsi1` promoted ahead of `105:scsi0`, both leaving a
+  violating storage under §8.2's first exception — is what the footprint rule forces.
+- **The corpus deltas are exact, not approximate.** Every `before/after_objective_total` on the
+  24h and 2d bundles shifts by exactly `55 834 574 848` bytes / 2⁴⁰ = 0.05078125 (VM 843425's
+  constant excess at `μ = 1`), the free-space bundle's payback benefit gains exactly
+  `0.05078 × 31 536 000 = 1 601 437.5`, and its repair now moves a different six-disk set of
+  that VM because breaking the footprint is what frees the reserve — explained in the commit
+  message, as the phase row requires. The 24h bundle's `vm_splits[]` additionally exercises
+  §9.5's "still above its cap afterwards" listing (excess unchanged, still listed).
+- **Single-sourcing audited, the AGENTS.md §5 way.** The footprint sum lives once
+  (`reserve.vm_footprints_bytes()`): `compute_reserve_status`, `transient_invariant_ok`,
+  `execute.py`'s tracked `footprints_by_storage` and live re-check, the MILP's
+  `_cbc_vm_footprint()` (shared by (C4) and (C9)) and `evaluate_assignment` all call it or, in
+  the model's case, the one linear-expression twin the plan's phase row mandates. The transient
+  predicate generalizes correctly to concurrent landings (an incoming disk joins its *own* VM's
+  footprint; two disks of one VM landing together raise it by both), and the executor's
+  post-move bookkeeping now *adds* the landed `z_{d,s}` to its VM's footprint — the AN-01 fix
+  carried over to the new shape. `largest_disk_bytes()` survives for the wipe-time estimate
+  only, and `verify-storages` keeps it visibly separate from the footprint.
+- **Stage discipline confirmed in the code**: stage 1's `prob1` carries only the feasibility
+  constraints plus `Σ slack`; `_cbc_split_excess_term()` is reached only from
+  `_cbc_objective_terms()`, which only stage 2 calls. A split can never displace a repair in the
+  MILP.
+- **The `git grep -il 'largest disk'` sweep the phase row promises is real**: the only survivors
+  are the deliberately per-volume contexts (the wipe-time line, `verify-storages`'s
+  informational largest-disk figure) plus generated site output and a `.pyc`.
+- **Schema/manual/example lockstep**: both new knobs exist in `config_schema.json`, the
+  dataclasses, `drs.example.yaml` and the manual, with the two §11.1 rules implemented as
+  specified (the `> 0` error; the `μ < κ` warning, which correctly fires only while the rule is
+  on — tested). The upgrade note ("read `show-load` first — the first run can plan substantial
+  migrations") appears in the manual at both the `factor` and `split_vm_footprint` entries and
+  in §14.9's upgrade paragraph, satisfying §5.3.3's own "the manual must tell an upgrading
+  operator" requirement.
+
+### 62.2 Findings summary
+
+| ID | Severity | Location | Topic |
+|----|----------|----------|-------|
+| AO-01 | Medium | `cli.py` `_render_objective_breakdown_line`/`_objective_breakdown_json`; plan §9.5 as-built block | `explain`'s objective breakdown omits the new seventh (μ) term: the printed terms no longer sum to the printed `.total`, and nine shipped "six terms" doc claims plus §9.5's own sample went stale |
+| AO-02 | Low | `gates.py` `split_gate` | The gate's (C5) test counts a converting move at its listed size, not the `z_{d,s}` (C5) itself charges — inconsistent with the peak test two lines above it |
+| AO-03 | Low | `cli.py` `_render_split_lines`; plan §9.5 as-built; `optimize.py` stage 2 | "The best N storages allow" is printed on a `solver_status: "optimal"` that means within-`mip_gap` (default 2%), not proven optimal — the S-07 distinction, lost again |
+| AO-04 | Low | plan §5.3.3/§5.4 vs `heuristic.active_split_caps()` | At `mu_vm_split_per_tib: 0` with `T` set, the plan's letter keeps `w_v = 1` for `V^split` while the built code restores I/O weighting; the plan never says the weight rule is disabled with the term and the gate |
+| AO-05 | Low | plan §5.3 `U_obj` | `κ·|V|·(|S|−1)` is not an upper bound of the `w_v`-weighted `κ` term it must dominate; the generator's `computed_p_min` has used `max_w·|V|·(|S|−1)` since the `w_v` rework, so plan and oracle disagree |
+| AO-06 | Info | `gates.py` `split_gate`; `heuristic.evaluate_assignment` | §6's cost claim ("|D_v|·|S| reserve evaluations, cheap enough to run every time") under-counts the built gate's per-pair peak-footprint passes; and split peaks are computed even when the rule is off |
+
+### 62.3 Detailed findings
+
+#### AO-01 — `explain`'s objective breakdown omits the split term (Medium)
+
+**Where:** `src/proxmox_storage_drs/cli.py` — `_render_objective_breakdown_line()`,
+`_objective_breakdown_json()`, and the closest-rejected-move's term list in the
+`_render_no_moves_lines()` neighbourhood; plan §9.5's "As built, added later" block;
+`docs/manual/29-explain.md`, `docs/manual/30-safety-and-status.md`,
+`docs/manual/10-configuration.md`, `docs/internals/40-cli-and-logging.md`,
+`docs/internals/90-heuristic.md`.
+
+**Issue:** §5.4's objective gained a seventh term (`μ·Σ_{v∈V^split} o_v`), and
+`ObjectiveBreakdown.total` includes it (`heuristic.py`, the `total` property). The explain
+surface was not touched: the human `objective:` line still prints
+`imbalance + moves + bytes + fragmentation + spread + reserve = total`, the `--json` breakdown
+still serializes exactly those six keys beside `total`, and the closest-rejected-move line still
+shows six term-pairs whose deltas cannot explain the printed `worse by` (which is
+`breakdown.total − baseline.total`, split term included). Whenever a group holds a VM above its
+split cap, the displayed terms do not sum to the displayed total — by exactly `μ·Σ o_v`. That is
+not a corner case of the feature but its flagship case: at the *default* 2 TiB cap the committed
+24h corpus bundle's own group carries VM 843425 at 52 GiB of excess (`μ = 1`), so an explain run
+against that very cluster prints an arithmetic identity that is false by 0.051. The renderer's
+own docstring still says "the section 5.4 objective's six terms", plan §9.5's as-built block
+still specs "the six-term breakdown" with a six-term sample line, and nine shipped doc locations
+still say "six terms" (`docs/manual/29-explain.md` lines 9, 77, 86 and 226;
+`docs/manual/30-safety-and-status.md`'s `explain` row; `docs/manual/10-configuration.md`'s
+"`reserve_shortfall_tib`, one of the six terms"; `docs/internals/40-cli-and-logging.md`;
+`docs/internals/90-heuristic.md` twice — the fixture-cross-check sentence and the
+"narrates … six terms" sentence). `docs/internals/90-heuristic.md`'s dataclass narration was
+updated to "seven terms" in the code but not in the page that mirrors it.
+
+**Recommendation:** Add `split_excess_term` as the seventh printed term (before `reserve`,
+matching the objective's term order), to `_objective_breakdown_json`'s keys, and to the
+closest-rejected-move's term-pair list; update §9.5's as-built sample and the nine doc
+locations. A regression test should assert the seven terms sum to `.total` — the property that
+makes the line worth printing at all.
+
+#### AO-02 — The split gate's (C5) test under-charges a converting move (Low)
+
+**Where:** `src/proxmox_storage_drs/gates.py`, `split_gate()`.
+
+**Issue:** The gate's peak-lowering test calls `_peak_footprint_bytes()`, which passes
+`storage=s` so every disk counts at `z_{d,s}` — but the follow-on reserve check calls
+`compute_reserve_status(target, group.disks, storage_of=trial)` *without* `storage=target`, so
+every disk counts at its listed `size_bytes`. On a target with `enforce_format` (§5.3.2) the
+converted `z_{d,s}` is what (C5) itself charges ("the converted size `z_{d,s}` is what the
+reserve and the transient invariant count"), so the gate can judge compliant a single move that
+the real (C5) rejects — the two tests inside one function disagree about which size a disk is.
+The plan's §6 wording ("leaves `s` without a (C5) shortfall, by the one shared reserve
+function") promises the check (C5) actually is. No unsafe plan can result — the solver and the
+heuristic both enforce (C5) at `z_{d,s}`, and the gate is only an act/no-act opener — so the
+worst case is a spurious `ACT` that ends "no moves made". One argument fixes it:
+`storage=target`.
+
+#### AO-03 — "The best N storages allow" rests on a status that does not mean proven (Low)
+
+**Where:** `src/proxmox_storage_drs/cli.py` `_render_split_lines()` (`proven_best =
+solved.status == "optimal"`); plan §9.5's as-built paragraph; `docs/manual/27-plan.md`'s
+`split:`-line section; `src/proxmox_storage_drs/optimize.py` `_solve_cbc()`.
+
+**Issue:** The as-built rule — claim the best split only when the MILP *proved* the result
+optimal — is implemented as `solver_status == "optimal"`, but stage 2 solves with
+`gapRel=mip_gap` (default **0.02**) and PuLP's `LpStatus["Optimal"]` collapses "proved optimal"
+and "stopped because the gap was satisfied" into one string. That is precisely the distinction
+the codebase already fought once: stage 1 forces `gapRel=0` *because* "Optimal" proves nothing at
+a non-zero gap (REVIEW.md S-07 — the comment block that makes the same distinction for stage 1
+sits directly above the `stage1_solver_cmd` this function builds). At the defaults the line can
+therefore print "the best 3 storages allow" on a result up to 2 % off the true objective
+optimum — and 2 % of a large objective (a busy group's `α·Σ e_s`) can exceed a full `μ·z_d`
+step, i.e. admit a worse peak. The corpus bundles replay through the heuristic (`status: null`), so the confident wording has
+never actually been exercised by a gate.
+
+**Recommendation:** Either treat stage 2 as proven only when `solver.mip_gap == 0` (and say so),
+or have the MILP prove the *peak* directly — it is one number: solve stage 2, then fix the
+objective and minimize `Σ o_v` with `gapRel=0`. Short of that, soften the line and the plan's
+"proved the result optimal" to "the MILP found nothing better within `mip_gap`".
+
+#### AO-04 — `μ = 0`: the plan's letter and the built weight rule disagree (Low)
+
+**Where:** plan §5.3.3 ("`0` disables the term and the split gate") and §5.4 ("`w_v = 1` for
+`v ∈ V^split`"); `src/proxmox_storage_drs/heuristic.py` `active_split_caps()`.
+
+**Issue:** `V^split` is defined by `T` alone (`{ v : Σ z_d > T }`), §5.4 pins `w_v = 1` for every
+member, and §5.3.3 says `μ = 0` disables "the term and the split gate" — the weight rule is
+conspicuously not in that list. The built `active_split_caps()` returns `{}` whenever
+`μ ≤ 0`, which empties `V^split` for the weights too: with `T` set and `μ = 0` a busy large VM
+gets its I/O weight back. Its docstring claims the plan says this ("disables the term, the
+weight rule and the gate together") — it does not. The built reading is the sensible one (with
+the policy off there is nothing for the weight to defer to), so the fix is a plan clause: state
+that `μ = 0` disables the `w_v = 1` rule with the term and the gate, in §5.3.3's weight
+paragraph and §11.1's row.
+
+#### AO-05 — §5.3's `U_obj` κ term is not an upper bound of the term it must dominate (Low)
+
+**Where:** plan §5.3's single-stage alternative (`U_obj`), the line edited in this range to add
+the `μ` term.
+
+**Issue:** `U_obj` must upper-bound the whole non-reserve objective so that
+`P_min = U_obj/ε_r` is provably dominant. Its κ term is written `κ·|V|·(|S|−1)`, but §5.4's κ
+term is `κ·Σ_v w_v·(Σ_s y_{v,s} − 1)` with `w_v = max(1, ℓ_v/ℓ̄)` — a busy VM weighs more than 1
+(§14's own worked example puts `w₁₀₁` at 2.703), so the true κ upper bound is
+`κ·max_v w_v·|V|·(|S|−1)` and the plan's `U_obj` under-counts by exactly the factor that grows
+when VMs are busy — the case a dominant-P bound exists for. The executable restatement already
+knows: `generate_expected.py`'s `computed_p_min()` has used `max_w·|V|·(|S|−1)` since the `w_v`
+rework (`2e7abaf`), with a docstring saying why. Spec-only (internals 91 records the big-M
+variant is not built), but the μ half of the line was rewritten in this range without fixing the
+κ half, and every committed expected file's `big_m_p_min_computed` is computed by the stricter
+formula than the plan states.
+
+**Recommendation:** Replace `κ·|V|·(|S|−1)` with `κ·max_v w_v·|V|·(|S|−1)` in `U_obj`, and add the
+`max_v w_v` input to the list the warning must log (§5.3's own list was extended for `μ` in this
+range; it is now missing `w_v` for the same reason).
+
+#### AO-06 — The split gate's cost claim under-counts the built test (Info)
+
+**Where:** plan §6's split-gate paragraph ("The test is `|D_v|·|S|` reserve evaluations per large
+VM, cheap enough to run every time"); `src/proxmox_storage_drs/gates.py` `split_gate()`;
+`src/proxmox_storage_drs/heuristic.py` `evaluate_assignment()`.
+
+**Issue:** The reserve evaluations do run only for peak-lowering pairs, but every (disk, target)
+pair first pays a full-group peak-footprint computation — `_peak_footprint_bytes()` walks every
+storage and every disk of the group — so the gate is
+`O(|V^split| · |D_v| · |S|² · |D|)` dictionary operations, not `|D_v|·|S|` reserve evaluations.
+Trivial at fixture scale (the §14.9 gate is microseconds), but on a group carrying, say, fifty
+large VMs of ten disks on eight storages it is ~10⁷ operations per `evaluate_group_gates()` call
+— and the gate runs on every `show-load`, `plan` and `explain`. Relatedly, `evaluate_assignment()`
+computes split peaks even when `active_split_caps()` is empty (`split_peak_footprints_bytes()`
+has no early-out), adding an `O(|S|·|D|)` pass to the heuristic's hottest loop in exactly the
+default-quiet case of a cluster with no VM above 2 TiB. Not a defect — recorded so the plan's
+"cheap enough" sentence either gains the real cost or the implementation gains the two obvious
+early-outs (`wanted` empty → return; per-VM disk lists computed once instead of rescanned per
+pair).
+
+---
+
+## 63. Resolution of thirty-first-pass findings (AO-01..AO-06)
+
+- **AO-01 → fixed.** `explain`'s `objective:` line, its `--json` breakdown
+  (`_objective_breakdown_json()`, now seven keys with `split_excess_term`) and the
+  closest-rejected-move's term pairs all print the split term, between `spread` and `reserve`, so
+  the printed terms sum to the printed total again. Plan §9.5's sample lines and every "six
+  terms" claim (the manual's `explain`, safety and configuration pages, the internals pages, the
+  README) now say seven; the manual's `explain` page describes the `split` term. Regression test
+  `test_the_explain_objective_terms_sum_to_the_printed_total`.
+- **AO-02 → refuted.** `split_gate()` calls `compute_reserve_status(target, group.disks,
+  storage_of=trial)`, and that function has no `storage=` parameter to omit: it passes its own
+  `Storage` into `vm_footprints_bytes()` and `managed_used_bytes()`, so every disk is already
+  counted at `z_{d,s}` for the storage under evaluation. The gate's peak test and its (C5) test
+  therefore use the same sizes. Pinned by `test_split_gate_charges_a_converting_move_at_its_
+  converted_size`, which fails if the reserve check ever falls back to the listed size.
+- **AO-03 → fixed by not claiming it.** The finding is right that `solver_status: "optimal"` means
+  within `solver.mip_gap` — and the claim fails even at a gap of 0, because the objective optimum
+  trades the peak against `β`/`γ`/`κ`, so it does not prove the *peak* minimal. The line no longer
+  says "the best N storages allow"; a settled MILP result still above its cap ends "the solver
+  found no better split across N storages", anything else "still above the cap". Plan §9.5, the
+  manual and the tests follow.
+- **AO-04 → fixed (plan clause).** §5.3.3 and §11.1 now say `mu_vm_split_per_tib: 0` disables the
+  term, the gate and the `w_v = 1` rule together; the built behaviour was the sensible one.
+  Test `test_mu_zero_restores_the_io_weight_of_a_large_vm`.
+- **AO-05 → fixed (plan).** `U_obj`'s κ term is `κ·w_max·|V|·(|S|−1)`, `w_max` joins the logged
+  inputs, and §5.3's worked number is recomputed (`33.14`, `P_min ≈ 3.47×10⁷`, matching the
+  expected file's `big_m_p_min_computed`). Spec only; the big-M variant is still not built.
+- **AO-06 → fixed.** `split_gate()` computes each large VM's per-storage footprints once and finds
+  the post-move peak in `O(|S|)` per pair, running the reserve check only for peak-lowering pairs;
+  `split_peak_footprints_bytes()` returns at once when no VM is in `V^split`. Plan §6's cost
+  sentence now states the real cost.
 
 ---
 

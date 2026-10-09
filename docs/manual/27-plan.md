@@ -179,16 +179,17 @@ group's output carries one line per such VM that the plan changes, or that is st
 afterwards:
 
 ```
-  split: VM 701 largest footprint 10.00 TiB → 4.00 TiB (cap 2.00 TiB, excess 8.00 TiB → 2.00 TiB — the best 3 storages allow)
+  split: VM 701 largest footprint 10.00 TiB → 4.00 TiB (cap 2.00 TiB, excess 8.00 TiB → 2.00 TiB — the solver found no better split across 3 storages)
 ```
 
 *Largest footprint* is the most of that VM any one storage holds (the sum of its disks there —
 the figure a snapshot of the VM has to find room for, doubled at the default reserve factor).
 *Cap* is the threshold the VM is spread towards (a single disk larger than the threshold raises
 its own VM's cap to that disk's size). *Excess* is how far the largest footprint is above the cap.
-With fewer storages than disks the cap is usually unreachable, and the line says so: "the best 3
-storages allow" is claimed only when the solver proved the result optimal, otherwise the line ends
-"still above the cap". A group is planned for this reason even when its I/O and data are in
+With fewer storages than disks the cap is usually unreachable, and the line says so: a result still above the cap ends "the solver found no better split across 3
+storages" when the MILP settled on it (the solver minimizes the whole objective within
+`solver.mip_gap`, so this is not a proof that no other split has a lower peak), and "still above the
+cap" otherwise. A group is planned for this reason even when its I/O and data are in
 balance (the gate reads "VM 701 holds … against a … cap … acting now regardless of I/O
 drift/imbalance"), and such a plan has to pay for itself like any balance plan — splitting is a
 preference, not a repair, and gets no exemption from the `payback:` test below.

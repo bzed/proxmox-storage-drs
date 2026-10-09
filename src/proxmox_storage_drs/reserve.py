@@ -327,9 +327,11 @@ def split_peak_footprints_bytes(
 ) -> dict[int, int]:
     """``max_s F_{v,s}`` for every VM id in ``caps`` (section 5.3.3): the largest footprint any
     one storage holds of that VM under ``storage_of``, each disk at ``z_{d,s}``."""
+    wanted = set(caps)
+    if not wanted:
+        return {}
     storages = list(storages)
     disks = list(disks)
-    wanted = set(caps)
     peak = {vmid: 0 for vmid in wanted}
     for storage in storages:
         for vmid, footprint in vm_footprints_bytes(
