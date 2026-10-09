@@ -73,7 +73,7 @@ from proxmox_storage_drs.config import ObjectiveConfig
 from proxmox_storage_drs.reserve import (
     ReserveStatus,
     compute_reserve_status,
-    split_excess_bytes,
+    split_peak_footprints_bytes,
     split_vm_caps,
 )
 from proxmox_storage_drs.topology import (
@@ -128,6 +128,7 @@ class ObjectiveBreakdown:
     split_excess_term: float = 0.0
     split_excess_bytes: dict[int, int] = field(default_factory=dict)  # vmid -> o_v
     split_caps_bytes: dict[int, int] = field(default_factory=dict)  # vmid -> T_v
+    split_peak_bytes: dict[int, int] = field(default_factory=dict)  # vmid -> max_s F_{v,s}
 
     @property
     def total(self) -> float:
@@ -404,7 +405,10 @@ def evaluate_assignment(
     )
 
     # Section 5.3.3 (C9): o_v is the peak footprint beyond the cap, charged at mu per TiB.
-    excess = split_excess_bytes(group.storages, group.disks, split_caps, storage_of=storage_of)
+    peaks = split_peak_footprints_bytes(
+        group.storages, group.disks, split_caps, storage_of=storage_of
+    )
+    excess = {vmid: max(0, peaks[vmid] - cap) for vmid, cap in split_caps.items()}
     split_excess_term = objective.mu_vm_split_per_tib * sum(excess.values()) / _BYTES_PER_TIB
 
     return ObjectiveBreakdown(
@@ -425,6 +429,7 @@ def evaluate_assignment(
         split_excess_term=split_excess_term,
         split_excess_bytes=excess,
         split_caps_bytes=dict(split_caps),
+        split_peak_bytes=peaks,
     )
 
 

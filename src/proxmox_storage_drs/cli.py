@@ -1121,6 +1121,72 @@ def _render_plan_move_line(
     return line
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _VmSplit:
+    """One large VM's (``V^split``, section 5.3.3) before/after numbers for the report."""
+
+    vmid: int
+    cap_bytes: int
+    peak_bytes_before: int
+    peak_bytes_after: int
+    excess_bytes_before: int
+    excess_bytes_after: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "vmid": self.vmid,
+            "cap_bytes": self.cap_bytes,
+            "peak_footprint_bytes_before": self.peak_bytes_before,
+            "peak_footprint_bytes_after": self.peak_bytes_after,
+            "excess_bytes_before": self.excess_bytes_before,
+            "excess_bytes_after": self.excess_bytes_after,
+        }
+
+
+def _vm_splits(before: ObjectiveBreakdown, after: ObjectiveBreakdown) -> list[_VmSplit]:
+    """Section 9.5: every ``v in V^split`` whose split excess the plan changes, plus every one
+    still above its cap afterwards (so an operator can see which large VMs the storages cannot
+    spread further), lowest vmid first."""
+    splits = []
+    for vmid in sorted(after.split_caps_bytes):
+        excess_before = before.split_excess_bytes.get(vmid, 0)
+        excess_after = after.split_excess_bytes.get(vmid, 0)
+        if excess_before == excess_after and excess_after == 0:
+            continue
+        splits.append(
+            _VmSplit(
+                vmid,
+                after.split_caps_bytes[vmid],
+                before.split_peak_bytes.get(vmid, 0),
+                after.split_peak_bytes.get(vmid, 0),
+                excess_before,
+                excess_after,
+            )
+        )
+    return splits
+
+
+def _render_split_lines(splits: list[_VmSplit], storage_count: int, proven_best: bool) -> list[str]:
+    """Section 9.5's ``split:`` lines. "The best N storages allow" is only claimed when the
+    MILP proved the result optimal; otherwise the line says it is still above the cap."""
+    lines = []
+    for split in splits:
+        note = ""
+        if split.excess_bytes_after > 0:
+            note = (
+                f" — the best {storage_count} storages allow"
+                if proven_best
+                else " — still above the cap"
+            )
+        lines.append(
+            f"  split: VM {split.vmid} largest footprint {format_bytes(split.peak_bytes_before)} → "
+            f"{format_bytes(split.peak_bytes_after)} (cap {format_bytes(split.cap_bytes)}, excess "
+            f"{format_bytes(split.excess_bytes_before)} → "
+            f"{format_bytes(split.excess_bytes_after)}{note})"
+        )
+    return lines
+
+
 def _render_plan_payback_lines(
     payback_result: PaybackResult, payback_ratio: float, vm_name_by_key: dict[str, str]
 ) -> list[str]:
@@ -1415,6 +1481,14 @@ def _render_group_plan_human(
         lines.append(f"  spread: {before_spread:.1%} → {after_spread:.1%}")
         if payback_result is not None:
             lines.extend(_render_plan_payback_lines(payback_result, payback_ratio, vm_name_by_key))
+    outcome = solve_outcomes[group.name]
+    lines.extend(
+        _render_split_lines(
+            _vm_splits(outcome.initial_breakdown, final_breakdown),
+            len(group.storages),
+            proven_best=outcome.status == "optimal",
+        )
+    )
     unfixable = _unfixable_shortfall(group, final_breakdown, solve_outcomes[group.name])
     lines.extend(_render_unfixable_shortfall_lines(unfixable, vm_name_by_key))
     # `explain` passes explain_no_moves=False: it prints its own, richer
@@ -1606,7 +1680,18 @@ def _render_group_plan_json(
             "repair_exempt": payback_result.repair_exempt,
             "reserve_shortfall_bytes_before": payback_result.reserve_shortfall_bytes_before,
             "reserve_shortfall_bytes_after": payback_result.reserve_shortfall_bytes_after,
+            "split_excess_bytes_before": sum(
+                solve_outcome.initial_breakdown.split_excess_bytes.values() if solve_outcome else ()
+            ),
+            "split_excess_bytes_after": sum(
+                final_breakdown.split_excess_bytes.values() if final_breakdown else ()
+            ),
         }
+    vm_splits = (
+        [sp.as_dict() for sp in _vm_splits(solve_outcome.initial_breakdown, final_breakdown)]
+        if solve_outcome is not None and final_breakdown is not None
+        else []
+    )
     unfixable = (
         _unfixable_shortfall(group, final_breakdown, solve_outcome)
         if final_breakdown is not None
@@ -1628,6 +1713,7 @@ def _render_group_plan_json(
         "before_objective_total": before_objective_total,
         "after_objective_total": after_objective_total,
         "payback": payback_out,
+        "vm_splits": vm_splits,
         "unfixable_shortfall": unfixable.as_dict() if unfixable is not None else None,
     }
     if forecast is not None:

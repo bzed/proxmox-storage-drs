@@ -318,6 +318,28 @@ def split_vm_caps(disks: Iterable[Disk], split_vm_footprint_bytes: int | None) -
     }
 
 
+def split_peak_footprints_bytes(
+    storages: Iterable[Storage],
+    disks: Iterable[Disk],
+    caps: Iterable[int],
+    *,
+    storage_of: StorageOf = _current_storage,
+) -> dict[int, int]:
+    """``max_s F_{v,s}`` for every VM id in ``caps`` (section 5.3.3): the largest footprint any
+    one storage holds of that VM under ``storage_of``, each disk at ``z_{d,s}``."""
+    storages = list(storages)
+    disks = list(disks)
+    wanted = set(caps)
+    peak = {vmid: 0 for vmid in wanted}
+    for storage in storages:
+        for vmid, footprint in vm_footprints_bytes(
+            disks, storage.id, storage_of=storage_of, storage=storage
+        ).items():
+            if vmid in wanted:
+                peak[vmid] = max(peak[vmid], footprint)
+    return peak
+
+
 def split_excess_bytes(
     storages: Iterable[Storage],
     disks: Iterable[Disk],
@@ -328,14 +350,6 @@ def split_excess_bytes(
     """``o_v`` for every VM in ``caps`` (section 5.3.3, (C9)): the peak footprint any one
     storage holds of the VM beyond its cap, ``max(0, max_s F_{v,s} - T_v)``. The peak, not a
     sum over storages, because the reserve a storage needs is driven by the largest footprint
-    on it. Each disk counts at ``z_{d,s}`` for the storage it sits on under ``storage_of``."""
-    storages = list(storages)
-    disks = list(disks)
-    excess = {vmid: 0 for vmid in caps}
-    for storage in storages:
-        for vmid, footprint in vm_footprints_bytes(
-            disks, storage.id, storage_of=storage_of, storage=storage
-        ).items():
-            if vmid in caps:
-                excess[vmid] = max(excess[vmid], footprint - caps[vmid])
-    return excess
+    on it."""
+    peak = split_peak_footprints_bytes(storages, disks, caps, storage_of=storage_of)
+    return {vmid: max(0, peak[vmid] - cap) for vmid, cap in caps.items()}

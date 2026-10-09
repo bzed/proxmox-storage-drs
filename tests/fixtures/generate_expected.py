@@ -20,6 +20,10 @@ Fixtures:
                     isolates section 5.4's w_v weighting and D^big exemption, and
                     section 7.2's kappa*dA benefit term, from the payback rule.
 
+  large-vm-split    Section 14.9: balanced I/O, every reserve satisfied, one large VM whole
+                    on one storage -- isolates section 5.3.3's split rule (C9), the split
+                    gate and the mu*dO payback term.
+
 Usage:  python3 tests/fixtures/generate_expected.py [--check]
 """
 
@@ -41,7 +45,13 @@ Assignment = Dict[str, str]
 StorageState = Dict[str, Any]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FIXTURES = ("fc-tier1", "reserve-tradeoff", "affinity-repair", "free-space-repair")
+FIXTURES = (
+    "fc-tier1",
+    "reserve-tradeoff",
+    "affinity-repair",
+    "free-space-repair",
+    "large-vm-split",
+)
 R = 6  # rounding for recorded values
 TIB = 1 << 40
 
@@ -94,6 +104,11 @@ class Fixture:
     # from the built output entirely.
     hard_sweep_tib: List[Optional[float]]
     counterfactual_soft_zero: bool
+    # Section 5.3.3's T in TiB, ``group.split_vm_footprint_tib`` -- None switches the split
+    # rule off. Every fixture states it explicitly (load_fixture() refuses a file that does
+    # not), because the engine's default is 2 TiB and a fixture that silently inherited it
+    # would change its worked numbers whenever the default moved.
+    split_tib: Optional[float] = None
 
     @property
     def all_keys(self) -> List[str]:
@@ -128,6 +143,26 @@ class Fixture:
         return float(self.migration.get("tiny_disk_bytes", 0)) / TIB
 
     @property
+    def mu(self) -> float:
+        """Section 5.4's mu (``objective.mu_vm_split_per_tib``), 0 when the split rule is off
+        -- the rule's term, weight rule and gate all switch off together."""
+        return float(self.objective.get("mu_vm_split_per_tib", 0.0)) if self.split_tib else 0.0
+
+    @property
+    def split_caps(self) -> Dict[int, float]:
+        """``{vmid: T_v}`` for ``V^split`` (section 5.3.3), written out independently of the
+        engine's ``reserve.split_vm_caps()``: a VM whose disks add up to more than T, capped at
+        ``max(T, its largest disk)``. Empty when the rule is off (T null, or mu 0)."""
+        if self.split_tib is None or not self.mu:
+            return {}
+        caps: Dict[int, float] = {}
+        for v in sorted({self.vmid[k] for k in self.all_keys}):
+            sizes = [self.size[k] for k in self.all_keys if self.vmid[k] == v]
+            if sum(sizes) > self.split_tib:
+                caps[v] = max(self.split_tib, max(sizes))
+        return caps
+
+    @property
     def vm_weights(self) -> Dict[int, float]:
         """Section 5.4's `w_v = max(1, l_v / l_bar)`. `V` (the vmids this
         returns weights for) is derived from movable disks only
@@ -152,7 +187,8 @@ class Fixture:
         average = sum(self.load[k] for k in self.all_keys) / len(all_vmids)
         if not average:
             return {v: 1.0 for v in vmids}
-        return {v: max(1.0, load_per_vm[v] / average) for v in vmids}
+        split = self.split_caps
+        return {v: 1.0 if v in split else max(1.0, load_per_vm[v] / average) for v in vmids}
 
 
 def storage_of(f: Fixture, assign: Assignment, key: str) -> str:
@@ -167,6 +203,8 @@ def load_fixture(stem: str) -> Fixture:
         fx: Dict[str, Any] = yaml.safe_load(fh)
     g = fx["group"]
     disks = fx["disks"]
+    if "split_vm_footprint_tib" not in g:
+        raise SystemExit(f"{stem}.yaml: group.split_vm_footprint_tib must be stated (null = off)")
     movable = [d for d in disks if not d.get("pinned", False)]
     pinned = [d for d in disks if d.get("pinned", False)]
     return Fixture(
@@ -195,6 +233,9 @@ def load_fixture(stem: str) -> Fixture:
         format={d["key"]: d.get("format", "raw") for d in disks},
         hard_sweep_tib=list(fx.get("hard_sweep_tib", [])),
         counterfactual_soft_zero=bool(fx.get("counterfactual_soft_zero", False)),
+        split_tib=(
+            None if g["split_vm_footprint_tib"] is None else float(g["split_vm_footprint_tib"])
+        ),
     )
 
 
@@ -249,8 +290,28 @@ def reserve_term(f: Fixture, s: str, largest: float) -> float:
     return max(f.reserve_factor * largest, f.soft[s])
 
 
+def footprint_on(f: Fixture, assign: Assignment, s: str, vmid: int) -> float:
+    """Section 5.3.3's ``F_{v,s}``: the sum of VM ``vmid``'s disks on ``s`` -- every disk,
+    pinned or not (a snapshot covers all of them)."""
+    return sum(f.size[k] for k in f.all_keys if f.vmid[k] == vmid and storage_of(f, assign, k) == s)
+
+
 def largest_on(f: Fixture, assign: Assignment, s: str) -> float:
-    return max((f.size[k] for k in f.all_keys if storage_of(f, assign, k) == s), default=0.0)
+    """Section 5.3 (C4) ``Z_s`` = ``max_v F_{v,s}``, the largest per-VM footprint on ``s``."""
+    return max(
+        (footprint_on(f, assign, s, v) for v in {f.vmid[k] for k in f.all_keys}), default=0.0
+    )
+
+
+def peak_footprint(f: Fixture, assign: Assignment, vmid: int) -> float:
+    """``max_s F_{v,s}`` -- the peak share of one VM any single storage holds."""
+    return max(footprint_on(f, assign, s, vmid) for s in f.storages)
+
+
+def excess_of(f: Fixture, assign: Assignment) -> float:
+    """Section 5.3.3 (C9): ``O = sum_{v in V^split} o_v`` in TiB, ``o_v = max(0, peak_v - T_v)``
+    -- the peak, not a sum over storages."""
+    return sum(max(0.0, peak_footprint(f, assign, v) - cap) for v, cap in f.split_caps.items())
 
 
 def used_on(f: Fixture, assign: Assignment, s: str) -> float:
@@ -267,7 +328,7 @@ def per_storage(f: Fixture, assign: Assignment) -> Dict[str, StorageState]:
         out[s] = {
             "load": round(sum(f.load[k] for k in f.all_keys if storage_of(f, assign, k) == s), R),
             "used_tib": round(used, R),
-            "largest_tib": round(largest, R),
+            "largest_footprint_tib": round(largest, R),
             "required_tib": round(used + term, R),
             "violates_reserve": used + term > f.capacity[s] + 1e-9,
         }
@@ -322,6 +383,29 @@ def repair_markers(f: Fixture, assign: Assignment) -> Dict[str, bool]:
     return markers
 
 
+def split_gate_opens(f: Fixture, assign: Assignment) -> bool:
+    """Section 6's split gate, restated independently of ``gates.split_gate()``: some VM in
+    ``V^split`` has a movable disk whose move alone, to an eligible other storage, strictly
+    lowers the VM's peak footprint and leaves the target without a (C5) shortfall. No cooldowns
+    here -- the fixtures carry no state."""
+    for v in f.split_caps:
+        peak = peak_footprint(f, assign, v)
+        for k in f.keys:
+            if f.vmid[k] != v:
+                continue
+            for s in eligible_storages(f, k):
+                if s == storage_of(f, assign, k):
+                    continue
+                trial = dict(assign)
+                trial[k] = s
+                if peak_footprint(f, trial, v) >= peak - 1e-9:
+                    continue
+                short = used_on(f, trial, s) + reserve_term(f, s, largest_on(f, trial, s))
+                if short <= f.capacity[s] + 1e-9:
+                    return True
+    return False
+
+
 def fragmentation(f: Fixture, assign: Assignment) -> float:
     """Section 5.4 kappa term, `A = Sum_v w_v * (extra storages)` -- V from
     movable disks only (objective.affinity_counts_pinned_disks=False, set
@@ -355,6 +439,7 @@ def objective_nonreserve(f: Fixture, assign: Assignment, beta: float, delta: flo
         + f.objective["gamma_move_bytes_per_tib"] * sum(f.size[k] for k in big_moved)
         + f.objective["kappa_vm_affinity"] * fragmentation(f, assign)
         + delta * F_of(f, assign)
+        + f.mu * excess_of(f, assign)
     )
 
 
@@ -426,6 +511,11 @@ def computed_p_min(f: Fixture, beta: float, delta: float) -> float:
         * len(set(f.vmid.values()))
         * (len(f.storages) - 1)
         + delta * 2 * len(f.storages)
+        + f.mu
+        * sum(
+            sum(f.size[k] for k in f.all_keys if f.vmid[k] == v) - cap
+            for v, cap in f.split_caps.items()
+        )
     )
     return float(u_obj * (1 << 20))
 
@@ -467,6 +557,12 @@ def cost(f: Fixture, key: str) -> float:
     return duration_mirror(f, key) * omega_mirror + duration_wipe(f, key) * omega_wipe
 
 
+def transient_basis(f: Fixture, state: Assignment, key: str, b: str) -> float:
+    """Section 8.1: the snapshot term's basis while ``key`` mirrors onto ``b``,
+    ``max(Z_b, F_{v(key),b} + z_key)`` -- the incoming disk joins its own VM's footprint."""
+    return max(largest_on(f, state, b), footprint_on(f, state, b, f.vmid[key]) + f.size[key])
+
+
 def order_moves(
     f: Fixture, target: Assignment, delta: float, hard: Optional[Dict[str, float]] = None
 ) -> List[Dict[str, Any]]:
@@ -503,7 +599,7 @@ def order_moves(
         feasible = []
         for k in pending:
             b = target[k]
-            basis = max(st[b]["largest_tib"], f.size[k])
+            basis = transient_basis(f, state, k, b)
             floor = max(f.reserve_factor * basis, hard_map[b])
             if st[b]["used_tib"] + f.size[k] + floor <= f.capacity[b] + 1e-9:
                 feasible.append(k)
@@ -528,6 +624,7 @@ def order_moves(
                 alpha * (E_of(f, _state) - E_of(f, nxt))
                 + delta * (F_of(f, _state) - F_of(f, nxt))
                 + kappa * (fragmentation(f, _state) - fragmentation(f, nxt))
+                + f.mu * (excess_of(f, _state) - excess_of(f, nxt))
             )
             c = cost(f, k)
             return float("inf") if c == 0.0 else persistent_reduction / c
@@ -535,7 +632,7 @@ def order_moves(
         pick = max(prio, key=ratio)
         b = target[pick]
         used_b = st[b]["used_tib"]
-        basis = max(st[b]["largest_tib"], f.size[pick])
+        basis = transient_basis(f, state, pick, b)
         floor = max(f.reserve_factor * basis, hard_map[b])
         out.append(
             {
@@ -635,6 +732,14 @@ def case_for(f: Fixture, beta: float, delta: float) -> Dict[str, Any]:
         },
     }
 
+    if f.split_caps:
+        case["expected_split_excess_after_tib"] = round(excess_of(f, a), R)
+        case["expected_vm_footprints_tib"] = {
+            str(v): sorted((round(footprint_on(f, a, s, v), R) for s in f.storages), reverse=True)
+            for v in f.split_caps
+        }
+        case["split_gate_opens_after"] = split_gate_opens(f, a)
+
     demo_p = f.objective.get("big_m_undersized_p_demo")
     if demo_p is not None:
         demo_a, demo_val = best_big_m(f, beta, delta, float(demo_p))
@@ -692,7 +797,8 @@ def payback(
     delta_e = E_of(f, f.current) - e_after
     delta_f = F_of(f, f.current) - f_after
     delta_a = fragmentation(f, f.current) - a_after
-    benefit = (alpha * delta_e + delta_weight * delta_f + kappa * delta_a) * float(
+    delta_o = excess_of(f, f.current) - excess_of(f, assignment if assignment else f.current)
+    benefit = (alpha * delta_e + delta_weight * delta_f + kappa * delta_a + f.mu * delta_o) * float(
         f.migration["payback_horizon_seconds"]
     )
     aggregate_ok = benefit >= float(f.migration["payback_ratio"]) * total_cost
@@ -817,6 +923,35 @@ def build(f: Fixture) -> Dict[str, Any]:
             entry.update(try_order(f, assignment, delta, hard_map))
             sweep.append(entry)
         out["hard_sweep"] = sweep
+
+    if f.split_caps:
+        beta0 = float(f.objective["beta_values"][0])
+        delta0 = float(f.objective.get("delta_values", [0.0])[0])
+        off = Fixture(**{**f.__dict__, "split_tib": None})
+        off_a, off_val = best_big_m(off, beta0, delta0, off.big_m_p)
+        first = cases[0]
+        # Section 14.9's payback arithmetic for the split plan (cost, mu*dO + kappa*dA benefit).
+        out["payback_split_plan"] = payback(
+            f,
+            first,
+            first["_exact_E_after"],
+            first["_exact_F_after"],
+            first["_exact_A_after"],
+            first["_assignment"],
+        )
+        out["split"] = {
+            "split_vm_footprint_tib": f.split_tib,
+            "mu_vm_split_per_tib": f.mu,
+            "caps_tib": {str(v): cap for v, cap in f.split_caps.items()},
+            "excess_before_tib": round(excess_of(f, f.current), R),
+            "gate_opens_initial": split_gate_opens(f, f.current),
+            # Recorded so the harness can assert the rule, and nothing else, moves the VM.
+            "counterfactual_split_off": {
+                "expected_objective": round(off_val, R),
+                "expected_moves": moves_of(off, off_a),
+                "gate_opens_initial": split_gate_opens(off, off.current),
+            },
+        }
 
     if f.counterfactual_soft_zero:
         zero_soft = Fixture(**{**f.__dict__, "soft": {s: 0.0 for s in f.storages}})
