@@ -1032,7 +1032,7 @@ priced the deviation relative to the group's mean fill, so a value raised
 under that formula does not carry over — re-derive it from `X*`. A replayed
 bundle with five equal storages, balanced I/O and data concentrated on three
 of them planned no capacity move under the relative form at the default and
-plans 20 data-disk moves under the absolute one, from 100 GiB disks that follow their VM up to 1.95 TiB.
+plans 20 data-disk moves under the absolute one, from 100 GiB disks that follow their VM up to 1.95 TiB (observed on the operator's own cluster).
 
 ### `objective.affinity_counts_pinned_disks`
 

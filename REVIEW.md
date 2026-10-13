@@ -426,6 +426,24 @@ feature (the `exclude.stopped` rename and its refusal, the PVE-client resilience
 0.1.18/0.1.19 and the isort test fix) remain unreviewed by this pass and are flagged for the
 next one.
 
+A **thirty-second pass** (section 64) reviews the `feat/absolute-capacity-spread` branch — the
+plan-only redesign of (C7) (`cbb242d`) and its phase 18 implementation (`0e36ba4`): the
+capacity-spread term repriced from a fill deviation relative to `b̄` to **absolute TiB** off each
+storage's capacity-proportional share, with the break-even disk size `X* = β/(2δ−γ)`, the `U_obj`
+bound's `δ` term widened to `2·(Σz + ΣUˢᵉˣᵗ)`, the `δ > α` warning replaced by one at `0 < 2δ ≤ γ`,
+and every §14 number recomputed — together with the `main` commits the thirty-first pass deferred
+(the `exclude.stopped` rename and its refusal, the PVE-client resilience work, the isort test fix,
+releases 0.1.18–0.1.20) and a verification of the AO-01..AO-06 resolutions, which §63 self-recorded.
+Three findings (AP-01..AP-03), two Low and one Info: the manual's `--json` field list still
+describes `before/after_capacity_spread` as "the section 5.3 (C7) fill-fraction spread" — a
+cross-reference this branch's own (C7) rewrite made wrong, since the field remains the §6 gate's
+relative fraction while (C7) now defines TiB; and phase 18's acceptance criterion (a cluster-6
+replay at the default weights plans capacity moves where the relative form planned none) is stated
+as satisfied on the strength of a bundle that is not committed, while every committed replay runs
+at `beta_move_count: 0.0`, where `X* = 0` and a different regime holds. All §14 numbers re-derived
+by hand; heuristic, CBC and the fixture generator agree on the new term to the last digit on a
+foreign-carrying fixture; the deferred commits and all three releases are clean.
+
 ---
 
 ## 0. Overall assessment
@@ -8758,6 +8776,263 @@ pair).
   the post-move peak in `O(|S|)` per pair, running the reserve check only for peak-lowering pairs;
   `split_peak_footprints_bytes()` returns at once when no VM is in `V^split`. Plan §6's cost
   sentence now states the real cost.
+
+---
+
+## 64. Thirty-second-pass review — (C7) repriced in absolute TiB (phase 18), the deferred `main` commits, releases 0.1.18–0.1.20
+
+Reviewed the `feat/absolute-capacity-spread` branch as a whole — the plan-only commit `cbb242d`
+("Specify the capacity-spread term in absolute TiB", 257 lines of `IMPLEMENTATION_PLAN.md`, the
+PDF re-stamped in the same commit) and the phase 18 implementation `0e36ba4` (33 files: the
+heuristic, CBC, config, the CLI hint line, the fixture generator, every fixture and corpus
+expected file, the manual, the example config and three internals pages) — plus everything the
+thirty-first pass explicitly deferred to this pass (§62's scope note): `511501c` (the isort test
+fix), `9d8ad99`/`33dfb4f` (the `exclude.running_only` → `exclude.stopped` rename and its
+refusal), `b8d6b4e` (the PVE-client resilience work), releases 0.1.18–0.1.20, and a
+re-verification of the AO-01..AO-06 resolutions, which §63 recorded without a verification pass
+(§§46/§48.1's convention). The method is the established one: re-derive §14 independently, run
+every gate, read the code against the plan's claims, and re-derive the corpus diffs by hand.
+
+The redesign's core argument is correct and well-made: the relative form made the term's *level*
+size-independent but its *slope* — the thing that decides whether a move is made — proportional to
+`2δ/B̄`, so the fixed per-move costs outgrew it as groups grew, and past `B̄ = 2δ/γ` no
+capacity-only move of any size could pay (20 TiB per storage at the defaults). In TiB the gain per
+TiB moved is a constant `2δ`, the break-even `X* = β/(2δ−γ) ≈ 270 GiB` is group-size-independent,
+and the term shares its unit with `γ` — which also makes the §7.2 payback benefit and the §5.4
+exchange-rate framing (`2δ = 1.0` against `α = 1.0` at the defaults) meaningful. The
+specification-first shape (plan commit, then implementation) with "the plan is ahead of the
+implementation" stated openly in the first commit is the discipline this review series has
+endorsed since the F-passes.
+
+### 64.1 Verification run
+
+- **`make check`'s substance, green at branch tip (`0e36ba4`)**: black/isort/flake8 clean, mypy
+  clean, **1225 passed**, **96.97% line coverage**, `generate_expected.py --check` OK,
+  `validate_corpus.py --check` OK (dev venv), `make docs-check` OK (all three PDF stamps and the
+  manpage match their Markdown — both commits rebuilt and re-stamped the plan PDF in the same
+  commit as its Markdown, per AGENTS.md §7.4). Also green on the **system toolchain** (pulp
+  2.7.0, no statsmodels): `validate_corpus.py --check` exits 0 with AM-02's skip-adoption warning
+  naming the statsmodels variants — environment-independence holds.
+- **§14 re-derived in full, independently, under the new term.** fc-tier1 (all three storages
+  8 TiB, no foreign): `b̄ = 0.270833`, each storage's fill target `b̄·C_s = 2.167 TiB`;
+  `F_before = 2.333 + 0.667 + 1.667 = 4.667` (`= 14/3`, as the updated
+  `test_delta_050_at_the_default_beta_reproduces_the_two_move_solution` asserts); two-move
+  `F_after = 0.667` (`= 2/3`); the third move's `F: 0.667 → 1.667`, `δ·ΔF = +0.500`, rejection at
+  `+0.375`; full objectives **3.843 vs 4.218**; the affinity comparison `3.97` (together) against
+  `3.22` (split), by 0.75 where an unweighted `κ` would give 1.6; §14.4's ranking reductions
+  **6.03** (`α·4.5333 + δ·1.5`) and **1.32** (`α·2.0 + δ·0.667 − κ·w₁₀₁·1.351`) — every figure the
+  plan states reproduces to the digit. §14.5's benefit
+  `(6.5333 + 0.5 × 4.0 − 0.5 × 2.7027) × 31 536 000 = 226 490 984`, ratio **8 640** — and
+  `fc-tier1.expected.json` records `226 490 983.78` / `8639.95`. §14.6: cells **12.00 / 3.30 /
+  14.60**, flip **8.70**, the no-δ gap 9.70, `P_min = 26.6·2²⁰ ≈ 2.79×10⁷` (expected file:
+  `27 892 121.6`). §14.7: `ΔF = 2 × 528 KiB`, `δ·ΔF·H = +15.51`, benefit `31 536 015.51`
+  (expected file identical), pre-§7.2 ratio ≈ 1 020. §14.8: targets 5.1 TiB each, `F: 8.2 → 6.2`,
+  benefit `−9.78×10⁷`, ratio `−6 216`, counterfactual 4.100 against the repair's 7.775, and the
+  as-built one-move `F: 8.2 → 7.2`, objective 3.975, benefit `1.26×10⁷`, ratio ≈ 2 406. §14.9 sets
+  `delta_capacity_spread: 0`, so only the recorded unit changed — verified. §5.3's `U_obj =
+  14.8 + 1.5 + 0.325 + 13.51 + 6.5 = 36.64`, `P_min ≈ 3.84×10⁷` (expected file: `38 418 265.946`
+  at β=0.25/δ=0.5), dominant above ≈ 37 GiB — which incidentally heals a stale "roughly 25 GiB"
+  that had survived AO-05's own `U_obj` correction. The new bound itself is sound:
+  `Σ_s |B_s − b̄·C_s| ≤ Σ_s B_s + b̄·Σ_s C_s = 2·(Σz + ΣUˢᵉˣᵗ)`, since both sums are the group's
+  total bytes.
+- **The single-implementation claim verified empirically, on a foreign-carrying fixture** (the
+  case where the old form's `b_s`/`B_s` composition matters most): on `affinity-repair` (stor-c
+  holds 4 TiB foreign), the heuristic, CBC and the generator all compute
+  `Σ d_s = 5.3333333532` and the term `2.6666666` — identical to the last digit. The one
+  trip-up on the way, recorded for the next reader: `ReserveStatus.managed_used_bytes`
+  **includes** `foreign_used_bytes` (it is `managed_used_bytes(...) + foreign` in
+  `compute_reserve_status`), while the *function* of the same name does not — the value
+  `evaluate_assignment()` reads is the plan's `B_s`, and `docs/internals/90-heuristic.md`'s new
+  section states this correctly.
+- **The fixture diffs are exactly what the phase row promises**: no fixture's optimum, move set
+  or order changed — only `F_*`, objective, `P_min`, agreement-threshold and benefit values, and
+  every fixture's test assertion tracks the regenerated value
+  (`31_536_006.65 → 31_536_015.51`, `-123_114_070.59 → -97_761_600.0`, `2.153846/0.307692 →
+  14/3 / 2/3`). The corpus diffs are genuine decision changes — the point of the phase: the 24h
+  bundle's heuristic gains two capacity-only moves (747564's disks, `imbalance_reduction` < 0),
+  the 2d bundle's heuristic goes 5 → 15 moves (it now spreads the large VM 843425 for data at
+  β=0) and CBC 13 → 8, the free-space bundle's CBC 19 → 18 — all read by hand, all green under
+  `check_milp_objective_total` and the Pareto check. Every corpus variant is a `beta: 0.0` sweep
+  case, so the commit message's "only the beta=0 sweep cases change" is correct, if compressed.
+- **The payback raw-quantity discipline (R-01) survives the unit change**: `raw_capacity_spread()`
+  still feeds `compute_benefit_load_seconds()`, and `docs/internals/96-payback.md` says so.
+- **The deferred commits and releases, reviewed and clean.** `511501c` (isort) is trivial and
+  correct. `9d8ad99` fixes a real doc lie on the way (`running_only: true` skipped stopped VMs
+  before their configs were fetched, so their disks could never be moved — the old §2 text claimed
+  they could be moved for capacity). `33dfb4f` refuses `exclude.stopped: false` at load time
+  naming the reason (replication/backup tools track volumes by location), makes topology skip
+  stopped VMs unconditionally, and the apply-time preflight it leans on exists
+  (`execute.py:318`); the schema rejects the old key outright, consistent with the operator's
+  no-shims direction, and 0.1.19's entry documents the breakage. `b8d6b4e`'s two retry regimes
+  (outage 5 s doubling to 60 s; short 1 s/2 s/4 s jittered for every idempotent call),
+  its transient classification (429/5xx, TLS, truncated/non-JSON bodies, a login answered
+  with a non-401/403 status parsed from proxmoxer's message), the session rebuild after
+  transport failures (and only those — a `ResourceException` does not poison the pool), and
+  the never-retried `move_disk` are all right. Release hygiene 0.1.18–0.1.20: version lockstep
+  in all five places, annotated tags `debian/<version>` with the right tagger and messages on
+  the release merges, the graphify refresh commit immediately before each Release commit on its
+  release branch (AM-06's rule now exercised three times), changelog entries accurate to their
+  windows — 0.1.20 carries the honest UPGRADE NOTE phase 17's row required, and names the
+  review round.
+- **AO-01..AO-06 verified as §63 records them**: seven terms in `explain`'s line and `--json`
+  (with the regression test), AO-02's refutation holds (`split_gate()` passes its own `Storage`
+  into `compute_reserve_status`, so the (C5) test charges `z_{d,s}`), the "no better split
+  across N storages" wording, `test_mu_zero_restores_the_io_weight_of_a_large_vm`, `U_obj`'s
+  `κ·w_max` (in the current §5.3, with `w_max` among the logged inputs), and the split gate's
+  early-outs.
+
+### 64.2 Findings summary
+
+| ID | Severity | Location | Summary |
+|----|----------|----------|---------|
+| AP-01 | Low | `docs/manual/27-plan.md` | The `--json` field list still describes `before_capacity_spread`/`after_capacity_spread` as "the section 5.3 (C7) fill-fraction spread" — a cross-reference this branch's own (C7) rewrite made wrong: (C7) now defines the absolute-TiB deviation, while the field remains the §6 gate's *relative* fraction (`_spread_fraction()` over `fill_fraction`), and nothing tells the reader it is not the objective's TiB term they have just read about in `delta_capacity_spread`'s entry |
+| AP-02 | Low | plan §12 (phase 18 row), §5.3 (C7), §5.4, `docs/manual/10-configuration.md` | Phase 18's "Done when" criterion — a cluster-6-like replay "plans capacity moves **at the default weights**, where the relative form planned none" — is stated as satisfied (`17 + 3` moves, quoted as fact in §5.3, §5.4 and the manual) on the strength of a bundle that is not committed, while every committed replay evidence runs at `beta_move_count: 0.0`, where `X* = 0` and every toward-target move pays regardless of size — a different regime. Replayed live, the committed 24h bundle at its own default beta plans **no** capacity moves (its 2.28 TiB of fill deviation and one large VM's concentrated 400-GiB disks leave `δ·ΔF` below any plan's `β`+`γ`+`κ` cost — correctly refused, honestly reported, and a shape no committed bundle escapes) |
+| AP-03 | Info | working tree | `announcement.md` sits untracked and referenced nowhere: a complete, accurate forum-announcement draft (CBC, AGPL, the trixie `.deb`, `verify-metrics`, the six-counter transport trap) — V-05's shape. Commit it, ignore it, or delete it; the current state is the wrong one, and its accuracy is time-bound (the release-page URL and version must be filled in before posting) |
+
+### 64.3 AP-01 — the `--json` field list's (C7) pointer now names the wrong quantity
+
+**Severity:** Low
+**Files:** `docs/manual/27-plan.md` (the `groups[]` field list), `docs/manual/10-configuration.md`'s
+rewritten `delta_capacity_spread` entry (for the contrast the reader carries with them).
+
+`plan --json`'s `before_capacity_spread`/`after_capacity_spread` are computed by
+`_spread_fraction(final_breakdown.fill_fraction, average_fill)` — `(max b_s − min b_s)/b̄`, the
+**relative** fill-fraction spread, deliberately the §6 gate's own shape (the field predates the
+δ term and the corpus's Pareto check compares it as a fraction). The branch changed what (C7)
+*is* — `d_s = |B_s − b̄·C_s|` in TiB — and updated the objective's own documentation everywhere
+else, but this field's description kept its old locator: "the section 5.3 (C7) fill-fraction
+spread the same way". Delete the reference and the sentence still describes the field, so by
+§8.0's footnote test the pointer alone would be tolerable — but the pointer is now actively
+misleading, because the section it names defines a different quantity in a different unit, and
+the reader most likely to look is the one who has just been told (correctly, in the rewritten
+`delta_capacity_spread` entry) that the objective's data spread is "TiB by which each storage's
+data is off its capacity-proportional share". Meeting `after_capacity_spread: 1.026` with no
+unit and a pointer to the TiB section invites exactly the misreading the self-containment rule
+exists to prevent — a field documented by cross-reference that the referenced text no longer
+supports, the AGENTS.md §8.6 class. The fix is one sentence: describe the field as the relative
+fill-fraction spread the capacity **gate** compares (§6, the same shape as
+`gates.capacity_spread_threshold`'s input), explicitly distinct from the objective's TiB term.
+
+### 64.4 AP-02 — phase 18's acceptance evidence is not reproducible from the repository
+
+**Severity:** Low
+**Files:** `IMPLEMENTATION_PLAN.md` §12 (phase 18 row), §5.3 (C7), §5.4,
+`docs/manual/10-configuration.md` (`objective.delta_capacity_spread`, "Upgrading" paragraph),
+`tests/corpus/` (the committed evidence).
+
+Phase 18's row says "**Implemented**, except the `debian/changelog` note" — and its "Done when"
+clause reads: "`--replay` of a bundle like `cluster-6` … plans capacity moves at the default
+weights, where the relative form planned none". The plan and the manual state the criterion as
+met, with specifics: §5.3 (C7) records the bundle's shape (five 20 TiB storages holding
+12.3/3.1/15.0/1.3/0 TiB, gate at 236%), §5.4 the outcome ("a replay at that weight plans
+seventeen data disks in the five-storage group … and three in the three-storage one … Both plans
+clear payback by a ratio of several thousand"), the manual the sum ("plans 20 data-disk moves
+under the absolute one, from 100 GiB disks that follow their VM up to 1.95 TiB").
+
+Everything derivable from those numbers checks out — `B̄ = 6.34`, the relative form's threshold
+`β/(2δ/B̄ − γ) ≈ 2.3 TiB` (consistently above the bundle's stated largest disk of 1.95 TiB), the
+gate's 236%, the new-form equivalence `δ_rel = δ·B̄ ≈ 3.2`, and the 17-disk breakdown is exactly
+`X*`-consistent (thirteen disks from 290 GiB up, four 100–200 GiB followers) — but the bundle
+itself is not in the repository, so none of it can be replayed. What *is* committed runs at a
+different point of the parameter space: every corpus variant sweeps `beta_move_count: 0.0`
+(the narrow sweep's only beta), where `X* = 0` and every toward-target move pays regardless of
+size — the regime in which the corpus's heuristic now spreads the large VM 843425 for data. At
+the *default* `beta_move_count: 0.25`, replayed live for this pass, the committed 24h bundle
+plans **no** capacity moves, and for a reason that is itself instructive: its group's whole fill
+deviation is only 2.28 TiB (so `δ·ΔF` tops out at 1.14), and the concentrated storage's
+above-`X*` disks (400-GiB scale) all belong to one large VM, so any move set that recovers the
+deviation splits it and pays `κ` — the cheapest such plan costs ≈ 1.56 against the 1.14 any plan
+could earn. Correctly priced, correctly refused, and the new no-moves line says so — but it
+means the committed corpus proves the mechanism works while it *cannot* demonstrate the
+criterion even in principle: its data shapes (one VM's concentrated data, a small total
+deviation) never put a bundle in the regime where the default weights move data for spread.
+Only cluster-6 — five storages, 290-GiB-to-1.95-TiB disks, several VMs' data concentrated —
+does, and only its uncommitted replay claims it.
+
+This is not a defect in the code and not a challenge to the operator's word; the plan carries
+live-cluster observations elsewhere (§12.1's factor ranges). The difference is that this one is
+the phase's acceptance criterion, quoted as a replay result in the same style the plan quotes
+committed-bundle replays, and §16's capture machinery exists to make exactly this evidence
+committable — a cluster-6-shaped capture is a few megabytes and would also give the corpus its
+first bundle that exercises the term at the default weights (the committed bundles' shapes —
+concentrated single-VM data, small total deviations — never reach the regime, as the 24h
+replay above shows). **Recommendation:** commit a `cluster-6` capture (or one shaped like it), or —
+if the bundle cannot be shared — say so in the row the way §12.1 says it: "live-verified on the
+operator's cluster, not replayable here".
+
+### 64.5 AP-03 — an untracked `announcement.md` (Info)
+
+A finished-looking forum announcement in BBCode sits untracked in the working tree, referenced
+nowhere — the exact V-05 shape (`run-with-system-python.sh`'s state before that finding's
+fix). Its content was checked against the tree and is accurate: CBC plus the heuristic
+fallback, the never-traded reserve, dry-run default, `explain`, the six-counter transport trap
+(§28's cross-metric check exists for it), `verify-metrics` as the gate, AGPL, the trixie `.deb`.
+Untracked means invisible to review and CI, and its accuracy is time-bound — the GitHub
+releases URL and the version must be filled in before posting, which is precisely the kind of
+detail that bitrots. Commit it (a `docs/` or `contrib/` home, or wherever the operator wants
+release-announcement drafts), add it to `.gitignore`, or delete it. Not blocking; the current
+state is the only wrong one.
+
+### 64.6 What this pass confirms
+
+- **The design argument is sound and its implementation is single-sourced.** The level-vs-slope
+  distinction is the right way to think about the relative form's failure (the plan's own
+  re-derivation — "a group with ten times the data needs ten times the moves to correct the
+  same relative imbalance, each of which earned a tenth as much" — is exactly the scaling that
+  killed it), and `d_s` now has one definition in the heuristic, one in CBC (MiB, `δ·2⁻²⁰` per
+  MiB — verified against the code), and one in the generator, agreeing to the last digit on a
+  foreign-carrying fixture. The `b̄ = 0` guards agree in all three (term inactive, gate inactive).
+- **The safety invariants are untouched**: the reserve, the transient invariant, the
+  free-space floors and their ordering, dry-run default, no-auto-delete and the payback gate
+  are all unchanged by a re-weighting of a preference term — §6's own "a preference, not a
+  safety property" framing, re-verified green by the whole suite.
+- **The removed `δ > α` warning is a documented, pinned design change**: §11.1's new row states
+  the reason (unlike units) and the replacement warning (`0 < 2δ ≤ γ`) is implemented and tested
+  both ways, including the exact boundary and `δ = 0` staying silent. The `X*` framing is a
+  better guard than the old warning ever was: the manual now tells the operator to choose `δ`
+  from the smallest disk they want moved, with the worked numbers (100 GiB → 1.3, 1 TiB → 0.15 —
+  both re-derived here).
+- **The new no-moves hint is exactly §9.5's specification**: all three knobs with their values,
+  `X*` in GiB, the `2δ ≤ γ` alternative, both exits — and it prints on a live replay of the 24h
+  bundle, whose honest "no moves made" at the default beta is itself the best evidence that
+  the hint is needed.
+- **The corpus's environment-independence (AM-02) holds on the system toolchain**, and the
+  submission files are not staled by the regenerated expected files (they describe cluster
+  shapes and pipeline coverage, not move counts — checked).
+- **The process discipline held throughout the range**: the plan-first commit, PDFs re-stamped
+  in the same commits, all three releases cut on `release/` branches merged `--no-ff` with the
+  graphify refresh immediately before each Release commit, and phase 18's row honestly
+  deferring the changelog upgrade note to the next release entry rather than backfilling
+  (§9.2's rule), with the manual already carrying the "Upgrading" paragraph the note will
+  restate.
+
+### 64.7 Assessment
+
+The branch does what its commit messages say, the plan's arithmetic is self-consistent to the
+digit (this pass re-derived every §14 number it quotes), and the one behaviour change is the
+intended one: a preference term repriced so it can act at all on groups larger than a fixture.
+The two Low findings are cheap: AP-01 is one sentence plus a PDF re-stamp; AP-02 is an
+evidence decision — commit a cluster-6-shaped bundle (which the corpus would genuinely benefit
+from, being unable to exercise the term at the default weights with its current shapes) or
+annotate the claim as live-verified. AP-03 is a housekeeping choice. Nothing here blocks the
+merge; fix AP-01 in the same commit as the PDF rebuild, decide AP-02 before or with the release
+that will carry phase 18, and the deferred commits and releases this pass picked up need
+nothing at all.
+
+---
+
+## 65. Resolution of thirty-second-pass findings (AP-01..AP-03)
+
+- **AP-01 → fixed.** The manual's `--json` field list now describes `before_capacity_spread`/
+  `after_capacity_spread` as the relative fill-fraction spread the capacity gate compares
+  (`(max − min) / mean`), a fraction and explicitly not the TiB term `delta_capacity_spread` prices.
+- **AP-02 → fixed by annotating, not by committing a bundle.** The `cluster-6` bundle is the
+  operator's local capture and is deliberately not committed. Plan §5.4, phase 18's "Done when" and
+  the manual now say the result is live-verified on the operator's cluster and not replayable from
+  the repository; §5.4 also records that the committed corpus sweeps only `beta_move_count: 0.0` and
+  that its 24h bundle correctly plans nothing at the default β, so it demonstrates the mechanism and
+  not the criterion. A committable cluster-6-shaped capture stays a good idea for the corpus.
+- **AP-03 → fixed.** `announcement.md` deleted.
 
 ---
 

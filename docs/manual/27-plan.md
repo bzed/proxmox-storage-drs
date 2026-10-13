@@ -305,8 +305,9 @@ above), `load_per_tib`, `duration_mirror_seconds`,
 `deadlocked` (a list of disk keys) and `deadlock_message` (`null` if none),
 `before_spread`/`after_spread` (the section 6 spread fraction, before the
 plan and after every scheduled move), `before_capacity_spread`/
-`after_capacity_spread` (the section 5.3 (C7) fill-fraction spread the same
-way, `null` for a group whose mean fill is 0 or that has not solved),
+`after_capacity_spread` (the *relative* fill-fraction spread the capacity gate compares,
+`(max − min) / mean` of bytes used / capacity, a fraction and not the TiB term
+`objective.delta_capacity_spread` prices, the same way, `null` for a group whose mean fill is 0 or that has not solved),
 `before_objective_total`/`after_objective_total` (the section 5.4 objective's
 full `.total`, `evaluate_assignment()` re-scored at the same true weights
 `validate_corpus.py`'s cross-backend check uses -- REVIEW.md AA-01), `load_error`
