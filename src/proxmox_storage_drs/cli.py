@@ -1325,6 +1325,38 @@ def _render_unfixable_shortfall_lines(
     return lines
 
 
+def _capacity_gate_hint(objective: ObjectiveConfig | None) -> str:
+    """The second "no moves made" line for a capacity-gated group (section 9.5): names beta,
+    gamma and delta and prints the break-even disk size ``X* = beta / (2 delta - gamma)`` TiB,
+    the smallest disk whose move the data-spread term can pay for, or says that no disk can."""
+    tail = (
+        "raise objective.delta_capacity_spread or lower objective.beta_move_count to spread "
+        "data more aggressively, or raise gates.capacity_spread_threshold (null disables it) "
+        "to stop planning for it"
+    )
+    head = (
+        "the capacity gate opened this group: no plan's data-spread gain, priced per TiB by "
+        "objective.delta_capacity_spread, outweighs the migrations it takes"
+    )
+    if objective is None:
+        return f"    {head}; {tail}"
+    beta = objective.beta_move_count
+    gamma = objective.gamma_move_bytes_per_tib
+    delta = objective.delta_capacity_spread
+    if 2 * delta <= gamma:
+        reach = (
+            f"delta {delta:g} per TiB is at most half of gamma {gamma:g}, so no disk of any "
+            "size can pay for its move"
+        )
+    else:
+        x_star_gib = beta / (2 * delta - gamma) * 1024
+        reach = (
+            f"with beta {beta:g} per move, gamma {gamma:g} and delta {delta:g} per TiB only a "
+            f"disk larger than X* = {x_star_gib:.0f} GiB can pay for its move"
+        )
+    return f"    {head}: {reach}; {tail}"
+
+
 def _render_plan_no_moves_lines(
     decision: GateDecision,
     schedule_result: ScheduleResult,
@@ -1345,10 +1377,10 @@ def _render_plan_no_moves_lines(
     A capacity-gated group gets a second line naming the two weights
     involved: the capacity gate opens a group whose I/O may already be
     balanced, so the data-spread term (``objective.delta_capacity_spread``)
-    is the only thing that can pay for a move, and at the default weights
-    it often cannot -- a replayed bundle with a 112 % capacity spread needed
-    about 2.5 times the default before its cheapest fix (three moves, one VM
-    split) paid for itself."""
+    is the only thing that can pay for a move. It is priced per TiB, so a disk
+    pays for its move only above ``X* = beta / (2 delta - gamma)`` (about
+    270 GiB at the defaults); the line prints ``X*`` for the configured
+    weights."""
     if not decision.act or schedule_result.order or schedule_result.deadlocked:
         return []
     if unfixable is not None:
@@ -1375,18 +1407,7 @@ def _render_plan_no_moves_lines(
         and decision.drift_fraction is None
     )
     if capacity_gated:
-        weights = (
-            f" ({objective.delta_capacity_spread:g} against {objective.beta_move_count:g} per move)"
-            if objective is not None
-            else ""
-        )
-        lines.append(
-            "    the capacity gate opened this group: no plan's data-spread gain, weighted by "
-            "objective.delta_capacity_spread, outweighs the migrations it takes, charged by "
-            f"objective.beta_move_count{weights}; raise delta_capacity_spread to spread "
-            "data more aggressively, or raise gates.capacity_spread_threshold (null "
-            "disables it) to stop planning for it"
-        )
+        lines.append(_capacity_gate_hint(objective))
     return lines
 
 

@@ -232,10 +232,13 @@ both. "Scores best" is claimed only for a CBC solve with status `optimal`.
 
 A group opened by the capacity gate alone (`GateDecision.capacity_fraction`
 set, reserve override, drift and imbalance all unset) gets a second line
-naming `objective.delta_capacity_spread` and `objective.beta_move_count`
-with their values: on such a group the I/O is usually balanced already, so
-the data-spread term is the only thing that can pay for a move, and at the
-default weights it often cannot (`IMPLEMENTATION_PLAN.md` section 5.4). The
+(`_capacity_gate_hint()`) naming `objective.beta_move_count`,
+`objective.gamma_move_bytes_per_tib` and `objective.delta_capacity_spread` with their
+values and printing the break-even disk size `X* = beta / (2 delta - gamma)` TiB: on such
+a group the I/O is usually balanced already, so the data-spread term -- priced per TiB --
+is the only thing that can pay for a move, and only a disk above `X*` can pay for itself
+(about 270 GiB at the defaults). At `2 delta <= gamma` the line says that no disk of any
+size can instead. The
 weights reach the renderer as an optional `objective` argument, threaded
 through `_render_plan_human()`/`_render_apply_human()` from the resolved
 config.

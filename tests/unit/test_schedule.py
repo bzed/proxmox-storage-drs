@@ -282,11 +282,15 @@ def test_ordering_prefers_the_larger_persistent_reduction_once_delta_matters() -
     ``102:scsi0`` has the better imbalance-only ratio (it is picked first
     at ``delta_capacity_spread=0``), but ``101:scsi0`` has the better
     *combined* alpha+delta ratio once delta is large enough to matter --
-    the section 8.2 ranking must switch to it, not stay on 102:scsi0."""
+    the section 8.2 ranking must switch to it, not stay on 102:scsi0. Since the
+    data-spread term is priced in absolute TiB (section 5.3 (C7)) every TiB moved
+    toward the targets earns the same ``2 * delta``; the flip therefore needs a
+    move that overshoots: ``c`` is small enough that 102's 3.9 TiB lands past its
+    share, so it earns less per TiB than 101's move into ``b``."""
     storages = (
         make_storage("a", capacity_tib=27.0, foreign_used_tib=10.0),
         make_storage("b", capacity_tib=23.5),
-        make_storage("c", capacity_tib=25.0),
+        make_storage("c", capacity_tib=12.0),
     )
     disks = (
         make_disk("101:scsi0", 4.8, "a"),

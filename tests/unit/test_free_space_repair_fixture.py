@@ -315,7 +315,7 @@ def test_end_to_end_repair_is_exempt_from_the_economic_test() -> None:
         MIGRATION.payback_horizon_seconds,
     )
     assert benefit < 0  # the repair worsens balance -- the point of the fixture
-    assert benefit == pytest.approx(-123_114_070.59, rel=1e-3)
+    assert benefit == pytest.approx(-97_761_600.0, rel=1e-3)
 
     excluded_disk_keys: frozenset[str] = frozenset(
         mc.disk_key for mc in move_costs if mc.exceeds_max_duration

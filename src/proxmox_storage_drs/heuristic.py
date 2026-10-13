@@ -111,12 +111,12 @@ class ObjectiveBreakdown:
     move_count_term: float
     bytes_moved_term: float  # gamma * TiB moved, D^big only (section 5.4)
     fragmentation_term: float  # kappa * affinity_debt -- affinity_debt = sum(w_v * extra storages)
-    capacity_spread_term: float  # delta * sum(d_s), section 5.3 (C7)
+    capacity_spread_term: float  # delta * sum(d_s) with d_s in TiB, section 5.3 (C7)
     reserve_penalty_term: float  # objective.reserve_violation_penalty * TiB short
     spread_e: dict[str, float]  # storage id -> e_s = |u_s - u*|, for reporting (both metrics)
     utilization: dict[str, float]  # storage id -> u_s, for reporting and the minmax metric
     fill_fraction: dict[str, float]  # storage id -> b_s = used/capacity, section 5.3 (C7)
-    fill_deviation: dict[str, float]  # storage id -> d_s = |b_s - b_bar| / b_bar
+    fill_deviation: dict[str, float]  # storage id -> d_s = |B_s - b_bar * C_s| in TiB
     reserve_statuses: dict[str, ReserveStatus]  # storage id -> (C4)/(C5) at this assignment
     moved_disk_keys: frozenset[str]  # every disk that moved, tiny disks included (for reporting)
     # Section 7.2's raw (kappa-unscaled) A = sum(w_v * extra storages) -- payback.py's
@@ -364,7 +364,13 @@ def evaluate_assignment(
         spread_e[storage.id] = abs(u_s - average_utilization)
         b_s = status.managed_used_bytes / storage.capacity_bytes if storage.capacity_bytes else 0.0
         fill_fraction[storage.id] = b_s
-        fill_deviation[storage.id] = abs(b_s - average_fill) / average_fill if average_fill else 0.0
+        # Section 5.3 (C7): absolute TiB off the capacity-proportional share, so a
+        # TiB moved toward the targets earns 2*delta whatever the group's size.
+        fill_deviation[storage.id] = (
+            abs(status.managed_used_bytes - average_fill * storage.capacity_bytes) / _BYTES_PER_TIB
+            if average_fill
+            else 0.0
+        )
 
     if objective.spread_metric == "minmax":
         spread = max(utilization.values()) if utilization else 0.0

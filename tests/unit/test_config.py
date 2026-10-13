@@ -459,14 +459,25 @@ def test_delta_capacity_spread_default_is_half_of_alpha_spread(tmp_path: Path) -
     assert not any("delta_capacity_spread" in w for w in resolved.warnings)
 
 
-def test_delta_capacity_spread_above_alpha_spread_is_a_warning_not_an_error(
-    tmp_path: Path,
-) -> None:
+def test_delta_capacity_spread_above_alpha_spread_no_longer_warns(tmp_path: Path) -> None:
+    """delta is per TiB and alpha per in-flight request: comparing them was comparing unlike
+    units, so the old warning at delta > alpha is gone (section 11.1)."""
     data = minimal_config_dict()
     data["objective"] = {"alpha_spread": 1.0, "delta_capacity_spread": 1.5}
     path = write_config(tmp_path, data)
     resolved = config.load_config(str(path), env={})
-    assert any("delta_capacity_spread" in w for w in resolved.warnings)
+    assert not any("delta_capacity_spread" in w for w in resolved.warnings)
+
+
+def test_delta_capacity_spread_that_can_never_pay_is_a_warning(tmp_path: Path) -> None:
+    """0 < 2 * delta <= gamma: the term is on but no disk of any size can pay (section 11.1)."""
+    data = minimal_config_dict()
+    data["objective"] = {"gamma_move_bytes_per_tib": 0.05, "delta_capacity_spread": 0.025}
+    resolved = config.load_config(str(write_config(tmp_path, data)), env={})
+    assert any("delta_capacity_spread" in w and "never pay" in w for w in resolved.warnings)
+    data["objective"]["delta_capacity_spread"] = 0.0
+    resolved = config.load_config(str(write_config(tmp_path, data)), env={})
+    assert not any("delta_capacity_spread" in w for w in resolved.warnings)
 
 
 def test_delta_capacity_spread_negative_is_a_structural_error(tmp_path: Path) -> None:

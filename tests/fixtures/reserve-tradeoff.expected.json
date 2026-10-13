@@ -30,7 +30,7 @@
       }
     },
     "E_before": 10.0,
-    "F_before": 2.5,
+    "F_before": 4.0,
     "spread_before": 2.0,
     "capacity_spread_before": 2.5
   },
@@ -38,10 +38,10 @@
     {
       "beta_move_count": 0.25,
       "delta_capacity_spread": 0.5,
-      "expected_objective": 11.25,
+      "expected_objective": 12.0,
       "expected_move_count": 0,
       "expected_E_after": 10.0,
-      "expected_F_after": 2.5,
+      "expected_F_after": 4.0,
       "expected_fragmentation": 0.0,
       "expected_moves": [],
       "expected_order": [],
@@ -69,17 +69,17 @@
       "expected_capacity_spread_after": 2.5,
       "lexicographic": {
         "min_total_slack_tib": 0.0,
-        "expected_objective_nonreserve": 11.25,
+        "expected_objective_nonreserve": 12.0,
         "expected_move_count": 0,
         "expected_moves": [],
         "agrees_with_big_m_at_configured_p": true,
-        "big_m_agreement_threshold_p": 9.075,
+        "big_m_agreement_threshold_p": 8.7,
         "big_m_p_configured": 1000.0,
-        "big_m_p_min_computed": 24746393.6
+        "big_m_p_min_computed": 27892121.6
       },
       "big_m_undersized_p_demo": {
         "p": 5.0,
-        "expected_objective": 7.175,
+        "expected_objective": 8.3,
         "expected_moves": [
           "202:scsi0:roomy->cramped"
         ],

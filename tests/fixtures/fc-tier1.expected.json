@@ -38,7 +38,7 @@
       }
     },
     "E_before": 8.066667,
-    "F_before": 2.153846,
+    "F_before": 4.666667,
     "spread_before": 2.554054,
     "capacity_spread_before": 1.846154
   },
@@ -49,7 +49,7 @@
       "expected_objective": 3.384685,
       "expected_move_count": 3,
       "expected_E_after": 1.133333,
-      "expected_F_after": 0.769231,
+      "expected_F_after": 1.666667,
       "expected_fragmentation": 2.702703,
       "expected_moves": [
         "101:scsi1:san-a->san-b",
@@ -133,10 +133,10 @@
     {
       "beta_move_count": 0.25,
       "delta_capacity_spread": 0.5,
-      "expected_objective": 3.663531,
+      "expected_objective": 3.843018,
       "expected_move_count": 2,
       "expected_E_after": 1.533333,
-      "expected_F_after": 0.307692,
+      "expected_F_after": 0.666667,
       "expected_fragmentation": 2.702703,
       "expected_moves": [
         "101:scsi1:san-a->san-b",
@@ -194,16 +194,16 @@
       "expected_capacity_spread_after": 0.230769,
       "lexicographic": {
         "min_total_slack_tib": 0.0,
-        "expected_objective_nonreserve": 3.663531,
+        "expected_objective_nonreserve": 3.843018,
         "expected_move_count": 2,
         "expected_moves": [
           "101:scsi1:san-a->san-b",
           "102:scsi0:san-a->san-c"
         ],
         "agrees_with_big_m_at_configured_p": true,
-        "big_m_agreement_threshold_p": -0.454418,
+        "big_m_agreement_threshold_p": -0.723649,
         "big_m_p_configured": 1000.0,
-        "big_m_p_min_computed": 34748249.946
+        "big_m_p_min_computed": 38418265.946
       }
     },
     {
@@ -212,7 +212,7 @@
       "expected_objective": 4.009685,
       "expected_move_count": 2,
       "expected_E_after": 1.533333,
-      "expected_F_after": 0.307692,
+      "expected_F_after": 0.666667,
       "expected_fragmentation": 2.702703,
       "expected_moves": [
         "101:scsi1:san-a->san-b",
@@ -285,10 +285,10 @@
     {
       "beta_move_count": 0.5,
       "delta_capacity_spread": 0.5,
-      "expected_objective": 4.163531,
+      "expected_objective": 4.343018,
       "expected_move_count": 2,
       "expected_E_after": 1.533333,
-      "expected_F_after": 0.307692,
+      "expected_F_after": 0.666667,
       "expected_fragmentation": 2.702703,
       "expected_moves": [
         "101:scsi1:san-a->san-b",
@@ -346,16 +346,16 @@
       "expected_capacity_spread_after": 0.230769,
       "lexicographic": {
         "min_total_slack_tib": 0.0,
-        "expected_objective_nonreserve": 4.163531,
+        "expected_objective_nonreserve": 4.343018,
         "expected_move_count": 2,
         "expected_moves": [
           "101:scsi1:san-a->san-b",
           "102:scsi0:san-a->san-c"
         ],
         "agrees_with_big_m_at_configured_p": true,
-        "big_m_agreement_threshold_p": -0.329418,
+        "big_m_agreement_threshold_p": -0.598649,
         "big_m_p_configured": 1000.0,
-        "big_m_p_min_computed": 36321113.946
+        "big_m_p_min_computed": 39991129.946
       }
     }
   ],
@@ -381,8 +381,8 @@
       }
     ],
     "total_cost_load_seconds": 26214.4,
-    "benefit_load_seconds": 192529137.63,
-    "ratio": 7344.4,
+    "benefit_load_seconds": 226490983.78,
+    "ratio": 8639.95,
     "aggregate_ok": true,
     "reserve_shortfall_tib_before": 2.5,
     "reserve_shortfall_tib_after": 0.0,

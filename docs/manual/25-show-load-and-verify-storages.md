@@ -124,8 +124,8 @@ Group fc-tier1 → ACT: capacity spread 32.0% meets or exceeds gates.capacity_sp
 ```
 
 Unlike the other three, this gate can act on a group whose I/O is already
-perfectly balanced — `objective.delta_capacity_spread` is what does the
-actual spreading once the solver runs. Setting
+perfectly balanced — `objective.delta_capacity_spread`, a price per TiB, is
+what does the actual spreading once the solver runs. Setting
 `gates.capacity_spread_threshold: null` disables it outright, and it never
 fires on a group with no data at all (mean fill `0`).
 
