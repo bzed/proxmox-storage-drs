@@ -147,15 +147,16 @@ explains it — `plan` and `apply` say so:
 Group tier1 → ACT: capacity spread 112.2% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance
   solver: cbc (optimal)
   no moves made: keeping the current placement scores best under the configured objective weights -- the gate decides that a group is planned, not that the plan must move something (explain shows the closest rejected move and why)
-    the capacity gate opened this group: no plan's data-spread gain, weighted by objective.delta_capacity_spread, outweighs the migrations it takes, charged by objective.beta_move_count (0.5 against 0.25 per move); raise delta_capacity_spread to spread data more aggressively, or raise gates.capacity_spread_threshold (null disables it) to stop planning for it
+    the capacity gate opened this group: with beta 0.25 per move, gamma 0.05 and delta 0.5 per TiB only a disk larger than X* = 269 GiB can pay for its move; raise objective.delta_capacity_spread or lower objective.beta_move_count to spread data more aggressively, or raise gates.capacity_spread_threshold (null disables it) to stop planning for it
 ```
 
 Under `solver: cbc (optimal)` "scores best" is proven; under the heuristic
 the line says it is not. The second line appears only when the capacity gate
 opened the group: there the I/O is typically balanced already, and the
-data-spread weight alone has to pay for every move — at the default weights
-it often cannot (the configuration chapter's `objective.delta_capacity_spread`
-entry works through an example). After an imbalance gate the usual cause is
+data-spread weight alone has to pay for every move. It is a price per TiB, so
+only a disk larger than the break-even size `X*` printed on the line can pay
+for its own move (the configuration chapter's `objective.delta_capacity_spread`
+entry derives it). After an imbalance gate the usual cause is
 a hotspot no placement can relieve, typically one disk carrying most of the
 group's load; `explain`'s pinned-load line gives the best spread achievable.
 `explain` prints its own, fuller version: the closest rejected move and the

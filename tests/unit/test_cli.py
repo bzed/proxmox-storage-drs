@@ -4701,8 +4701,25 @@ def test_a_capacity_gated_empty_plan_names_the_two_weights_that_decided_it() -> 
     )
     assert lines[0].startswith("  no moves made: keeping the current placement scores best")
     assert "objective.delta_capacity_spread" in lines[1]
-    assert "(0.5 against 0.25 per move)" in lines[1]
+    # X* = beta / (2 delta - gamma) = 0.25 / (1.0 - 0.05) TiB, about 269 GiB
+    assert "X* = 269 GiB" in lines[1]
     assert "gates.capacity_spread_threshold" in lines[1]
+
+
+def test_a_capacity_gated_empty_plan_says_when_no_disk_can_pay() -> None:
+    """At 2 * delta <= gamma the data-spread term cannot pay for a move of any size, so
+    the line says that instead of printing an unbounded X*."""
+    from proxmox_storage_drs.config import ObjectiveConfig
+
+    lines = cli._render_plan_no_moves_lines(
+        _gate(capacity_fraction=1.122),
+        _no_move_schedule(),
+        None,
+        ObjectiveConfig(delta_capacity_spread=0.02, gamma_move_bytes_per_tib=0.05),
+        _outcome("cbc", "optimal"),
+    )
+    assert "no disk of any size can pay" in lines[1]
+    assert "X* =" not in lines[1]
 
 
 def test_an_imbalance_gated_empty_plan_gets_only_the_general_line() -> None:

@@ -189,6 +189,25 @@ is the regression test, built directly from the manual's own claim: two
 scenarios with an identical hottest storage but a materially different
 second-worst one score identically under minmax and differently under l1.
 
+## `d_s` is absolute TiB, and why
+
+`evaluate_assignment()` computes the data-spread term as
+`delta_capacity_spread * Σ_s |B_s − b̄·C_s| / 2⁴⁰`: `B_s` is the storage's managed
+bytes at this assignment (`ReserveStatus.managed_used_bytes`, foreign volumes
+included, the reserve excluded), `b̄` the group's mean fill, `C_s` the capacity, so
+`b̄·C_s` is the capacity-proportional share. `ObjectiveBreakdown.fill_deviation`
+holds each `d_s` in TiB. The earlier form divided by `b̄`, which made the gain per
+TiB moved `2δ/B̄` for a group averaging `B̄` TiB per storage: the fixed per-move
+costs (`beta`, and `gamma` per TiB) then outgrew it as the group grew, and past
+`B̄ = 2δ/γ` (20 TiB at the defaults) no move could ever pay. In TiB the gain is
+`2δ` per TiB moved at any size and the break-even disk is `X* = β/(2δ − γ)`.
+The same expression is written into the CBC model (`optimize.py`'s
+`_cbc_capacity_spread_term()`, sizes in MiB, `delta` entering as `delta/2²⁰` per
+MiB) and into the oracle `tests/fixtures/generate_expected.py` (`F_of()`); the
+payback rule and the move ordering read `raw_capacity_spread()`, the same sum
+unweighted, so they follow without a change. `fill_fraction` is still reported:
+`explain` and the capacity gate speak in fill fractions.
+
 ## Proof this reproduces the plan, not just itself
 
 `tests/unit/test_heuristic.py` doesn't stop at "the assignment matches the

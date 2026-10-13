@@ -951,16 +951,20 @@ def _check_payback_horizon(config: Config, warnings: list[str]) -> None:
 
 
 def _check_objective_weights(config: Config, warnings: list[str]) -> None:
-    """Warn (never error) once ``delta_capacity_spread`` outweighs ``alpha_spread`` --
-    the point where data evenness starts outweighing I/O evenness in every plan
-    comparison, and the tool is no longer an I/O balancer first. ``delta_capacity_spread
-    >= 0`` is already enforced structurally by the schema."""
-    if config.objective.delta_capacity_spread > config.objective.alpha_spread:
+    """Warn (never error) while ``0 < 2 * delta_capacity_spread <= gamma_move_bytes_per_tib``
+    (section 11.1): the data-spread term is switched on, but a TiB moved toward the targets
+    earns ``2 * delta`` and costs at least ``gamma``, so no disk of any size can pay for its
+    move. ``delta_capacity_spread >= 0`` is already enforced structurally by the schema.
+    The earlier warning against ``delta > alpha`` is gone: ``delta`` is per TiB and ``alpha``
+    per in-flight request, so that compared unlike units."""
+    delta = config.objective.delta_capacity_spread
+    gamma = config.objective.gamma_move_bytes_per_tib
+    if 0 < 2 * delta <= gamma:
         warnings.append(
-            f"objective.delta_capacity_spread ({config.objective.delta_capacity_spread:g}) "
-            f"exceeds objective.alpha_spread ({config.objective.alpha_spread:g}) -- data "
-            "evenness now outweighs I/O evenness in every plan comparison; lower "
-            "delta_capacity_spread if I/O balance should stay the first priority"
+            f"objective.delta_capacity_spread ({delta:g}) is at most half of "
+            f"objective.gamma_move_bytes_per_tib ({gamma:g}) -- a TiB moved toward an even "
+            "spread earns 2 * delta and costs at least gamma, so the data-spread term can "
+            "never pay for a move; raise delta_capacity_spread or set it to 0 to say so"
         )
 
 

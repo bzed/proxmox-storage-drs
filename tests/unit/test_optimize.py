@@ -300,11 +300,10 @@ def test_delta_050_at_the_default_beta_reproduces_the_two_move_solution(backend:
     }
     assert result.breakdown.moves == 2
     # Section 14.2/14.3's exact F_before/F_after for this group.
-    assert sum(result.initial_breakdown.fill_deviation.values()) == pytest.approx(
-        2.153846, abs=1e-5
-    )
-    assert sum(result.breakdown.fill_deviation.values()) == pytest.approx(0.307692, abs=1e-5)
-    assert result.breakdown.capacity_spread_term == pytest.approx(0.5 * 0.307692, abs=1e-5)
+    # (absolute TiB, section 5.3 (C7): 14/3 before, 2/3 after).
+    assert sum(result.initial_breakdown.fill_deviation.values()) == pytest.approx(14 / 3, abs=1e-5)
+    assert sum(result.breakdown.fill_deviation.values()) == pytest.approx(2 / 3, abs=1e-5)
+    assert result.breakdown.capacity_spread_term == pytest.approx(0.5 * 2 / 3, abs=1e-5)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

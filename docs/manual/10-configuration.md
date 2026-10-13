@@ -675,12 +675,19 @@ also cannot fire on a group with no data at all (mean fill `0`).
 **Opening a group is not the same as moving data.** When this gate fires,
 the group is planned; whether anything moves is decided by the objective,
 and on a group whose I/O is already balanced only
-`objective.delta_capacity_spread` can pay for a move. At the default weights
-it often cannot — the entry for that weight works through a 112 % spread that
-stays put — and `plan` reports `→ ACT` followed by `no moves made`, naming
-both knobs. Either raise `objective.delta_capacity_spread` until the moves
-you want pay, or raise this threshold (or set it to `null`) if you do not
-want groups planned for data spread at all.
+`objective.delta_capacity_spread` can pay for a move. That weight is a price
+per TiB, so a disk pays for its own move once it is larger than a break-even
+size (about 270 GiB at the defaults; the entry for that weight derives it). When
+the only disks that would help are smaller, `plan` reports `→ ACT` followed
+by `no moves made`, naming `objective.beta_move_count`,
+`objective.gamma_move_bytes_per_tib` and `objective.delta_capacity_spread` and
+printing the break-even size. Either raise `objective.delta_capacity_spread`
+(or lower `objective.beta_move_count`) until the moves you want pay, or raise
+this threshold (or set it to `null`) if you do not want groups planned for
+data spread at all. The gate itself stays relative on purpose: it asks
+whether the data is lopsided enough to plan for, which is a question about
+proportions, whereas the objective asks whether a particular move is worth it,
+which is a question about bytes.
 
 ### `gates.cooldown_per_disk`
 
@@ -884,7 +891,7 @@ minimizes one weighted sum, evaluated per group:
 + beta_move_count         * (number of migrations)
 + gamma_move_bytes_per_tib * (TiB actually migrated)
 + kappa_vm_affinity       * (VM disk fragmentation, I/O-weighted — see below)
-+ delta_capacity_spread   * (data spread: summed deviation of each storage's fill fraction from the group's mean)
++ delta_capacity_spread   * (data spread: TiB by which each storage's data is off its capacity-proportional share, summed)
 + mu_vm_split_per_tib     * (split excess: TiB of each large VM beyond the cap on its fullest storage)
 + reserve_violation_penalty * (reserve violation, heuristic backend only — see below)
 ```
@@ -978,53 +985,54 @@ TiB of excess no longer buys a new storage and the rule rarely acts.
 
 ### `objective.delta_capacity_spread`
 
-Weight, default `0.5`.
+Weight per TiB, default `0.5`.
 
-Weight on data spread — the deviation of each storage's fill fraction
-(bytes used / capacity) from the group's mean fill (`IMPLEMENTATION_PLAN.md`
-section 5.3 (C7)). Bounds the share of a group's data any single storage
-failure costs, and keeps peak fill uniform across the group. I/O balance
-stays the first priority: this defaults to half of `alpha_spread`, and acts
-on its own mainly when a group's I/O is already balanced but its data is
-concentrated — the case `gates.capacity_spread_threshold` exists to reach.
-`0` disables the term entirely; configuration validation warns once it
-exceeds `alpha_spread`, the point where data evenness starts outweighing I/O
-evenness in every plan comparison.
+Price of one TiB of data spread. A storage's data spread is how far the data
+on it is from its capacity-proportional share of the group's data: if a group
+holds 20 TiB across storages of 30, 10 and 10 TiB, the shares are 12, 4 and
+4 TiB, and a storage holding 15 TiB is 3 TiB off. The term is the sum of those
+deviations over the storages, in TiB, times this weight. It bounds the share
+of a group's data any single storage failure costs, and keeps peak fill
+uniform across the group. `0` disables the term entirely.
 
-**What the default does in practice.** The data spread this weight
-multiplies is the sum, over the group's storages, of each storage's fill
-deviation from the group's mean fill, relative to that mean
-(`Σ_s |b_s − b̄| / b̄`, where `b_s` is a storage's bytes used / capacity and
-`b̄` the group's). On two storages of similar size it cannot exceed 2 (all
-data on one, the other empty), so at the default `0.5` evening out even a
-badly skewed pair is worth at most about 1 — while every move costs `beta_move_count` (`0.25`), plus
-`gamma_move_bytes_per_tib` per TiB moved, plus `kappa_vm_affinity` times the
-VM's weight if the move leaves one of its disks behind. A real example, a
-two-storage group with its I/O balanced, one storage 9 % full and the other
-35 % (mean 22.5 %, a spread of 1.12, reported as 112 %):
+**It is absolute, so it does not depend on the group's size.** Moving a TiB
+of data from a storage that has too much to one that has too little removes
+two TiB of deviation (one at each end) and so earns `2 × delta_capacity_spread`
+— `1.0` at the default — whether the group holds 5 TiB or 500. A disk of
+`X` TiB pays for its move when that gain exceeds its cost,
+`beta_move_count + gamma_move_bytes_per_tib × X`, which gives a break-even size
 
-- the whole data-spread term is `0.5 × 1.12 = 0.56`;
-- the cheapest plan that evens it out moves three disks of one VM, 1.1 TiB,
-  bringing the spread to 0.06: a gain of `0.5 × 1.06 = 0.53`;
-- those moves cost `3 × 0.25 = 0.75` for the count, `0.05` for the bytes,
-  `0.5` for splitting the VM from its other disks and `0.01` of I/O
-  balance — `1.31` in all.
+```
+X* = beta_move_count / (2 × delta_capacity_spread − gamma_move_bytes_per_tib)  TiB
+```
 
-The plan never pays at `0.5`; it starts to pay once this weight exceeds
-`1.31 / 1.06 ≈ 1.24`. So **at the defaults, data spread decides between
-plans the I/O objective is nearly indifferent between, and rarely causes a
-move on its own**, even when `gates.capacity_spread_threshold` opens the
-group for planning. `plan` then prints `no moves made` with a line naming
-this weight (see the plan chapter). That is safe — `plan` only reads — but it
-repeats every run until the spread or the configuration changes.
+At the defaults that is `0.25 / (1.0 − 0.05) ≈ 0.263 TiB`, about 270 GiB:
+larger disks that sit on an over-full storage and have somewhere to go pay for
+their own move; smaller ones move only when something else — their VM's other
+disks, the I/O balance — moves them anyway. When
+`2 × delta_capacity_spread` is at most `gamma_move_bytes_per_tib` no disk of
+any size can pay, the term is on but inert, and configuration validation
+warns. `plan` prints `X*` in its `no moves made` line.
 
-To have the tool spread data on its own, raise this weight until the plans
-you want pay: work out the gain as above for the move set you expect, or
-replay a `collect-testdata` bundle with a few values and read `plan`'s
-output. Too high has a cost: past `alpha_spread` (`1.0` by default) data
-evenness outweighs I/O evenness in every comparison, and configuration
-validation warns. Too low (or `0`) leaves data spread to chance: the
-capacity gate still opens groups, and nothing moves for it.
+I/O balance stays the first priority, as an exchange rate: at the default,
+one TiB moved toward its share (a gain of `1.0`) is worth one unit of
+in-flight-load deviation (`alpha_spread` is per unit of in-flight load). On a group whose
+I/O is imbalanced, the I/O term dominates; on one whose I/O is already
+balanced, this term is what decides.
+
+**Choosing a value.** Decide the smallest disk you want moved purely for
+data spread, `X_min`, and set
+`delta_capacity_spread = (beta_move_count / X_min + gamma_move_bytes_per_tib) / 2`.
+For `X_min = 100 GiB` (about 0.098 TiB) that is about `1.3`; for `X_min = 1 TiB`
+it is `0.15`. Too high moves many small disks for little gain and, because every
+TiB of spread now outweighs more of the I/O term, lets data evenness override
+I/O evenness; too low (or `0`) leaves data spread to chance: the capacity gate
+still opens groups, and nothing moves for it. **Upgrading:** earlier versions
+priced the deviation relative to the group's mean fill, so a value raised
+under that formula does not carry over — re-derive it from `X*`. A replayed
+bundle with five equal storages, balanced I/O and data concentrated on three
+of them planned no capacity move under the relative form at the default and
+plans 20 data-disk moves under the absolute one, from 100 GiB disks that follow their VM up to 1.95 TiB.
 
 ### `objective.affinity_counts_pinned_disks`
 

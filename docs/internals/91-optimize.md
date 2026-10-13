@@ -107,6 +107,14 @@ anywhere, no integer-coefficient discipline to satisfy.
 `solver.mip_gap` and `solver.time_limit_seconds` map onto
 `pulp.COIN_CMD(gapRel=..., timeLimit=...)` directly.
 
+**(C7) is written in MiB.** `_cbc_storage_used_mib()` assembles `B_s` — assigned
+disks, pinned disks and foreign volumes, in MiB like every size in the model — and
+`_cbc_capacity_spread_term()` adds `d_s ≥ ±(B_s − b̄·C_s)` rows with `delta`
+scaled by `2²⁰/2⁴⁰` per MiB, so the term is `delta` per TiB of absolute deviation,
+matching `heuristic.evaluate_assignment()` exactly. Raw bytes would badly condition
+the matrix, and a fill *fraction* (the earlier form) would price spread relative to
+the group, which is what made the term vanish on large groups.
+
 **`gapRel` is only meaningful against the real objective, so stage 2's
 constant is kept.** PuLP hands the model to CBC without the objective
 expression's constant term, and CBC measures its relative gap against the

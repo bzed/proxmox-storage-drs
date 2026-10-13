@@ -563,32 +563,25 @@ def _cbc_storage_load(
     return (moved_load + pinned_load) / s.capability_weight if s.capability_weight else moved_load
 
 
-def _cbc_storage_fill(
+def _cbc_storage_used_mib(
     pulp: Any,
     s: Any,
     movable: tuple[Disk, ...],
     pinned_by_storage: dict[str, tuple[Disk, ...]],
     x: dict[Any, Any],
 ) -> Any:
-    """(C7)'s `b_s`, continuous -- the same numerator (C5)'s capacity
-    constraint already assembles (managed disks assigned here, plus pinned
-    disks, plus foreign volumes -- excluding the reserve term `R_s`, which
-    the fill fraction deliberately does not count, section 5.3 (C7)),
-    divided by `C_s`. In MiB, like every other size-valued quantity in this
-    model (C4)/(C5) already use -- raw bytes here (~1e12-1e14) alongside
-    load values (~1-10) would badly condition the LP matrix for CBC's
-    simplex, and CBC does not raise on that, it just returns a
-    numerically poor "optimal" (confirmed against a real corpus bundle,
-    where an unscaled version of this function made CBC's own after_spread
-    almost 100x worse than the heuristic's on the same weights)."""
+    """(C7)'s `B_s`, in MiB -- the same numerator (C5)'s capacity constraint already
+    assembles (managed disks assigned here, plus pinned disks, plus foreign volumes --
+    excluding the reserve term `R_s`, which the fill deliberately does not count, section 5.3
+    (C7)). MiB, like every other size-valued quantity in this model: raw bytes here
+    (~1e12-1e14) alongside load values (~1-10) would badly condition the LP matrix for CBC's
+    simplex, and CBC does not raise on that, it just returns a numerically poor "optimal"
+    (confirmed against a real corpus bundle)."""
     pinned_used = sum(d.size_bytes for d in pinned_by_storage[s.id]) / _BYTES_PER_MIB
     moved_bytes = pulp.lpSum(
         (disk_size_on(d, s) / _BYTES_PER_MIB) * x[d.key, s.id] for d in movable
     )
-    foreign_mib = s.foreign_used_bytes / _BYTES_PER_MIB
-    numerator = moved_bytes + pinned_used + foreign_mib
-    capacity_mib = s.capacity_bytes / _BYTES_PER_MIB
-    return numerator / capacity_mib if capacity_mib else numerator * 0
+    return moved_bytes + pinned_used + s.foreign_used_bytes / _BYTES_PER_MIB
 
 
 def _cbc_objective_terms(
@@ -702,12 +695,19 @@ def _cbc_capacity_spread_term(
     `_cbc_objective_terms()` purely to stay within this project's
     complexity limit."""
     if objective.delta_capacity_spread and average_fill:
+        # Section 5.3 (C7): d_s = |B_s - b_bar * C_s|, absolute. Sizes are MiB here, like
+        # every size in this model, so delta enters as delta / 2^20 per MiB (as gamma does).
         d = {s.id: _lp_variable(pulp, f"d_{s.id}", lowBound=0) for s in group.storages}
         for s in group.storages:
-            b_s = _cbc_storage_fill(pulp, s, movable, pinned_by_storage, x)
-            prob += (b_s - average_fill) / average_fill <= d[s.id]
-            prob += (average_fill - b_s) / average_fill <= d[s.id]
-        terms.append(objective.delta_capacity_spread * pulp.lpSum(d.values()))
+            b_mib = _cbc_storage_used_mib(pulp, s, movable, pinned_by_storage, x)
+            share_mib = average_fill * s.capacity_bytes / _BYTES_PER_MIB
+            prob += b_mib - share_mib <= d[s.id]
+            prob += share_mib - b_mib <= d[s.id]
+        terms.append(
+            objective.delta_capacity_spread
+            * (_BYTES_PER_MIB / _BYTES_PER_TIB)
+            * pulp.lpSum(d.values())
+        )
 
 
 def _objective_with_offset_as_variable(pulp: Any, objective_expr: Any) -> Any:

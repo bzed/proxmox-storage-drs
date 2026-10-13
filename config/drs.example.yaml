@@ -242,7 +242,8 @@ gates:
   # Minimum relative spread in fill fraction (bytes/capacity) across a group before
   # we act at all, even when I/O is perfectly balanced -- the data-spread counterpart
   # of imbalance_threshold. null disables the gate entirely. It only decides that a
-  # group is planned; whether data moves is objective.delta_capacity_spread's call.
+  # group is planned; whether data moves is objective.delta_capacity_spread's call
+  # (a price per TiB, so only disks above X* = beta / (2 * delta - gamma) can pay).
   capacity_spread_threshold: 0.25  # 25%
   cooldown_per_disk: 24h
   cooldown_per_storage: 1h
@@ -289,15 +290,17 @@ objective:
   beta_move_count: 0.25        # penalty per migration  -> "minimal number of migrations"
   gamma_move_bytes_per_tib: 0.05  # penalty per TiB migrated
   kappa_vm_affinity: 0.50      # penalty per extra storage a VM's disks are spread over
-  # Weight on data spread -- the deviation of each storage's bytes-used/capacity
-  # from the group's mean. Bounds the share of a group's data any single storage
-  # failure costs. Defaults to half of alpha_spread so I/O balance stays the first
-  # priority; 0 disables the term. At this default it mostly breaks ties between
-  # plans: on a group with balanced I/O it rarely pays for moves by itself (a
-  # two-storage group at 9% and 35% fill needed about 1.24 before its cheapest
-  # fix -- three moves, 1.1 TiB, one VM split -- paid), so the capacity gate can
-  # open a group and plan prints "no moves made". Raise it to spread data on its
-  # own; above alpha_spread, data evenness outweighs I/O in every comparison.
+  # Price per TiB of data spread -- the TiB by which each storage's data is off its
+  # capacity-proportional share of the group's data, summed. Bounds the share of a
+  # group's data any single storage failure costs. Moving X TiB toward the shares
+  # earns 2 * delta whatever the group's size, so a disk pays for its own move once
+  # X > X* = beta_move_count / (2 * delta - gamma_move_bytes_per_tib): about 270 GiB
+  # at these defaults. Choose delta from the smallest disk you want moved for data
+  # spread alone: delta = (beta / X_min + gamma) / 2 (100 GiB -> 1.3, 1 TiB -> 0.15).
+  # At 0.5 one TiB moved is worth one unit of in-flight-load deviation, so I/O balance
+  # stays the first priority. 0 disables the term; at 2 * delta <= gamma it is on but
+  # can never pay, and validation warns. A value raised under the older relative
+  # formula does not carry over -- re-derive it from X*.
   delta_capacity_spread: 0.5
   # Weight of the large-VM split rule (snapshot_reserve.split_vm_footprint), per TiB
   # of "excess" -- the most of a large VM any one storage holds beyond the cap. The

@@ -221,7 +221,7 @@ def test_end_to_end_plan_accepts_payback_at_zero_cost() -> None:
         raw_affinity_debt(solve_outcome.initial_breakdown),
         raw_affinity_debt(final_breakdown),
     )
-    assert benefit == pytest.approx(31_536_006.65, abs=1.0)  # affinity-repair.expected.json
+    assert benefit == pytest.approx(31_536_015.51, abs=1.0)  # affinity-repair.expected.json
 
     payback_result = evaluate_plan_payback(
         move_costs,

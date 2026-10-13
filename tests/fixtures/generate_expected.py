@@ -347,12 +347,12 @@ def E_of(f: Fixture, assign: Assignment) -> float:
 
 
 def F_of(f: Fixture, assign: Assignment) -> float:
-    """Section 5.3 (C7) L1 data spread, Sum_s |b_s - b_bar| / b_bar --
+    """Section 5.3 (C7) L1 data spread in absolute TiB, Sum_s |B_s - b_bar * C_s| --
     always L1, unlike E_of there is no minmax alternative (section 5.4)."""
     b_bar = f.b_bar
     if not b_bar:
         return 0.0
-    return sum(abs(used_on(f, assign, s) / f.capacity[s] - b_bar) / b_bar for s in f.storages)
+    return sum(abs(used_on(f, assign, s) - b_bar * f.capacity[s]) for s in f.storages)
 
 
 def slack_of(f: Fixture, assign: Assignment) -> float:
@@ -510,7 +510,7 @@ def computed_p_min(f: Fixture, beta: float, delta: float) -> float:
         * max_w
         * len(set(f.vmid.values()))
         * (len(f.storages) - 1)
-        + delta * 2 * len(f.storages)
+        + delta * 2 * (sum(f.size.values()) + sum(f.foreign.values()))
         + f.mu
         * sum(
             sum(f.size[k] for k in f.all_keys if f.vmid[k] == v) - cap

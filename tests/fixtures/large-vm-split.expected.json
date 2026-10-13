@@ -38,7 +38,7 @@
       }
     },
     "E_before": 0.0,
-    "F_before": 3.076923,
+    "F_before": 13.333333,
     "spread_before": 0.0,
     "capacity_spread_before": 2.307692
   },
@@ -49,7 +49,7 @@
       "expected_objective": 4.05,
       "expected_move_count": 3,
       "expected_E_after": 0.0,
-      "expected_F_after": 0.615385,
+      "expected_F_after": 2.666667,
       "expected_fragmentation": 2.0,
       "expected_moves": [
         "701:scsi2:st-a->st-b",
