@@ -1,3 +1,34 @@
+pve-storage-drs (0.1.21) trixie; urgency=medium
+
+  * The data-spread term of the objective (objective.delta_capacity_spread) is
+    now priced in absolute TiB. It used to measure each storage's fill
+    deviation relative to the group's mean fill, so moving a TiB earned
+    2*delta divided by the average data per storage: the fixed per-move costs
+    (beta, gamma per TiB) outgrew it as groups grew, and above about 20 TiB
+    per storage at the defaults no move could ever pay. A group could open on
+    the capacity gate every run and never move anything. Moving X TiB toward
+    each storage's capacity-proportional share now earns 2*delta*X at any
+    group size, and a disk pays for its own move above X* = beta / (2*delta -
+    gamma), about 270 GiB at the defaults. The heuristic and the CBC model
+    share the one definition. UPGRADE NOTE: delta_capacity_spread now means a
+    price per TiB. A value raised under the relative formula does not carry
+    over; re-derive it from the smallest disk you want moved for data spread
+    alone, delta = (beta / X_min + gamma) / 2 (100 GiB gives 1.3, 1 TiB gives
+    0.15). The default 0.5 is unchanged, and plans on groups with concentrated
+    data and balanced I/O may now contain capacity moves they did not before:
+    read a dry-run plan first. A dry-run on one production-shaped bundle went
+    from no moves to 20 data-disk moves.
+  * Configuration validation no longer warns when delta_capacity_spread
+    exceeds alpha_spread (different units); it warns when 0 < 2*delta <=
+    gamma_move_bytes_per_tib, where the term is on but can never pay.
+  * The "no moves made" line for a capacity-gated group names beta, gamma and
+    delta and prints the break-even disk size X*.
+  * Review round 32 (REVIEW.md AP-01..AP-03): the manual's --json field list
+    no longer mislabels before/after_capacity_spread, which stay the capacity
+    gate's relative fraction.
+
+ -- Bernd Zeimetz <bzed@debian.org>  Tue, 13 Oct 2026 12:00:00 +0200
+
 pve-storage-drs (0.1.20) trixie; urgency=medium
 
   * The snapshot reserve is now computed from the largest per-VM footprint
