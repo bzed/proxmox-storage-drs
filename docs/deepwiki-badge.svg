@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="20" viewBox="0 0 128 20" role="img" aria-label="Ask DeepWiki">
+  <title>Ask DeepWiki</title>
+  <!--
+    "Ask DeepWiki" README badge, drawn locally. The badge DeepWiki serves from
+    deepwiki.com/badge.svg does not render through GitHub's image proxy, so
+    the README links this file instead; the link target is still DeepWiki.
+    Original artwork (an open book), no external fonts or images.
+  -->
+  <clipPath id="r"><rect width="128" height="20" rx="3"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="26" height="20" fill="#3b3b4f"/>
+    <rect x="26" width="102" height="20" fill="#5b4bd6"/>
+  </g>
+  <g fill="none" stroke="#fff" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M13 6.2 C11 4.9 8.6 4.7 6.2 5.1 V14.2 C8.6 13.8 11 14 13 15.3 C15 14 17.4 13.8 19.8 14.2 V5.1 C17.4 4.7 15 4.9 13 6.2 Z"/>
+    <path d="M13 6.2 V15.3"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,DejaVu Sans,Geneva,sans-serif" font-size="11">
+    <text x="77" y="14.5">Ask DeepWiki</text>
+  </g>
+</svg>
