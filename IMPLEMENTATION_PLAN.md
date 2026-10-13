@@ -75,10 +75,12 @@ operator wants them, remains the primary quantity. Like the migration count, eve
 implemented as a **tunable preference** (the `δ` term in §5.4) rather than a strict "I/O first,
 bytes second" lexicographic order: two assignments' load objectives are essentially never exactly
 equal, so a strict order would reduce the capacity term to a tie-breaker that never acts. The
-default weight keeps I/O the first priority in every comparison on an imbalanced group, gives `δ`
-the deciding vote among plans the load objective is nearly indifferent between, and lets it act on
-its own — behind §6's capacity gate — on a group whose I/O is already balanced but whose data is
-concentrated on few storages.
+term is priced in **absolute TiB** of misplaced data, in the same unit as the cost of the moves
+that fix it, so a given move is worth the same on a small group as on a large one. The default
+weight keeps I/O the first priority on an imbalanced group, gives `δ` the deciding vote among plans
+the load objective is nearly indifferent between, and lets it act on its own — behind §6's
+capacity gate — on a group whose I/O is already balanced but whose data is concentrated on few
+storages.
 
 ### Operating assumptions
 
@@ -1326,7 +1328,7 @@ Set `Uˢᵉˣᵗ = 0` only if `snapshot_reserve.count_foreign_volumes` is false,
 | `Z_s` | `≥ 0` | largest per-VM footprint on `s`, `max_v F_{v,s}` (§5.3.3) |
 | `o_v` | `≥ 0` | split excess of `v ∈ V^split`: how far its largest footprint on any storage exceeds `T_v` (§5.3.3 (C9)) |
 | `e_s` | `≥ 0` | absolute deviation of `u_s` from target (L1 objective) |
-| `d_s` | `≥ 0` | relative deviation of `s`'s fill fraction from the group mean fill `b̄` (capacity-spread objective, §5.3 (C7)) |
+| `d_s` | `≥ 0` | absolute deviation, in TiB, of the bytes on `s` from its fill target `b̄·C_s` (capacity-spread objective, §5.3 (C7)) |
 | `t` | `≥ 0` | maximum utilization (min–max objective) |
 | `r_s` | `≥ 0` | reserve violation slack |
 
@@ -1560,11 +1562,13 @@ effectively hard:
    number**, because the bound depends on the group's absolute load `T_g` (§4):
 
    ```
-   U_obj  =  2·α·T_g  +  β·|D|  +  γ·Σ_d z_d  +  κ·w_max·|V|·(|S|−1)  +  δ·2·|S|
+   U_obj  =  2·α·T_g  +  β·|D|  +  γ·Σ_d z_d  +  κ·w_max·|V|·(|S|−1)
+          +  δ·2·(Σ_d z_d + Σ_s Uˢᵉˣᵗ)
           +  μ·Σ_{v∈V^split} (Σ_{d : v(d)=v} z_d − T_v)
                                                                      (upper bound on the
                                                                      non-reserve objective;
-                                                                     Σ_s d_s ≤ 2|S| by (C7),
+                                                                     Σ_s d_s ≤ 2·(Σ z_d + Σ Uˢᵉˣᵗ)
+                                                                     by (C7),
                                                                      w_max = max_v w_v, since the κ
                                                                      term is w_v-weighted (§5.4),
                                                                      o_v ≤ Σ z_d − T_v by (C9))
@@ -1572,13 +1576,14 @@ effectively hard:
    ```
 
    `Σ_s e_s ≤ 2·T_g` because every `u_s` lies in `[0, T_g/c_s]` and the deviations from `u*` sum to
-   at most twice the total. Take `ε_r = 1 MiB` expressed in the same size unit as `z_d` (2⁻²⁰ TiB if
+   at most twice the total; `Σ_s d_s ≤ 2·(Σ_d z_d + Σ_s Uˢᵉˣᵗ)` for the same reason, since
+   `Σ_s |B_s − b̄·C_s| ≤ Σ_s B_s + b̄·Σ_s C_s` and both sums are the group's total bytes. Take `ε_r = 1 MiB` expressed in the same size unit as `z_d` (2⁻²⁰ TiB if
    sizes are TiB), which says: never accept even a one-mebibyte reserve shortfall in exchange for
    balance. Config `objective.reserve_violation_penalty` is then a *floor*, not the value used:
    the model uses `P = max(configured, P_min)` and logs a warning when it had to raise it. That
    warning must be *checkable*, not just an announcement: log `P_configured`, `P_min`, `P_used`,
-   and the six inputs the bound came from — `T_g`, `|D|`, `Σ_d z_d`, `w_max`, `|V|·(|S|−1)` and the summed
-   split headroom `Σ_{v∈V^split} (Σ z_d − T_v)` (§5.3.3) — plus the `ε_r`
+   and the seven inputs the bound came from — `T_g`, `|D|`, `Σ_d z_d`, `Σ_s Uˢᵉˣᵗ`, `w_max`,
+   `|V|·(|S|−1)` and the summed split headroom `Σ_{v∈V^split} (Σ z_d − T_v)` (§5.3.3) — plus the `ε_r`
    granularity, and repeat them in `pve-storage-drs explain`. `P_min` moves with `T_g`, so the same config file
    legitimately yields different effective penalties on a quiet group and a busy one, and on the
    same group at different times of day. An operator who sets `reserve_violation_penalty: 5000` and
@@ -1587,12 +1592,13 @@ effectively hard:
 
    Worked against §14 (`T_g = 7.4`, `|D| = 6`, `Σz = 6.5 TiB`, `|V| = 5`, `|S| = 3`, `δ = 0.5`,
    `w_max = w₁₀₁ = 2.703` (§14.3), sizes in TiB, and the split rule off as that fixture sets it, so
-   the `μ` term is 0): `U_obj = 14.8 + 1.5 + 0.325 + 13.51 + 3.0 = 33.14`, so
-   `P_min = 33.14 · 2²⁰ ≈ 3.47×10⁷` (the figure `fc-tier1.expected.json` records as
+   the `μ` term is 0, no foreign volumes): `U_obj = 14.8 + 1.5 + 0.325 + 13.51 + 6.5 = 36.64`, so
+   `P_min = 36.64 · 2²⁰ ≈ 3.84×10⁷` (the figure `fc-tier1.expected.json` records as
    `big_m_p_min_computed`; an earlier revision of this bound used a flat `κ` weight of 1 and read
-   `24.6`, `2.58×10⁷` — REVIEW.md AO-05). The
+   `24.6`, `2.58×10⁷` — REVIEW.md AO-05 — and the relative-fill revision of (C7) bounded the `δ`
+   term by `δ·2·|S| = 3.0` and read `33.14`, `3.47×10⁷`). The
    configured default `P = 1000` is **four orders of magnitude too small** to be provably dominant at
-   mebibyte granularity — it is dominant for violations above roughly 25 GiB and silently tradeable
+   mebibyte granularity — it is dominant for violations above roughly 37 GiB and silently tradeable
    below that. This is precisely why option 1 is the default and this option needs the computed `P`.
 
 **Use the lexicographic solve (option 1) by default.** It needs no calibration, its correctness does
@@ -1633,17 +1639,44 @@ storage and ignore a second nearly-as-bad one.
 
 **(C7) Capacity-spread linearization.** Let `b_s = (Σ_d z_d·x_{d,s} + Uˢᵉˣᵗ) / C_s` be the storage's
 **fill fraction** and `b̄ = (Σ_d z_d + Σ_s Uˢᵉˣᵗ) / (Σ_s C_s)` the group's mean fill — a constant,
-like `u*`, because total bytes are invariant under reassignment. Then:
+like `u*`, because total bytes are invariant under reassignment. Each storage's **fill target** is
+`b̄·C_s`, its capacity-proportional share of the group's bytes, and `d_s` measures how far the bytes
+actually on it, `B_s = b_s·C_s`, are from that target, **in TiB**:
 
 ```
-(b_s − b̄)/b̄  ≤  d_s        and        (b̄ − b_s)/b̄  ≤  d_s      ∀ s ∈ S
+B_s − b̄·C_s  ≤  d_s        and        b̄·C_s − B_s  ≤  d_s      ∀ s ∈ S
 ```
 
-`b_s` is linear in `x`, so no variables beyond `d_s` are needed. Dividing by `b̄` makes the term
-**scale-free**: measured on absolute fractions, deviation shrinks as a group empties and the term
-would stop acting precisely where risk concentration is easiest to fix; relative to `b̄`, a group
-filled to 5% that keeps 60% of its bytes on one storage deviates as much as a full one does. If
-`b̄ = 0` the group holds no data: the term is inactive, and so is §6's capacity gate. The fill
+`B_s` is linear in `x`, so no variables beyond `d_s` are needed. `d_s` carries the same size unit as
+`z_d`: the CBC model holds sizes in MiB (§5.5), so `δ` enters the objective as `δ / 2²⁰` per MiB,
+exactly as `γ` does.
+
+**Why absolute TiB, and not the fill deviation relative to `b̄`.** An earlier revision divided by
+`b̄`, `Σ_s |b_s − b̄| / b̄`, to make the term scale-free. That made its *level* independent of the
+group's size and its *slope* dependent on it, and the slope is what decides whether a move is
+made. Moving `X` TiB from a storage above its target to one below it, with neither crossing its
+target, lowers `Σ_s d_s` by exactly `2X`, and the objective by `2δ·X`. Under the relative form
+it lowered the objective by `2δ·X / B̄` on storages of equal size, where `B̄` is the average number
+of TiB per storage. A move costs `β + γ·X` (§5.4), so
+under the relative form a move paid for itself only for disks larger than `β / (2δ/B̄ − γ)`. That
+threshold grows with the amount of data in the group, and once `B̄ ≥ 2δ/γ` (20 TiB per storage at
+the defaults) no capacity-only move of any size could pay. Disk sizes do not grow with a
+cluster, so a group with ten times the data needs ten times the moves to correct the same relative
+imbalance, each of which earned a tenth as much. Found on a replayed production bundle
+(`cluster-6`): five 20 TiB storages holding 12.3/3.1/15.0/1.3/0 TiB, the capacity gate at 236 %,
+`B̄ = 6.33 TiB`, so only disks above about 2.3 TiB could ever move for data spread, and the group
+held none that would not overshoot. Every run opened the group and moved nothing.
+
+The relative form also measured the wrong risk. What a storage failure costs is bytes, so a group
+filled to 5 % that keeps 60 % of its bytes on one storage really does have less data at risk than
+a full one with the same shape. In absolute TiB its deviation is smaller, and its term is smaller
+too. The *gain per TiB moved* stays `2δ` in both groups, so the smaller group is not neglected:
+every move toward the target still earns its full price. The concern that first motivated
+dividing by `b̄`, that a term "stops acting as the group empties", is true of deviations measured
+in fill *fractions*, whose slope per TiB moved falls as capacity grows. It is not true of TiB,
+whose slope per TiB moved is constant.
+
+If `b̄ = 0` the group holds no data: the term is inactive, and so is §6's capacity gate. The fill
 counts managed disks and foreign volumes but **not** the snapshot reserve — the quantity spread is
 *data at risk*, and free space is not data.
 
@@ -1996,34 +2029,49 @@ of the decomposition, not an oversight.
 
 `δ` spreads **bytes**, not load. The failure of a storage takes with it everything on it, so an
 even fill fraction bounds the share of the group's data that any single failure costs, and it keeps
-peak fill — hence reserve headroom — uniform across the group. I/O balance stays the first
-priority: `Σ_s e_s` and `Σ_s d_s` are both sums of per-storage deviations from an equal-share
-target on comparable relative scales, `δ` defaults to half of `α`, and on an imbalanced group the
-`α` term dominates every plan comparison (in §14.2: `α·Σe = 8.07` against `δ·Σd = 1.08`). `δ`
-decides among plans the load objective is nearly indifferent between, and acts on its own only
-when a group's I/O is already balanced but its data is concentrated — the case §6's capacity gate
-exists to reach.
+peak fill — hence reserve headroom — uniform across the group. `Σ_s d_s` is in TiB (§5.3 (C7)),
+so `δ` is a price per TiB of misplaced data, in the same unit as `γ`'s price per TiB copied.
 
-**At the default `δ = 0.5` it rarely acts on its own, and that is accepted, not fixed.** `Σ_s d_s`
-is at most 2 on two storages of similar size, so the whole term is worth about 1 there, while every
-move costs `β` plus `γ·z_d` plus, if it splits a VM, `κ·w_v`. Found on a replayed two-storage
-bundle with balanced I/O and fills of 9 % and 35 % (`Σd = 1.12`, the capacity gate at 112 %): the
-cheapest plan that evens it out moves three disks of one VM, 1.1 TiB, to `Σd = 0.06`, for a gain of
-`δ·1.06` against a cost of `0.75 + 0.05 + 0.5 + 0.01 = 1.31` — it pays only from `δ ≈ 1.24` (`1.31 / 1.06`), and at
-the defaults CBC proves staying put optimal. The capacity gate therefore opens such groups, and the
-plan is empty. Raising the default δ was considered and rejected: past `α` data evenness
-outweighs I/O evenness in every comparison (§11.1 warns), and how much data spread is worth moving
-terabytes for is operator policy. What *is* required is that the empty plan explains itself (§9.5's
-"no moves made" line, which names `δ` and `β` for a capacity-gated group) and that the manual works
-the example through, so an operator who wants data spread knows which knob to turn and roughly how
-far.
+**Which disks the term moves on its own.** Moving a disk of `X` TiB from a storage above its fill
+target to one below it, without either crossing its target, earns `2δ·X` and costs `β + γ·X`, so
+a capacity-only move pays when
+
+```
+X  >  X*  =  β / (2δ − γ)                (no move ever pays when 2δ ≤ γ)
+```
+
+At the defaults (`β = 0.25`, `γ = 0.05`, `δ = 0.5`), `X* = 0.25 / 0.95 ≈ 0.26 TiB ≈ 270 GiB`. Disks
+smaller than that do not move for data spread alone. They still move when a larger disk of the
+same VM moves and `κ` makes following it cheaper than splitting the VM, and they still move for
+I/O balance. `X*` does not
+depend on how much data the group holds, so the same weights mean the same thing on a 5 TiB group
+and on a 500 TiB one. A move that overshoots, leaving the source below its target or the target
+above it, earns less, and the solver accounts for that exactly. A move that splits a VM also pays
+`κ·w_v`. On the `cluster-6` bundle that motivated this form (§5.3 (C7)), whose storages are all the
+same size, so the new term equals the old relative one at `δ_rel = δ·B̄ ≈ 3.2`, a replay at that
+weight plans seventeen data disks in the five-storage group (thirteen between 290 GiB and
+1.95 TiB, and four of 100–200 GiB that follow a larger disk of their VM) and three in the
+three-storage one (0.7–1.95 TiB). Both plans clear payback by a ratio of several thousand. At the
+old default the same bundle planned nothing on either group.
+
+**I/O balance stays the first priority, as an exchange rate.** At `δ = 0.5`, one TiB of data moved
+from above its target to below it is worth one in-flight request of summed load deviation
+(`2δ = 1.0`, against `α = 1.0`). A disk the solver moves for data spread is therefore one whose
+load it can place without giving back more I/O balance than the move earns. In practice those are
+the group's cold disks, and on an imbalanced group the `α` term still dominates the comparison (in
+§14.2: `α·Σe = 8.07` against `δ·Σd = 2.33`). `δ` decides among plans the load objective is nearly
+indifferent between, and acts on its own when a group's I/O is balanced but its data is
+concentrated — the case §6's capacity gate exists to reach.
 
 Like `β` and `κ`, `δ` is an exchange rate, not a lexicographic order — a strict "I/O first, bytes
 only among exactly equal load optima" rule would never act, for the same reason §1 gives for
-refusing a strict migration minimum. It says how much summed utilization deviation one unit of
-summed relative fill deviation is worth (`objective.delta_capacity_spread`, default 0.5; `0`
-disables the term). Raise it to spread data more aggressively — §11.1 warns once `δ` exceeds `α`,
-the point where data evenness starts outweighing I/O evenness in every comparison. The term is L1
+refusing a strict migration minimum. It says how much summed utilization deviation one TiB of
+summed fill deviation is worth (`objective.delta_capacity_spread`, default 0.5 per TiB; `0`
+disables the term). Raise it to spread data more aggressively: `X*` falls, and smaller disks
+qualify. Lower it, and `X*` rises until, at `2δ ≤ γ`, the term can never pay for a move at all
+(§11.1 warns). How much data spread is worth moving terabytes for is operator policy. What *is*
+required is that an empty plan on a capacity-gated group explains itself (§9.5's "no moves made"
+line, which prints `X*`) and that the manual works the break-even through. The term is L1
 and stays L1 whatever `objective.spread_metric` is set to: the risk argument cares about every
 storage's share, not only the fullest one.
 
@@ -2159,9 +2207,15 @@ reason to keep data concentrated. Unlike a reserve violation this is a preferenc
 safety property: cooldowns, payback (§7) and the transient invariant (§8.1) all still apply, and
 `gates.capacity_spread_threshold: null` disables the gate — with
 `objective.delta_capacity_spread: 0`, the whole feature. The gate cannot fire when `b̄ = 0`: an
-empty group has nothing to spread. Passing it opens the group for planning and nothing more: at
-the default `δ` the plan is often empty, which §5.4 accepts and §9.5's "no moves made" line
-explains.
+empty group has nothing to spread. Passing it opens the group for planning and nothing more. The
+plan is still empty when the only disks that would even the data out are smaller than §5.4's
+break-even `X*`, which §9.5's "no moves made" line explains.
+
+The gate stays **relative** while the objective's `δ` term is absolute (§5.3 (C7)), on purpose:
+they answer different questions. The gate asks whether the shape of the group's data is lopsided
+enough to plan for at all, which is a question about proportions, and a threshold in TiB would mean
+something different on every group. The objective asks whether a particular move is worth its
+cost, which is a question about bytes, priced in the same unit as `γ`.
 
 **Split gate** — the counterpart of the capacity gate for §5.3.3's split rule. It fires when some
 VM `v ∈ V^split` has a movable disk `d` and an eligible storage `s ≠ σ₀(d)` ((C2), not in cooldown)
@@ -2291,7 +2345,7 @@ benefit  =  ( α·(E_before − E_after)  +  δ·(F_before − F_after)  +  κ·
                                       +  μ·(O_before − O_after) )  ·  H
 ```
 
-also in load-seconds — `δ` converts relative fill deviation, `κ·w_v` a busy VM's fragmentation and
+also in load-seconds — `δ` converts a TiB of fill deviation, `κ·w_v` a busy VM's fragmentation and
 `μ` a TiB of split excess into load-deviation equivalents (§5.4), so both sides of §7.3's comparison stay in the unit that
 is the whole point of using I/O time as the load metric. `β` and `γ` charge the move itself and
 belong on the cost side.
@@ -3000,9 +3054,11 @@ rule's own line, and the status file's warning (§2.4) tracks the executed endpo
 deadlock and no unfixable shortfall to explain it — ends with a line saying the objective preferred
 the current placement (proven only for CBC `optimal`; the heuristic's line says it is not) and that
 `explain` shows the closest rejected move. When the capacity gate alone opened the group, a second
-line names `objective.delta_capacity_spread` and `objective.beta_move_count` with their values and
-the two ways out: raise `δ`, or raise or disable `gates.capacity_spread_threshold` (§5.4 has the
-worked numbers). `plan` and `apply` print it; `explain` prints its own fuller version instead. The
+line names `objective.delta_capacity_spread`, `objective.beta_move_count` and
+`objective.gamma_move_bytes_per_tib` with their values, and the break-even disk size they imply,
+`X* = β / (2δ − γ)` (§5.4): "only disks larger than X* move for data spread alone". When
+`2δ ≤ γ` it says instead that no disk of any size can. It then gives the two ways out: raise `δ`
+(or lower `β`) to bring `X*` down, or raise or disable `gates.capacity_spread_threshold`. `plan` and `apply` print it; `explain` prints its own fuller version instead. The
 other common cause after an imbalance gate is a hotspot no placement relieves — one disk carrying
 most of a group's load — which `explain`'s pinned-load line quantifies.
 
@@ -3266,7 +3322,7 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | `payback_ratio > 0`, `payback_horizon > 0` | Zero disables the safety test |
 | `payback_horizon ≥ 30d` (warn, not error) | A horizon of days rejects slow-accruing but real benefits; it should approximate VM lifetime, not operator patience (§7.2) |
 | `tiny_disk_bytes ≥ 0` | The size below which a disk moves free of `β`, `γ` and the payback test (§5.4, §7), and only together with a larger disk of its VM ((C8), §5.3); `0` restores the old accounting and switches (C8) off |
-| `delta_capacity_spread ≥ 0`; warn when `> alpha_spread` | A negative weight would reward concentration; above `α`, data evenness outweighs I/O evenness in every comparison and the tool is no longer an I/O balancer first |
+| `delta_capacity_spread ≥ 0`; warn when `0 < 2·delta_capacity_spread ≤ gamma_move_bytes_per_tib` | A negative weight would reward concentration. Below the warning line the term is enabled but can never pay for a move of any size (§5.4's `X*` is unbounded), which is `0` in effect without saying so. The earlier warning at `δ > α` is gone: `δ` is per TiB and `α` per in-flight request, so comparing them was comparing unlike units |
 | `capacity_spread_threshold > 0` where set, `null` disables | A ratio of fill fractions to the mean fill; it can legitimately exceed 1 (§14.2 measures 1.85) |
 | `max_concurrent_* ≥ 1` | Zero would deadlock the scheduler |
 | `execution.locks.wait_timeout > 0`, `on_timeout ∈ {skip, abort}` | A zero timeout turns every ordinary backup window into a failed run |
@@ -3443,6 +3499,7 @@ Each phase is independently testable and useful on its own.
 | 15 | Single-source configuration defaults (§11.1; REVIEW.md AL-03) | Every default exists **exactly once, on the dataclass field**; the loader constructs each config class from the raw mapping by passing **only the keys the operator actually wrote**, through field-level converters (duration/byte/percent strings, list→tuple), so no `.get(key, default)` ever restates a default — today's twin copies in `config.py` (e.g. `model: str = "quantile"` on `ForecastConfig` beside `fc_raw.get("model", "quantile")` in the loader, and the same shape for every other knob) are gone; `config_schema.json`, the third copy of the shape, is generated from the same field/type/enum source — or, if generation proves heavier than checking, a check target fails on drift between schema and dataclasses — so it cannot rot either; **zero operator-visible behaviour change**: `--help`, the manual's option tables and `config/drs.example.yaml` values are byte-identical before and after, proven by the fixture and corpus checks running green untouched |
 | 16 | Per-storage target format, `enforce_format` (§5.3.2) | **Implemented, not yet live-tested.** The `qcow2`-on-`lvm` allocation rule was read from `LVMPlugin.pm` (`alloc_lvm_image`/`calculate_lvm_size`) and recorded in §5.3.2, and `z_{d,s}` has its third term (`topology.qcow2_lvm_allocation_bytes()`, an upper bound). Built as follows: `config_schema.json` gains `enforce_format` (`enum [raw, qcow2, null]`) on `groups[].storages[]` — no top-level key; `config.py` resolves it per expanded storage with §11.4's literal-beats-pattern precedence and runs §11.1's type check once the inventory is loaded; `topology.target_format()` and a per-pair `disk_size_on()` are the single implementations of `φ(d,s)` and `z_{d,s}`, and `storage_accepts_format()`'s callers in `optimize.py`, `heuristic.py` and `execute.py` pass `φ(d,s)` instead of `fmt_d`; the MILP's (C4)/(C5)/(C7) rows and `schedule.transient_invariant_ok()` use `z_{d,s}`; `execute.py` sends `format=` iff `φ ≠ fmt_d` (§9.2), and its existing conversion charge becomes the planned case; `verify-storages`, the plan line and `--json` show it (§3.5, §9.5). The cases of that fixture — one enforcing target makes an otherwise ineligible move feasible, and the converted `z_{d,s}` changes which disk fits — are covered by `tests/unit/test_enforce_format.py` against both solver backends (an exhaustive-enumeration fixture from `generate_expected.py` is not added); every existing fixture and corpus bundle must reproduce the same decisions (no `enforce_format` ⇒ `z_{d,s} = z_d`); the corpus `expected.json` files change only by the two new per-move keys `format_from`/`format_to` (§9.5), which is the whole diff. The manual, `config/drs.example.yaml` and `docs/internals/` move in the same commit (no CLI option is added, so the manpage's `OPTIONS` is unchanged). **Done when** additionally a live `confirm` run on the dev cluster converts one data disk and one `efidisk0` in each direction onto shared LVM, the source volume is observed gone (§9.3), and the target's listed size matches `z_{d,s}` |
 | 17 | Per-VM snapshot footprint and large-VM splitting (§5.3.3, (C4), (C9), §5.4 `μ`, §6 split gate, §7.2, §8.1, §9.2, §9.5) | **Implemented.** `Z_s` is the largest per-VM footprint in one shared function that `reserve.compute_reserve_status()`, `schedule.transient_invariant_ok()`, `execute.py`'s live re-check, `optimize.py`'s (C4) rows and the heuristic all call — a second copy of the footprint sum is the same bug as a second reserve check (AGENTS.md §5); `config_schema.json`, `config.py`, `config/drs.example.yaml` and the manual gain `snapshot_reserve.split_vm_footprint` (default `2TiB`, `null` off) and `objective.mu_vm_split_per_tib` (default 1.0) with §11.1's two rules, and `drs.example.yaml`'s `snapshot_reserve.factor` comment stops saying "largest disk"; `optimize.py` adds `o_v` and (C9) and the `μ` term, `heuristic.compute_vm_weights()` returns `w_v = 1` for `V^split`, the heuristic's repair and polish steps follow §5.3.3; `gates.py` gains the split gate (`split_gate()`, handed the objective weights and the storage cooldowns by `evaluate_group_gates()`); `payback.py`'s benefit gains `μ·ΔO·H`; `schedule.py`'s ordering ratio gains the `μ` term; `plan`/`apply`/`explain` print the `split:` line and `--json` carries `vm_splits[]` and the split-excess pair (§9.5); `show-load` and `verify-storages` print `Z_s` with its VM (§3.5). Fixtures: the generator's independent restatement of the reserve uses the footprint; the four existing fixtures state `split_vm_footprint_tib: null` explicitly (§14.1 says why), and the new `large-vm-split.yaml` of §14.9 states `2.0` and `mu_vm_split_per_tib: 1.0`; `generate_expected.py` regenerates every expected file — `fc-tier1` changes only as §14 records (initial `Z_a` 3.0 and `r_a` 2.5, shortfall pair 2.5 → 0.0, `101:scsi1` `repair: true`; optimum, objectives, order, transient targets and every payback number unchanged), `affinity-repair`'s stor-a reserve basis rises by its two tiny disks' bytes, `reserve-tradeoff` and `free-space-repair` (single-disk VMs only) do not change — and the per-storage `largest_tib` field is renamed `largest_footprint_tib`; a unit case covers §7.3's redundant-repair plan, which `fc-tier1` no longer exercises; the committed corpus bundles are replayed and their expected files regenerated, with any plan change explained in the commit. Every file matching `git grep -il 'largest disk'` is swept, the manual and internals included |
+| 18 | Capacity-spread term in absolute TiB (§5.3 (C7), §5.3 `U_obj`, §5.4 `δ` and `X*`, §6, §7.2, §9.5, §11.1) | **Specified, not implemented.** One implementation of `d_s = |B_s − b̄·C_s|` in TiB, shared by `heuristic.py`'s objective evaluator and `optimize.py`'s (C7) rows (sizes in MiB there, so `δ` enters as `δ / 2²⁰` per MiB, like `γ`); `payback.py`'s `δ·ΔF` and §8.2's ranking follow from it unchanged; the `U_obj` bound's `δ` term becomes `δ·2·(Σ z_d + Σ Uˢᵉˣᵗ)` with `Σ Uˢᵉˣᵗ` logged among its inputs; `config.py` drops the `δ > α` warning and warns at `0 < 2δ ≤ γ`; the §9.5 "no moves made" line prints `X*`; the §6 gate is unchanged. `generate_expected.py`'s `F_of` and `computed_p_min` change the same way and every fixture is regenerated: checked against a scratch regeneration while this was specified, **no fixture's optimum, move set or order changes**, only `F_*`, objective, `P_min`, agreement-threshold and benefit values, all of which §14 already quotes. Every corpus `expected.json` is regenerated and its diff read by hand, since a real bundle's decisions may change, which is the point. The manual's `delta_capacity_spread` entry (unit, `X*`, worked break-even), `config/drs.example.yaml`'s comment, `docs/internals/`' objective page and `explain`'s `spread` label (TiB) move in the same commit. **Done when** additionally `--replay` of a bundle like `cluster-6` (equal storages, balanced I/O, data concentrated, disks of a few hundred GiB) plans capacity moves at the default weights, where the relative form planned none, and `debian/changelog` tells operators who had raised `δ` under the relative form that the same number now means a price per TiB, to be re-derived from `X*` rather than carried over |
 
 Phase 4 before phase 6 is deliberate: a working heuristic makes the MILP verifiable, and it is the
 production fallback for large groups. Do not start with the solver.
@@ -3455,6 +3512,10 @@ implementation by the twenty-eighth review pass (REVIEW.md section 56): 14 close
 target design and is a behaviour change; 15 is a pure internal refactor with no behaviour to
 specify beyond §11.1's existing validation rules. Phase 14's scope was then cut down by operator
 direction (REVIEW.md AL-04, §12.1): no p95 → p99 default change, and the saturation guard goes. Also after phase 14, and by the same direction (no compatibility shims: the only users are the maintainers), `snapshot_reserve.min_free_bytes` and its fold into `free_space.soft` were removed; phase 13's row above describes the fold as it was built.
+
+Phase 18 was added after replaying a production bundle (`cluster-6`, §5.3 (C7)) on which the
+capacity gate opened two groups every run and the relative-fill (C7) term made every move lose. It
+changes the term's unit, not its role, and needs no new configuration key.
 
 Phase 11 is last only because it was found last — dogfooding the finished tool, where the noise on
 a clean run and the silence on an `auto` run are both obvious in a way they never were while the
@@ -3721,7 +3782,8 @@ violation 2.5 TiB rather than the 0.5 TiB the per-disk rule computed.
 
 - Spread `(6.50 − 0.20)/2.4667 = 2.554` → **255%**, far above the 20% gate.
 - `E_before = |6.50−2.4667| + |0.70−2.4667| + |0.20−2.4667| = 4.0333 + 1.7667 + 2.2667 = 8.0667`
-- Data spread (§5.3 (C7)): fills 56%/19%/6% against `b̄ = 0.2708`, `F_before = 2.154` — san-a
+- Data spread (§5.3 (C7)): fills 56%/19%/6% against `b̄ = 0.2708`, so each storage's fill target
+  is `b̄·C_s = 2.167 TiB` and `F_before = 2.333 + 0.667 + 1.667 = 4.667 TiB` — san-a
   alone holds 69% of the group's bytes. `(0.5625 − 0.0625)/0.2708 = 1.85`, far above the 25%
   capacity gate.
 - san-a already breaches the snapshot reserve. This is why (C5) carries slack `r_s` rather than being
@@ -3744,7 +3806,7 @@ With default weights (`α=1.0, β=0.25, γ=0.05/TiB, κ=0.5, δ=0.5`) the optimu
 | san-c | 2.70 | 2.0 | 1.5 | 5.0 | 25% | ✓ |
 
 `E_after = 0.5333 + 0.7667 + 0.2333 = 1.5333`, spread (3.00−1.70)/2.4667 = **53%**; the fill
-deviation drops from `F_before = 2.154` to `F_after = 0.308`. The reserve violation is repaired.
+deviation drops from `F_before = 4.667 TiB` to `F_after = 0.167 + 0.333 + 0.167 = 0.667 TiB`. The reserve violation is repaired.
 The footprint rule leaves this optimum, and every other optimum the fixture records, exactly where
 the per-disk rule had it: every one of them already splits VM 101, so its final `Z_s` values are the
 same under both rules, and the assignments the footprint rule newly marks short are ones that keep
@@ -3765,14 +3827,14 @@ the two-move plan above for everything past it. This is exactly the "minimal num
 trade-off made explicit and tunable; both plans are correct, and `β` chooses.
 
 **The `δ` knob, demonstrated at the defaults.** The third move concentrates data — san-b's fill
-rises to 38% while san-c's falls to 19%, `F` goes from 0.308 to 0.769, `δ·ΔF = +0.231` — and that
-regression outweighs the move's net I/O gain:
+rises to 38% while san-c's falls to 19%, `F` goes from 0.667 to 1.667 TiB, `δ·ΔF = +0.500` — and
+that regression outweighs the move's net I/O gain:
 
 ```
-α·ΔE + β·1 + γ·0.5 TiB + δ·ΔF  =  −0.400 + 0.250 + 0.025 + 0.231  =  +0.106   → rejected
+α·ΔE + β·1 + γ·0.5 TiB + δ·ΔF  =  −0.400 + 0.250 + 0.025 + 0.500  =  +0.375   → rejected
 ```
 
-The two-move plan is therefore the optimum at the defaults (full objectives: 3.664 against 3.769 —
+The two-move plan is therefore the optimum at the defaults (full objectives: 3.843 against 4.218 —
 both split VM 101, so both carry the same `κ·w₁₀₁ = 1.351` and this particular comparison is
 unchanged by the weighting), and it is also ahead on migrations (2 < 3), bytes moved (2.5 < 3.0 TiB)
 and data spread. That is
@@ -3790,16 +3852,16 @@ of the lexicographic solve discards them all. The comparison is still worth maki
 persistent terms, because it shows what the weighting does wherever space does *not* decide (it
 did here under the per-disk rule, with VM 101 whole on san-c within its reserve). Keeping VM 101
 together forces san-a to `L = 4.0` and the best reachable `E` becomes `3.133`. Comparing
-`E + κ·w + δ·F`: `3.133 + 0 + 0.5·0.769 = 3.52` (together) against
-`1.5333 + 1.351 + 0.5·0.308 = 3.04` (split). Splitting still wins — high I/O legitimately
-overrides the preference — but by 0.48 rather than the 1.3 an unweighted `κ` would have given, and
+`E + κ·w + δ·F`: `3.133 + 0 + 0.5·1.667 = 3.97` (together) against
+`1.5333 + 1.351 + 0.5·0.667 = 3.22` (split). Splitting still wins — high I/O legitimately
+overrides the preference — but by 0.75 rather than the 1.6 an unweighted `κ` would have given, and
 a somewhat busier VM 101 would flip the comparison entirely, which is what the weighting is for.
 
 ### 14.4 Ordering
 
 `102:scsi0` is scheduled first. Both moves leave san-a while it is violating (C5), so both rank
 under §8.2's first exception, and among them `102:scsi0` has the larger persistent-objective
-reduction per unit cost (`5.23` per `15 729 load·s` against `0.96` per `10 486` — VM 101's
+reduction per unit cost (`6.03` per `15 729 load·s` against `1.32` per `10 486` — VM 101's
 fragmentation is charged to the second move). It does **not** repair san-a on its own: with
 `102:scsi0` gone san-a holds 3.0 TiB, all of it VM 101, so `3.0 + 2 × 3.0 = 9.0 > 8.0` — still
 1.0 TiB short until `101:scsi1` leaves and san-a's footprint drops to 2.0 (`2.0 + 4.0 = 6.0`).
@@ -3837,12 +3899,12 @@ different number in a named field rather than a silent discrepancy.
 
 ```
 benefit = (α·ΔE + δ·ΔF + κ·ΔA) · H
-        = (6.5333 + 0.5 × 1.8462 − 0.5 × 2.7027) × 31 536 000
-                             (ΔF = 2.1538 − 0.3077;  ΔA = 0 − 2.7027: the plan splits
+        = (6.5333 + 0.5 × 4.0000 − 0.5 × 2.7027) × 31 536 000
+                             (ΔF = 4.6667 − 0.6667 TiB;  ΔA = 0 − 2.7027: the plan splits
                               VM 101 — the group's heaviest, w₁₀₁ = 2.703 — and §7.2
                               charges that fragmentation against the benefit)
-        = 6.1050 × 31 536 000 = 192 527 280 ≈ 1.93×10⁸ load·s
-ratio   = 192 527 280 / 26 214 ≈ 7 344   ≥ λ = 10   → ACCEPT
+        = 7.1820 × 31 536 000 = 226 490 984 ≈ 2.26×10⁸ load·s
+ratio   = 226 490 984 / 26 214 ≈ 8 640   ≥ λ = 10   → ACCEPT
 ```
 
 **A move that fails payback.** Consider instead a 4.0 TiB archive disk with `ℓ = 0.1` whose relocation
@@ -3872,9 +3934,9 @@ belonging to different VMs. So `u* = 5.0`, and:
 
 | Assignment | `Σ r_s` | `E` | Non-reserve objective at `β = 0.25`, `δ = 0.5` |
 |---|---|---|---|
-| both on `roomy` (current) | **0** | 10.0 | 11.25 |
-| one moved to `cramped` | 1.0 TiB | **0.0** | 2.18 |
-| both moved to `cramped` | 2.0 TiB | 10.0 | 13.10 |
+| both on `roomy` (current) | **0** | 10.0 | 12.00 |
+| one moved to `cramped` | 1.0 TiB | **0.0** | 3.30 |
+| both moved to `cramped` | 2.0 TiB | 10.0 | 14.60 |
 
 Moving one disk balances the group *perfectly* and costs a 1 TiB reserve breach on `cramped`
 (`3 + 1 + 2·1 = 6 > 5`). That is the trade the reserve rule exists to forbid, and the three answers
@@ -3883,17 +3945,19 @@ are:
 - **Lexicographic (the default).** Stage 1 finds `min Σ r_s = 0`, stage 2 optimises within that
   set — so the plan is *no moves at all*, and the group stays at `E = 10`. Correct, and it needed
   no calibration to be correct.
-- **Big-M at the configured `P = 1000`.** Same answer: `2.18 + 1000 > 11.25`.
-- **Big-M at `P = 5`.** `2.18 + 5 = 7.18 < 11.25`, so it moves the disk and breaches the reserve for
+- **Big-M at the configured `P = 1000`.** Same answer: `3.30 + 1000 > 12.00`.
+- **Big-M at `P = 5`.** `3.30 + 5 = 8.30 < 12.00`, so it moves the disk and breaches the reserve for
   balance. The exact flip point, recorded in the expected file as
-  `big_m_agreement_threshold_p`, is **`P = 9.08`**: below it big-M is wrong, above it big-M is right.
+  `big_m_agreement_threshold_p`, is **`P = 8.70`**: below it big-M is wrong, above it big-M is right.
   Note how small that number is — nothing about `P = 5` looks obviously wrong to an operator, which
   is the whole argument for computing `P` rather than configuring it. (The `δ` term raises the moved
-  plan's objective — concentrating both disks on `cramped` is also the worse data spread, and the
-  gap between the two plans narrows from 9.70 to 9.08 — but not enough to matter at any sane `P`.)
+  plan's objective — the group's fill targets are 4 TiB on `roomy` and 1 TiB on `cramped`, so
+  moving a disk onto `cramped`, which already holds 3 TiB of foreign data, takes `F` from 4 to
+  6 TiB — and the gap between the two plans narrows from 9.70 to 8.70, but not enough to matter at
+  any sane `P`.)
 
-The build-time bound of §5.3 gives `P_min = 23.6 · 2²⁰ ≈ 2.47×10⁷` for this group, four orders above
-the 9.08 actually needed. That is the bound doing its job: it is deliberately worst-case (it refuses
+The build-time bound of §5.3 gives `P_min = 26.6 · 2²⁰ ≈ 2.79×10⁷` for this group, four orders above
+the 8.70 actually needed. That is the bound doing its job: it is deliberately worst-case (it refuses
 to trade even one mebibyte), and being conservative in the safe direction costs nothing.
 
 One further check the fixture records: the `P = 5` plan is not merely undesirable, it is
@@ -3932,17 +3996,17 @@ fill-deviation regression, and every other byte-moving candidate worsens `δ` mo
 anything. Payback accepts with `benefit ≈ κ·ΔA·H = 3.15×10⁷ load·s` against `cost = 0`.
 
 This fixture pins §5.4/§7.2's *value*, not a verdict flip: the affinity repair is worth
-31 536 000 of the plan's `benefit_load_seconds: 31 536 006.65` (`κ·ΔA·H`, 99.99998 % of it) at
+31 536 000 of the plan's `benefit_load_seconds: 31 536 015.51` (`κ·ΔA·H`, 99.99995 % of it) at
 exactly zero cost, and `test_affinity_repair_fixture.py` asserts that by value rather than by
 pass/fail. It is **not** the fixture that flips reject-to-accept — replayed through the pre-§7.2
 formula (no `κ·ΔA` term, `tiny_disk_bytes = 0` so both tiny disks are charged their real,
 nonzero mirror cost), this same two-move plan still *accepts*: `ΔE = 0` exactly, `ΔF` is
 positive (the tiny disks leave above-mean storages for a below-mean one), giving
-`benefit ≈ δ·ΔF·H = +6.65 load·s` against `cost ≈ 0.0152 load·s` — ratio ≈ 438, the same ✓ the
+`benefit ≈ δ·ΔF·H = +15.51 load·s` against `cost ≈ 0.0152 load·s` — ratio ≈ 1 020, the same ✓ the
 fix produces. The verdict flip the live cluster actually suffered belongs to the *pre-§12*
 formula alone (`benefit = ΔE·H` at the old 7d horizon, §12's phase table): that formula scores
 this plan `benefit = 0 < λ·cost` and rejects it. What a silent revert of `κ`/`w_v` does catch on
-this fixture is the test's exact-value assertions (`benefit ≈ 31 536 006.65`,
+this fixture is the test's exact-value assertions (`benefit ≈ 31 536 015.51`,
 `cost_load_seconds == 0.0`), not the verdict.
 
 ### 14.8 Companion fixture: the free-space repair mandate
@@ -3963,13 +4027,15 @@ eligibility — which is what makes the repair a *two*-move plan rather than a o
 format-compatibility rule it leans on. *It was not implemented when the fixture was specified* —
 `topology.Storage` did not expose storage type/format, so both solver backends treated every
 group storage as an eligible target for every disk — and under that behaviour the fixture's
-optimum would have been the *one*-move repair `601:scsi0 packed → swapme` (objective 1.081 — but
-**not** a plan that pays for itself: it relocates the quiet 0.05 disk off a perfectly balanced
-group, so `E: 0 → 0.10` against `F: 1.608 → 1.412`, benefit
-`(−0.100 + 0.5 × 0.196) × 31 536 000 ≈ −6.2×10⁴ load·s` against a 5 243 load·s cost, ratio −11.8,
-and it clears the gate only through the same repair exemption the two-move plan needs — its own
-`Σ r_s` is 0.5 → 0, so both the built `has_reserve_override` and §7.3's outcome trigger fire on
-it). What depends on the format rule is the plan's *shape*, not its economics: the two-move
+optimum would have been the *one*-move repair `601:scsi0 packed → swapme` (objective 1.081
+under the relative-fill (C7) of that time — and then **not** a plan that paid for itself: it
+relocates the quiet 0.05 disk off a perfectly balanced group, so `E: 0 → 0.10` against a relative
+`F: 1.608 → 1.412`, benefit `(−0.100 + 0.5 × 0.196) × 31 536 000 ≈ −6.2×10⁴ load·s` against a
+5 243 load·s cost, ratio −11.8, clearing the gate only through the same repair exemption the
+two-move plan needs — its own `Σ r_s` is 0.5 → 0, so both the built `has_reserve_override` and
+§7.3's outcome trigger fire on it. Under the absolute-TiB (C7) it would pay on its own: objective
+3.975, `F: 8.2 → 7.2 TiB`, benefit `(−0.100 + 0.5 × 1.0) × 31 536 000 ≈ 1.26×10⁷ load·s`, ratio
+≈ 2 406). What depends on the format rule is the plan's *shape*, not its economics: the two-move
 repair, the indirect repair the revert test marks, and both `hard`-sweep orders below. Capacity
 alone cannot substitute for the format rule: §8.1's predicate is monotone in `z_d`, so any storage
 that accepts the 1.0 TiB `603` accepts the 0.5 TiB `601`, and pinning `603` (the
@@ -4031,24 +4097,25 @@ format-feasible assignments confirms the lexicographic optimum is unique:
 | swapme | 2.0 | 1.0 | 3.0 | 8.0 | 0 |
 
 `Σ r_s: 0.5 → 0`. The counterfactual is recorded in the expected file: with `free_space.soft: 0`
-on the same cluster, the optimum is **no moves at all** (objective 0.804 against the repair's
-5.283) — the requirement, and nothing else, is what makes the solver move. (With the capacity gate
+on the same cluster, the optimum is **no moves at all** (objective 4.100 against the repair's
+7.775) — the requirement, and nothing else, is what makes the solver move. (With the capacity gate
 nulled, that counterfactual is the engine declining to act at all; with the gate left at its
 default it is §9.5's ACT-but-no-moves case, reported by `explain`'s closest-alternative block.)
 
 **Payback rejects this plan, and the exemption is what executes it.** The repair wrecks the
 balance the cluster started with: loads become 2.00/0.05/4.10, `E: 0 → 4.1`, and the fill spread
-improves only from `F = 1.608` to `F = 1.216`:
+improves only from `F = 8.2 TiB` to `F = 6.2 TiB` (targets 5.1 TiB on each storage):
 
 ```
-benefit = (α·ΔE + δ·ΔF) · H = (−4.100 + 0.5 × 0.392) × 31 536 000 = −1.23×10⁸ load·s
+benefit = (α·ΔE + δ·ΔF) · H = (−4.100 + 0.5 × 2.0) × 31 536 000 = −9.78×10⁷ load·s
 cost    = 2 × (0.5 TiB/200 MiB/s) + 2 × (1.0 TiB/200 MiB/s) = 5 243 + 10 486 = 15 729 load·s
-ratio   = −7 827   <  λ = 10   → REJECT — overridden: the plan repairs (Σ r_s 0.5 → 0), §7.3-exempt
+ratio   = −6 216   <  λ = 10   → REJECT — overridden: the plan repairs (Σ r_s 0.5 → 0), §7.3-exempt
 ```
 
 A negative benefit is the point: this plan moves a 0.05-load disk off a perfectly balanced group
-and concentrates 4.10 of load on `swapme`. No weighting of the §5.4 objective can make it
-attractive, and no payback horizon can make it pay — the mandate is the only thing that produces
+and concentrates 4.10 of load on `swapme`. Only a `δ` above 2.05 per TiB — four times the default,
+pricing data spread above I/O balance — would even make its benefit positive, and no payback horizon can make
+it pay — the mandate is the only thing that produces
 it, which is precisely why the exemption must be structural (§5.3) rather than a weight.
 
 **The `hard` sweep, and why the order flips.** §8.2 schedules `601 → roomy` first by its
