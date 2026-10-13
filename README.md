@@ -5,7 +5,7 @@
 # proxmox-storage-drs
 
 [![Proxmox](https://img.shields.io/badge/Proxmox-E57000?style=for-the-badge&logo=proxmox&logoColor=white)](https://proxmox.com/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/bzed/proxmox-storage-drs)
+[![Ask DeepWiki](docs/deepwiki-badge.svg)](https://deepwiki.com/bzed/proxmox-storage-drs)
 [![Tests](https://github.com/bzed/proxmox-storage-drs/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/bzed/proxmox-storage-drs/actions/workflows/tests.yml)
 [![Debian Package](https://github.com/bzed/proxmox-storage-drs/actions/workflows/debian-package.yml/badge.svg?branch=main)](https://github.com/bzed/proxmox-storage-drs/actions/workflows/debian-package.yml)
 [![codecov](https://codecov.io/gh/bzed/proxmox-storage-drs/branch/main/graph/badge.svg)](https://codecov.io/gh/bzed/proxmox-storage-drs)
