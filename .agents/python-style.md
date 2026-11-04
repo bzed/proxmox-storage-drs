@@ -35,6 +35,8 @@ is a long string or URL that a human should look at.
   # SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
   # SPDX-License-Identifier: AGPL-3.0-or-later
   ```
+  The year is the creation year; when you later edit the file, extend it to include the current
+  year (`2026, 2028` or `2026-2027`) — once per year, not per commit. See AGENTS.md section 0.
 - Type-annotate every public function, including the return type. `-> None` is not optional.
 - Frozen `@dataclass(frozen=True, slots=True)` for value objects (a disk, a storage, a move,
   a plan). The engine is stateless except for `state.json`; mutable objects invite the kind of

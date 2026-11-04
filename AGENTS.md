@@ -28,17 +28,23 @@ and the short version.
 
 **Rules that must survive every edit session:**
 
-1. Never remove, rewrite or "modernise" the copyright line. If a file gains substantial new
-   content the holder stays the same unless Bernd says otherwise.
+1. Never remove, rewrite or "modernise" the copyright line — extending its years (rule 3) is the
+   only permitted edit. If a file gains substantial new content the holder stays the same unless
+   Bernd says otherwise.
 2. Every new source file (`.py`, and any shipped script) starts with:
    ```python
    # SPDX-FileCopyrightText: 2026 Bernd Zeimetz <bernd@bzed.de>
    # SPDX-License-Identifier: AGPL-3.0-or-later
    ```
-   Two comment lines, before the module docstring. No year ranges to churn — bump the year
-   only when a file is substantially rewritten.
-3. `LICENSE` is verbatim FSF text. Never edit it, reflow it, or replace it with a summary.
-4. AGPL is copyleft with a network clause. Do not vendor, copy in, or link code under a
+   Two comment lines, before the module docstring. The year is the year the file was created.
+3. **When you change a file, make sure the current year is in its copyright line.** Whatever
+   fits: a file from 2026 touched in 2026 stays `2026`; touched in 2027 it becomes `2026-2027`;
+   touched in 2028 with 2027 skipped it becomes `2026, 2028`. The holder never
+   changes, only the years. Apply it to every file you edit that carries a copyright line —
+   `.py` headers, shipped scripts, and the `Copyright:` stanzas of `debian/copyright` — once per
+   year, not once per commit: if the current year is already covered, leave the line alone.
+4. `LICENSE` is verbatim FSF text. Never edit it, reflow it, or replace it with a summary.
+5. AGPL is copyleft with a network clause. Do not vendor, copy in, or link code under a
    licence incompatible with AGPL-3.0-or-later. If a dependency's licence is unclear, stop
    and ask rather than guessing.
 
