@@ -32,7 +32,7 @@ that discards it.
 the measured load (`load_digest`). It logs the gate's computed
 drift/imbalance, together with the thresholds the gate compared them
 against (`gate_decision`). It logs the chosen plan with its solver backend
-and the six objective terms (`plan_selected`). It logs section 7's payback
+and the seven objective terms (`plan_selected`). It logs section 7's payback
 arithmetic and the ratio it needed (`payback_verdict`). It logs every
 migration issued, with its PVE task UPID (`move_started` /
 `move_finished`). A run opens with `run_started` and closes with

@@ -15,8 +15,8 @@
   `metrics` block. Run `pve-storage-drs verify-metrics` before you rely on
   any plan. The tool needs no new exporter or collector.
 - **A PVE user or API token** with read access to VM and storage inventory,
-  plus permission to call `move_disk`. Use an API token for unattended
-  operation (`execution.mode: auto`). Use a username and password for
+  plus permission to call `move_disk`. An API token is preferred for unattended
+  operation (`execution.mode: auto`). A username and password work for
   interactive use. The section "Setting up the PVE credential" below lists
   the exact privileges. The obvious
   approach, "just grant Audit everywhere", is not enough. The
@@ -107,8 +107,8 @@ The install puts the `pve-storage-drs` executable, its manpage, the example
 configuration at `/usr/share/doc/pve-storage-drs/examples/drs.example.yaml`,
 and the whole documentation set under `/usr/share/doc/pve-storage-drs/`.
 The set has this manual as `manual/*.md`, the internals guide as
-`internals/*.md`, and the specification as `IMPLEMENTATION_PLAN.md`. Each
-file also ships as a typeset PDF. The Markdown files stay uncompressed on
+`internals/*.md`, and the specification as `IMPLEMENTATION_PLAN.md`. Each of the three documents also ships
+as one typeset PDF. The Markdown files stay uncompressed on
 purpose. A cluster node has no GUI. It often has no way to get a PDF off
 the node. So the command `less
 /usr/share/doc/pve-storage-drs/manual/20-verifying-metrics.md` must work on
@@ -160,7 +160,9 @@ actually running the timer. See
 Putting the configuration on `pmxcfs` does not make the tool cluster-aware.
 `state.json` is node-local: each node would keep its own cooldowns, its own
 drift baseline and its own run lock, which do not coordinate with each
-other. **Enable the systemd timer on exactly one host.** The one thing that
+other. **Schedule the tool on exactly one
+host.** The package ships no timer unit. Create your own systemd timer or cron
+job. The one thing that
 *does* cross the cluster is a startup scan for in-flight `move_disk` UPIDs
 owned by the DRS user, which is what keeps two accidental instances from
 actively conflicting (they degrade to "slow and redundant" instead).

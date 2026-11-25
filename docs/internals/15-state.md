@@ -21,9 +21,9 @@ no lock, no balance, no cooldowns, nothing in flight.
 ## Reading degrades; writing does not
 
 `load_state()` never raises. A missing file is the ordinary first-run
-case. The function stays silent. A present-but-corrupt, empty, or
-wrong-`schema_version` file also yields `empty_state()`. The function
-logs that case at `WARNING`. Section 11.2 puts it this way: "losing
+case. The function stays silent. A corrupt or wrong-`schema_version` file also yields `empty_state()`, and the
+function logs that case at `WARNING`. An empty file yields `empty_state()`
+silently, like a missing file. Section 11.2 puts it this way: "losing
 this file is safe but not free: cooldowns and drift history reset",
 not "state.json existing and being readable is required to run". This
 mirrors the choice in `show-load`: on a Prometheus outage, the command
@@ -136,8 +136,9 @@ is a known, documented limitation, not an oversight.
 once per group. It calls it for every disk and storage that the
 run's `execute_plan()` call actually migrated. The run records a
 fresh disk cooldown at the disk's *new* location. It records a fresh
-storage cooldown for the move's **destination** only. That mirrors
-`_descend()`'s own asymmetry above (`docs/internals/92-execute.md`). A
+storage cooldown for **both** the source and the destination of the move
+(`docs/internals/92-execute.md` explains why). The *enforcement* of that
+cooldown stays destination-only, like `_descend()` above. A
 group that `apply` never acts on keeps its cooldowns untouched,
 exactly like before this was wired in. `apply` does not act on a
 group when the gate said `NO ACTION`. It also does not act when
@@ -151,8 +152,9 @@ exercised now. `apply` is the one command that can run a migration.
 The lock protects that command (see `docs/internals/92-execute.md`).
 The command acquires the lock first. It builds up the run's `State` in
 memory as each group finishes executing
-(`with_recorded_balance()`/`with_recorded_cooldown()`). It writes the
-state once at the very end via `save_locked_state()`. It **never**
+(`with_recorded_balance()`/`with_recorded_cooldown()`). It writes the state at the end of the run via `save_locked_state()`. It also
+writes at the start and at the end of each migration (see below), so that a crash
+leaves the UPID of an unfinished move on disk. It **never**
 uses `save_state_atomic()`'s rename. That rename would detach the
 very lock just taken. This page describes that bug above. The write
 happens before `release_lock()`, in a `finally`. A mid-run exception

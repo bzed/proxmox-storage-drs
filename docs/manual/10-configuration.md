@@ -15,8 +15,8 @@ comment points back to.
 
 Integer, required, no default.
 
-The version of the config format. `pve-storage-drs` refuses to start on a
-`schema_version` whose **major** number it does not understand. The error
+The version of the config format. `pve-storage-drs` refuses to start on any `schema_version` other than the one it
+understands. The error
 names the version the tool does understand. The tool does not guess field
 values from a future incompatible format. The current value is `1`.
 
@@ -57,8 +57,8 @@ certificate is not signed by a certificate the host running
 
 String or `null`.
 
-A PVE user, e.g. `drs@pve`. The key is required unless you set
-`proxmox.auth.token_id`. Username/password authentication is what the
+A PVE user, e.g. `drs@pve`. The key is required unless you set both
+`proxmox.auth.token_id` and `proxmox.auth.token_secret`. Username/password authentication is what the
 original requirement asked for. An API token (below) is the preferred
 method for `execution.mode: auto`. A token needs no interactive ticket
 refresh, and you can scope it tightly. The tool's actual minimum privilege
@@ -151,14 +151,17 @@ the moment you notice that Prometheus is unreachable.
 String or `null`, default `null`.
 
 The HTTP basic auth credentials for your Prometheus, if it requires them.
-The tool ignores both keys when `prometheus.bearer_token` is set.
+Set either these two keys or
+`prometheus.bearer_token`, not both (see that key).
 
 ### `prometheus.bearer_token`
 
 String or `null`, default `null`.
 
 A bearer token for a Prometheus instance behind an auth proxy that expects
-one. The token takes precedence over basic auth when both are set.
+one. Do not set it together with `prometheus.username`
+and `prometheus.password`. When all are set, this version sends the basic auth
+credentials and does **not** send the token (a known defect, issue #2).
 
 ## `metrics` — Telegraf/InfluxDB name mapping
 
@@ -361,9 +364,9 @@ Fraction in (0, 1], default `0.80`.
 
 The tool rejects a disk's data for this run when its sample coverage over
 `window.lookback` falls below this fraction. It then uses the disk's last
-known load from `state.json`, flagged in the report. The tool never treats
-a low-coverage disk as zero. Treating it as zero would silently invite
-migrations *onto* a busy but under-sampled storage.
+known load from `state.json`, flagged in the report. When `state.json` has no load for the disk, the tool uses 0 and flags the disk.
+A load of 0 can invite migrations *onto* a busy but under-sampled storage. Check
+flagged disks before you trust a plan.
 
 ## `load_weights` — combining read/write and time/ops/bytes
 
@@ -415,20 +418,20 @@ The weight on the bytes/second term, for the same reason as
 
 Weight, default `1.0`.
 
-The read/write asymmetry factor the tool applies to the `ops`/`bytes`
-terms only (see `load_weights.write_factor`). Do not apply it to the
-`iotime` term as well: I/O time already reflects the real read/write cost
-difference, so the factor would count the same difference twice. Apply it
-to `iotime` only deliberately.
+The factor that the tool applies to the read side of all three raw signals: I/O
+time, operations and bytes (see `load_weights.write_factor`). I/O time already
+reflects the real cost difference between reads and writes. A factor other than
+1.0 therefore counts that difference twice in the I/O-time signal. Change it only
+on purpose.
 
 ### `load_weights.write_factor`
 
 Weight, default `1.0`.
 
 The same factor as `load_weights.read_factor`, for the write side. A
-write-heavy RAID-6 array, for example, might set this key above 1.0 on the
-`ops`/`bytes` terms to express the real cost asymmetry those terms cannot
-see otherwise.
+write-heavy RAID-6 array, for example, might set this key above 1.0 to express a
+cost that the `ops` and `bytes` signals cannot show. The factor also scales the
+I/O-time signal.
 
 ## `groups` — storage groups
 
@@ -438,7 +441,9 @@ String, required.
 
 The name of the group. A disk may only move between storages in its own
 group. The tool does not balance across groups
-(`IMPLEMENTATION_PLAN.md` section 5). The name must be unique.
+(`IMPLEMENTATION_PLAN.md` section 5). The name must be unique. This version
+does not check this: a duplicate name silently replaces the earlier group (a
+known defect, issue #3).
 
 ### `groups[].storages[].id`
 
@@ -600,8 +605,8 @@ reserve large.
 Boolean, default `true`.
 
 Count volumes DRS does not manage (templates, ISOs, backups, other groups'
-disks, orphans) against a storage's used capacity. The tool strongly
-recommends this key. Turning it off understates real usage and erodes the
+disks, orphans) against a storage's used capacity. Keeping it `true` is strongly
+recommended. Turning it off understates real usage and erodes the
 reserve that the key is meant to guarantee, without warning.
 
 ## `free_space` — keep N bytes (or N%) free on top of the snapshot reserve
@@ -781,9 +786,10 @@ Duration, default `365d`.
 The horizon `H`. The tool assumes that the reduction of imbalance, data spread and
 VM affinity that a plan achieves persists over this horizon:
 `benefit = (alpha_spread * ΔE + delta_capacity_spread * ΔF + kappa_vm_affinity *
-ΔA) * H`. Each `Δ` is the improvement that the plan achieves in that term: the
+ΔA + mu_vm_split_per_tib * ΔO) * H`. Each `Δ` is the improvement that the plan achieves in that term: the
 value before the plan minus the value after it. `ΔE` is for imbalance, `ΔF` for
-data spread and `ΔA` for VM-affinity fragmentation. See `objective` below for what
+data spread, `ΔA` for VM-affinity fragmentation and `ΔO` for the split excess of
+large VMs in TiB (see `snapshot_reserve.split_vm_footprint`). See `objective` below for what
 each term measures. `ΔA` may be negative. A balance move that splits a VM pays for
 that fragmentation out of its other gains (`IMPLEMENTATION_PLAN.md` section 7.2).
 
@@ -805,7 +811,10 @@ toward the actual lifetime of your VMs only for fleets that really are short-liv
 Weight `> 0`, default `10.0`.
 
 `λ`: a plan is only accepted when `benefit >= payback_ratio * cost`, summed
-over every disk the plan moves. Both sides are in **load-seconds**.
+over every disk the plan moves. One exception exists: a plan that lowers the
+reserve or free-space shortfall of its group passes without this test (see
+`free_space`). The per-move limit `migration.max_single_move_duration` still
+applies to it. Both sides are in **load-seconds**.
 Load-seconds are average in-flight I/O requests multiplied by seconds.
 `load_weights` produces that request unit (see `metrics.read_time_ns`
 above). That is what makes the comparison meaningful. A disk's cost
@@ -1134,8 +1143,7 @@ the VM already has a disk. To keep the old behaviour, set it explicitly.
 Weight, default `1000.0`.
 
 The reserve-violation weight in the **heuristic backend**'s objective
-(`solver.backend: heuristic`, or `auto` falling back to it when neither a
-MILP backend is installed). The tool multiplies the weight straight into
+(`solver.backend: heuristic`, or `auto` when it falls back to the heuristic). The tool multiplies the weight straight into
 `reserve_penalty_term = objective.reserve_violation_penalty *
 reserve_shortfall_tib`. This is one of the seven terms that the
 `objective:` line of `explain` prints.
@@ -1185,9 +1193,10 @@ it should.
 
 Duration, default `60`.
 
-Wall-clock budget for a MILP solve attempt before falling back to the
-heuristic. The tool never emits a partial/unvalidated assignment on
-timeout. It falls back cleanly instead.
+Wall-clock budget for a MILP solve attempt. If the solver has a feasible plan when the limit ends, the tool uses that plan
+and reports it as `feasible`, which means not proven optimal. The tool falls back
+to the heuristic only when the solver finds no feasible plan in time. It never
+emits a partial assignment.
 
 ### `solver.mip_gap`
 
@@ -1317,7 +1326,8 @@ actually answers is never retried. This includes 4xx errors, in particular
 401/403 "not authorized".
 
 Outside this window, every read still gets a short retry. The retries take
-about 10 s in total: 1 s, 2 s, 4 s, with jitter. A single dropped connection
+waits of 1 s, 2 s and 4 s, each multiplied by a random factor between 0.5 and
+1.5. A single dropped connection
 does not fail a dry run or `show-load`. A virtual IP moving to another node
 does not fail them either. Each retry after a connection-level failure
 starts from a fresh login and connection.
@@ -1403,11 +1413,12 @@ for every storage where `saferemove` is on. `verify-storages` checks this.
 
 ### `execution.time_windows[].days`
 
-List of `mon`..`sun`, default: every day.
+List of `mon`..`sun`. Required in every window: to run every day, name all
+seven days.
 
 Which days a time window applies on. The window applies only to
-`execution.mode: auto`. `dry-run` and `confirm` are not time-restricted.
-Neither mode changes anything without a human already present.
+`execution.mode: auto`. `dry-run` and `confirm` are not time-restricted, because neither mode changes
+anything without a human already present.
 
 ### `execution.time_windows[].start` / `execution.time_windows[].end`
 
@@ -1447,8 +1458,10 @@ Individual disks excluded regardless of their VM.
 
 List of storage ids, default `[]`.
 
-Storages excluded as both source and target. The setting removes them from
-their group without editing `groups`.
+Intended meaning: storages that no disk moves onto or off. **This version does
+not apply the key** (a known defect, issue #1): plans still move disks onto and
+off the listed storages. To keep a storage out of balancing, remove it from
+`groups`.
 
 ### `exclude.tags`
 
@@ -1460,10 +1473,10 @@ A VM carrying any of these tags opts out entirely.
 
 Boolean, default `true`.
 
-Pre-filter disks with a snapshot or an unreferenced companion volume before
-they reach the API. Setting this `false` does **not** make such a move
-work. PVE rejects `move_disk delete=1` on a snapshotted volume regardless.
-The setting only removes the early, informative warning. Keep this `true`.
+**The key has no effect in this version** (issue #5). The tool pins every disk
+with a snapshot or an unreferenced companion volume, whatever the value. PVE
+rejects `move_disk delete=1` on a snapshotted volume in any case. Keep this
+`true`.
 
 ### `exclude.stopped`
 
@@ -1598,7 +1611,7 @@ history that `holt_winters` requires: `2 * seasonal_periods * metrics.step`. Tha
 To fit **weekly** seasonality instead of daily seasonality (for example, weekends
 look different from weekdays), widen this key together with `window.lookback`.
 `seasonal_periods: 2016` (7d at the default step of 5m) needs a `window.lookback` of
-at least 28 days (`2 * 2016 * 5m`). Both a live `plan`/`apply` and
+at least 14 days (`2 * 2016 * 5m`). Both a live `plan`/`apply` and
 `collect-testdata` fetch the history in requests of one day each, however wide the
 range gets. A large combination of `seasonal_periods` and `window.lookback`
 therefore no longer risks the per-series resolution limit of a

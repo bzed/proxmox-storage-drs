@@ -129,7 +129,8 @@ then the real one, and `solver.mip_gap` means what it says. Stage 1's
 objective, `Σ r_s`, has no constant. The function leaves it untouched.
 
 Every size-valued quantity (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`,
-`Uˢᵉˣᵗ`, `soft_s`/`hard_s`) is expressed in whole MiB (`_mib()`). Every
+`Uˢᵉˣᵗ`, `soft_s`/`hard_s`) is expressed in MiB (bytes divided by
+`_BYTES_PER_MIB`). Every
 load uses section 4's average in-flight I/O requests, before the weights
 are applied. The reason is LP conditioning, not exactness: floats would
 be exact enough. Raw bytes (~10¹²-10¹⁴) alongside load values (~1-10)
@@ -139,7 +140,7 @@ on a real corpus bundle. There, an unscaled model made CBC's own post-plan
 spread almost 100× worse than the heuristic's on the same weights.
 `soft_s` is `storage.free_space_soft_bytes`. `topology.py` resolves it
 once per storage (`60-topology.md`). It is never a scalar threaded in
-from config. `r[s.id] >= _mib(s.free_space_soft_bytes)` is the model's
+from config. `r[s.id] >= s.free_space_soft_bytes / _BYTES_PER_MIB` is the model's
 one-sided bound on `R_s`, alongside the `reserve_factor·Z_s` one.
 
 Every variable is built with `_lp_variable()`. It is a thin wrapper
@@ -316,7 +317,7 @@ place and the same way as the cooldown fix just above. `_fixed_zero_pairs()`
 is the one generator `_cbc_feasibility_constraints()` calls to decide
 which `(disk, storage)` pairs get `x_{d,s}=0`. It yields a pair whenever
 the storage is in `cooldown_storages` **or**
-`topology.storage_accepts_format(s, d.format)` is false. One shared
+`topology.storage_accepts_format(s, target_format(d, s))` is false. One shared
 function replaces the cooldown check and the format check duplicated
 inline in the model builder. Factoring the *decision* out, not just the
 loop, keeps the builder under this project's own complexity limit. A disk

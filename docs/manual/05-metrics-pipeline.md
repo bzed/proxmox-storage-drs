@@ -140,13 +140,13 @@ gigapipe directly, and `pve-storage-drs` reads from it directly. The path has no
 Telegraf, no output plugin and no format bridge. Nothing in the path can drop a
 field because of its type.
 
-The project runs the tool against this backend. Both bundles in `tests/corpus/`
-come from a cluster that runs it, and they record it as their
-`prometheus_backend`. The regression suite thus runs against real data of the
+The project runs the tool against this backend. Two of the three
+bundles in `tests/corpus/` come from a cluster that runs it, and they record it
+as their `prometheus_backend`. The third records `unverified`. The regression suite thus runs against real data of the
 gigapipe shape on every `make check`.
 
-To use gigapipe, point `prometheus.url` at its query endpoint. Nothing else in
-this manual changes. This is also true at the default of `metrics.step` and
+To use gigapipe, point `prometheus.url` at its query endpoint. Nothing else
+in this manual changes, including the defaults of `metrics.step` and
 `metrics.rate_window`. A test against a live system found that a recently updated
 gigapipe returns zero series for a range query whose step reaches the duration of
 its `rate()` window. The default does exactly that. The tool works around the

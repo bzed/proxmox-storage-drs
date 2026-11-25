@@ -137,7 +137,9 @@ above their default of `1`, `auto`-only, strictly FIFO). See
 same order as a launch queue. It does not need `schedule.py` to reason
 about overlapping in-flight windows. `optimize.py` (phase 6) is done:
 `plan`/`apply` pick CBC or the heuristic per `solver.backend`. The MILP
-backend enforces the storage cooldown identically to the heuristic (see
+backend excludes a cooldown storage as a move target, as the descent of the
+heuristic does. Unlike the repair step of the heuristic, it does not exempt a
+cooldown storage when it repairs a reserve violation (see
 [`91-optimize.md`](91-optimize.md)).
 
 Cooldowns and drift history are read *and written*. The (C2) per-disk pin
@@ -149,8 +151,8 @@ storages (see [`15-state.md`](15-state.md), [`60-topology.md`](60-topology.md),
 
 Some parts of the modules that exist are still missing:
 
-- Heuristic step 4 "polish" and the format-compatibility eligibility of (C2) in
-  `heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)).
+- Heuristic step 4 "polish" in `heuristic.py` (see
+  [`90-heuristic.md`](90-heuristic.md)).
 - In `schedule.py`: priority-2 ordering, staging, and reasoning about which pairs
   of moves could safely be *scheduled* to overlap. `schedule.py` still only ever
   produces a strictly sequential order. The concurrent *execution* of that order in
@@ -179,12 +181,12 @@ that would otherwise form. Read the comment at the top of
   today. How its cooldown data reaches `topology.py`/`heuristic.py`.
 - [`20-forecasting.md`](20-forecasting.md): the Holt-Winters forecast, its
   backtest gate, and how it scales the load of a disk.
-- [`30-metrics.md`](30-metrics.md): the Prometheus client and the six
+- [`30-metrics.md`](30-metrics.md): the Prometheus client and the
   `verify-metrics` checks.
 - [`40-cli-and-logging.md`](40-cli-and-logging.md): command dispatch, the
   `--mode` escalation rule, and why logs go to stderr.
 - [`50-pve-api.md`](50-pve-api.md): the PVE API client, why it uses `proxmoxer`,
-  and two facts that a test on a real cluster confirmed.
+  and facts that tests on a real cluster confirmed.
 - [`60-topology.md`](60-topology.md): the join of disks, storages and groups. The
   foreign-volume accounting of section 5.1.1. The shared (C4)/(C5) evaluator. The
   cooldown pin per disk.
@@ -197,7 +199,7 @@ that would otherwise form. Read the comment at the top of
 - [`90-heuristic.md`](90-heuristic.md): the objective of sections 5.4/5.5 and the
   seed/repair/descend search, checked against the exact objective totals of section
   14. The destination filter of the storage cooldown and its exemption for repair.
-  What "polish" and format eligibility still lack.
+  What "polish" still lacks.
 - [`91-optimize.md`](91-optimize.md): the CBC MILP backend. Why it deliberately
   uses no scaling, and why the LP conditioning still makes it work in whole MiB. Why
   it solves the reserve in two lexicographic stages instead of one big-M objective.

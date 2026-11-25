@@ -174,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Balance disk I/O load across Proxmox VE shared storages. The tool "
             "live-migrates VM disks. Dry-run is the default. The tool changes nothing "
-            "unless you explicitly select a less safe --mode."
+            "unless execution.mode or --mode selects a less safe mode."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )

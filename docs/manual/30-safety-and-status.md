@@ -5,8 +5,9 @@
 These hold for every value of `execution.mode`. No setting can change them
 (`.agents/domain-invariants.md`):
 
-- **Dry-run is the default.** A missing or unparseable `execution.mode`
-  means dry-run, never automatic execution.
+- **Dry-run is the default.** A missing `execution.mode`
+  means dry-run. A value other than `dry-run`, `confirm` or `auto` fails
+  validation, and the run exits `1`. Neither case leads to automatic execution.
 - **The tool never trades the snapshot reserve, or the free space you
   configure, for balance.** `pve-storage-drs` leaves a group imbalanced
   rather than breach `snapshot_reserve.factor` or `free_space.soft` on any
@@ -24,13 +25,15 @@ These hold for every value of `execution.mode`. No setting can change them
 | Code | Meaning |
 |---|---|
 | `0` | Success. The run stopped at a gate. The run found nothing worth moving. A `verify-metrics` run found no error-level finding. |
-| `1` | The run failed: the configuration is invalid, Prometheus or the PVE API is unreachable, a move failed, a check failed, or a command is not yet implemented in this build (see below). The list includes an API that fails mid-run, for any group, in the first plan or in a re-plan. A run that gives up because `execution.max_replans_per_run` was exhausted is not a failure. It exits `0`. |
+| `1` | The run failed: the configuration is invalid, Prometheus or the PVE API is unreachable, a move failed, or a check failed. The list includes an API that fails mid-run, for any group, in the first plan or in a re-plan. A run that gives up because `execution.max_replans_per_run` was exhausted is not a failure. It exits `0`. |
 | `2` | Usage error on the command line. |
 
 ## What this build actually implements
 
-`IMPLEMENTATION_PLAN.md` section 12 defines thirteen phases. The tool now
-implements all thirteen. Phase 10 adds `collect-testdata`, `--replay` and
+`IMPLEMENTATION_PLAN.md` section 12 defines 18 phases. The tool implements all of
+them except phase 15, an internal refactoring of how the code stores
+configuration defaults. Phase 16 (`enforce_format`) is implemented but not yet
+tested on a live cluster. Phase 10 adds `collect-testdata`, `--replay` and
 the real-cluster test corpus of section 16. Phase 11 adds the section 2.3
 logging policy (see [`35-logging.md`](35-logging.md)). The status file a
 monitoring check reads is documented in [`36-monitoring.md`](36-monitoring.md).

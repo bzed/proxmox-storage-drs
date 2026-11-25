@@ -95,9 +95,9 @@ independent of whether the plan as a whole looks profitable.
 The scheduler orders some moves first *regardless* of their ratio. It does so
 when the storage a move leaves currently breaches its snapshot reserve or its
 configured `free_space.soft` requirement. `free_space.soft` is the capacity a
-storage must always keep free. The requirement is the larger of
-`snapshot_reserve.factor` times the largest disk of the storage, or
-`free_space.soft` (`IMPLEMENTATION_PLAN.md` section 5.3, constraints
+storage must always keep free. The requirement is the larger of two values: `snapshot_reserve.factor`
+times the largest footprint of one VM on the storage (the sum of its disks
+there), or `free_space.soft` (`IMPLEMENTATION_PLAN.md` section 5.3, constraints
 (C4)/(C5)/5.3.1). The `ACT: reserve violated on ...` header in human output
 implies such a move. Safety is not subject to hysteresis (section 13). So such a
 move always wins over a purely balance-driven move.
@@ -297,7 +297,7 @@ silently. See `docs/internals/96-payback.md`.
   at all (see above). `show-load`/`explain` both show it as
   `[pinned: cooldown: ...]`. A storage that was a migration's
   *destination* within `gates.cooldown_per_storage` accepts no new
-  incoming moves from the heuristic. See `docs/internals/15-state.md`,
+  incoming moves from either backend. See `docs/internals/15-state.md`,
   `docs/internals/60-topology.md`
   and `docs/internals/90-heuristic.md`.
 - **No staging, no concurrent scheduling.** Documented as deliberate, not

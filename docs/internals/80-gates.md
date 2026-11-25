@@ -5,7 +5,7 @@ and the `reserve.ReserveStatus` of each storage into the act/no-act verdict of
 section 6? Why is the cooldown handling not here? This page describes
 `proxmox_storage_drs/gates.py`.
 
-## One function, three gates, in the order section 6 lists them
+## One function, five gates, in the order section 6 lists them
 
 `evaluate_group_gates()` is pure: it does no network I/O and does not access
 `state.json`. It takes these inputs:
@@ -69,18 +69,19 @@ decides:
    That reading would make the very first run of an operator fail to act on a
    cluster that is already imbalanced.
 5. **Imbalance gate.** The test is
-   `(max_s u_s − min_s u_s) / u* ≥ gates.imbalance_threshold`. `u_s` is the fill
-   fraction of each storage and `u*` the average of the group across storages
+   `(max_s u_s − min_s u_s) / u* ≥ gates.imbalance_threshold`. `u_s` is the load of each
+   storage divided by its declared capability (`L_s / c_s`), not a byte fill, and
+   `u*` is the average of the group
    (`GroupLoad.average_utilization`; both section 4, see
-   `docs/internals/70-loadmodel.md`). The gate thus fires when the spread between
-   the fullest and the emptiest storage, relative to the average fill of the group,
-   crosses the threshold. `u* == 0` (an idle group, section 4) always means no
+   `docs/internals/70-loadmodel.md`). The gate thus fires when the spread between the most and the least utilized
+   storage, relative to `u*`, crosses the threshold. `u* == 0` (an idle group, section 4) always means no
    act, because there is nothing to spread evenly.
 
 ## `last_load` is real now, for `show-load` and `plan`
 
-`state.py` (section 11.2) exists. `_last_loads_by_group()` in `cli.py` reads
-`state.path` once per run. It hands the slice of `last_balance.load_vector` for
+`state.py` (section 11.2) exists. `cli.py` loads
+`state.path` once per run. `_last_loads_by_group()` then reads the load vector of
+each group from that `State`. It hands the slice of `last_balance.load_vector` for
 each group to `evaluate_group_gates()` as `last_load`. The keys are rewritten to
 plain `topology.Disk.key`. The value is `None` when the group has no recorded
 balance yet. Both `show-load` and `plan` do this identically: `cli.py` calls the

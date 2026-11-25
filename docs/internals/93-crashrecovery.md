@@ -51,7 +51,7 @@ A UPID has the shape `UPID:{node}:{pid}:{pstart}:{starttime}:{type}:{id}:{user}:
 This shape is not general PVE-API knowledge taken on faith.
 `.agents/domain-invariants.md` rule 10 forbids stating unverified PVE
 behaviour. This project confirmed the shape live against the real dev
-cluster (`[[dev-cluster-access]]`). It read an actual `qmconfig` task's own
+cluster. It read an actual `qmconfig` task's own
 UPID before `parse_upid()` was written to depend on it.
 
 `parse_upid()` returns `None` for anything that does not parse as a UPID at
@@ -135,6 +135,10 @@ callbacks, `execute.InflightCallback = Callable[[str], None]`:
   `state.without_inflight_upid()`'s own docstring). The callback clears the
   UPID here exactly as promptly as a `"moved"` outcome. It does not leave the
   UPID recorded until the source actually releases.
+
+The text above describes the sequential executor. The concurrent executor fires
+the same pair: from `_advance_pending()` at the launch, and from
+`_poll_inflight_once()` at each retry and at completion.
 
 Neither call is wrapped in `try`/`finally`. If something inside the wait
 itself raises, say a network failure mid-poll, `on_inflight_finished` simply

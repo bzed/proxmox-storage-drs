@@ -8,7 +8,7 @@ unless the mode is `dry-run`, `apply` issues the moves. `execution.mode` (or
 
 | Mode | What `apply` does |
 |---|---|
-| `dry-run` *(default)* | Prints the same report as `plan`, plus a `would_move` outcome per move. Issues zero API calls. |
+| `dry-run` *(default)* | Prints the same report as `plan`, plus a `would_move` outcome per move. Reads the cluster and Prometheus as `plan` does, and sends no write call. |
 | `confirm` | Runs one move at a time and asks before each move: `[y]es`/`[n]o skip`/`[a]ll remaining`/`[q]uit`. |
 | `auto` | Runs unattended. `execution.time_windows`, `max_migrations_per_run` and a bounded automatic re-plan loop limit the run (see "Reading `auto` mode" below). Only this mode honours `execution.max_concurrent_migrations`/`max_concurrent_per_storage` above their default of `1` and runs several moves at once (see "Concurrent execution" below). |
 
@@ -157,7 +157,7 @@ then refuses the move, and the whole run fails (see "When something cannot be
 read").
 
 A VM config lock makes `apply` wait, not fail, up to
-`execution.locks.wait_timeout_seconds`. The lock can be `backup`, `snapshot`,
+`execution.locks.wait_timeout`. The lock can be `backup`, `snapshot`,
 `migrate` or any other value. The tool never uses a whitelist of values (see
 `docs/internals/92-execute.md`). A task that
 still runs on the VM does the same. This is typically the "Erase data" job

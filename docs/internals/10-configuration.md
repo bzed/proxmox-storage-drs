@@ -31,8 +31,9 @@ there is nothing useful to suggest.
    default inline via `.get(key, default)`. These defaults are also what
    `config/drs.example.yaml` documents and what the manual's
    [`../manual/10-configuration.md`](../manual/10-configuration.md)
-   describes. There is deliberately no second copy of a default anywhere
-   else in the codebase.
+   describes. The frozen dataclasses repeat many of these
+   defaults as field defaults, so change both places together. (Phase 15 of the
+   plan removes the duplication. It is still open.)
 3. **`_validate_semantics()`** runs the section 11.1 rules that
    `jsonschema` cannot express: cross-field comparisons, and rules that need
    a value derived from two independently-optional settings. Each rule is a

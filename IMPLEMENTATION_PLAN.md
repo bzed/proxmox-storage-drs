@@ -395,7 +395,7 @@ call site cannot silently add an unnameable member.
 | `run_summary` | INFO | Once per invocation: groups visited, moves issued/succeeded/failed, bytes moved, wall time, exit code | built |
 | `gate_decision` | INFO | Per group: `act`, the computed drift/imbalance fractions and the thresholds they were compared against | built — section 2.1 required it; nothing implemented it |
 | `load_digest` | INFO | Per group: total load, per-storage `u_s`, disk count, how many disks were coverage-rejected | built — section 2.1 required it; nothing implemented it |
-| `plan_selected` | INFO | Per acting group: backend, solver status, move count, the six objective terms, before/after spread | built — section 2.1 required it; nothing implemented it |
+| `plan_selected` | INFO | Per acting group: backend, solver status, move count, the seven objective terms, before/after spread | built — section 2.1 required it; nothing implemented it |
 | `payback_verdict` | INFO | Per acting group: benefit, cost, ratio, the configured minimum, and the accept/reject outcome | built — section 2.1 required it; nothing implemented it |
 | `move_started` | INFO | Immediately after `move_disk` returns, carrying **the UPID**, disk key, source, target, bytes | built — section 2.1 required it; nothing implemented it |
 | `move_finished` | INFO | Per move: UPID, outcome (`moved`/`failed`/`replan_needed`/`draining`), duration | built |

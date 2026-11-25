@@ -79,7 +79,8 @@ a second move. The retry logic has two regimes. Inside `outage_tolerance()`
 it runs the long 5 s→60 s loop below. Outside it (every read), it runs a
 short retry of 1 s, 2 s and 4 s. Each wait is scaled by a random factor in
 [0.5, 1.5]. This keeps the `read_workers` threads from retrying in
-lockstep. The total is about 10 s. That is enough for a TLS reset or a VIP
+lockstep. The three waits add up to 7 s before the random
+factor, and to between 3.5 s and 10.5 s with it. That is enough for a TLS reset or a VIP
 failover. It is short enough not to hide a real outage. Before every retry
 after a *transport* failure (not after a 5xx the API answered),
 `_refresh_session()` rebuilds the session via `reauthenticate`. This is
@@ -105,8 +106,7 @@ above still catches the case this cannot reach.
 **`storage_definitions()` deliberately uses `GET /storage` (the list form),
 never the singular `GET /storage/{id}`, even though some callers need only
 one storage's config.** The check ran empirically against a real PVE 9.2.11
-cluster during development
-([[dev-cluster-access]] in the maintainer's notes, not reproduced here). An
+cluster during development. An
 API token granted only `Datastore.Audit` can list every storage's full
 config via `GET /storage`. The list includes `saferemove`/`saferemove_throughput`.
 The identical data via `GET /storage/{id}` for the same storage returns

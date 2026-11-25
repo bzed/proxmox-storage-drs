@@ -1,5 +1,6 @@
 # proxmox-storage-drs — reference configuration
-# Every value shown is the default unless marked REQUIRED.
+# Every value shown is the default unless marked REQUIRED or EXAMPLE. The group
+# and storage entries are examples.
 #
 # Install this file to /etc/pve/drs.yaml. The path is on the cluster
 # filesystem. The cluster replicates the file to every node. One copy
@@ -31,7 +32,8 @@ proxmox:
     # Password auth. The tool also supports an API token. Prefer the token for
     # unattended operation: set token_id/token_secret instead of
     # username/password.
-    username: drs@pve              # REQUIRED
+    username: drs@pve              # REQUIRED unless token_* is set
+
     # Leave the secret out of this file when the config lives in /etc/pve.
     # password and token_secret read from the environment when left null.
     password: null                 # REQUIRED unless token_* is set; env: PVE_PASSWORD
@@ -45,7 +47,8 @@ proxmox:
 prometheus:
   url: http://prometheus.example.com:9090   # REQUIRED
   timeout_seconds: 30
-  # Set basic auth or a bearer token if your Prometheus is protected
+  # Set basic auth or a bearer token if your Prometheus is protected. Do not set
+  # both: the token is then not sent (a known defect, issue #2).
   username: null
   password: null
   bearer_token: null
@@ -122,11 +125,10 @@ load_weights:
   iotime: 1.0           # primary: rate(rd+wr_total_time_ns)/1e9, dimensionless
   ops:    0.0
   bytes:  0.0
-  # Read/write asymmetry. Use these factors for the ops and bytes terms,
-  # where the real cost difference between a read and a write is NOT
-  # represented anywhere else (a RAID-6 write costs far more than a read of
-  # the same size). The iotime term measures that cost directly. Applying
-  # these factors to it double-counts. Apply them there only on purpose.
+  # Read/write asymmetry. Each factor scales one side of all three raw signals:
+  # iotime, ops and bytes. The iotime signal already measures the real cost
+  # difference, so a factor other than 1.0 counts that difference twice there.
+  # Change the factors only on purpose.
   read_factor:  1.0
   write_factor: 1.0
 
@@ -190,7 +192,7 @@ groups:
       - id: san-d
         capability_weight: 1.0
       - id: san-e
-        capability_weight: 0.5     # half the spindles -> carries half the load
+        capability_weight: 0.5     # EXAMPLE: half the spindles -> carries half the load
 
 # --------------------------------------------------------- snapshot reserve
 snapshot_reserve:
@@ -215,8 +217,8 @@ snapshot_reserve:
 # ---------------------------------------------------------------- free space
 # The tool keeps N bytes (or N% of capacity) free on every storage, always. The
 # larger of this value and the snapshot reserve above wins (section 5.3
-# (C5)/5.3.1). This is the Storage DRS mandate. Example: a new VM of an admin makes
-# a storage too full. The tool then migrates data off that storage until the
+# (C5)/5.3.1). This is the Storage DRS mandate. Example: an admin's new VM can
+# make a storage too full. The tool then migrates data off that storage until the
 # storage meets the requirement again. This repair bypasses the drift/imbalance
 # gates and the payback economics, exactly like a snapshot-reserve violation does.
 free_space:
@@ -229,8 +231,8 @@ free_space:
   soft: 0
   # The TRANSIENT floor: how far a storage may dip below `soft` while a move is in
   # flight (section 8.1). PVE allocates a mirror target in full before the source
-  # releases anything. A plan that lands a disk on a storage close to `soft` thus
-  # needs room to pass through it. null (the default) means hard = soft: no dip at
+  # releases anything. A plan that lands a disk on a storage heading toward `soft`
+  # thus needs room to pass through it. null (the default) means hard = soft: no dip at
   # all. That is the same strength this invariant had before free_space existed.
   # Leave this null unless you decide on purpose to accept a bounded, planned dip.
   # Never set it lower "to make a plan fit". Change `soft` for that.
@@ -335,12 +337,9 @@ objective:
   # The default changed from false after 0.1.6.
   affinity_counts_pinned_disks: true
   # Soft slack so that a start state that already violates the reserve stays
-  # repairable instead of infeasible. This value is a FLOOR, not the value used.
-  # With the single-stage big-M formulation, the tool computes the provably dominant
-  # P from the load and sizes of the group. It uses max(this, computed) and warns
-  # when it raises the value. The default solve is lexicographic, in two stages: it
-  # repairs the reserve first, then balances within the room that leaves. That solve
-  # needs no penalty at all, and the tool prefers it.
+  # repairable instead of infeasible. Only the heuristic backend reads it, and it
+  # uses the value exactly as set. The MILP backend repairs the reserve first
+  # (lexicographic, two stages) and needs no penalty at all.
   reserve_violation_penalty: 1000.0
 
 solver:
@@ -395,7 +394,8 @@ execution:
     wait: true
     timeout: 48h              # >= largest disk / saferemove_throughput
 
-  time_windows:          # empty = any time. Applies to "auto" mode only.
+  time_windows:          # EXAMPLE window. The default is [] = any time.
+                         # Applies to "auto" mode only.
     - days: [mon, tue, wed, thu, fri, sat, sun]
       start: "22:00"
       end:   "06:00"
@@ -404,14 +404,13 @@ execution:
 exclude:
   vmids: []              # never move disks of these VMs
   disks: []              # e.g. ["101:scsi1"]
-  storages: []           # never move onto/off these
+  storages: []           # NOT APPLIED by this version (issue #1): remove the
+                         # storage from groups instead
   tags: ["no-drs"]       # PVE VM tags that opt a VM out
-  # PVE REJECTS move_disk delete=1 on a volume with snapshots. Without delete=1 the
-  # move would not carry the snapshots across either. false does not make such
-  # moves work. It only stops the tool from filtering them out, so they fail at the
-  # API instead. The tool pins snapshotted disks (it still counts their bytes and
-  # load). Every run reports them at WARN and names the VMs whose snapshots you
-  # must clear.
+  # This key has no effect in this version (issue #5). The tool always pins
+  # snapshotted disks (it still counts their bytes and load). PVE rejects
+  # move_disk delete=1 on them anyway. show-load and explain name the pinned
+  # disks, whose snapshots you must clear.
   skip_vms_with_snapshots: true
   # The tool never moves a stopped VM, whatever violation its disks cause. Veeam and
   # similar tools break when the volumes of a replicated VM move. The tool accepts

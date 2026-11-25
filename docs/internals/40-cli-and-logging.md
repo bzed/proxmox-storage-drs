@@ -69,8 +69,8 @@ dispatch in `main()` stays the same.
 ## `--group`: filtered once, right after `build_topology()`
 
 `_filter_groups(topology, args.group)` is the one place that reads `--group`.
-`show-load`, `verify-storages` and `plan` each call it immediately after
-`build_topology()`. The function replaces the `groups` tuple of that
+`show-load`, `verify-storages`, `plan`, `explain` and `apply` each call it
+immediately after `build_topology()`. The function replaces the `groups` tuple of that
 `Topology` with the named subset. The subset keeps the topology order. Every
 render function downstream iterates `topology.groups` as before. It needs no
 `--group` awareness of its own.
@@ -197,9 +197,9 @@ The tool uses `_fallback_manual_text()` only when `man(1)` is missing or has no
 entry. Examples are a source checkout without installation, or a minimal system
 without man-db. The function walks up from the location of `cli.py` and looks
 for `man/pve-storage-drs.1.md` in a source tree. If that also fails, it prints
-a short message. The message names the real path of the installed package and
-the file in the tree. That is a local path that the user can act on, never a
-bare URL.
+a short message. The message names the package to install and the file
+`man/pve-storage-drs.1.md` in the source tree. The user can act on both. The
+message is never a bare URL.
 
 ## The unfixable-shortfall report
 

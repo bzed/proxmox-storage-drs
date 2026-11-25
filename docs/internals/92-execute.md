@@ -260,7 +260,7 @@ stop. It uses no lookup table of "harmless" values to skip past. A future
 PVE version can add a lock value this codebase has never seen. Guessing
 wrong risks a half-completed operation on someone else's backup or
 snapshot (`.agents/domain-invariants.md` rule 5). What happens after
-`execution.locks.wait_timeout_seconds` depends on
+`execution.locks.wait_timeout` depends on
 `execution.locks.on_timeout`:
 
 `_check_lock_once()` also reports a task still running on the VM.
@@ -354,8 +354,8 @@ It returns `"y"`/`"n"`/`"a"`/`"q"`. `execute_plan()` calls it and
 interprets the four answers. It raises `ValueError` on anything else. It
 never talks to a terminal itself. `cli.py` is the only module allowed to
 call `print()`/`input()` (its own module docstring).
-`cli._confirm_move_interactively()` holds the actual prompt text. It also
-*retries* an out-of-set answer instead of turning it into the `ValueError`
+`cli._make_confirm_move_interactively()` builds the callback. The callback holds
+the actual prompt text. It also *retries* an out-of-set answer instead of turning it into the `ValueError`
 that `execute_plan()` would otherwise raise. A typo at the keyboard should
 not look like a bug report.
 
@@ -392,9 +392,9 @@ missing dict keys.
 PVE or Prometheus at all. A second concurrent `apply` invocation (any
 mode, including `dry-run`) exits `0` immediately. It pays for neither
 round-trip first. That matches section 11.2's "a live PID means another
-instance is running: exit 0 quietly." An operator's `[q]uit` can stop the
-whole run before every group is even planned. So can a `replan_needed`,
-though that one is per-group and does not otherwise propagate.
+instance is running: exit 0 quietly." An operator's `[q]uit`, or an aborted run, can stop the whole
+run before every group is even planned. A `replan_needed` outcome does not: it
+stays inside its own group.
 `_render_group_plan_human()`/`_render_group_plan_json()` are the shared
 per-group renderers behind both `plan`'s and `apply`'s output. They look
 up `gate_decisions` with `.get()`, not `[]`. `plan` always plans every
@@ -474,9 +474,10 @@ unless `cli.py` passes real values. The first is a `deadline`, an
 absolute instant. The function checks it against `clock.now()` before
 starting each move. It checks it together with that move's
 `payback.MoveCost` duration estimate from `move_costs_by_key`. The second
-is a `max_migrations` count. It is decremented once per move actually
-attempted (`"moved"`/`"draining"`/`"failed"`, never `"skipped"`/
-`"would_move"`/`"replan_needed"`). Both budgets stop the whole run
+is a `max_migrations` count. It is decremented once per move that `move_disk` actually
+launched. A move that fails before the launch (a pre-flight or live-check
+refusal, or a lock timeout) does not count. Neither does a `"skipped"`,
+`"would_move"` or `"replan_needed"` outcome. Both budgets stop the whole run
 cleanly, never mid-move, via the same `_auto_budget_stop_outcome()`
 helper. Remaining time only ever decreases. A spent cap stays spent.
 There is never a reason to skip one move for a budget reason and then try
@@ -486,7 +487,7 @@ The deadline is actually checked **twice** for a locked VM.
 `_auto_budget_stop_outcome()`'s pre-flight check runs before any network
 call for this move. A VM-lock wait (`_wait_for_unlocked()`) can burn a
 large, unpredictable share of the same budget. It can burn up to
-`execution.locks.wait_timeout_seconds`, hours by default, entirely *after*
+`execution.locks.wait_timeout`, hours by default, entirely *after*
 that first check already said yes. `_execute_one_move()` re-checks the
 identical condition right after a lock clears and before committing to
 `move_disk`. The check is `_deadline_exceeded()`, the one shared
@@ -529,8 +530,8 @@ is a residual, documented limitation, not a silent one.
 
 `cli._run_auto_group()` is where section 9.2's re-plan protocol actually
 lives. It is a loop, bounded by `execution.max_replans_per_run`. The loop
-calls `_apply_payback_gate()`. If the *last* outcome it produced was
-`"replan_needed"`, the loop re-fetches topology fresh. It calls
+calls `_apply_payback_gate()`. If any outcome it produced is `"replan_needed"`, the loop re-fetches topology
+fresh. It calls
 `build_topology()`, not just re-runs `_plan_group()` on the same `Group`
 object. Whatever triggered the mismatch can mean the group's own
 membership changed. The loop then calls `_plan_group()` again before
@@ -623,7 +624,7 @@ pre-flight-then-lock-then-live-check sequence. `_LockWaitTracker` plays the
 same role for a lock wait that `_MoveWaitState` plays for a move's
 completion. `start`/`warned` survive across cycles. The executor then logs
 the "VM is locked" warning once, not once per poll. It also knows when
-`execution.locks.wait_timeout_seconds` has actually elapsed. The
+`execution.locks.wait_timeout` has actually elapsed. The
 generalized invariant itself lives in `reserve.transient_charge_ok()`
 (`docs/internals/95-schedule.md`). `_launch_decision()`'s only job is to
 assemble its inputs. It calls the same `_live_transient_check()` the

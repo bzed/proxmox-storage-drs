@@ -115,8 +115,9 @@ A landing disk joins its *own* VM's footprint. A disk that reunites a VM on
 
 The arithmetic lives in `reserve.transient_charge_ok()`. The function takes a
 *list* of charges rather than one disk. It degenerates to section 8.1's
-original single-move form when called with `[(disk.vmid, disk.size_bytes)]`. This module calls
-it that way. It generalizes correctly to several moves landing on
+original single-move form when called with one charge. This module calls it that
+way, with `[(disk.vmid, disk_size_on(disk, target_storage))]`. For a move that
+keeps the format of the disk, that size is `disk.size_bytes`. It generalizes correctly to several moves landing on
 the same storage at once. `execute._launch_decision()` calls it with more
 than one charge, for real, under concurrent execution.
 
@@ -132,7 +133,7 @@ this module computes, not PVE's lower allocated `used` on a thin pool (see
 `92-execute.md`).
 
 Section 5.3.1's transient floor is folded into the check the same way (C5)
-folds `soft_s` into the steady-state one: `max(f_b * max(Z_b, z_d), hard_b)`.
+folds `soft_s` into the steady-state one: `max(f_b * max(Z_b, F_{v(d),b} + z_d), hard_b)`.
 The floor here is `hard_b` (`target_storage.free_space_hard_bytes`), not
 `soft_b`.
 
@@ -206,16 +207,14 @@ when `order_moves()` scheduled every move a plan proposed.
   deadlock in a case a more sophisticated scheduler would have found a way
   through. Omitting them can never make
   this module produce an order that it considers safe but that is not safe.
-- **Cooldowns**, for the same reason `gates.py` does not implement them yet.
-  `state.json` (section 11.2) would record the timestamps a real cooldown
-  check needs. That file does not exist.
+- **Cooldowns**. `order_moves()` takes no cooldown input. The gates and the
+  solvers apply cooldowns before a plan exists (`80-gates.md`,
+  `90-heuristic.md`). `state.json` stores them after a run (`15-state.md`).
 
-## Wired into `plan`, not yet into `apply`
+## Wired into `plan` and `apply`
 
-`cli.py`'s `plan` command calls `heuristic.run_heuristic()`. It then calls
-`schedule.order_moves()` for every group the gate says to act on. The command
-renders the result (see `docs/manual/27-plan.md`).
-
-Nothing calls `schedule.py` from `apply` yet, because `apply` itself does
-not exist
-(`execute.py`, phase 7+). `plan` only ever computes and prints.
+`_plan_group()` in `cli.py` solves, schedules and prices every group that the
+gate says to act on. It calls `schedule.order_moves()` for the schedule. Both
+`plan` and `apply` call `_plan_group()`. `apply` therefore executes the order that
+this module computes (see `92-execute.md`). `docs/manual/27-plan.md` describes the
+rendered result.

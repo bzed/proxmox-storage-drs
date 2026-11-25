@@ -27,8 +27,6 @@ A successful run looks like this (labels and values are illustrative):
 [   info] metrics.write_time_ns = 'blockstat_wr_total_time_ns' exists
 [   info] blockstat_rd_operations: sample series labels {'vmid': '101', 'instance': 'scsi0', 'nodename': 'pve01', 'cluster': 'pvezebe'}
 ...
-[   info] 'cluster' label values seen across these metrics: pvezebe
-...
 
 OK: verify-metrics found no blocking problems
 ```
@@ -78,8 +76,9 @@ section 3.3):
    load model rejects the data of that disk and uses its last known load from
    `state.json` instead.
 6. **Observed sample spacing.** The command measures the real gap between samples.
-   It counts the raw samples over a 10-minute window with `count_over_time()` and
-   takes the median across series. It does not trust
+   It counts the raw samples with `count_over_time()` over a window of 20 times
+   `metrics.pvestatd_push_interval`, or 10 minutes if that is longer. It takes
+   the median across series of the window divided by the count. It does not trust
    `metrics.pvestatd_push_interval`. A difference of more than 20% is an
    **error**. A `metrics.rate_window` below four times the observed spacing is also
    an **error**. This check stops an outdated `pvestatd_push_interval` from
@@ -105,5 +104,5 @@ section 3.3):
 - **Coverage is low for specific disks**: check that Telegraf scrapes every node.
   Check that `window.lookback` is not longer than your Prometheus retention.
 - **Spacing disagrees**: measure the real push interval of `pvestatd` on a node.
-  Use its systemd timer, or the interval in `/etc/pve/status.cfg` if you set it
-  there. Then correct `metrics.pvestatd_push_interval`.
+  If
+  `/etc/pve/status.cfg` sets an interval, use that value. Then correct `metrics.pvestatd_push_interval`.

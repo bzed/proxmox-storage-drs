@@ -34,18 +34,18 @@ pve-storage-drs -c /etc/pve/drs.yaml collect-testdata --estimate
 
 ```
 groups: 2   disks: 47
-range: 7d  step: 5m
-estimated Prometheus queries: 117
-estimated series sample points: 1137024
+range: 2.0d  step: 5.0m
+estimated Prometheus queries: 57
+estimated series sample points: 324864
 ```
 
 The query count includes the day-sized chunking `--estimate` itself
-performs at capture time. That is 7 range-query chunks per group per metric
-at the 7 d default, not 1. So the count is the real HTTP request count. It
+performs at capture time. That is 2 range-query chunks per group per metric
+at the 48 h default, not 1. So the count is the real HTTP request count. It
 is not a logical-query count that understates it.
 
-The sample-point figure is `47 disks · 6 metrics · 4032 points`. A plain division, `604800s / 300s`,
-would suggest `2016` instead. At
+The sample-point figure is `47 disks · 6 metrics · 1152 points`. A plain division,
+`172800s / 300s`, would suggest `576` instead. At
 `metrics.step == metrics.rate_window`, a live capture issues range queries
 at *half* the configured step. Both settings are `5m` here, the project's
 own default. The capture stores the points at that half step too. The half
@@ -71,8 +71,10 @@ refuses outright. It names the flags that bring the count under the limit:
 
 The exit status is `0` when every capture step succeeded. It is `1` when
 the bundle was written but the manifest records one or more failed calls.
-A `Datastore.Allocate`-shaped permission gap looks exactly like this. See
-`00-installation.md`. The exit status is `2` on a usage error.
+A permission gap that
+returns an HTTP error appears as such a failed call. A missing
+`Datastore.Allocate` does not: PVE returns an empty list, and the tool records
+that as success (see `00-installation.md`). The exit status is `2` on a usage error.
 
 ### What is in a bundle, and what is not
 
@@ -136,7 +138,7 @@ the `.tar.gz` it was sent as. Run
   "no data":
 
   ```
-  pve-storage-drs: bundle has no recorded response for the range query
+  pve-storage-drs: bundle has no recorded response for
   'sum by (vmid, instance) (rate(blockstat_rd_operations{...}[300s]))'
   over [1700000000,1700086400] -- captured range was [1699400000,1700000000]
   ```
@@ -163,7 +165,7 @@ reproduces it offline, on a machine that has never seen your cluster. The
 reproduction works for as long as the project exists. A bundle is also the
 only thing that can prove the MILP solver and the fallback heuristic still
 agree at a few hundred disks. The synthetic fixtures in `tests/fixtures/`
-top out at six.
+top out at eight disks.
 
 The terms, in short:
 

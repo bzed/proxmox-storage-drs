@@ -14,8 +14,9 @@ holds one `DiskLoad` per disk (`ℓ_d`) and one `StorageLoad` per storage
 (`L_s`, `u_s`). It also holds the group's `u*` and whether the whole group
 is idle. The function never touches the PVE API. It never builds topology
 itself. This matches `reserve.py`'s identical "given the join, evaluate
-one formula" framing. The match is no coincidence. `cli.py` calls the
-function exactly once per group. The solver consumes that same set of
+one formula" framing. The match is no coincidence. Each `plan`, `show-load` or `apply`
+pass in `cli.py` calls the function once per group. A re-plan in `auto` mode calls
+it again. The solver consumes that same set of
 per-disk `ℓ_d` values against every *candidate* assignment it considers.
 The solver is `heuristic.py`'s `run_heuristic()`, via
 `GroupLoad.load_by_disk_key()`. It does not recompute load per candidate.

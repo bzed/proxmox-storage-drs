@@ -72,8 +72,8 @@ numerically identical.
 `compute_benefit_load_seconds()` applies the weights *inside* itself, as
 explicit parameters rather than built into an already-scaled input. That
 keeps R-01's principle intact. The principle now covers all three terms, not
-just the first two. `cli.py`'s `plan` handler computes all six raw values for
-the pre-plan and post-plan assignments. It passes the values, and all three
+just the first two. `_plan_group()` in `cli.py` computes all six raw values for the pre-plan and
+post-plan assignments, for `plan` and `apply` alike. It passes the values, and all three
 weights, through.
 
 The `kappa` term's own inclusion here is the fix for a real live failure. A

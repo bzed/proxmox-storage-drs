@@ -90,18 +90,18 @@ Group fc-tier1 → NO ACTION: imbalance 12.2% is below gates.imbalance_threshold
 
 The forecast can lose its backtest, or the history can be too short to run one.
 The group then falls back to the observed loads, and the line reads `forecast:
-holt_winters not used -- ...; loads are as observed`. With no `forecast:` line at
-all, you have configured the `quantile` model, or the tool could not fetch the
-forecast history in this run. In the second case, the tool logs a warning and the
-numbers are the observed ones. See [`explain`](29-explain.md) for the fields. See
+holt_winters not used -- ...; loads are as observed`. A failed fetch of the forecast history prints the same `not used` line, and the
+tool logs a warning. With no `forecast:` line at all, you have configured the
+`quantile` model, or the group is idle and has nothing to forecast. See [`explain`](29-explain.md) for the fields. See
 `forecast.model` in the configuration reference for the rule of the backtest.
 
 ## The `Group <name> → ACT`/`NO ACTION` line
 
-The tool evaluates four gates in this order: **reserve override**, then the
-**capacity gate**, then **drift**, then **imbalance**. The first gate that decides
-wins. The header line above shows the reserve override. The shortfall of 0.5 TiB
-on san-a forces `ACT`, however balanced or drifted the group is, because "safety is
+The tool evaluates the gates in this order: **reserve override**, then the
+**capacity gate**, the **split gate**, **drift** and **imbalance**. The first gate
+that decides wins. The split gate acts for a large VM that can be spread over
+more storages (see `snapshot_reserve.split_vm_footprint`). The header line above shows the reserve override. The shortfall of 2.50 TiB on
+san-a forces `ACT`, however balanced or drifted the group is, because "safety is
 not subject to hysteresis" (section 13). On a group with no reserve violation, the
 line can take these other shapes:
 
@@ -122,7 +122,7 @@ reason to leave data lopsided across storages:
 Group fc-tier1 → ACT: capacity spread 32.0% meets or exceeds gates.capacity_spread_threshold (25.0%) -- acting now regardless of I/O drift/imbalance
 ```
 
-The other three gates differ in one way: this gate can act on a group whose I/O is
+Unlike the drift and imbalance gates, this gate can act on a group whose I/O is
 already perfectly balanced. Once the solver runs,
 `objective.delta_capacity_spread`, a price per TiB, does the actual spreading.
 `gates.capacity_spread_threshold: null` disables the gate. The gate never fires on
@@ -153,7 +153,9 @@ are:
 - `pending config change (unapplied)`
 - `pending deletion (unapplied)`
 - `locked: <lock>`
-- `excluded by config`
+- `excluded by config` (the VM is excluded)
+- `excluded by config (exclude.disks)`
+
 - `excluded: unused disk (exclude.include_unused_disks=false)`
 - `small disk with no larger disk of its VM in this group
   (migration.tiny_disk_bytes)`: an EFI/TPM disk whose VM has all its other disks
@@ -235,8 +237,7 @@ data-quality decisions. The groups thus cannot share a fetch. A typical deployme
 with one to three groups sends a handful of fast instant queries, which is no
 concern. An operator who runs many groups against an already busy Prometheus must
 know about this multiplier. Each query aggregates only the VMs that the group
-actually has, split into batches of `metrics.VMID_QUERY_BATCH_SIZE` VMs for a very
-large single group. It does not aggregate every VM of the cluster. An earlier
+actually has, split into batches of 150 VMs for a very large single group. It does not aggregate every VM of the cluster. An earlier
 version of this tool aggregated the whole cluster in each of those `7N` queries.
 On a cluster with hundreds of VMs, Prometheus itself could then time out the query
 instead of just answering slowly.
@@ -363,5 +364,5 @@ Cluster storages matched by no group:
 
 A pattern that is too broad, or that matches nothing, is the one new way to
 misconfigure a group that this feature adds. The tool therefore never applies an
-expansion without a record: every run also logs the expansion at INFO, whichever
+expansion without a record: every run also logs the expansion at DEBUG level, whichever
 command you run.

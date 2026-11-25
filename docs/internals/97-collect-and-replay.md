@@ -96,15 +96,15 @@ same optional `now`. It forwards the value to
 
 The node-scoping selector (`resolve_node_selector()`, section 3.4) is
 built into the query *text*. This module captures that text and writes
-it into a bundle file's `"query"` field. If the code built the
-selector from the real node list, two failures would follow. The real
-node names would leak into the bundle. A later `--replay` run would
-build different query text and never match. That run reconstructs the
-selector from `ReplayPveClient.node_names()`. That method returns
-pseudonymized names. `_capture_prometheus_files()` maps `known_nodes`
-through `mapper.node()` *before* it hands them to
-`resolve_node_selector()`. The code builds the captured text and the
-replayed text from the same anonymized inputs.
+it into a bundle file's `"query"` field. The *live* query must use the real node names, because Prometheus knows no
+other names. The *captured* text must not: real names would leak into the
+bundle, and a later `--replay` run would build different query text and never
+match. That run builds the selector from `ReplayPveClient.node_names()`, which
+returns pseudonyms. `_capture_prometheus_files()` therefore builds the selector
+twice. It calls `resolve_node_selector()` with the real names for the live query.
+It calls `build_node_selector()` with the names mapped through `mapper.node()` for
+the captured text. The captured text and the replayed text thus come from the
+same anonymized inputs.
 
 ## Anonymization: allowlist, then pseudonym, then timestamp
 

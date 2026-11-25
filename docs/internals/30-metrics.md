@@ -1,8 +1,8 @@
 # The Prometheus client and `verify-metrics`
 
 **What does this page answer?** How does `metrics.py` talk to Prometheus
-without ever touching the network in a test? What does each of the six
-`verify-metrics` checks query? This page describes
+without ever touching the network in a test? What does each `verify-metrics` check
+query? This page describes
 `proxmox_storage_drs/metrics.py`.
 
 ## `_SessionLike` / `_ResponseLike`: why not `requests.Session` directly
@@ -76,8 +76,7 @@ An earlier revision of this function had a middle tier here. That tier
 matched a `cluster`-naming label against the live cluster's own name
 (`PveClient.cluster_name()`, `GET /cluster/status`). An operator correction
 removed the tier. The premise was that this project's deployments carry
-such a label "as standard practice". That premise was simply wrong. This
-project does not follow such a convention. The tier existed only on a
+such a label "as standard practice". That premise was simply wrong. No such convention exists. The tier existed only on a
 mistaken assumption. The extra `Sys.Audit`-gated API call it needed added
 nothing. Use `metrics.extra_selector` for a cluster-naming (or any other)
 label your own Telegraf/InfluxDB tagging scheme actually has.
@@ -93,7 +92,7 @@ and `loadmodel.py` never call the PVE API themselves.
 this function. The command calls `resolve_node_selector(metrics, None)`
 directly. It applies only an explicit override. The command is deliberately
 independent of the PVE API. It also has no node list of its own to build
-the default tier from. Of its six checks, only `_check_coverage()`/
+the default tier from. Of its checks, only `_check_coverage()`/
 `_check_observed_spacing()` build a `rate()`/range query at all. The other
 checks query a raw metric name or sample one series directly. A
 cross-cluster mix-up is not a correctness question there. It is a
@@ -189,7 +188,7 @@ for this query at all". Once the step has fallen back once, every later
 chunk reuses it directly. It does so without re-entering the fallback
 branch.
 
-## `verify_metrics()`: six checks, six functions
+## `verify_metrics()`: five check functions
 
 Each `_check_*` function is a single, focused verification. It returns
 `Finding`s. Where relevant, it also returns the data the report carries

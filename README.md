@@ -76,8 +76,8 @@ apt install ../pve-storage-drs_*_all.deb
 ```
 
 The Debian package targets **trixie**. Trixie is the base of PVE 9.x. The package pulls a real
-MILP solver (`coinor-cbc` via `python3-pulp`) as a hard dependency. A package install always
-plans with a solver rather than the fallback heuristic. See [Packaging](#packaging).
+MILP solver (`coinor-cbc` via `python3-pulp`) as a hard dependency. A package install therefore plans with the CBC solver by default. The heuristic
+runs only when you select it or when a CBC solve fails. See [Packaging](#packaging).
 
 Run from a git checkout instead. The checkout gives you the dependency-free heuristic unless you
 also install the `solver` extra:
@@ -165,8 +165,7 @@ the live backend:
 5. per-disk sample coverage is good enough over your window;
 6. the declared `pvestatd` push interval matches the sample spacing actually observed.
 
-Two findings matter more than the rest. Check 4 failing means a transport dropped a field. The
-finding reads *one metric is missing disks the others report*. That failure mode produces a
+Two findings matter more than the rest. Check 4 failing means a transport dropped a field. The finding reads *no series for N disk(s) that other configured metrics report*. That failure mode produces a
 confidently wrong plan rather than an error. See [The metrics pipeline](#the-metrics-pipeline).
 Check 3 asks you to confirm something the tool cannot check for you. `instance` is the tag PVE
 itself emits for the drive id, so `instance` is not wrong. Prometheus uses `instance` for its own
@@ -197,8 +196,8 @@ pve-storage-drs -c /etc/pve/drs.yaml explain    # the same plan, narrated
 `plan` never runs anything, in any mode. `explain` runs the identical pipeline. It then narrates
 what `plan` output does not print. The narration covers every disk pinned this run and why. It
 covers the VMs a pin leaves spread across storages. It covers the objective's seven terms,
-individually. It covers the payback arithmetic. It covers the closest move the solver rejected. It covers
-that move when a group's gate said "act" but the solver still chose to move nothing. It shows
+individually. It covers the payback arithmetic. It covers the closest move the solver rejected, when a group's gate
+said "act" but the solver still chose to move nothing. It shows
 what that move would have cost. That last item answers the most common question this tool gets.
 
 ### Step 7 — apply it ⚠️ this one migrates data
@@ -227,7 +226,7 @@ tasks keeps them from actively conflicting, but it degrades the overlap to "slow
 rather than preventing it.
 
 An `auto` run logs its full decision trail — gate, load, plan, objective, payback, and every
-migration with its PVE task UPID — without needing `-v`, as JSON, because under a timer that log
+migration with its PVE task UPID — without needing `-v`, because under a timer that log
 is the only record of what happened to your cluster. `--log-level warning` or `error` on such a
 run is raised back up to `info` rather than discarding it; `--quiet` is the one option that does
 discard it, and it does not belong in a timer unit. See
@@ -292,7 +291,8 @@ that distinguishes them.
 ## Status
 
 The tool is implemented, tested against a production cluster, and released as a Debian
-package. See [Step 1](#step-1--install). Phases 1–14 of `IMPLEMENTATION_PLAN.md` §12 are done.
+package. See [Step 1](#step-1--install). Phases 1–14 and 16–18 of `IMPLEMENTATION_PLAN.md` §12
+are implemented. Phase 16 is not yet tested on a live cluster.
 They run from reading the cluster and Prometheus, through the gates, the solver (CBC when
 installed, a dependency-free heuristic otherwise), move ordering and execution, to Debian
 packaging. They also cover the `collect-testdata` / `--replay` diagnostic-bundle subsystem, the

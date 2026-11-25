@@ -22,7 +22,9 @@ The tool guarantees two properties. No setting turns them off. Every storage kee
 for snapshots. By default the reserve is twice the most space one VM's snapshot would need on
 that storage, which is the sum of all of that VM's disks on the storage. The reserve holds
 *during* a migration, not only before and after it, because a mirrored disk uses both storages
-until the move ends. The tool rejects a plan whose migration cost exceeds the imbalance the plan removes.
+until the move ends. The tool rejects a plan whose balance gain does not pay
+for its migration cost. By default, the gain must be at least ten times the cost.
+A plan that repairs a reserve shortfall is exempt from this test.
 
 The default mode is **dry-run**. In this mode **pve-storage-drs** prints the plan, the
 arithmetic behind it and the API calls it would issue. It changes nothing. The tool never
@@ -70,7 +72,7 @@ filesystem. Every node reads the same file.
   output does not print. It shows the measured load every number derives from, which is
   **show-load**'s own per-storage/per-disk picture. It names every disk pinned this run, with
   its exact reason. It names any VM a pin leaves with disks on more than one storage ("cannot
-  fully consolidate"). It breaks the solver's objective into its five weighted terms. It shows
+  fully consolidate"). It breaks the solver's objective into its seven weighted terms. It shows
   the pinned load as a fraction of the group's total, against *report.warn_pinned_load_fraction*.
   That flags a residual imbalance that is likely too structural (too much load pinned) for
   another run of **plan** to fix by itself. **-v** adds the exact Prometheus query the whole run
@@ -187,9 +189,8 @@ subcommand takes options of its own.
   fetches nothing. A real capture refuses to start above *support.max_series_points*.
 
 **--range** *DURATION*
-: Sets the range of the series capture. The flag overrides *support.capture_range*. The
-  default captures what *holt_winters* needs (twice *window.lookback*), not only what the
-  configured model needs.
+: Sets the range of the series capture. The flag overrides *support.capture_range*. The default captures what *holt_winters* needs (at least twice
+  *window.lookback*), not only what the configured model needs.
 
 **--step** *DURATION*
 : Sets the resolution of the series capture. The flag overrides *metrics.step*. Coarsening the

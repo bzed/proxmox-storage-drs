@@ -12,9 +12,9 @@ feasibility and objective functions as the MILP path so the two backends are
 directly comparable." `evaluate_assignment()` takes a `Group` and any candidate
 `Assignment` (`dict[Disk.key, storage id]`). The candidate need not be reachable
 from the current state by any sequence of moves. The function returns an
-`ObjectiveBreakdown`. This keeps the five terms of the section 5.4 objective
-separate instead of one number. There are two reasons. `explain` (not yet written)
-needs to show the arithmetic. The tests that check the function against the worked
+`ObjectiveBreakdown`. This keeps the seven terms of the section 5.4 objective
+separate instead of one number. There are two reasons. `explain` needs to
+show the arithmetic. The tests that check the function against the worked
 example of section 14 need to assert each term individually, because a total alone
 could be right for the wrong reasons.
 
@@ -237,9 +237,14 @@ is the number of **every** distinct vmid with a disk in the group. `|V|` is not 
 disks. The worked number of section 14.7 (`l_bar = 6.0/3`, not `6.0/2`, with VM 309
 pinned out of the sum but still counted here) caught the first implementation, which
 got this wrong. `evaluate_assignment()` uses `w_v` in `fragmentation_term` instead
-of the old flat count per VM. Both MILP backends (`optimize.py`) import the identical function. They thus add
-the coefficient per vmid to their own `kappa` term in the same way. The
+of the old flat count per VM. The CBC model (`optimize.py`) imports the identical function. It thus adds the
+coefficient per vmid to its own `kappa` term in the same way. The
 weighting is not implemented twice (AGENTS.md section 5).
+
+**Section 5.3 (C2), format eligibility,** is enforced while the heuristic builds
+candidates. It skips every target that fails
+`storage_accepts_format(target, target_format(disk, target))`. The section 14
+fixture holds three storages of identical type, so it does not exercise this rule.
 
 **Section 5.3 (C8), small disks follow their VM,** is enforced by discarding
 candidates, not by scoring them:
@@ -283,12 +288,6 @@ extended to the third term).
   outside every candidate that `_descend()` tries today. The one fixture that exists
   to validate this module does not exercise it. This is a real gap, recorded here
   instead of being silently absent.
-- **Format-compatibility eligibility of (C2)**: `topology.Storage` does not yet
-  carry the information on storage type and format that this rule needs.
-  `_default_format` in `topology.py` resolves it internally but never exposes it on
-  `Storage`. For this reason, every storage of the group is currently an eligible
-  target for every movable disk. The section 14 fixture is homogeneous (three
-  storages of identical type) and does not exercise this gap either.
 
 The `plan` command of `cli.py` uses `heuristic.py`, together with `schedule.py` (the
 move ordering of section 8; see `95-schedule.md` and `docs/manual/27-plan.md`).

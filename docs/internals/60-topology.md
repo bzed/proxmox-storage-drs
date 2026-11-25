@@ -126,7 +126,8 @@ conditions. The first condition is config exclusion (VM-level, then
 `exclude.disks`). The second is a real snapshot or an unreferenced companion
 volume (section 3.7). `_disk_snapshot_or_orphan_reason` handles it.
 `GET .../snapshot` always returns a `"current"` entry. A live cluster
-confirmed this. The function filters that entry out before counting. For an
+confirmed this. `_fetch_vm()` drops that
+entry, so the function only sees real snapshots. For an
 unreferenced volume, the reason names the volume as `storage:volume`. It lists
 the first two sorted, plus a count of the rest. The reason names the volume
 because the volume appears nowhere else the operator looks. The third
@@ -148,8 +149,10 @@ rule lives beside the pin. `is_small_disk()` tests one disk.
 pinned included. Disks of the same VM in another group never anchor
 anything. Nothing moves between groups. `small_disk_placement_ok()` checks
 one disk. `small_disks_follow_their_vm()` checks a whole assignment in a
-single pass. Both solvers use these functions (`docs/internals/90-heuristic.md`,
-`91-optimize.md`).
+single pass. The
+heuristic calls the two placement functions. The CBC model writes the same rule as
+linear constraints with `is_small_disk()` and `larger_vm_disks()`
+(`docs/internals/90-heuristic.md`, `91-optimize.md`).
 
 ## The pending-change pin
 
@@ -224,7 +227,7 @@ PVE itself never noticed. It never refused to boot the VM over it. See
 sum uses the same `size`/`approximate-size` tiering. It has no VM config
 to fall back to for a size at all. When neither field is present, the
 module skips the volume. It logs a warning and undercounts the reserve.
-`_parse_pve_config_size_bytes` parses PVE's own config-file size suffixes.
+`parse_pve_config_size_bytes()` parses PVE's own config-file size suffixes.
 `512G` means binary GiB, with no explicit `i`. The module uses its own
 parser on purpose. `units.py`'s parser is for *this project's* config
 file. That format is different, and only by coincidence similarly shaped.
@@ -257,7 +260,9 @@ whose volid was never referenced. Orphans, templates, other groups'
 foreign volumes, and disks of VMs this run never fetched
 (stopped-and-excluded, or ungrouped) all fall out of this one computation.
 No special-casing per category is needed. This matches section 5.1.1's
-definition read literally.
+definition read literally. The sum runs only when
+`snapshot_reserve.count_foreign_volumes` is `true`, the default. When it is
+`false`, `Uˢᵉˣᵗ` is 0 and the reserve ignores unreferenced volumes.
 
 ## Section 11.4: `/…/` storage patterns are expanded here, once
 
@@ -310,9 +315,9 @@ member of the group. This holds regardless of whether a literal or a
 pattern named the storage. A warning carries no typo-safety rationale for
 staying quiet. The content check does.
 
-The module logs every pattern's expansion at INFO. It logs the raw entry
+The module logs every pattern's expansion at DEBUG. It logs the raw entry
 and the ids it matched. The call is
-`logger.info(..., extra={"event": "storage_pattern_expanded", ...})`. The
+`logger.debug(..., extra={"event": "storage_pattern_expanded", ...})`. The
 expansion is carried on `Topology.pattern_expansions` for `cli.py`'s
 `verify-storages` to print (section 3.5). The module computes
 `Topology.unmanaged_storage_ids` once, right after `groups`. The value is
@@ -422,9 +427,9 @@ mechanism is the same one `_resolve_disk_size_and_format()`'s
 Its snapshots are native LVM-thin COW, never qcow2-on-the-LV.
 
 Section 5.3 (C2)'s "`s` cannot hold the disk's format" is
-`topology.storage_accepts_format(storage, disk.format)`. Both MILP backends
-call this one function (`91-optimize.md`). So do `heuristic.py`'s own
-candidate-generating helpers. They fix `x_{d,s}=0` (or exclude the pair
+`topology.storage_accepts_format(storage, disk.format)`. The
+CBC model calls this function, with `target_format(disk, storage)` as the format
+(`91-optimize.md`). So do `heuristic.py`'s own candidate-generating helpers. They fix `x_{d,s}=0` (or exclude the pair
 from the neighbourhood the heuristic searches) for every ineligible target.
 Unlike the free-space floor, format eligibility needs no per-run
 resolution step of its own. It is a pure function of `storage_type`. The
