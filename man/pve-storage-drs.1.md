@@ -21,27 +21,28 @@ with **move_disk**.
 The tool guarantees two properties. No setting turns them off. Every storage keeps free space
 for snapshots. By default the reserve is twice the most space one VM's snapshot would need on
 that storage, which is the sum of all of that VM's disks on the storage. The reserve holds
-*during* a migration, not only before and after it. A mirrored disk uses both storages until the
-move ends. The tool rejects a plan whose migration cost exceeds the imbalance the plan removes.
+*during* a migration, not only before and after it, because a mirrored disk uses both storages
+until the move ends. The tool rejects a plan whose migration cost exceeds the imbalance the plan removes.
 
 The default mode is **dry-run**. In this mode **pve-storage-drs** prints the plan, the
 arithmetic behind it and the API calls it would issue. It changes nothing. The tool never
 deletes a volume on its own.
 
-Every plan computes from the six per-disk counters. These are QEMU `query-blockstats` figures.
-**pvestatd** already exports them through PVE's InfluxDB external metric server. The tool
-installs no exporter and no collector.
+The tool computes every plan from six per-disk counters. The counters are QEMU
+`query-blockstats` figures. **pvestatd** already exports them through PVE's InfluxDB external
+metric server. The tool installs no exporter and no collector.
 
-The InfluxDB protocol that PVE exports carries string fields. It fixes a field's type at its
-first write. Prometheus has no string sample type. A transport between the two can drop one
-counter for one disk. The drop is silent and permanent. The other five counters keep working.
-Telegraf with a Prometheus remote-write or OpenMetrics output is the common case.
+The InfluxDB protocol that PVE exports carries string fields. The protocol fixes the type of a
+field at the first write. Prometheus has no string sample type. As a result, a transport between
+the two can drop one counter for one disk. The drop is silent and permanent. The other five
+counters continue to work. Telegraf with a Prometheus remote-write or OpenMetrics output is the
+common case.
 
-A dropped counter produces a wrong plan, not an error. Run **verify-metrics** before you trust
-any plan. The command cross-checks all six counters against each other.
+A dropped counter produces a wrong plan, not an error. For this reason, run **verify-metrics**
+before you trust any plan. The command cross-checks all six counters against each other.
 
 A backend that takes PVE's InfluxDB output as-is and serves PromQL itself has no such bridge.
-gigapipe on ClickHouse is the tested example. The tool is dogfooded against it. The "Where the
+gigapipe on ClickHouse is the tested example. The project runs the tool against gigapipe. The "Where the
 numbers come from" page of the operator manual describes the mechanism in full.
 
 The tool reads its configuration from */etc/pve/drs.yaml*. The file sits on the cluster
@@ -91,9 +92,9 @@ filesystem. Every node reads the same file.
   removed, and the Prometheus metrics. The command is read-only and dry-run-only. Giving
   **--mode confirm**/**auto** alongside it is a usage error. The tool replaces every identifier
   with a pseudonym. It keys the pseudonyms to a salt that stays on the host. The tool keeps
-  sizes, capacities and load shapes. A bundle is not anonymous to someone who already knows
-  the cluster. Read the bundle before you send it. The command's own options are listed under
-  **COLLECT-TESTDATA OPTIONS** below. The exit status is *0* when every capture step succeeds.
+  sizes, capacities and load shapes. Therefore, a bundle is not anonymous to someone who
+  already knows the cluster. Read the bundle before you send it. The **COLLECT-TESTDATA
+  OPTIONS** section below lists the options of the command. The exit status is *0* when every capture step succeeds.
   It is *1* when the bundle was written but its manifest records a failed call.
 
 **help**
@@ -117,9 +118,10 @@ The tool accepts the global options before the command.
   cluster-wide. The flag does not restrict them.
 
 **--mode** *dry-run*|*confirm*|*auto*
-: Overrides *execution.mode* for this run. The tool logs every override. An override toward
-  less safety logs at warning level. The modes order is **dry-run** < **confirm** < **auto**.
-  The log names both values. The override removes a barrier the operator configured.
+: Overrides *execution.mode* for this run. The tool logs every override. The order of the modes
+  is **dry-run** < **confirm** < **auto**. The tool logs an override toward less safety at
+  warning level. That log record names both values, because the override removes a barrier that
+  the operator configured.
 
 **--json**
 : Prints the machine-readable report instead of the human-readable one.
@@ -234,8 +236,8 @@ the default and what happens at either extreme. That document, not this page, is
 for configuration.
 
 The cluster filesystem replicates */etc/pve*. An edit is live on every node immediately. The
-web server can read the files there as a group. Keep the credentials out of the file and in
-**PVE_PASSWORD** or **PVE_TOKEN_SECRET**. Prefer an API token over a password.
+group of the web server can read the files there. Therefore, keep the credentials out of the file.
+Put them in **PVE_PASSWORD** or **PVE_TOKEN_SECRET**. Prefer an API token over a password.
 
 # ENVIRONMENT
 
@@ -243,7 +245,8 @@ web server can read the files there as a group. Keep the credentials out of the 
 : Path to the configuration file. **--config** overrides it.
 
 **PVE_PASSWORD**, **PVE_TOKEN_SECRET**
-: Proxmox VE credentials. You can keep them out of the configuration file.
+: Proxmox VE credentials. With these variables, you do not have to write the credentials into the
+  configuration file.
 
 # FILES
 
@@ -263,8 +266,8 @@ web server can read the files there as a group. Keep the credentials out of the 
 *monitoring.status_file* (unset by default)
 : **apply** rewrites the status report at the end of every run. The report uses the format the
   **check_statusfile** plugin (*monitoring-plugins-contrib*) reads. Line 1 is *OK*, *WARNING* or
-  *CRITICAL*. Line 2 is the output. The modification time of the file is its freshness. The
-  tool rewrites the file even when the run moved nothing. See *docs/manual/36-monitoring.md*.
+  *CRITICAL*. The output follows. The modification time of the file shows how new the report is.
+  For this reason, the tool rewrites the file even when the run moved nothing. See *docs/manual/36-monitoring.md*.
 
 */var/lib/pve-storage-drs/anonymization-salt*
 : The pseudonym key for **collect-testdata**. The tool generates it on first use. Its mode is
@@ -285,8 +288,8 @@ web server can read the files there as a group. Keep the credentials out of the 
 1
 : The run failed. The failure can be an invalid configuration. It can be Prometheus or the
   Proxmox VE API unreachable, or failing mid-run. It can be a failed migration. It can be a
-  solver that produced nothing usable. The API can fail for any group, in the first plan or in
-  a re-plan. **apply** stops at once and visits no later group. A run that stops because
+  solver that produced nothing usable. A Prometheus or API failure counts for every group, in the
+  first plan and in a re-plan. **apply** then stops at once and visits no later group. A run that stops because
   *execution.max_replans_per_run* was exhausted is not a failure. It exits 0.
 
 2
