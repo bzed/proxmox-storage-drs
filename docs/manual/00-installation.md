@@ -18,7 +18,8 @@
   plus permission to call `move_disk`. Use an API token for unattended
   operation (`execution.mode: auto`). Use a username and password for
   interactive use. The section "Setting up the PVE credential" below lists
-  the exact privileges. "just grant Audit everywhere" is not enough. The
+  the exact privileges. The obvious
+  approach, "just grant Audit everywhere", is not enough. The
   gap is silent, not an error.
 
 ## Setting up the PVE credential
@@ -45,7 +46,8 @@ image-holding storages in your `groups`, not backup targets):
   have more free space than it has. The tool then plans and runs migrations
   that reduce a safety margin it believes it still protects.
 - Grant it **at each storage's own path** (`/storage/<id>`), not only at the
-  parent `/storage`. The storage-path grant is the one that works.
+  parent `/storage`. The storage-path grant is
+  the one that is confirmed to work.
 - Also add `VM.Audit` cluster-wide (`/`) for VM inventory and config. If you
   use the built-in role `PVEAuditor` as a base, it already includes it.
 

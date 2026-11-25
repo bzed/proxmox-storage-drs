@@ -439,10 +439,10 @@ mid-run exception never leaves the lock held.
 ## The payback gate: `apply` refuses on its own verdict (REVIEW.md S-02)
 
 Section 7 calls the payback rule "a **hard acceptance test on the finished
-plan**, not merely a soft `γ` penalty". A plan whose moves already cost
-`γ` points against in the solver's own objective
-(`docs/internals/91-optimize.md`) can still be rejected wholesale here,
-after the fact. The tool does not just score it lower going in. The rule
+plan**, not merely a soft `γ` penalty". The solver's own
+objective already charges a plan `γ` points for the size of a move
+(`docs/internals/91-optimize.md`). The tool can still reject such a whole plan
+here, after the fact. It does not only score the plan lower in advance. The rule
 is a verdict `plan` shows the operator, not a suggestion. An earlier
 revision of `_handle_apply()` computed `payback_result` and then ignored
 it entirely on the execution path. It executed a plan whose aggregate
