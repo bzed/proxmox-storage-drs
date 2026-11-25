@@ -46,8 +46,8 @@ just unattractive. By the time `_descend()` runs, `_repair()` has already resolv
 every reserve violation that it can. In the common case, the term is therefore
 exactly zero and does not influence the choices of the descent at all.
 `test_reserve_violation_is_repaired_even_with_beta_high_enough_to_forbid_balance_moves`
-is the regression test: with `beta=100`, no purely cosmetic balance move could
-ever be worth a migration, and the repair move still happens.
+is the regression test. With `beta=100`, no purely cosmetic balance move could
+ever be worth a migration. The repair move still happens.
 
 **The tool judges a candidate by the total shortfall of the whole group, not by the
 shortfall of the source storage.** That total already counts what a move does to
@@ -69,8 +69,8 @@ progress. The rule that the total of the *group* must strictly decrease repairs
 this. It also makes the iteration bound of the loop (movable disks times storages,
 sized generously) a correct termination argument instead of a lucky one.
 `test_repair_does_not_oscillate_when_no_target_can_fully_absorb_the_violation` is
-the regression test: a 3 TiB disk that cannot fit alone on either of two storages
-of 8 TiB with `reserve_factor: 2.0` moves exactly once. The move repairs what it can,
+the regression test. It uses two storages of 8 TiB with `reserve_factor: 2.0`.
+A 3 TiB disk cannot fit alone on either of them. The disk moves exactly once. The move repairs what it can,
 from a group-wide shortfall of 3 TiB down to 1 TiB, and the disk does not move
 back and forth forever.
 
@@ -91,9 +91,9 @@ improvement, a swap.
 
 ## Descend also tries relocating a whole VM at once — a real gap, found by dogfooding
 
-Neither of the two candidate kinds above can reach a third kind of improving move:
-a relocation of *all* movable disks of a VM with several disks to one new storage,
-together. A move of one disk cannot get there when the `kappa` (VM affinity) term
+Neither of the two candidate kinds above can reach a third kind of improving
+move. That move relocates *all* movable disks of a VM with several disks to one
+new storage, together. A move of one disk cannot get there when the `kappa` (VM affinity) term
 of the objective is large enough to make a move of only one disk of the VM a net
 loss. The move temporarily *fragments* the VM (and pays `kappa`) before a second
 move could reunite it elsewhere, and `_descend()` only takes a step that improves
@@ -121,8 +121,8 @@ trial, so the descent can never choose a worse assignment this way. The trial
 respects `cooldown_storages` as a destination exclusion, like the other two
 candidates.
 `test_descend_relocates_a_whole_multi_disk_vm_neither_single_moves_nor_swaps_can_reach`
-reproduces the numbers of the production scenario by hand: a single move raises the
-objective by +0.43, and the joint move lowers it by -0.14. The test confirms that
+reproduces the numbers of the production scenario by hand. A single move raises
+the objective by +0.43. The joint move lowers it by -0.14. The test confirms that
 `_descend()` only finds the improvement once this candidate exists.
 `_best_of()`/`_single_move_trials()`/`_swap_trials()`/`_vm_relocation_trials()` are
 helpers that the flake8 complexity limit forced out. They let all three candidate
@@ -216,10 +216,10 @@ At `delta_capacity_spread: 0`, it asserts that `ObjectiveBreakdown.total` equals
 `3.384685` (three-move plan) and, at `beta_move_count: 0.50`, `4.009685` (two-move
 plan). These are the exact totals that the revised arithmetic of section 14.3 gives
 once `w_v` weights `kappa` (below). They are not values that this module invented
-and then asserted against itself. A match to six decimal places is strong evidence
-that the seven terms of the objective, their units (TiB for size, average in-flight
-I/O for load) and the search that chooses among them are correct together, not
-just consistent with each other.
+and then asserted against itself. A match to six decimal places is strong evidence. It shows that these parts are
+correct together, not just consistent with each other: the seven terms of the
+objective, their units (TiB for size, average in-flight I/O for load) and the
+search that chooses among them.
 
 ## `w_v`: `kappa` weighted by a VM's own I/O, and `D^big`
 
@@ -237,10 +237,9 @@ is the number of **every** distinct vmid with a disk in the group. `|V|` is not 
 disks. The worked number of section 14.7 (`l_bar = 6.0/3`, not `6.0/2`, with VM 309
 pinned out of the sum but still counted here) caught the first implementation, which
 got this wrong. `evaluate_assignment()` uses `w_v` in `fragmentation_term` instead
-of the old flat count per VM. Both MILP backends (`optimize.py`) import the
-identical function, so that they add the coefficient per vmid to their own `kappa`
-term in the same way, instead of implementing the weighting twice (AGENTS.md
-section 5).
+of the old flat count per VM. Both MILP backends (`optimize.py`) import the identical function. They thus add
+the coefficient per vmid to their own `kappa` term in the same way. The
+weighting is not implemented twice (AGENTS.md section 5).
 
 **Section 5.3 (C8), small disks follow their VM,** is enforced by discarding
 candidates, not by scoring them:
@@ -264,10 +263,9 @@ Second, `D^big = {d : z_d >= migration.tiny_disk_bytes}` (default 64 MiB).
 threshold. The reunion of an `efidisk0`/`tpmstate0` thus costs nothing on the
 `beta`/`gamma` side. `moved_disk_keys` itself is unchanged, so a tiny disk still
 appears as a real move everywhere else (reporting, the ordering in `schedule.py`,
-the move list in `payback.py`). `ObjectiveBreakdown.affinity_debt` (the raw `A`,
-weighted by `w_v` but not scaled by `kappa`) and `raw_affinity_debt()` exist only so
-that the benefit in `payback.py` can use the identical quantity that `kappa` charges
-here. It never derives a second quantity independently (the rule of REVIEW.md R-01,
+the move list in `payback.py`). `ObjectiveBreakdown.affinity_debt` is the raw `A`, weighted by `w_v` but not
+scaled by `kappa`. This field and `raw_affinity_debt()` exist for one purpose. The
+benefit in `payback.py` uses the identical quantity that `kappa` charges here. It never derives a second quantity independently (the rule of REVIEW.md R-01,
 extended to the third term).
 
 ## What this pass deliberately does not do
@@ -278,10 +276,10 @@ extended to the third term).
   section 14 fixture (the tests above prove it). The reason is that the `kappa` term
   of the objective already makes the descent prefer co-location when it is not too
   costly. Since the repair above, the relocation of a whole VM in the descent also
-  reaches the case with two or fewer disks directly. What remains for polish is
-  strictly narrower than before: an *N-way rotation* across three or more storages
-  (disk A needs S1→S2, disk B needs S2→S3, disk C needs S3→S1 in a cycle), where the
-  move of no disk improves alone and no two disks belong to the same VM. This is
+  reaches the case with two or fewer disks directly. What remains for polish is strictly narrower than before. It is an *N-way
+  rotation* across three or more storages (disk A needs S1→S2, disk B needs
+  S2→S3, disk C needs S3→S1 in a cycle). In it, the move of no disk improves alone,
+  and no two disks belong to the same VM. This is
   outside every candidate that `_descend()` tries today. The one fixture that exists
   to validate this module does not exercise it. This is a real gap, recorded here
   instead of being silently absent.
