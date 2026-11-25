@@ -1,52 +1,54 @@
 # Persistent state: `state.json`
 
-**What does this page answer?** What does `state.py` actually store, how
-does reading it degrade instead of failing, why is the advisory lock a real
-`flock()` rather than a JSON field, and what does today's wiring into
-`show-load`/`plan` actually change? Describes `proxmox_storage_drs/state.py`.
+**What does this page answer?** What does `state.py` store? How does
+reading degrade instead of failing? Why is the advisory lock a real
+`flock()` rather than a JSON field? What does the wiring into
+`show-load`/`plan` change? This page describes `proxmox_storage_drs/state.py`.
 
 ## One dataclass tree, matching section 11.2's JSON exactly
 
-`State` mirrors the plan's own example document field for field: `lock`
-(`LockInfo | None`), `last_balance` (`at` plus a `"<group>:<vmid>:<device>"
--> ℓ_d` `load_vector`), `cooldowns` (`disk`/`storage`, each a key ->
-timestamp mapping), `inflight_upids`, `staged_disks`. `disk_state_key()`/
-`storage_state_key()` build the two key shapes section 11.2 specifies —
-group-prefixed specifically so a vmid reused after a VM is destroyed and
-recreated in a *different* group cannot collide with its old entry.
-`empty_state()` is what a fresh install, or a lost file, degrades to: no
-lock, no balance, no cooldowns, nothing in flight.
+`State` mirrors the plan's own example document field for field. The fields
+are `lock` (`LockInfo | None`), `last_balance` (`at` plus a
+`"<group>:<vmid>:<device>" -> ℓ_d` `load_vector`), `cooldowns`
+(`disk`/`storage`, each a key -> timestamp mapping), `inflight_upids`, and
+`staged_disks`. `disk_state_key()` and `storage_state_key()` build the two
+key shapes that section 11.2 specifies. The keys are group-prefixed. A vmid
+reused after a VM is destroyed and recreated in a *different* group then
+cannot collide with its old entry. `empty_state()` is what a fresh install,
+or a lost file, degrades to: no lock, no balance, no cooldowns, nothing in
+flight.
 
 ## Reading degrades; writing does not
 
-`load_state()` never raises. A missing file is the ordinary first-run case
-(silent); a present-but-corrupt, empty, or wrong-`schema_version` one is
-still just `empty_state()`, but logged at `WARNING` — section 11.2's own
-words are "losing this file is safe but not free: cooldowns and drift
-history reset", not "state.json existing and being readable is required to
-run". This mirrors `show-load`'s choice to degrade a group's load to
-"unavailable" on a Prometheus outage rather than fail the whole command —
-neither Prometheus nor `state.json` is an *explicitly requested* input the
-way `-c/--config PATH` is, and only the latter is a hard failure on error
+`load_state()` never raises. A missing file is the ordinary first-run case.
+The function stays silent. A present-but-corrupt, empty, or
+wrong-`schema_version` file also yields `empty_state()`. The function logs
+that case at `WARNING`. Section 11.2 puts it this way: "losing this file is
+safe but not free: cooldowns and drift history reset", not "state.json
+existing and being readable is required to run". This mirrors the choice in
+`show-load`: on a Prometheus outage, the command degrades a group's load to
+"unavailable" rather than fail the whole command. Neither Prometheus nor
+`state.json` is an *explicitly requested* input the way `-c/--config PATH`
+is. Only the latter fails hard on an error
 (`.agents/domain-invariants.md` section 9).
 
-`save_state_atomic()`, by contrast, raises `StateError` on any failure —
-writing (or locking) is something a caller actively asked this module to
-do, not a read with a documented, safe fallback. It writes to a temp file
-in the same directory, `fsync`s, then `os.replace()`s over the real path,
-so a concurrent `load_state()` can never observe a half-written file —
-which is exactly what lets every read in this codebase skip locking
-entirely (next section).
+`save_state_atomic()`, by contrast, raises `StateError` on any failure.
+Writing (or locking) is an action a caller asked this module to do, not a
+read with a documented, safe fallback. The function writes to a temp file
+in the same directory, `fsync`s the file, then `os.replace()`s it over the
+real path. A concurrent `load_state()` can then never observe a
+half-written file. That is exactly what lets every read in this codebase
+skip locking entirely (next section).
 
 ## Locking: `flock()` is the mechanism, the JSON `lock` field is a label
 
 `acquire_lock()` takes a real, non-blocking `fcntl.flock(LOCK_EX |
-LOCK_NB)` on the state file itself. That is the actual, kernel-enforced
-mutual exclusion section 11.2 asks for, and it is correct by construction
-for two instances on the *same host* — `.agents/domain-invariants.md`
-section 9 is explicit that "the `fcntl` lock cannot see another node";
-cross-node coordination is the separate in-flight-UPID scan (section 13),
-not this module's job.
+LOCK_NB)` on the state file itself. That is the kernel-enforced mutual
+exclusion that section 11.2 asks for. It is correct by construction for two
+instances on the *same host*. `.agents/domain-invariants.md` section 9 is
+explicit that "the `fcntl` lock cannot see another node". Cross-node
+coordination is the separate in-flight-UPID scan (section 13), not this
+module's job.
 
 The `lock: {pid, host, acquired_at}` field recorded *inside* the JSON is
 **descriptive metadata for a human reading the file, not the exclusion

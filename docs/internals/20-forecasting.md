@@ -1,57 +1,59 @@
 # Forecasting: a Holt-Winters scaling of each disk's load
 
-**What does this page answer?** How does `forecast.py` turn a disk's history into
-a load for the *next* window, when is that trusted, and where does it enter the
-model? Describes `proxmox_storage_drs/forecast.py` and its two callers,
-`cli._compute_group_load()` and `loadmodel.apply_forecast()`.
+**What does this page answer?** How does `forecast.py` turn a disk's history
+into a load for the *next* window? When is that value trusted? Where does it
+enter the model? This page describes `proxmox_storage_drs/forecast.py` and
+its two callers, `cli._compute_group_load()` and `loadmodel.apply_forecast()`.
 
 ## What is forecast, and what is not
 
 The decision statistic behind every placement is `window.quantile` (p95) of a
 disk's load. `forecast.model: quantile` (the default) takes it over the **last**
-`W = window.lookback`; this module is only used for `holt_winters`, which
-predicts it over the **next** `W`: fit the disk's series, forecast
-`ceil(W / metrics.step)` steps, take `window.quantile` of that forecast path,
-clamp at 0 (`holt_winters_quantile()`).
+`W = window.lookback`. This module is used only for `holt_winters`. That
+model predicts the statistic over the **next** `W`: it fits the disk's
+series, forecasts `ceil(W / metrics.step)` steps, takes `window.quantile` of
+that forecast path, and clamps at 0 (`holt_winters_quantile()`).
 
-Two things it deliberately is not:
+Two things the value deliberately is not:
 
 - **Not the last forecast point.** `fit.forecast(steps)[-1]` is one sample at
-  one hour of day; it says nothing about tomorrow's peak. The unit test builds a
-  series that *ends at its daily trough*: the last point is the trough, the p95
-  of the path is near the peak.
-- **No `z * sigma` band.** A forecast p95 is compared with its `quantile`-model
-  peers' observed p95; a residual band would inflate exactly the disks that were
-  forecast.
+  one hour of day. That value says nothing about tomorrow's peak. The unit
+  test builds a series that *ends at its daily trough*: the last point is
+  the trough, the p95 of the path is near the peak.
+- **No `z * sigma` band.** The tool compares a forecast p95 with the
+  observed p95 of its `quantile`-model peers. A residual band would inflate
+  exactly the disks that were forecast.
 
-There is no forecaster protocol and no model registry any more: `quantile` needs
-no code here at all, `seasonal_naive` was removed (its statistic — the median of
-the same hour of day — was not a forecast over `W`), and everything that used an
-upper bound (the section 7.3 saturation guard) is gone.
+The forecaster protocol and the model registry are gone. `quantile` needs no
+code here at all. `seasonal_naive` was removed: its statistic, the median of
+the same hour of day, was not a forecast over `W`. Everything that used an
+upper bound (the section 7.3 saturation guard) is gone too.
 
 ## A ratio, never a substitution
 
-`loadmodel.compute_disk_load_series()` normalizes **per timestamp** while
-`compute_group_load()` normalizes over the whole window and also owns coverage
-rejection and the `last_known_loads` fallback, so the two numbers are on
-different scales. The forecast therefore scales, it does not replace:
+`loadmodel.compute_disk_load_series()` normalizes **per timestamp**.
+`compute_group_load()` normalizes over the whole window. The latter also
+owns coverage rejection and the `last_known_loads` fallback. The two
+numbers are therefore on different scales. The forecast scales a load; it
+does not replace one:
 
     l_d  <-  l_d * f_d / h_d
 
-with `h_d` the `window.quantile` of the disk's own series over `[now-W, now]`
-and `f_d` the forecast from above (`disk_factors()`). `loadmodel.apply_forecast()`
-applies the factors and rebuilds the per-storage `L_s`/`u_s` and `u*`. A disk
-keeps its observed `l_d` unchanged when
+Here `h_d` is the `window.quantile` of the disk's own series over
+`[now-W, now]`, and `f_d` is the forecast from above (`disk_factors()`).
+`loadmodel.apply_forecast()` applies the factors. It rebuilds the
+per-storage `L_s`/`u_s` and `u*`. A disk keeps its observed `l_d`
+unchanged when
 
 - it is flagged for low coverage (`DiskLoad.flagged_reason`), or
 - it has no samples in the window, or `h_d = 0`, or
 - there is no trustworthy fit: fewer than `2 * seasonal_periods` samples, a
   constant series, `statsmodels` not installed, any exception from the fit, a
   `ConvergenceWarning` (turned into an error inside the fit), or a non-finite
-  forecast. `holt_winters_quantile()` returns `None` and the disk is left out.
+  forecast. `holt_winters_quantile()` returns `None` and the disk stays out.
 
-`idle` and `no_series_matched` describe the observed window and are untouched: a
-forecast never wakes an idle group up.
+`idle` and `no_series_matched` describe the observed window, and the
+forecast leaves them untouched. A forecast never wakes an idle group up.
 
 **One call site rule.** `cli._compute_group_load()` is the only place either
 `show-load` or `plan`/`apply` gets a group's load from, so a group's gates and its

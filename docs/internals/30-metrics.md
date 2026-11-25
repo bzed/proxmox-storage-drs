@@ -1,72 +1,73 @@
 # The Prometheus client and `verify-metrics`
 
 **What does this page answer?** How does `metrics.py` talk to Prometheus
-without ever touching the network in a test, and what does each of the six
-`verify-metrics` checks actually query? Describes
+without ever touching the network in a test? What does each of the six
+`verify-metrics` checks query? This page describes
 `proxmox_storage_drs/metrics.py`.
 
 ## `_SessionLike` / `_ResponseLike`: why not `requests.Session` directly
 
-`PrometheusClient.__init__` accepts `session: _SessionLike | None`, a
-`Protocol` defined in this module with only the one `get(...)` method the
-client actually calls — not `requests.Session` itself. `.agents/testing.md`
-forbids any test talking to a real Prometheus; a structural protocol lets a
-test hand in a small dataclass with a matching `get()` instead of mocking
-or subclassing the real (network-capable) session. `PrometheusClient()` with
-no `session` argument still constructs a real `requests.Session()`, which
-satisfies the protocol structurally — nothing special is needed to make the
-real thing fit.
+`PrometheusClient.__init__` accepts `session: _SessionLike | None`. That
+type is a `Protocol` defined in this module, with only the one `get(...)`
+method the client actually calls. It is not `requests.Session` itself.
+`.agents/testing.md` forbids any test that talks to a real Prometheus. A
+structural protocol lets a test hand in a small dataclass with a matching
+`get()`. The test does not mock or subclass the real (network-capable)
+session. `PrometheusClient()` with no `session` argument still constructs a
+real `requests.Session()`. That object satisfies the protocol structurally,
+so nothing special is needed to make the real session fit.
 
 ## `_get()`: one request path, three endpoint shapes
 
-Every one of `instant_query`, `range_query` and `label_values` goes through
-the private `_get()`, which does the HTTP call, checks the status code,
-parses JSON, checks Prometheus's own `status: "success"` field, and returns
-`payload["data"]`. That field's *shape* genuinely differs by endpoint — a
-dict with a `result` list for `query`/`query_range`, a bare list for
-`label/<name>/values` — which is why `_get()` is typed `Any` rather than
-picking one shape; each public method knows which shape it asked for and
-narrows accordingly. Every failure mode (a transport error, a non-200
-status, unparseable JSON, an unsuccessful Prometheus response) raises
-`MetricsError` from exactly this one place, so a caller catching
+All three methods `instant_query`, `range_query` and `label_values` go
+through the private `_get()`. That function does the HTTP call, checks the
+status code, parses the JSON, checks Prometheus's own `status: "success"`
+field, and returns `payload["data"]`. The *shape* of that field differs by
+endpoint: a dict with a `result` list for `query`/`query_range`, a bare list
+for `label/<name>/values`. `_get()` is therefore typed `Any` instead of
+picking one shape. Each public method knows which shape it asked for, and it
+narrows the type accordingly. Every failure mode (a transport error, a
+non-200 status, unparseable JSON, an unsuccessful Prometheus response)
+raises `MetricsError` from this one place. A caller that catches
 `MetricsError` around any of the three public methods sees every failure
 mode uniformly.
 
 ## PromQL construction
 
-`build_rate_promql()` builds `sum by (vmid, device) (rate(<metric>{<selector>}[<rate_window>]))`
-— the `sum by` deliberately collapses the node/host labels, so a VM that
-live-migrated between nodes mid-window still reads as one series, and
-`selector` (see "Node-scoping" below) sits *inside* `rate()`'s own vector
-selector, before those labels are collapsed. `build_quantile_over_time_promql()`
-wraps a rate expression in `quantile_over_time(q, (<rate_expr>)[<lookback>:<step>])`
-— `metrics.py`'s own six-raw-quantity fetch calls the first to build each
-`rate_expr`, then the second around it, once per configured quantile.
-Both are pure string-building functions, deliberately factored out of any
-query-issuing code so they are unit-testable without a fake session at
-all (`IMPLEMENTATION_PLAN.md` section 3.4 has the full per-metric
+`build_rate_promql()` builds `sum by (vmid, device) (rate(<metric>{<selector>}[<rate_window>]))`.
+The `sum by` deliberately collapses the node/host labels. A VM that
+live-migrated between nodes mid-window still reads as one series. The
+`selector` (see "Node-scoping" below) sits *inside* the vector selector of
+`rate()`, before the collapse. `build_quantile_over_time_promql()` wraps a
+rate expression in `quantile_over_time(q, (<rate_expr>)[<lookback>:<step>])`.
+The six-raw-quantity fetch in `metrics.py` calls the first function to
+build each `rate_expr`, then wraps the result with the second, once per
+configured quantile.
+Both are pure string builders. The code factors them out of any
+query-issuing code on purpose, so a unit test can call them without a fake
+session at all (`IMPLEMENTATION_PLAN.md` section 3.4 has the full per-metric
 derivation). `raw_metric_name()` is the one place that maps a
 `RAW_METRIC_FIELDS` entry (`"read_ops"`, ...) to the configured metric name
-on a `MetricsConfig`, via `getattr` — this is what lets `verify_metrics()`
-iterate "every configured raw metric" without hand-listing the six field
-names a second time anywhere in this module.
+on a `MetricsConfig`, via `getattr`. That lets `verify_metrics()` iterate
+"every configured raw metric" without hand-listing the six field names a
+second time anywhere in this module.
 
 ## Node-scoping: `build_node_selector()` / `resolve_node_selector()`
 
-`build_rate_promql()`'s `selector` parameter is what makes a query correct
-on a Prometheus that serves more than one PVE cluster (or anything else
-emitting a same-named metric): without it, `sum by (vmid, device)` happily
-sums across clusters, since `vmid` is only unique *within* one. The
-selector text itself is resolved once per command invocation by
-`resolve_node_selector(metrics, node_names)`, in this order:
+The `selector` parameter of `build_rate_promql()` is what makes a query
+correct on a Prometheus that serves more than one PVE cluster (or anything
+else emitting a same-named metric). Without the selector, `sum by (vmid,
+device)` sums across clusters, since `vmid` is unique only *within* one
+cluster. `resolve_node_selector(metrics, node_names)` resolves the selector
+text once per command invocation, in this order:
 
-1. `metrics.extra_selector` verbatim when the operator set one (trusted
-   completely; it may not even name a node label at all).
-2. `build_node_selector(metrics.labels.node, node_names)` otherwise, which
-   escapes every name (`_escape_promql_regex_literal()` -- an FQDN's `.`
-   is a regex metacharacter otherwise) and joins them into one `=~`
-   alternation. This is the default tier, from this cluster's own node
-   list.
+1. `metrics.extra_selector`, verbatim, when the operator set it. The code
+   trusts it completely. It may not even name a node label at all.
+2. `build_node_selector(metrics.labels.node, node_names)` otherwise. The
+   function escapes every name (`_escape_promql_regex_literal()`; an FQDN's
+   `.` is a regex metacharacter otherwise). It then joins the names into one
+   `=~` alternation. This is the default tier, built from this cluster's own
+   node list.
 3. `None` when nothing above resolved anything (an empty `node_names`).
 
 An earlier revision of this function had a middle tier here matching a

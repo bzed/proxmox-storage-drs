@@ -1,48 +1,50 @@
 # Overview: what is built, and how it fits together
 
-**What does this page answer?** Where does an invocation of `pve-storage-drs` go,
-which module owns which piece, and how much of `IMPLEMENTATION_PLAN.md`'s
-section 2 architecture actually exists right now?
+**What does this page answer?** Where does a call to `pve-storage-drs` go?
+Which module owns which part? Which part of the section 2 architecture in
+`IMPLEMENTATION_PLAN.md` exists today?
 
 ## The pipeline, as specified and as built
 
 `IMPLEMENTATION_PLAN.md` section 2 describes seven stages: collect, join,
-gate, solve, cost, order, execute. As of this page, all seven exist, with
-**two** interchangeable stage-4 (solve) backends — the dependency-free
-heuristic and the MILP (CBC via `pulp`) path — selected by `solver.backend`.
-Stage 7 (execute) is real for all three `execution.mode` values,
-including `auto`'s own section 9.1 time-window/migration-count budgets,
-section 9.2 re-plan loop, and section 8.1/9.2's concurrent execution
-(`execution.max_concurrent_migrations`/`max_concurrent_per_storage`
-above their default of `1`, `auto`-only, strictly FIFO — see
-[`92-execute.md`](92-execute.md)'s own "Concurrent execution" section).
-Do not take this page as a claim that every phase-8 knob does
-something — [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)
-is the authoritative per-command status: `plan` prints an ordered,
+gate, solve, cost, order, execute. All seven exist. Stage 4 (solve) has
+**two** interchangeable backends: the dependency-free heuristic and the
+MILP path (CBC via `pulp`). The key `solver.backend` selects one. Stage 7
+(execute) runs for all three `execution.mode` values. That includes
+`auto`'s own section 9.1 time-window and migration-count budgets, the
+section 9.2 re-plan loop, and the concurrent execution of section 8.1/9.2
+(`execution.max_concurrent_migrations`/`max_concurrent_per_storage` above
+their default of `1`, `auto`-only, strictly FIFO; see the "Concurrent
+execution" section of [`92-execute.md`](92-execute.md)).
+
+Do not take this page as a claim that every phase-8 knob does something.
+[`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md) is
+the authoritative per-command status. `plan` prints an ordered,
 transient-feasible, payback-checked plan (see
-[`../manual/27-plan.md`](../manual/27-plan.md)), and `apply` (see
-[`../manual/28-apply.md`](../manual/28-apply.md)) executes it in any
-mode, re-validating every move against the live cluster immediately
-before issuing it (section 9.2), waiting out a VM lock rather than
-failing (section 9.3.1), and not considering a move done until the task
-succeeded *and* the source volume is gone *and* the VM's lock is clear
-(section 9.3.2) — see [`92-execute.md`](92-execute.md). `state.json`
-itself (`state.py`) is read by `show-load` and `plan` for drift history
-and cooldowns, and now **written** by `apply` after any run that actually
-executed a migration — see [`15-state.md`](15-state.md),
+[`../manual/27-plan.md`](../manual/27-plan.md)). `apply` (see
+[`../manual/28-apply.md`](../manual/28-apply.md)) executes the plan in any
+mode. It re-validates every move against the live cluster immediately
+before it issues the move (section 9.2). It waits out a VM lock rather
+than failing (section 9.3.1). It marks a move done only when the task
+succeeded, the source volume is gone, and the VM's lock is clear
+(section 9.3.2). See [`92-execute.md`](92-execute.md).
+
+`show-load` and `plan` read `state.json` (the module `state.py`) for drift
+history and cooldowns. `apply` also **writes** it after any run that
+executed a migration. See [`15-state.md`](15-state.md),
 [`80-gates.md`](80-gates.md) and [`92-execute.md`](92-execute.md).
 
-A handful of short symbols recur below and in every other page this one
-links to, so they are worth fixing once, here: `D` is the set of every
-managed disk a group places (pinned or not), `S` its set of storages, and
-`Uˢᵉˣᵗ` the bytes on a storage that belong to no managed disk at all —
-orphans, other groups' foreign volumes (`60-topology.md`). `(C2)` is the
-plan's per-disk eligibility constraint (a pinned disk cannot be
-reassigned); `(C4)`/`(C5)` are the largest-VM-footprint and capacity/snapshot-
-reserve constraints `reserve.py` evaluates per storage, both in
-`60-topology.md`. `ℓ_d` is one disk's own blended load; `L_s`/`u_s` a
-storage's summed load and I/O-share utilization; `u*` the group's average
-utilization — all four in [`70-loadmodel.md`](70-loadmodel.md).
+A few short symbols recur below and on every page this page links to, so
+this page fixes each one here. `D` is the set of every managed disk a group
+places (pinned or not). `S` is the group's set of storages. `Uˢᵉˣᵗ` is the
+bytes on a storage that belong to no managed disk at all: orphans and other
+groups' foreign volumes (`60-topology.md`). `(C2)` is the plan's per-disk
+eligibility constraint. A pinned disk cannot be reassigned. `(C4)` and `(C5)`
+are the largest-VM-footprint and capacity/snapshot-reserve constraints.
+`reserve.py` evaluates both per storage. Both live in `60-topology.md`.
+`ℓ_d` is one disk's own blended load. `L_s` is a storage's summed load and
+`u_s` its I/O-share utilization. `u*` is the group's average utilization.
+All four appear in [`70-loadmodel.md`](70-loadmodel.md).
 
 ```
    ┌──────────────────────┐        ┌────────────────────────────┐
@@ -123,45 +125,48 @@ utilization — all four in [`70-loadmodel.md`](70-loadmodel.md).
 | `collect.py` | `capture_bundle()`: the recording client wrappers, the estimate/refusal, the deterministic writer | section 16.1-16.4 |
 | `replay.py` | `ReplayPveClient`/`ReplayPrometheusClient`: real `PveClient`/`PrometheusClient` subclasses serving a bundle, no network | section 16.5 |
 
-Every phase 8 knob is now real: time windows, `max_migrations_per_run`,
+Every phase-8 knob is now real: time windows, `max_migrations_per_run`,
 the re-plan loop, and concurrent execution
 (`execution.max_concurrent_migrations`/`max_concurrent_per_storage`
-above their default of `1`, `auto`-only, strictly FIFO) — see
+above their default of `1`, `auto`-only, strictly FIFO). See
 [`92-execute.md`](92-execute.md) and
-[`../manual/28-apply.md`](../manual/28-apply.md). `schedule.py` itself
-still only ever produces a strictly-sequential *order* (see below);
-`execute.py`'s concurrent executor uses that same order as a launch
-queue rather than needing `schedule.py` to reason about overlapping
-in-flight windows itself. `optimize.py` (phase 6)
-is done: `plan`/`apply` pick CBC or the heuristic per
-`solver.backend`, and the MILP backend enforces the storage cooldown
-identically to the heuristic (see [`91-optimize.md`](91-optimize.md)).
-Cooldowns and drift history are read *and written*: `topology.py`'s (C2)
-per-disk pin and `heuristic.py`'s per-storage target exclusion consume
-`state.py`'s cooldown data, and `apply` writes a fresh one for every
-disk and **both** of a move's storages a run actually migrated (see
-[`15-state.md`](15-state.md), [`60-topology.md`](60-topology.md),
+[`../manual/28-apply.md`](../manual/28-apply.md).
+
+`schedule.py` itself still only ever produces a strictly-sequential
+*order* (see below). The concurrent executor in `execute.py` uses that
+same order as a launch queue. It does not need `schedule.py` to reason
+about overlapping in-flight windows. `optimize.py` (phase 6) is done:
+`plan`/`apply` pick CBC or the heuristic per `solver.backend`. The MILP
+backend enforces the storage cooldown identically to the heuristic (see
+[`91-optimize.md`](91-optimize.md)).
+
+Cooldowns and drift history are read *and written*. The (C2) per-disk pin
+in `topology.py` and the per-storage target exclusion in `heuristic.py`
+consume the cooldown data from `state.py`. `apply` writes a fresh cooldown
+for every disk a run actually migrated and for **both** of a move's
+storages (see [`15-state.md`](15-state.md), [`60-topology.md`](60-topology.md),
 [`90-heuristic.md`](90-heuristic.md) and [`92-execute.md`](92-execute.md)).
+
 Within modules that do exist:
 heuristic step 4 "polish" and (C2) format-compatibility eligibility in
 `heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)); `schedule.py`
-itself still only ever produces a strictly-sequential order (not
+still only ever produces a strictly-sequential order (that is not
 `execute.py`'s own concurrent *execution* of it, which is real -- see
-above -- but reasoning about which pairs of moves could safely be
+above -- but the reasoning about which pairs of moves could safely be
 *scheduled* to overlap, priority-2 ordering, and staging, per
 [`95-schedule.md`](95-schedule.md)); and the payback re-solve-and-retry
 loop in `payback.py` (see [`96-payback.md`](96-payback.md)).
 
 ## Why config.py depends on forecast.py
 
-`config.py`'s semantic validation (`_check_forecast_window`) must reject a
-`window.lookback` too short for the configured `forecast.model` at startup
-(section 11.1) — that check needs `forecast.required_range_seconds()`. Since
-`forecast.py` in turn needs `config.ForecastConfig` for its type signatures,
-the import is deferred to inside the validation function rather than at
-module level, breaking what would otherwise be an import cycle. See the
-comment at the top of `config.py`'s `_check_forecast_window` if you touch
-this.
+The semantic validation in `config.py` (`_check_forecast_window`) rejects a
+`window.lookback` that is too short for the configured `forecast.model` at
+startup (section 11.1). The check needs `forecast.required_range_seconds()`.
+`forecast.py` in turn needs `config.ForecastConfig` for its type
+signatures. `config.py` therefore defers the import to inside the
+validation function, not to module level. That breaks the import cycle
+that would otherwise form. Read the comment at the top of
+`_check_forecast_window` in `config.py` if you touch this.
 
 ## Where to read next
 

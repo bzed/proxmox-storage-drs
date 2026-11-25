@@ -1,9 +1,9 @@
 # Reading `apply`
 
-`apply` runs the identical per-group pipeline `plan` prints — the same
-gate, the same solver, the same scheduler, the same payback test (`plan`'s
-own manual page, `docs/manual/27-plan.md`, describes all four in detail)
-— and then, unless it is `dry-run`, actually issues the moves.
+`apply` runs the identical per-group pipeline `plan` prints. That is
+the same gate, the same solver, the same scheduler, the same payback
+test. `plan`'s own manual page, `docs/manual/27-plan.md`, describes all
+four in detail. Then, unless it is `dry-run`, `apply` issues the moves.
 `execution.mode` (or `--mode`) picks what happens next:
 
 | Mode | What `apply` does |

@@ -1,68 +1,67 @@
 # Command dispatch, the mode-override rule, and why logs go to stderr
 
 **What does this page answer?** How does `cli.py` turn `argv` into a
-dispatched command, what exactly does overriding `--mode` log, and why does
-structured logging go to stderr instead of the stdout the plan originally
-specified, and how does an unattended `apply` tell a monitoring system what it
-did? Describes `proxmox_storage_drs/cli.py`,
+dispatched command? What does overriding `--mode` log, exactly? Why does
+structured logging go to stderr instead of the stdout that the plan
+originally specified? How does an unattended `apply` tell a monitoring
+system what it did? This page describes `proxmox_storage_drs/cli.py`,
 `proxmox_storage_drs/logging_setup.py` and `proxmox_storage_drs/statusfile.py`.
 
 ## One parser, global options first
 
 `build_parser()` defines every global option (`-c`/`--config`, `--group`,
 `--mode`, `--json`, `-v`/`--quiet`, `--version`, `--manual`) on the
-**top-level** `ArgumentParser`, not on the subparsers, which is what makes
-argparse itself enforce `IMPLEMENTATION_PLAN.md` section 11.3's "global
-options before the subcommand" for free — there is no hand-written ordering
-check anywhere. `--help`'s defaults come from the real `default=` values
+**top-level** `ArgumentParser`, not on the subparsers. That placement makes
+argparse enforce `IMPLEMENTATION_PLAN.md` section 11.3's "global options
+before the subcommand" for free. There is no hand-written ordering check
+anywhere. The defaults in `--help` come from the real `default=` values
 passed to `add_argument`, combined with
-`argparse.ArgumentDefaultsHelpFormatter`; there is deliberately no second,
+`argparse.ArgumentDefaultsHelpFormatter`. There is deliberately no second,
 hand-maintained list of options and defaults anywhere in this module, the
 manpage, or the manual (AGENTS.md section 8.5).
 
-`main()` handles `--version` and `--manual`/`help` **before** requiring or
-loading any configuration — printing the version or the manual page must
-never depend on `/etc/pve/drs.yaml` existing. Only once a real subcommand is
-present does it call `config.load_config()`.
+`main()` handles `--version` and `--manual`/`help` **before** it requires or
+loads any configuration. Printing the version or the manual page must never
+depend on `/etc/pve/drs.yaml` existing. The function calls
+`config.load_config()` only once a real subcommand is present.
 
-**`-v`/`--verbose` is otherwise purely a `logging_setup.py` concern** (see
-below) — every subcommand's own stdout report is identical regardless of
-how many times it was given, with one deliberate exception:
-`_handle_explain()` reads `args.verbose` directly and adds a `data
-source:` line to its own report when set, naming the section 3.4
-node-scoping filter and window/rate settings the run's queries used
-(`docs/manual/29-explain.md`). This is the one place a global option's
-effect is not identical across every command, because `explain`'s entire
-purpose is narrating *how* a result was produced — provenance the other
-commands' reports have no occasion to print.
+**Otherwise, `-v`/`--verbose` is purely a `logging_setup.py` concern** (see
+below). Every subcommand's own stdout report is identical, no matter how
+many times the flag is given. One deliberate exception exists:
+`_handle_explain()` reads `args.verbose` directly. When the flag is set,
+the function adds a `data source:` line to its own report. The line names
+the section 3.4 node-scoping filter and the window/rate settings that the
+run's queries used (`docs/manual/29-explain.md`). This is the one place
+where a global option's effect differs across commands. The purpose of
+`explain` is to narrate *how* a result was produced. The other commands'
+reports have no occasion to print that provenance.
 
 ## Command handlers: a dict, not a chain of `if`s
 
 `_COMMAND_HANDLERS: dict[str, CommandHandler]` maps each subcommand name to
 a function of `(ResolvedConfig, argparse.Namespace, effective_mode) -> int`.
-A subcommand not yet implemented gets a handler from
-`_make_not_yet_implemented_handler(name)`, a closure factory rather than a
-`lambda` with a default-argument trick, because mypy's strict mode cannot
-infer a bare lambda's parameter types cleanly here — see the comment at that
+A subcommand that is not yet implemented gets a handler from
+`_make_not_yet_implemented_handler(name)`. The factory is a closure, not a
+`lambda` with a default-argument trick. mypy's strict mode cannot infer a
+bare lambda's parameter types cleanly here. See the comment at that
 function if you are tempted to simplify it back to a one-liner. Every
 subcommand in `_SUBCOMMANDS` now has a real handler (`explain` was the
-last one — see
+last one; see
 [`../manual/30-safety-and-status.md`](../manual/30-safety-and-status.md)),
-so this factory is currently only the extension point for the next one:
-`_COMMAND_HANDLERS`'s dict-comprehension initializer still runs it for
-every name before each real handler overwrites its own entry, so a new
-command added to `_SUBCOMMANDS` without a handler assignment fails
-honestly instead of a `KeyError` from `main()`'s dispatch.
-`_COMMAND_HANDLERS["verify-metrics"]` is overwritten with the real
-`_handle_verify_metrics` once `metrics.py` exists to back it, and likewise
-for every other command as its own module landed — `apply`'s handler is
-`_handle_apply` (`execute.py`/`crashrecovery.py`); `explain`'s is
-`_handle_explain`, which runs the identical `_plan_group()` pipeline
-`plan` does and narrates the pins, the fragmentation they cause, and the
-section 5.4 objective's seven terms that `plan` itself never prints.
+so the factory is only the extension point for the next one. The
+dict-comprehension initializer of `_COMMAND_HANDLERS` still runs the factory
+for every name, before each real handler overwrites its own entry. A new
+command added to `_SUBCOMMANDS` without a handler assignment then fails
+honestly, instead of a `KeyError` from `main()`'s dispatch.
+`_COMMAND_HANDLERS["verify-metrics"]` was overwritten with the real
+`_handle_verify_metrics` once `metrics.py` existed to back it. The same
+happened for every other command as its own module landed. `apply`'s
+handler is `_handle_apply` (`execute.py`/`crashrecovery.py`). `explain`'s
+is `_handle_explain`. It runs the identical `_plan_group()` pipeline that
+`plan` runs. It narrates the pins, the fragmentation they cause, and the
+seven terms of the section 5.4 objective that `plan` itself never prints.
 Adding a new implemented command is exactly this: write the handler,
-assign it into the
-dict, done — `main()`'s dispatch does not change.
+assign it into the dict, done. The dispatch in `main()` does not change.
 
 ## `--group`: filtered once, right after `build_topology()`
 

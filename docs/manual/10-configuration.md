@@ -1,23 +1,24 @@
 # Configuration reference
 
-Every key `pve-storage-drs` reads is documented here: type, unit, default, what it
-interacts with, and what happens if you set it too high or too low. A key
-that exists in the schema but not here, or here but not in the schema, is a
-bug — `tests/unit/test_documentation.py` asserts the two never drift apart.
+This page documents every key `pve-storage-drs` reads. For each key it gives
+the type, the unit, the default, the keys it interacts with, and what happens
+if you set it too high or too low. A key that exists in the schema but not
+here, or here but not in the schema, is a bug.
+`tests/unit/test_documentation.py` asserts that the two never drift apart.
 
 `config/drs.example.yaml` in the source tree (installed to
-`/usr/share/doc/pve-storage-drs/examples/drs.example.yaml`) carries the same defaults
-with inline comments; this page is the full explanation each comment points
-back to.
+`/usr/share/doc/pve-storage-drs/examples/drs.example.yaml`) carries the same
+defaults with inline comments. This page is the full explanation each
+comment points back to.
 
 ### `schema_version`
 
 Integer, required, no default.
 
-The config format's version. `pve-storage-drs` refuses to start on a `schema_version`
-whose **major** number it does not understand, naming the version it does
-understand in the error, rather than guessing at fields from a future
-incompatible format. Currently `1`.
+The version of the config format. `pve-storage-drs` refuses to start on a
+`schema_version` whose **major** number it does not understand. The error
+names the version the tool does understand. The tool does not guess field
+values from a future incompatible format. The current value is `1`.
 
 ## `proxmox` — the cluster API connection
 
@@ -25,104 +26,108 @@ incompatible format. Currently `1`.
 
 String, required, no default.
 
-Any cluster member's hostname or IP. The API is reached at
+The hostname or IP of any cluster member. The tool reaches the API at
 `https://<host>:<port>/api2/json`.
 
 ### `proxmox.port`
 
 Integer, default `8006`.
 
-The PVE API port. Change this only if you have put something unusual (a
-reverse proxy) in front of the API.
+The PVE API port. Change this value only if you put a reverse proxy or
+another service in front of the API.
 
 ### `proxmox.verify_ssl`
 
 Boolean, default `true`.
 
-Whether to verify the API's TLS certificate. Set `false` only for a
-self-signed certificate you cannot otherwise trust, and prefer
-`proxmox.ca_file` instead where possible — disabling verification also
-disables protection against a compromised network path to every node's API.
+Sets whether the tool verifies the API's TLS certificate. Set `false` only
+for a self-signed certificate you cannot trust by another method. Prefer
+`proxmox.ca_file` where possible. Disabling verification also disables the
+protection against a compromised network path to every node's API.
 
 ### `proxmox.ca_file`
 
 String path or `null`, default `null`.
 
-A CA bundle to verify the API's certificate against, when it is not signed
-by a certificate already trusted by the host running `pve-storage-drs`.
+A CA bundle to verify the API's certificate against. Use it when the API's
+certificate is not signed by a certificate the host running
+`pve-storage-drs` already trusts.
 
 ### `proxmox.auth.username`
 
 String or `null`.
 
-A PVE user, e.g. `drs@pve`. Required unless `proxmox.auth.token_id` is set.
-Username/password authentication is what the original requirement asked
-for; an API token (below) is preferred for `execution.mode: auto` because it
-needs no interactive ticket refresh and can be scoped tightly: the tool's
-actual minimum privilege is `Datastore.Audit` **and** `Datastore.Allocate` on
-every storage in the config's `groups`, plus `VM.Config.Disk` and
-`VM.Migrate` (or an equivalent custom role) on the VMs it may move.
-`Datastore.Audit` alone is not enough — PVE's per-volume content listing
-silently returns an *empty* result with no error when only Audit is
-granted, which would make every tracked disk look untracked rather than
-raising anything you'd notice. Grant the role per storage rather than
-relying on propagation from the parent `/storage` path, and remember that
-an API token's effective permission is the **intersection** of the user's
-own grants and the token's own: both need the grant, or neither has it.
+A PVE user, e.g. `drs@pve`. The key is required unless you set
+`proxmox.auth.token_id`. Username/password authentication is what the
+original requirement asked for. An API token (below) is the preferred
+method for `execution.mode: auto`. A token needs no interactive ticket
+refresh, and you can scope it tightly. The tool's actual minimum privilege
+is `Datastore.Audit` **and** `Datastore.Allocate` on every storage in the
+config's `groups`, plus `VM.Config.Disk` and `VM.Migrate` (or an equivalent
+custom role) on the VMs it may move.
+
+`Datastore.Audit` alone is not enough. PVE's per-volume content listing
+returns an *empty* result with no error when only `Datastore.Audit` is
+granted. The tool would then show every tracked disk as untracked, without
+any error you would notice. Grant the role per storage. Do not rely on
+propagation from the parent `/storage` path. An API token's effective
+permission is the **intersection** of the user's own grants and the
+token's own grants. Both need the grant, or neither has it.
 (`IMPLEMENTATION_PLAN.md` section 3.5.)
 
 ### `proxmox.auth.password`
 
 String or `null`, default `null`, environment: `PVE_PASSWORD`.
 
-Leave this `null` in the file and set `PVE_PASSWORD` in the environment (or a
-systemd credential) instead, especially when the config lives on `/etc/pve`
-and is therefore group-readable by `www-data`. A password given in the file
-is used as-is and is **not** overridden by the environment variable — see
-[`00-installation.md`](00-installation.md) for why the file's own
-permissions matter here.
+Leave this key `null` in the file. Set `PVE_PASSWORD` in the environment
+(or a systemd credential) instead. This matters most when the config file
+lives on `/etc/pve`, where it is group-readable by `www-data`. A password
+given in the file is used as-is. The environment variable does **not**
+override it. See [`00-installation.md`](00-installation.md) for why the
+file's own permissions matter here.
 
 ### `proxmox.auth.token_id`
 
 String or `null`, default `null`.
 
-An API token id, e.g. `drs@pve!balancer`. Set this instead of
-`username`/`password` for unattended operation; a token needs no ticket
-refresh loop and can be revoked independently of the user's password.
+An API token id, e.g. `drs@pve!balancer`. Set this key instead of
+`username`/`password` for unattended operation. A token needs no ticket
+refresh loop. You can revoke it independently of the user's password.
 
 ### `proxmox.auth.token_secret`
 
 String or `null`, default `null`, environment: `PVE_TOKEN_SECRET`.
 
-The secret half of the API token, with the same environment-variable
+The secret half of the API token. It follows the same environment-variable
 preference as `proxmox.auth.password`.
 
 ### `proxmox.ticket_refresh_seconds`
 
 Duration, default `3000` (50 minutes).
 
-How often a username/password ticket is refreshed. PVE tickets last
-approximately two hours; refreshing well before that avoids a mid-run
-authentication failure. Not used for API-token authentication, which needs
-no ticket. Implemented by overriding `proxmoxer`'s own (otherwise
-fixed-at-3600s) refresh interval after login, since `proxmoxer` has no
-constructor option for it; if a ticket somehow still gets rejected mid-run
-regardless (a long `confirm`-mode wait, a suspended process, a clock jump —
-see `50-pve-api.md`), the client transparently logs in again from scratch
-and retries the one call that failed, once, before giving up.
+How often the tool refreshes a username/password ticket. PVE tickets last
+about two hours. A refresh well before the expiry avoids a mid-run
+authentication failure. The tool does not use this key for API-token
+authentication, which needs no ticket. The implementation overrides
+`proxmoxer`'s own refresh interval after login, because `proxmoxer` has no
+constructor option for the value. Without the override, the interval is
+fixed at 3600s. If a ticket is still rejected mid-run (a long `confirm`-mode
+wait, a suspended process, a clock jump; see `50-pve-api.md`), the client
+logs in again from scratch. It then retries the failed call once, then it
+gives up.
 
 ### `proxmox.read_workers`
 
 Integer, default `12`.
 
-Size of the bounded thread pool used to fetch per-VM configuration —
-`GET /nodes/{node}/qemu/{vmid}/config` has no batch form, so this is what
-keeps a several-hundred-VM cluster's topology read from being serial.
-Raising it trades API server load for wall-clock time; 8–16 is the range the
-plan suggests. Too high a value on a small PVE API server can itself become
-the bottleneck. Only the per-VM fetch is parallelized; the cluster-wide and
-per-storage calls (`50-pve-api.md`) still run once each, sequentially,
-before it starts.
+The size of the bounded thread pool that fetches the per-VM configuration.
+`GET /nodes/{node}/qemu/{vmid}/config` has no batch form, so this key keeps
+the topology read of a several-hundred-VM cluster from being serial. A
+higher value increases API server load and reduces wall-clock time. The
+plan suggests the range 8 to 16. Too high a value can itself become the
+bottleneck on a small PVE API server. Only the per-VM fetch runs in
+parallel. The cluster-wide and per-storage calls (`50-pve-api.md`) still run
+once each, sequentially, before it starts.
 
 ## `prometheus` — the metrics source
 
@@ -136,29 +141,30 @@ The base URL of your Prometheus, e.g. `http://prometheus.example.com:9090`.
 
 Duration, default `30`.
 
-Per-request timeout against Prometheus. Too low a value on a busy or
-long-range query makes `verify-metrics` and the load model fail spuriously;
-too high a value delays noticing that Prometheus is actually unreachable.
+The per-request timeout for calls to Prometheus. A value that is too low
+can make `verify-metrics` and the load model fail on a busy or long-range
+query even though Prometheus is healthy. A value that is too high delays
+the moment you notice that Prometheus is unreachable.
 
 ### `prometheus.username` / `prometheus.password`
 
 String or `null`, default `null`.
 
-HTTP basic auth credentials, if your Prometheus requires them. Ignored when
-`prometheus.bearer_token` is set.
+The HTTP basic auth credentials for your Prometheus, if it requires them.
+The tool ignores both keys when `prometheus.bearer_token` is set.
 
 ### `prometheus.bearer_token`
 
 String or `null`, default `null`.
 
-A bearer token for Prometheus instances behind an auth proxy that expects
-one. Takes precedence over basic auth when both are set.
+A bearer token for a Prometheus instance behind an auth proxy that expects
+one. The token takes precedence over basic auth when both are set.
 
 ## `metrics` — Telegraf/InfluxDB name mapping
 
 Telegraf's naming is deployment-specific (`IMPLEMENTATION_PLAN.md` section
-3.3), so every name below is configuration, never a constant. Run
-`pve-storage-drs verify-metrics` after changing any of them — see
+3.3). Every name below is configuration, never a constant. Run
+`pve-storage-drs verify-metrics` after you change any of them. See
 [`20-verifying-metrics.md`](20-verifying-metrics.md).
 
 ### `metrics.read_ops`
@@ -190,20 +196,21 @@ As `metrics.read_bytes`, for writes.
 
 String, default `blockstat_rd_total_time_ns`.
 
-The Prometheus metric name for cumulative read I/O time in nanoseconds. This
-is the **primary** load signal by default (`load_weights.iotime`): by
-Little's law, `rate(rd_total_time_ns + wr_total_time_ns) / 1e9` is the
-average number of I/O requests in flight on that disk — dimensionless,
-additive across disks on the same storage, and directly comparable between
-storages of different size and speed. It also *self-weights* reads against
-writes automatically: an operation that takes eight times as long to
-service (a large sequential write against a small random read, say) counts
-eight times as much, with no manual read/write tuning needed. Pure IOPS
-treats every operation as equal and so under-counts large sequential load;
-pure throughput does the reverse and under-counts small random load. `ops`
-and `bytes` (see `load_weights` below) remain available as additional
-weighted terms for a policy the array's own timings do not capture.
-(`IMPLEMENTATION_PLAN.md` section 4.)
+The Prometheus metric name for the cumulative read I/O time in
+nanoseconds. This is the **primary** load signal by default
+(`load_weights.iotime`). By Little's law, `rate(rd_total_time_ns +
+wr_total_time_ns) / 1e9` is the average number of I/O requests in flight on
+that disk. The value is dimensionless. It is additive across disks on the
+same storage, and directly comparable between storages of different size
+and speed. The term also *self-weights* reads against writes
+automatically. An operation that takes eight times as long to service
+(a large sequential write versus a small random read, for example) counts
+eight times as much. You need no manual read/write tuning. A pure IOPS
+model treats every operation as equal, so it under-counts large sequential
+load. A pure throughput model does the reverse and under-counts small
+random load. `ops` and `bytes` (see `load_weights` below) remain available
+as additional weighted terms for a policy the array's own timings do not
+capture. (`IMPLEMENTATION_PLAN.md` section 4.)
 
 ### `metrics.write_time_ns`
 
@@ -215,200 +222,212 @@ As `metrics.read_time_ns`, for writes.
 
 String, default `vmid`.
 
-The Prometheus label carrying the VM id.
+The Prometheus label that carries the VM id.
 
 ### `metrics.labels.device`
 
 String, default `instance`.
 
-The Prometheus label carrying the drive id (`scsi0`, `virtio0`, ...).
-**Confirm this with `verify-metrics`.** PVE's own tag of this name collides
-with Prometheus's own scrape-target `instance` label, and many Telegraf
-configurations rename or overwrite it; `verify-metrics` warns loudly when
-this is still set to the literal string `instance`.
+The Prometheus label that carries the drive id (`scsi0`, `virtio0`, ...).
+**Confirm this key with `verify-metrics`.** PVE's own tag of this name
+collides with Prometheus's own scrape-target `instance` label. Many
+Telegraf configurations rename or overwrite the tag. `verify-metrics`
+prints a warning when this key is still set to the literal string
+`instance`.
 
 ### `metrics.labels.node`
 
 String, default `nodename`.
 
-The Prometheus label carrying the PVE node name — what the auto-derived
-filter below is built from: the tool fetches this cluster's
-own node list from the PVE API and scopes every query to `<this
-label>=~"<node1>|<node2>|..."`, so a Prometheus shared by more than one
-PVE cluster (or by anything else emitting a same-named metric) cannot
-silently sum in a same-numbered vmid from somewhere else. This is the
-default filter for every run; `verify-metrics` never applies it — see
-`metrics.extra_selector` below.
+The Prometheus label that carries the PVE node name. The tool builds the
+automatic filter below from this label: it fetches this cluster's own node
+list from the PVE API, then scopes every query to `<this
+label>=~"<node1>|<node2>|...">`. When one Prometheus serves more than one
+PVE cluster, or any other source emits a metric with the same name, this
+filter keeps a same-numbered vmid from another cluster out of the result.
+This is the default filter for every run. `verify-metrics` never applies
+it. See `metrics.extra_selector` below.
 
-**Confirm what's actually there with `verify-metrics`** before assuming
-the default is right for your Prometheus: it reports each configured
-metric's sample series labels so you can check this key names a real one.
+**Confirm what is actually there with `verify-metrics`** before you assume
+the default is right for your Prometheus. `verify-metrics` reports each
+configured metric's sample series labels, so you can check that this key
+names a real one.
 
 ### `metrics.extra_selector`
 
 String or `null`, default `null` (auto).
 
 Overrides the automatic node-scoping filter above with a raw PromQL label
-matcher, inserted verbatim into every query's vector selector (e.g.
-`{metrics.extra_selector}` becomes part of
-`rate(blockstat_rd_operations{cluster="mycluster"}[5m])`). Set this when
-the node-list filter isn't quite what you need — your own Telegraf/InfluxDB
-tagging scheme doesn't put the exact PVE node name in `metrics.labels.node`,
-you want to scope by something else (a cluster-naming tag your deployment
-happens to carry, say), or the restriction needed is something else
-entirely. Write exactly what your label scheme needs, e.g.
-`nodename=~"pve01|pve02|pve03"` or `cluster="mycluster"`; the value is
-used as-is, with no further quoting or escaping. `pve-storage-drs
-verify-metrics` applies this override too when set, but never derives its
-own filter automatically — it is deliberately independent of the PVE API
-entirely.
+matcher. The tool inserts the value verbatim into every query's vector
+selector (e.g. `{metrics.extra_selector}` becomes part of
+`rate(blockstat_rd_operations{cluster="mycluster"}[5m])`). Set this key
+when the node-list filter does not fit your setup: your Telegraf/InfluxDB
+tagging scheme does not put the exact PVE node name in
+`metrics.labels.node`, you want to scope by something else (a cluster-naming
+tag your deployment carries, for example), or you need a different
+restriction entirely. Write exactly what your label scheme needs, e.g.
+`nodename=~"pve01|pve02|pve03"` or `cluster="mycluster"`. The tool uses the
+value as-is, with no further quoting or escaping. `pve-storage-drs
+verify-metrics` applies this override too when it is set. It never derives
+its own filter automatically, because it is deliberately independent of
+the PVE API.
 
-There is deliberately no "cluster label" auto-scoping tier above the
-node-list default: an earlier revision of this tool assumed such a label
-was standard practice across this project's deployments, which turned out
-to be wrong — nothing in the Telegraf/InfluxDB pipeline guarantees one.
-Use `metrics.extra_selector` for that instead, if your Prometheus actually
-carries such a label.
+The tool does not add a "cluster label" auto-scoping tier above the
+node-list default. An earlier revision of this tool assumed such a label
+was standard practice across this project's deployments. That assumption
+turned out to be wrong: nothing in the Telegraf/InfluxDB pipeline
+guarantees a cluster label. Use `metrics.extra_selector` for that instead,
+if your Prometheus actually carries such a label.
 
 ### `metrics.rate_window`
 
 Duration, default `5m`.
 
-The inner range passed to `rate()`. Must be at least four times
-`metrics.pvestatd_push_interval`, or `rate()` sees too few points to be
-meaningful — `verify-metrics` measures the *observed* sample spacing of a
-live series and errors if this rule is violated against reality, not just
-against the declared `pvestatd_push_interval`.
+The inner range the tool passes to `rate()`. The value must be at least
+four times `metrics.pvestatd_push_interval`. Below that, `rate()` sees too
+few points to be meaningful. `verify-metrics` measures the *observed*
+sample spacing of a live series. It returns an error if this rule fails
+against the observed spacing, not just against the declared
+`pvestatd_push_interval`.
 
 ### `metrics.step`
 
 Duration, default `5m`.
 
-The sampling step used for range queries (forecasting, coverage checks).
-Independent of `metrics.rate_window`, though the two are usually set equal —
-which is also the one setting a workaround below silently changes what
-actually gets fetched at.
+The sampling step the tool uses for range queries (forecasting, coverage
+checks). The key is independent of `metrics.rate_window`, though you
+usually set the two equal. The workaround below silently changes the step
+the collector actually fetches at, but only when the two are equal.
 
 **Whenever `metrics.step >= metrics.rate_window`** (true at the usual-equal
-default), the collector does not send `metrics.step` to Prometheus as-is: a
-live-confirmed gigapipe bug returns zero series for any `rate()`-based range
-query or `quantile_over_time` subquery once the query's own step reaches the
-function's range-vector duration, so this tool queries at half that step (or
-the largest whole-second step below it that divides `metrics.step` evenly,
-at a wider ratio) and reassembles the configured grid from the result. Every
-disk's coverage, load history and forecast input comes back numerically
-identical to what a plain `metrics.step` query would have returned on an
-unaffected backend — except the `quantile_over_time` decision statistic
-itself, whose inner evaluation runs on the denser grid unconditionally, on
-every backend (a small, real shift in the reduced 95th-percentile value; see
-`docs/internals/30-metrics.md`). The *stored* sample count this produces —
-what `collect-testdata --estimate` prints and `support.max_series_points`
-compares against — is correspondingly doubled (or more) at the same ratio.
+default), the collector does not send `metrics.step` to Prometheus as-is.
+A live-confirmed gigapipe bug returns zero series for any `rate()`-based
+range query or `quantile_over_time` subquery once the query's own step
+reaches the function's range-vector duration. The tool therefore queries at
+half that step (or the largest whole-second step below it that divides
+`metrics.step` evenly, at a wider ratio). It then reassembles the configured
+grid from the result. Every disk's coverage, load history and forecast
+input comes back numerically identical to what a plain `metrics.step` query
+would have returned on an unaffected backend. One value differs: the
+`quantile_over_time` decision statistic itself. Its inner evaluation runs on
+the denser grid unconditionally, on every backend. That causes a small,
+real shift in the reduced 95th-percentile value. See
+`docs/internals/30-metrics.md`. The *stored* sample count the workaround
+produces (what `collect-testdata --estimate` prints and
+`support.max_series_points` compares against) doubles (or grows more) at
+the same ratio.
 
 ### `metrics.pvestatd_push_interval`
 
 Duration, default `10s` (`pvestatd`'s own default).
 
-How often PVE's `pvestatd` pushes metrics — a PVE-side setting this tool
-cannot read from the API, so it must be declared here. `verify-metrics`
-cross-checks it against the *observed* sample spacing of a live series and
-errors if they disagree by more than 20%, which is what stops a stale
-declaration from silently invalidating the `rate_window` rule above.
+How often PVE's `pvestatd` pushes metrics. This is a PVE-side setting that
+the tool cannot read from the API, so you must declare it here.
+`verify-metrics` cross-checks it against the *observed* sample spacing of a
+live series. It returns an error if the two disagree by more than 20%.
+That check stops a stale declaration from silently invalidating the
+`rate_window` rule above.
 
 ## `window` — the decision window
 
-This is the period whose load is balanced. It is **not** the amount of
-history a forecast needs to fit — see `forecast.model` below and
+This is the period whose load the tool balances. It is **not** the amount
+of history a forecast needs to fit. See `forecast.model` below and
 `IMPLEMENTATION_PLAN.md` section 10.1.
 
 ### `window.lookback`
 
 Duration, default `24h`.
 
-The window each disk's load is reduced over: the last `window.lookback` under
-`forecast.model: quantile`, the next one (as forecast) under `holt_winters`.
-Must be at least as long as the configured `forecast.model` needs (`forecast.model: holt_winters`
-at its default `seasonal_periods` needs 48h, which a 24h lookback can never
-supply — this is rejected at startup, not silently degraded).
+The window over which the tool reduces each disk's load. Under
+`forecast.model: quantile`, it is the last `window.lookback`. Under
+`forecast.model: holt_winters`, it is the next window (the forecast one).
+The value must be at least as long as the configured `forecast.model`
+needs. For example, `forecast.model: holt_winters` at its default
+`seasonal_periods` needs 48h, and a 24h lookback can never supply that.
+The tool rejects the config at startup; it does not degrade silently.
 
 ### `window.quantile`
 
 Fraction in (0, 1), default `0.95`.
 
-The point-estimate quantile: each disk's load is the p95 of its raw signal
-over `window.lookback`, not the mean, so one traffic spike neither triggers
-nor suppresses a migration.
+The quantile the tool uses as the point estimate: each disk's load is the
+p95 of its raw signal over `window.lookback`, not the mean. One traffic
+spike then neither triggers nor suppresses a migration.
 
 ### `window.min_coverage`
 
 Fraction in (0, 1], default `0.80`.
 
-A disk whose sample coverage over `window.lookback` falls below this
-fraction has its data rejected for this run; its last known load from
-`state.json` is used instead, flagged in the report. Never treated as zero —
-that would silently invite migrations *onto* a busy but under-sampled
-storage.
+The tool rejects a disk's data for this run when its sample coverage over
+`window.lookback` falls below this fraction. It then uses the disk's last
+known load from `state.json`, flagged in the report. The tool never treats
+a low-coverage disk as zero. Treating it as zero would silently invite
+migrations *onto* a busy but under-sampled storage.
 
 ## `load_weights` — combining read/write and time/ops/bytes
 
 Each disk's load is a single scalar, in **average in-flight I/O
-requests**, blended from three raw per-disk signals — I/O time,
-operations/second and bytes/second — after applying the read/write
-asymmetry factors below. The three raw signals have wildly different
-magnitudes (in-flight I/O is roughly 0–10, ops/s can run into the tens of
-thousands, bytes/s into the billions), so they cannot be weighted directly:
-each is first normalized against its own group's total (which makes the
-three comparable, but throws away their physical meaning), the normalized
-values are blended using the weights below, and the blend is then rescaled
-back onto the in-flight-I/O scale using the group's total I/O time. Under
-the defaults (`iotime: 1.0`, `ops: 0.0`, `bytes: 0.0`) that rescale is an
-exact identity, so a disk's load is simply its own I/O-time term — the
-normalize/blend/rescale machinery only changes the result once `ops` or
-`bytes` carries a non-zero weight. The absolute scale this produces matters
-beyond the blend itself: `migration.source_load_weight` and its siblings
-below assume that `1.0` in-flight request at a mirror endpoint is directly
-comparable to a disk's own load, which is only true because of this
-rescale. (Derived in full, with the normalization formula, in
-`IMPLEMENTATION_PLAN.md` section 4.)
+requests**. The tool blends three raw per-disk signals to compute it: I/O
+time, operations/second and bytes/second. It applies the read/write
+asymmetry factors below before the blend. The three raw signals have
+widely different magnitudes: in-flight I/O is about 0 to 10, ops/s can
+reach the tens of thousands, and bytes/s the billions. The tool cannot
+weight them directly. It first normalizes each signal against its own
+group's total. That makes the three comparable, but the normalization
+loses the physical meaning of the signals. The tool then blends the
+normalized values using the weights below, and rescales the blend back onto
+the in-flight-I/O scale using the group's total I/O time. Under the
+defaults (`iotime: 1.0`, `ops: 0.0`, `bytes: 0.0`) that rescale is an
+exact identity. A disk's load is then simply its own I/O-time term. The
+normalize/blend/rescale machinery changes the result only once `ops` or
+`bytes` carries a non-zero weight. The absolute scale matters beyond the
+blend itself: `migration.source_load_weight` and its siblings below assume
+that `1.0` in-flight request at a mirror endpoint is directly comparable to
+a disk's own load. That holds only because of this rescale.
+(`IMPLEMENTATION_PLAN.md` section 4 derives the formula in full, with the
+normalization formula.)
 
 ### `load_weights.iotime`
 
 Weight, default `1.0`.
 
-Weight on the I/O-time term (`rate(rd_total_time_ns + wr_total_time_ns) /
-1e9`), the primary signal by default: it is Little's-law in-flight I/O,
-additive across disks and self-weighting between large sequential and small
-random access with no manual read/write tuning needed.
+The weight on the I/O-time term (`rate(rd_total_time_ns + wr_total_time_ns) /
+1e9`). This is the primary signal by default. It is Little's-law in-flight
+I/O. It is additive across disks, and it self-weights between large
+sequential and small random access. You need no manual read/write tuning.
 
 ### `load_weights.ops`
 
 Weight, default `0.0`.
 
-Weight on the operations/second term. Non-zero only if you want IOPS to
-influence placement independently of I/O time.
+The weight on the operations/second term. Set it non-zero only if you want
+IOPS to influence placement independently of I/O time.
 
 ### `load_weights.bytes`
 
 Weight, default `0.0`.
 
-Weight on the bytes/second term, for the same reason as `load_weights.ops`.
+The weight on the bytes/second term, for the same reason as
+`load_weights.ops`.
 
 ### `load_weights.read_factor`
 
 Weight, default `1.0`.
 
-Read/write asymmetry applied to the `ops`/`bytes` terms only (see
-`load_weights.write_factor`). Applying it to the `iotime` term as well
-double-counts, since I/O time already reflects the real read/write cost
-difference — do that only deliberately.
+The read/write asymmetry factor the tool applies to the `ops`/`bytes`
+terms only (see `load_weights.write_factor`). Do not apply it to the
+`iotime` term as well: I/O time already reflects the real read/write cost
+difference, so the factor would count the same difference twice. Apply it
+to `iotime` only deliberately.
 
 ### `load_weights.write_factor`
 
 Weight, default `1.0`.
 
-As `load_weights.read_factor`, for the write side. A write-heavy RAID-6
-array, for example, might set this above 1.0 on the `ops`/`bytes` terms to
-express the real cost asymmetry those terms cannot otherwise see.
+The same factor as `load_weights.read_factor`, for the write side. A
+write-heavy RAID-6 array, for example, might set this key above 1.0 on the
+`ops`/`bytes` terms to express the real cost asymmetry those terms cannot
+see otherwise.
 
 ## `groups` — storage groups
 
@@ -416,44 +435,45 @@ express the real cost asymmetry those terms cannot otherwise see.
 
 String, required.
 
-A group's name. A disk may only ever move between storages in its own
-group; there is no cross-group balancing (`IMPLEMENTATION_PLAN.md` section
-5). Must be unique.
+The name of the group. A disk may only move between storages in its own
+group. The tool does not balance across groups
+(`IMPLEMENTATION_PLAN.md` section 5). The name must be unique.
 
 ### `groups[].storages[].id`
 
 String, required.
 
-A PVE storage id, or a `/regex/` pattern — a value that both begins and
-ends with `/` — matching one or more storage ids (`IMPLEMENTATION_PLAN.md`
-section 11.4). A pattern is matched with `re.fullmatch` (case-sensitive)
-against the live cluster's storage inventory on every run, so `/san-.*/`
-picks up a LUN added after the config was written with no edit needed; its
-own entry's `capability_weight`/`reserve_factor` apply to
-every storage it matches. A literal entry always overrides a pattern that
-also matches its storage, so one member of a pattern-matched family can
-still be pinned to different options. A storage may belong to **at most
-one** group (after pattern expansion) — belonging to two would make a
-disk's eligible destinations ambiguous, and config/cluster validation
-rejects it, as does a pattern matching zero storages or two patterns in one
-group claiming the same storage.
+A PVE storage id, or a `/regex/` pattern. A pattern is a value that both
+begins and ends with `/`. It matches one or more storage ids
+(`IMPLEMENTATION_PLAN.md` section 11.4). The tool matches a pattern with
+`re.fullmatch` (case-sensitive) against the live cluster's storage
+inventory on every run. A LUN added after you wrote the config is picked up
+by `/san-.*/` with no edit. The pattern entry's own
+`capability_weight`/`reserve_factor` apply to every storage the pattern
+matches. A literal entry always overrides a pattern that also matches its
+storage. That lets you pin one member of a pattern-matched family to
+different options. A storage may belong to **at most one** group (after
+pattern expansion). A storage in two groups would make a disk's eligible
+destinations ambiguous, so config/cluster validation rejects the config.
+The validation also rejects a pattern that matches zero storages, and two
+patterns in one group that claim the same storage.
 
 ### `groups[].storages[].capability_weight`
 
 Weight, `> 0`, default `1.0`.
 
-The storage's **relative** share of the group's load — `u_s = L_s / c_s` is
-what actually gets equalized, so a storage with half the spindles of its
-peers can be given `0.5` and will correctly be assigned half the load. Only
-the *ratios* within a group matter; the absolute value is meaningless and it
-is not a capacity.
+The storage's **relative** share of the group's load. `u_s = L_s / c_s` is
+what the tool actually equalizes. A storage with half the spindles of its
+peers can be given `0.5`, and the tool then assigns it half the load. Only
+the *ratios* within a group matter. The absolute value is meaningless, and
+it is not a capacity.
 
 ### `groups[].storages[].reserve_factor`
 
 Weight or `null`, default `null` (inherits `snapshot_reserve.factor`).
 
-Per-storage override of the group-wide snapshot reserve factor, for a
-storage whose snapshot behaviour genuinely differs from its peers.
+A per-storage override of the group-wide snapshot reserve factor. Use it
+for a storage whose snapshot behaviour genuinely differs from its peers.
 
 ### `groups[].storages[].enforce_format`
 
