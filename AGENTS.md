@@ -388,7 +388,47 @@ the manpage is fixed.
   manpage's `OPTIONS` and in the manual; every config knob appears in the manual; every knob the
   manual documents exists in the schema.
 
-Details: [`.agents/documentation.md`](.agents/documentation.md).
+### 8.7 Style: ASD-STE100, 80 % compliance
+
+Shipped prose is written to **ASD-STE100**, the simplified-technical-English standard from
+aerospace engineering, because an operator at 03:00 with a cluster to run has no time to parse a
+sentence two ways. Bound by the standard: the manual, `docs/internals/`, the manpage source, the
+README, the comments of `config/drs.example.yaml`, the `--help` strings, and the site landing
+page.
+
+**The bar is 80 %, not 100 % — and the 20 % is counted, not waived.** For each document: count the
+prose sentences (sentences inside fenced code blocks do not count), count the ones that pass every
+rule below, and the ratio must be at least 0.80. What the allowance absorbs is what the standard
+forbids and this codebase needs: configuration keys, formulae, Proxmox API names, the five-point
+config entry, and a sentence whose subject is a long identifier. Length alone does not buy a
+sentence into the 20 % — a sentence that could be split or simplified but was not counts as a
+failure.
+
+The rules, in the order that matters here:
+
+1. **One idea per sentence.** A sentence that needs "and" to join two actions is two sentences.
+2. **Active voice.** The actor — the tool, the operator, the storage — does the acting: "the tool
+   refuses the plan", never "the plan is refused".
+3. **Present tense** for how the tool works; past tense only for what happened (an observed
+   crash, a review finding).
+4. **Simple words, one word one meaning.** "use" not "utilize", "need" not "require", "show" not
+   "demonstrate", "end" not "terminate", "help" not "assist", "about" not "approximately".
+5. **No idioms, no figures of speech, no contractions.** "Shipped a lie in between" is a figure
+   of speech — it stays out of shipped prose (it is allowed in *this* file, which is builder-facing
+   and exempt below).
+6. **Short sentences.** Under ~20 words where the idea allows it.
+7. **Name the referent.** "It" and "this" point at one named thing; when two tools share a
+   sentence, name both.
+8. **Domain terms survive.** Provisioned size, load vector, the transient invariant, the snapshot
+   reserve, payback, drift, `saferemove`, wiping: these names live in the code, the fixtures and
+   the config. No rewrite renames them to buy compliance.
+
+**Exempt by audience:** `IMPLEMENTATION_PLAN.md` (the specification, section 7), `REVIEW.md`
+(the review record), `.agents/` and this file (builder-facing guidance), and code docstrings and
+comments (section 8.1 carries them with their own rules: units, raises, plan reference).
+
+Details: [`.agents/documentation.md`](.agents/documentation.md), section *Writing in
+ASD-STE100* — the word list, the before/after examples, and the review checklist.
 
 ---
 

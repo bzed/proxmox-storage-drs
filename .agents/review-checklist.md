@@ -42,6 +42,10 @@ Walk this list. It is short on purpose.
       `config/drs.example.yaml` and plan §15.1.
 - [ ] A new or changed CLI option appears in `--help` with its default and unit, and in the
       manpage's `OPTIONS`.
+- [ ] Shipped prose touched in the diff (manual, internals, manpage, README, config comments,
+      `--help`, site landing) is at 80 % ASD-STE100 compliance — counted per
+      [documentation.md](documentation.md), not eyeballed. Exempt by audience: the plan,
+      `REVIEW.md`, `.agents/`, code docstrings.
 - [ ] `make docs` was run and any regenerated PDF is in the same commit.
 
 ## Packaging

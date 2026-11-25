@@ -90,6 +90,83 @@ Two things this rule does **not** say:
   Prose written for the operator and prose written for the implementer are two texts, and they are
   *supposed* to drift in wording.
 
+## Writing in ASD-STE100 (80 %)
+
+[`../AGENTS.md`](../AGENTS.md) section 8.7 is the rule: shipped prose is written to the
+ASD-STE100 standard at 80 % compliance. This section is the how.
+
+### The counting
+
+Count the prose sentences of a file — sentences inside fenced code blocks do not count. Count the
+sentences that pass every rule below. The ratio must be at least 0.80. The remaining 20 % absorbs
+what the standard forbids and this codebase needs: configuration keys, formulae, Proxmox API
+names, the five-point config entry, and a sentence whose subject is a long identifier. A sentence
+that is long only because it was written that way does not earn its place in the 20 %.
+
+No off-the-shelf checker scores this corpus, so the counting is the check: it runs at review time,
+not in CI.
+
+### The rules
+
+1. **One idea per sentence.** A sentence that needs "and" to join two actions is two sentences.
+2. **Active voice.** The actor — the tool, the operator, the storage — does the acting.
+3. **Present tense** for how the tool works; past tense only for what happened.
+4. **Simple words, one word one meaning.** The word list:
+
+   | Use | Not |
+   |---|---|
+   | use | utilize |
+   | need | require |
+   | show | demonstrate |
+   | end | terminate |
+   | help | assist |
+   | about | approximately |
+   | keep | maintain |
+   | start | initiate |
+   | get | obtain |
+   | run | execute (except as a subcommand name) |
+   | tell | inform |
+   | check | verify (except as a subcommand name) |
+
+5. **No idioms, no figures of speech, no contractions.** "In the same commit" is plain; "it ships
+   a lie in the middle" is a figure of speech and stays out of shipped prose.
+6. **Short sentences.** Under ~20 words where the idea allows it. An em-dash aside that carries an
+   idea becomes its own sentence.
+7. **Name the referent.** "It" and "this" point at one named thing; when two tools share a
+   sentence, name both.
+8. **Domain terms survive.** Provisioned size, load vector, the transient invariant, the snapshot
+   reserve, payback, drift, `saferemove`, wiping: the names live in the code, the fixtures and the
+   config. A rewrite never renames one to buy compliance.
+
+### Before and after
+
+Before — one 44-word sentence, a passive, an idiom ("rides out"), and an em-dash aside:
+
+> Lower values react sooner and migrate more; higher values ride out daily variation, which is why
+> below roughly 0.05 the tool will chase noise on a busy cluster.
+
+After — three sentences, 45 words, every idea on its own:
+
+> Lower values react sooner and migrate more. Higher values ignore daily variation. Below roughly
+> 0.05 the tool reacts to noise on a busy cluster.
+
+The second one is longer in words and shorter in parse: each sentence states one fact the operator
+can check against the cluster.
+
+### Reviewing a rewrite
+
+1. **Count.** Does the file reach 80 %? Count sentences; do not eyeball the ratio.
+2. **Diff the facts.** Every configuration key, default, unit, number, command, exit code and
+   cross-reference target from the original still exists. A rewrite that "simplifies" a default is
+   a bug.
+3. **Check the 20 %.** Each sentence that fails the rules carries a configuration key, a formula,
+   an API name or a five-point entry — not just length.
+4. **Check the links.** Intra-file anchors still resolve after any heading change; file links
+   still exist.
+5. **Check the invariants.** SPDX headers byte-identical; copyright years current; fenced code
+   blocks byte-identical (in `config/drs.example.yaml` only comment lines may change).
+6. **Build.** `make docs` renders; `make check` is green.
+
 ## Writing the reference configuration
 
 `config/drs.example.yaml` is documentation that happens to parse. It is installed as an example,
