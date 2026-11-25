@@ -133,8 +133,8 @@ currently on.
 
 ## `compute_disk_load_series()`: the same blend, as a time series
 
-`compute_group_load()` reduces each raw quantity to one already-quantile'd
-scalar per disk. It uses `quantile_over_time` at query time. Section 10's
+`compute_group_load()` reduces each raw quantity to one scalar per disk, with the quantile
+already applied. It uses `quantile_over_time` at query time. Section 10's
 forecast needs the opposite. It needs the *raw* per-disk `ℓ_d` signal,
 unreduced. It needs it over a range and step of its own choosing. The
 choice is typically `forecast.required_range_seconds()`, not

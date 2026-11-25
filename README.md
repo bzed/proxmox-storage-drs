@@ -291,7 +291,7 @@ that distinguishes them.
 
 ## Status
 
-The tool is implemented, dogfooded against a production cluster, and released as a Debian
+The tool is implemented, tested against a production cluster, and released as a Debian
 package. See [Step 1](#step-1--install). Phases 1–14 of `IMPLEMENTATION_PLAN.md` §12 are done.
 They run from reading the cluster and Prometheus, through the gates, the solver (CBC when
 installed, a dependency-free heuristic otherwise), move ordering and execution, to Debian
@@ -508,7 +508,7 @@ Copyright © 2026 Bernd Zeimetz <bernd@bzed.de>
 
 ## AI disclaimer
 
-This project was built with AI assistance at every stage. Anthropic's
+This project was built with AI help at every stage. Anthropic's
 [Claude Opus 5](https://www.anthropic.com/claude) did the planning and architecture, including
 `IMPLEMENTATION_PLAN.md` itself. Anthropic's [Claude Sonnet 5](https://www.anthropic.com/claude)
 wrote most of the code, tests and documentation. Since late September 2026,

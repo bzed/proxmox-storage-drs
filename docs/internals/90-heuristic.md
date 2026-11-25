@@ -223,8 +223,8 @@ search that chooses among them.
 
 ## `w_v`: `kappa` weighted by a VM's own I/O, and `D^big`
 
-Section 5.4 strengthens the affinity term in two ways. Both came after live
-dogfooding found that the aggregate test of `payback.py` rejected a plan whose
+Section 5.4 strengthens the affinity term in two ways. Both came after a test on a live cluster
+found that the aggregate test of `payback.py` rejected a plan whose
 entire value was to reunite VMs. That value had no place to be counted (see
 `96-payback.md`).
 
@@ -301,7 +301,7 @@ and which VMs that leaves fragmented across more than one storage. See
 
 ## `best_single_disk_alternative()`: why `explain` says nothing moved
 
-Dogfooding against a real cluster led to this function. The gate decided `ACT`
+A test against a real cluster led to this function. The gate decided `ACT`
 (every disk eligible, nothing pinned), and the optimum of the solver was still to
 move nothing. This is the exact shape "kappa outweighs the repair", the opposite
 direction of the case that the whole-VM relocation above handles. Here, only a split

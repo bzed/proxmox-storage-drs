@@ -36,7 +36,7 @@ logging policy (see [`35-logging.md`](35-logging.md)). The status file a
 monitoring check reads is documented in [`36-monitoring.md`](36-monitoring.md).
 Phase 12 adds the capacity-spread objective and gate, and section 5.3
 (C7)/5.4's `δ` term. Phase 13 adds per-storage free-space requirements
-(section 5.3.1). Dogfooding against a production cluster continues.
+(section 5.3.1). Tests against a production cluster continue.
 `REVIEW.md` tracks findings from that work to resolution. The table below
 states exactly where this still-evolving tool stands, because honest status
 matters more than a document that reads as finished and closed:

@@ -289,7 +289,7 @@ migration:
   # the objective below, and needs no payback verdict. The default is well above an
   # EFI var store or TPM state. It is far below anything the payback rule was
   # written for. With kappa_vm_affinity below, this lets a tiny disk rejoin its VM
-  # for free instead of paying the price of a real migration. A disk this small
+  # at no cost, without the price of a real migration. A disk this small
   # also never moves on its own. It moves only to a storage where a larger disk of
   # its VM (in the same group) ends up. An EFI/TPM disk thus follows its VM and is
   # never a "repair" by itself. With no larger disk of its VM in the group, the

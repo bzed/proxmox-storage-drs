@@ -23,7 +23,7 @@ there is nothing useful to suggest.
    `importlib.resources`. The file ships as package data -- see
    `pyproject.toml`'s `[tool.setuptools.package-data]`. The function then
    runs the schema through `jsonschema`. Every object in the schema sets
-   `additionalProperties: false`. A typo'd key becomes a validation error
+   `additionalProperties: false`. A mistyped key becomes a validation error
    here, not a silent ignore. That keeps section 15.1's knob-to-formula
    table trustworthy. A key with no formula would go unnoticed otherwise.
 2. **`_build_config()`** walks the now-schema-valid raw `dict` into the

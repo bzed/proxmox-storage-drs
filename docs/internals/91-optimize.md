@@ -168,8 +168,8 @@ own control file already `Depends: coinor-cbc`. `rmadison` and
 `apt-cache show` against trixie confirm that; the page does not assume
 it. `debian/control` here now makes both `Depends` of `pve-storage-drs`
 itself too. A Debian install cannot end up with one and not the other
-short of a deliberately broken one. The catch earns its keep from the two
-cases that remain. That is a non-Debian `pip install pulp` with no system
+short of a deliberately broken one. Two cases remain that
+justify the catch. That is a non-Debian `pip install pulp` with no system
 `cbc` at all, and a `cbc` invocation that fails for some other reason (a
 malformed model, a killed subprocess). Either way, the result is still
 "this backend cannot produce a plan", never a bare traceback.
@@ -202,7 +202,7 @@ of `0`. `test_optimize.py` exercises the rule end to end, not just at the
 coefficient level, with `test_tiny_disk_bytes_lets_a_tiny_disk_reunite_with_its_vm_for_free`.
 At `tiny_disk_bytes: 0`, a 1 MiB `efidisk0` is not worth a full `beta`
 migration. Once the threshold covers it, the disk can reunite with its VM
-for free. `tests/unit/test_affinity_repair_fixture.py` also exercises the
+at no cost. `tests/unit/test_affinity_repair_fixture.py` also exercises the
 rule. It runs section 14.7's whole fixture through `solve()` and confirms
 the result agrees with the heuristic.
 
