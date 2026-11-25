@@ -16,8 +16,8 @@ A replacement for VMware's Storage DRS, for Proxmox VE 9.2.
 The Dynamic Load Balancer that PVE 9.2 ships moves guests between nodes to
 even out CPU and memory. It has no notion of the LUNs behind them. This
 tool is the **storage** counterpart to it. It never moves a guest. It moves
-individual disks between storages. The command is `pve-storage-drs`, named
-to keep the two from being confused.
+individual disks between storages. The command is `pve-storage-drs`. The name keeps
+readers from confusing the two tools.
 
 It balances **disk I/O load across configurable groups of shared storages**.
 The storage types are LVM/FC, Ceph RBD, or any other shared storage type PVE
@@ -31,10 +31,9 @@ migrations as possible.
   printed, until `execution.mode` or `--mode` moves it off the dry-run
   default. It is the only command with a code path that can write to the
   cluster.
-- **The tool never trades the snapshot reserve for balance.** A migration
-  plan that spends the free-space reserve during a move is rejected
-  outright. The tool does not weight it against the load the plan would
-  fix.
+- **The tool never trades the snapshot reserve for balance.** The tool rejects outright a migration
+  plan that spends the free-space reserve during a move. It does not weigh the
+  reserve against the load that the plan would repair.
 - **The tool never deletes anything automatically.** It reports volumes
   left behind by a failed move. The tool never removes them.
 
@@ -55,13 +54,13 @@ package contains.
 
 The [implementation plan](https://github.com/bzed/proxmox-storage-drs/blob/main/IMPLEMENTATION_PLAN.md)
 is deliberately not on the site. The plan is the full specification the tool
-implements, with every design derivation. The plan is addressed to whoever
-builds or changes the tool, rather than to whoever runs it. It lives in the
+implements, with every design derivation. The plan addresses whoever
+builds or changes the tool, not whoever runs it. It lives in the
 repository and as a PDF in the package.
 
 ## Getting the tool
 
-Every release is published as a ready-built Debian package on the
+The project publishes every release as a ready-made Debian package on the
 [GitHub releases page](https://github.com/bzed/proxmox-storage-drs/releases).
 The [operator manual](manual/00-installation.md) holds the installation
 walkthrough and the prerequisites: a PVE 9.2 cluster, a Prometheus carrying

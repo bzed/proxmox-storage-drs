@@ -147,15 +147,16 @@ for every disk a run actually migrated and for **both** of a move's
 storages (see [`15-state.md`](15-state.md), [`60-topology.md`](60-topology.md),
 [`90-heuristic.md`](90-heuristic.md) and [`92-execute.md`](92-execute.md)).
 
-Within modules that do exist:
-heuristic step 4 "polish" and (C2) format-compatibility eligibility in
-`heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)); `schedule.py`
-still only ever produces a strictly-sequential order (that is not
-`execute.py`'s own concurrent *execution* of it, which is real -- see
-above -- but the reasoning about which pairs of moves could safely be
-*scheduled* to overlap, priority-2 ordering, and staging, per
-[`95-schedule.md`](95-schedule.md)); and the payback re-solve-and-retry
-loop in `payback.py` (see [`96-payback.md`](96-payback.md)).
+Some parts of the modules that exist are still missing:
+
+- Heuristic step 4 "polish" and the format-compatibility eligibility of (C2) in
+  `heuristic.py` (see [`90-heuristic.md`](90-heuristic.md)).
+- In `schedule.py`: priority-2 ordering, staging, and reasoning about which pairs
+  of moves could safely be *scheduled* to overlap. `schedule.py` still only ever
+  produces a strictly sequential order. The concurrent *execution* of that order in
+  `execute.py` is real (see above). See [`95-schedule.md`](95-schedule.md).
+- The loop of `payback.py` that solves again and retries (see
+  [`96-payback.md`](96-payback.md)).
 
 ## Why config.py depends on forecast.py
 
@@ -170,55 +171,51 @@ that would otherwise form. Read the comment at the top of
 
 ## Where to read next
 
-- [`10-configuration.md`](10-configuration.md) — how a YAML file becomes a
-  validated `Config`, and where every default actually lives.
-- [`15-state.md`](15-state.md) — `state.json`'s dataclasses, why reading it
-  degrades but writing raises, the real `flock()` lock and the rename-vs
-  -in-place bug it takes to get that wrong, what `show-load`/`plan`
-  actually get from it today, and how its cooldown data reaches
-  `topology.py`/`heuristic.py`.
-- [`20-forecasting.md`](20-forecasting.md) — the Holt-Winters forecast, its
-  backtest gate, and how it scales a disk's load.
-- [`30-metrics.md`](30-metrics.md) — the Prometheus client and the six
+- [`10-configuration.md`](10-configuration.md): how a YAML file becomes a
+  validated `Config`, and where every default lives.
+- [`15-state.md`](15-state.md): the dataclasses of `state.json`. Why reading
+  degrades but writing raises. The real `flock()` lock, and the bug of rename
+  versus in-place writing that breaks it. What `show-load`/`plan` get from the file
+  today. How its cooldown data reaches `topology.py`/`heuristic.py`.
+- [`20-forecasting.md`](20-forecasting.md): the Holt-Winters forecast, its
+  backtest gate, and how it scales the load of a disk.
+- [`30-metrics.md`](30-metrics.md): the Prometheus client and the six
   `verify-metrics` checks.
-- [`40-cli-and-logging.md`](40-cli-and-logging.md) — command dispatch, the
+- [`40-cli-and-logging.md`](40-cli-and-logging.md): command dispatch, the
   `--mode` escalation rule, and why logs go to stderr.
-- [`50-pve-api.md`](50-pve-api.md) — the PVE API client, why it is built on
-  `proxmoxer`, and two things verified against a real cluster.
-- [`60-topology.md`](60-topology.md) — the disk/storage/group join, the
-  section 5.1.1 foreign-volume accounting, the shared (C4)/(C5) evaluator,
-  and the per-disk cooldown pin.
-- [`70-loadmodel.md`](70-loadmodel.md) — the section 4 raw-series-to-`ℓ_d`
-  blend, `min_coverage` rejection, and why `tpmstate0`/`unusedN` are exempt
-  from it but `efidisk0` is not.
-- [`80-gates.md`](80-gates.md) — the section 6 act/no-act verdict, how
-  `state.json`'s drift history now reaches it, and why the per-disk/
-  per-storage cooldowns live in `topology.py`/`heuristic.py` instead.
-- [`90-heuristic.md`](90-heuristic.md) — the section 5.4/5.5 objective and
-  the seed/repair/descend search, cross-checked against section 14's exact
-  objective totals, the storage-cooldown destination filter and its
-  repair-side exemption, and what "polish" and format eligibility still owe.
-- [`91-optimize.md`](91-optimize.md) — the CBC MILP backend,
-  why it is deliberately unscaled (and the LP-conditioning reason it still
-  works in whole MiB), why the reserve is solved in two lexicographic
-  stages rather than one big-M objective, and `cli.py`'s
-  `solver.backend` dispatch (`auto`'s cascade, and why an explicitly
-  forced backend still falls back to the heuristic rather than failing).
-- [`95-schedule.md`](95-schedule.md) — ordering a target assignment's
-  moves under the section 8 transient invariant, why `cost_m = z_d` is
-  exact today (not an approximation), and why the heuristic accepting a
-  residual violation can still mean the scheduler reports a deadlock.
-- [`96-payback.md`](96-payback.md) — the section 7 cost/benefit test,
-  the `headroom_src`/`headroom_dst` gap in the plan's own cost formula,
-  and why a reserve-fixing plan always passes the economic test.
-- [`92-execute.md`](92-execute.md) — why a completed move needs three
-  conditions, not one, why a VM lock is waited out rather than
-  whitelisted, the injectable `Clock`, how `cli.py`'s `_plan_group()`
-  gives `plan` and `apply` one shared pipeline instead of two, and
-  `auto` mode's time-window budget and re-plan loop (`timewindow.py`,
-  `cli._run_auto_group()`).
-- [`93-crashrecovery.md`](93-crashrecovery.md) — section 13's startup scan
-  for a `move_disk` left running by a crash or a second instance, the
-  cluster-wide `/cluster/tasks` read that `state.json`'s own `flock()`
-  cannot do, and how a UPID reaches disk *before* the move that owns it can
-  crash the engine.
+- [`50-pve-api.md`](50-pve-api.md): the PVE API client, why it uses `proxmoxer`,
+  and two facts that a test on a real cluster confirmed.
+- [`60-topology.md`](60-topology.md): the join of disks, storages and groups. The
+  foreign-volume accounting of section 5.1.1. The shared (C4)/(C5) evaluator. The
+  cooldown pin per disk.
+- [`70-loadmodel.md`](70-loadmodel.md): the blend of section 4 from raw series to
+  `ℓ_d`. The `min_coverage` rejection. Why `tpmstate0`/`unusedN` are exempt from it
+  but `efidisk0` is not.
+- [`80-gates.md`](80-gates.md): the act/no-act verdict of section 6. How the drift
+  history of `state.json` reaches it. Why the cooldowns per disk and per storage
+  live in `topology.py`/`heuristic.py` instead.
+- [`90-heuristic.md`](90-heuristic.md): the objective of sections 5.4/5.5 and the
+  seed/repair/descend search, checked against the exact objective totals of section
+  14. The destination filter of the storage cooldown and its exemption for repair.
+  What "polish" and format eligibility still lack.
+- [`91-optimize.md`](91-optimize.md): the CBC MILP backend. Why it deliberately
+  uses no scaling, and why the LP conditioning still makes it work in whole MiB. Why
+  it solves the reserve in two lexicographic stages instead of one big-M objective.
+  The `solver.backend` dispatch of `cli.py`: the cascade of `auto`, and why an
+  explicitly forced backend still falls back to the heuristic instead of failing.
+- [`95-schedule.md`](95-schedule.md): the ordering of the moves of a target
+  assignment under the transient invariant of section 8. Why `cost_m = z_d` is
+  exact today (not an approximation). Why the scheduler can report a deadlock even
+  when the heuristic accepts a remaining violation.
+- [`96-payback.md`](96-payback.md): the cost/benefit test of section 7. The
+  `headroom_src`/`headroom_dst` gap in the cost formula of the plan. Why a plan
+  that repairs the reserve always passes the economic test.
+- [`92-execute.md`](92-execute.md): why a completed move needs three conditions,
+  not one. Why the tool waits out a VM lock instead of using a whitelist. The
+  injectable `Clock`. How `_plan_group()` of `cli.py` gives `plan` and `apply` one
+  shared pipeline. The time-window budget and re-plan loop of `auto` mode
+  (`timewindow.py`, `cli._run_auto_group()`).
+- [`93-crashrecovery.md`](93-crashrecovery.md): the startup scan of section 13 for
+  a `move_disk` that a crash or a second instance left running. The cluster-wide
+  read of `/cluster/tasks`, which the `flock()` of `state.json` cannot replace. How
+  a UPID reaches disk *before* the move that owns it can crash the engine.
