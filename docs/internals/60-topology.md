@@ -347,8 +347,8 @@ They also derive each VM's cap `T_v = max(T, largest disk)` and its excess
 `o_v`. The excess is the peak footprint beyond the cap. These values serve
 the large-VM split rule (`91-optimize.md`, `80-gates.md`).
 
-`compute_reserve_status()` computes, for one storage: `used = Σ_{d∈D on s} z_d
-+ Uˢᵉˣᵗ_s`. That is every managed disk's bytes plus the foreign/unreferenced
+`compute_reserve_status()` computes, for one storage: `used = Σ_{d∈D on s} z_d +
+Uˢᵉˣᵗ_s`. That is every managed disk's bytes plus the foreign/unreferenced
 bytes from "`Uˢᵉˣᵗ`: everything not referenced" above. It computes
 `shortfall = max(0, used + R_s − capacity_s)`. The module rounds the result
 **up to the next whole MiB** (`round_up_to_mib()`). `ReserveStatus.violated`

@@ -63,8 +63,8 @@ its *provisioned* size. It does so on thin-provisioned storage (Ceph RBD,
 LVM-thin, ZFS) exactly as on thick. A plan that fits only while the disks
 stay thin is a plan a growing guest can turn into a full pool. Nothing
 here can bound that growth (`.agents/domain-invariants.md` rule 2b;
-over-provisioning is never considered). The planner's `used_b` is `Σ z_d
-+ Uˢᵉˣᵗ`. That is the provisioned sizes of the managed disks plus the
+over-provisioning is never considered). The planner's `used_b` is `Σ z_d +
+Uˢᵉˣᵗ`. That is the provisioned sizes of the managed disks plus the
 foreign volumes on the storage. That is the listing's total. PVE's `used`
 is the *allocated* figure. It is equal on a thick pool and far lower on a
 thin one. The dev cluster had a pool with 3.36 TiB provisioned and 1.45

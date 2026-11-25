@@ -78,8 +78,8 @@ any group whose minimum shortfall was not a round number of MiB, stage 2
 was `Infeasible` on every run. The group then fell back to the heuristic
 silently. The tool found this on a real bundle: 231 GiB short, with two
 528 KiB EFI disks the only movable disks on the short storages. Now each
-`r_s` is an integer variable. The capacity constraint `Σ z_d x_{d,s} + …
-+ R_s ≤ C_s + r_s` has integer `r_s ≥ 0`. That makes `r_s` exactly the
+`r_s` is an integer variable. The capacity constraint `Σ z_d x_{d,s} + … +
+R_s ≤ C_s + r_s` has integer `r_s ≥ 0`. That makes `r_s` exactly the
 shortfall rounded up to the next whole MiB. It is the same quantity
 `reserve.compute_reserve_status()` reports (`docs/internals/60-topology.md`).
 Stage 2's bound is the integer `round(min Σ r_s)`, with no tolerance at
