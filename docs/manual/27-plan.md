@@ -92,15 +92,15 @@ carries a `⚠ exceeds migration.max_single_move_duration` suffix. It also
 always fails the plan (see below). This is a hard, per-move rule,
 independent of whether the plan as a whole looks profitable.
 
-The `ACT: reserve violated on ...` header in human output implies such a
-move: a move scheduled first *regardless* of its ratio. The storage it
-leaves is currently breaching its snapshot reserve or its configured
-`free_space.soft` requirement. `free_space.soft` is the capacity a
-storage must always keep free, sized to the larger of
-`snapshot_reserve.factor` times the storage's largest disk or
+The scheduler orders some moves first *regardless* of their ratio. It does so
+when the storage a move leaves currently breaches its snapshot reserve or its
+configured `free_space.soft` requirement. `free_space.soft` is the capacity a
+storage must always keep free. The requirement is the larger of
+`snapshot_reserve.factor` times the largest disk of the storage, or
 `free_space.soft` (`IMPLEMENTATION_PLAN.md` section 5.3, constraints
-(C4)/(C5)/5.3.1). Safety is not subject to hysteresis (section 13). So
-this always wins over a purely balance-driven move.
+(C4)/(C5)/5.3.1). The `ACT: reserve violated on ...` header in human output
+implies such a move. Safety is not subject to hysteresis (section 13). So such a
+move always wins over a purely balance-driven move.
 
 `repair` (visible in `--json`, `[repair]` in human output) marks a move
 that the plan's own shortfall *depends on*. Hold that one disk back on
@@ -322,10 +322,11 @@ line: `vmid`, `cap_bytes`,
 also has `deadlocked` (a list of disk keys) and `deadlock_message`
 (`null` if none). It has `before_spread`/`after_spread`, the section 6
 spread fraction before the plan and after every scheduled move. It has
-`before_capacity_spread`/`after_capacity_spread`, the *relative*
-fill-fraction spread the capacity gate compares. That is `(max − min) /
-mean` of bytes used / capacity, a fraction and not the TiB term
-`objective.delta_capacity_spread` prices, the same way. The value is
+`before_capacity_spread`/`after_capacity_spread`. These two fields hold
+the *relative* fill-fraction spread that the capacity gate compares, before
+and after in the same way. The spread is `(max − min) / mean` of bytes used /
+capacity. It is a fraction, not the TiB term that
+`objective.delta_capacity_spread` prices. The value is
 `null` for a group whose mean fill is 0 or that has not solved. The
 group also has `before_objective_total`/`after_objective_total`, the
 section 5.4 objective's full `.total`. `evaluate_assignment()` re-scores

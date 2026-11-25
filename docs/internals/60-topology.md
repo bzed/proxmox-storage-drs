@@ -127,9 +127,9 @@ then `exclude.disks`). The second is a real snapshot or an unreferenced
 companion volume (section 3.7). `_disk_snapshot_or_orphan_reason` handles
 it. `GET .../snapshot` always returns a `"current"` entry. A live cluster
 confirmed this. The function filters that entry out before counting. For
-an unreferenced volume, the reason names it as `storage:volume`. It lists
-the first two sorted, plus a count of the rest. The reason appears
-nowhere else the operator looks. The third condition is an unapplied
+an unreferenced volume, the reason names the volume as `storage:volume`. It
+lists the first two sorted, plus a count of the rest. The reason names the
+volume because the volume appears nowhere else the operator looks. The third condition is an unapplied
 pending config change (section 3.8, below). The fourth is the per-disk
 cooldown (below). The fifth is a VM lock. The sixth is an `unusedN` disk,
 when `exclude.include_unused_disks` is false. A disk gets at most one
@@ -229,8 +229,7 @@ module skips the volume. It logs a warning and undercounts the reserve.
 parser on purpose. `units.py`'s parser is for *this project's* config
 file. That format is different, and only by coincidence similarly shaped.
 
-**Which node's content listing the tool uses is not a detail this function
-can be careless about.** The operator who hit this confirmed the behavior
+**The choice of the node for the content listing matters.** The operator who hit this confirmed the behavior
 live. PVE 9.2 supports qcow2-on-shared-LVM snapshots. Because of that
 support, `size` for one of these volumes is readable only from the node
 that has its LV *active*. The read is cheap on the node currently running
@@ -284,9 +283,9 @@ pattern matching zero storages is a `TopologyError`. Section 11.1 already
 gives that treatment to a literal id that does not exist. A typo is the
 likelier cause. A matched storage may have a `GET /storage` definition but
 be reported active by no node. That is the shape of a disabled storage.
-The check is fatal and names the pattern and the storage. REVIEW.md U-01
-records a literal reference to such a storage. It hit the same wall in
-`_pick_active_node`, with a worse message. That call sits three steps
+The check is fatal and names the pattern and the storage. A literal
+reference to such a storage already hit the same condition in
+`_pick_active_node` (REVIEW.md U-01), with a worse message. That call sits three steps
 downstream of expansion. It has no way to know a pattern was involved. The
 check here tells the operator which pattern is responsible. Two
 *different* patterns in the same group matching the same storage is also
@@ -383,9 +382,9 @@ self-consistent unit test.
 
 ## `free_space` resolution: `soft_s`/`hard_s`, resolved once, here
 
-The module resolves Section 5.3.1's `soft_s`/`hard_s` pair onto
-`Storage.free_space_soft_bytes`/`.free_space_hard_bytes` in
-`_build_storages()`. `_resolve_free_space()` does the work. It uses the
+`_build_storages()` resolves section 5.3.1's `soft_s`/`hard_s` pair onto
+`Storage.free_space_soft_bytes`/`.free_space_hard_bytes`.
+`_resolve_free_space()` does the work. It uses the
 same place and the same per-storage pattern `_resolve_reserve_factor()`
 already uses for `reserve_factor`. The reason is the same: a `/…/`
 pattern's `free_space` entry applies to every storage it matches. A

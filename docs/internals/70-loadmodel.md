@@ -33,30 +33,26 @@ engine-side (`_combined_raw`). The reason matches the one F-03 used to
 move `read_factor`/`write_factor` engine-side. One tested constant beats
 the same `/1e9` repeated across deployed PromQL strings.
 
-**REVIEW.md Q-02, revisited.** The original design fetched these six
-queries *unfiltered by group*. The theory was that Python-side filtering
-was free. Six more Prometheus queries per group was not free. The theory
-held. The team accepted it as a "Low, wasteful but correct" limitation.
-The project was designed against 1-3-group deployments. The limitation
-stopped being merely wasteful. A real cluster hit it. The cluster had
-several hundred VMs spread across many groups. Every group's plan
-re-issued the *same* unfiltered, cluster-wide aggregation.
-Prometheus/gigapipe's own query evaluator timed out on it outright. The
-message was "query timed out in expression evaluation". The result was not
-wasteful, it was broken. `metrics.group_query_selectors()` now scopes
-every such query. The queries are this module's six raw quantities,
+**REVIEW.md Q-02, revisited.** The original design fetched these six queries
+*unfiltered by group*. The theory was that Python-side filtering costs nothing,
+but six more Prometheus queries per group do cost something. The theory was
+correct. The review accepted the design as a "Low, wasteful but correct"
+limitation for the 1-3-group deployments that the project targeted. Then a real
+cluster with several hundred VMs across many groups hit the limitation. Every
+group's plan sent the *same* unfiltered, cluster-wide aggregation again.
+Prometheus/gigapipe's own query evaluator timed out on that query ("query timed
+out in expression evaluation"). The design was then not only wasteful. It was
+broken. `metrics.group_query_selectors()` now scopes every such query to the
+calling group's own vmids. The queries are this module's six raw quantities,
 `compute_disk_load_series()`'s own forecast history fetch, and
-`metrics.compute_disk_coverage()`. The scope is the calling group's own
-vmids. When a single group is large enough, the fetch splits into
-`metrics.VMID_QUERY_BATCH_SIZE`-sized batches. The function merges the
-batches back into one logical result. It splits when even the group's own
-aggregation would be too big for one query. A config with `N` groups still
-makes `7N` queries. The redundancy is unchanged. Each group's
-coverage/rejection decisions are independent. The fetch still cannot be
-shared across groups. The redundancy is still just a performance note for
-a many-group deployment. Each of those `7N` queries now aggregates only
-the disks that group actually has. It does not aggregate the whole
-cluster.
+`metrics.compute_disk_coverage()`. A single group can be so large that even its
+own aggregation is too big for one query. The fetch then splits into batches of
+`metrics.VMID_QUERY_BATCH_SIZE` and merges them back into one logical result. A
+config with `N` groups still makes `7N` queries. This redundancy is unchanged,
+because each group's coverage and rejection decisions are independent. Thus the
+groups cannot share the fetch. The redundancy is only a performance note for a
+deployment with many groups. Each of the `7N` queries now aggregates only the
+disks that the group has, not the disks of the whole cluster.
 
 ## Coverage rejection excludes a disk from the group total, not just from its own `ℓ_d`
 
