@@ -121,20 +121,20 @@ pre-move re-validation, `execute.py`'s `_preflight()` (see
 
 ## Pin priority: `_pin_reason()`
 
-`_pin_reason()` checks each disk in the fixed order section 5.3 (C2)
-lists its conditions. The first condition is config exclusion (VM-level,
-then `exclude.disks`). The second is a real snapshot or an unreferenced
-companion volume (section 3.7). `_disk_snapshot_or_orphan_reason` handles
-it. `GET .../snapshot` always returns a `"current"` entry. A live cluster
-confirmed this. The function filters that entry out before counting. For
-an unreferenced volume, the reason names the volume as `storage:volume`. It
-lists the first two sorted, plus a count of the rest. The reason names the
-volume because the volume appears nowhere else the operator looks. The third condition is an unapplied
-pending config change (section 3.8, below). The fourth is the per-disk
-cooldown (below). The fifth is a VM lock. The sixth is an `unusedN` disk,
-when `exclude.include_unused_disks` is false. A disk gets at most one
-reason. The first reason that applies wins. This matches how an operator
-would explain it.
+`_pin_reason()` checks each disk in the fixed order section 5.3 (C2) lists its
+conditions. The first condition is config exclusion (VM-level, then
+`exclude.disks`). The second is a real snapshot or an unreferenced companion
+volume (section 3.7). `_disk_snapshot_or_orphan_reason` handles it.
+`GET .../snapshot` always returns a `"current"` entry. A live cluster
+confirmed this. The function filters that entry out before counting. For an
+unreferenced volume, the reason names the volume as `storage:volume`. It lists
+the first two sorted, plus a count of the rest. The reason names the volume
+because the volume appears nowhere else the operator looks. The third
+condition is an unapplied pending config change (section 3.8, below). The
+fourth is the per-disk cooldown (below). The fifth is a VM lock. The sixth is
+an `unusedN` disk, when `exclude.include_unused_disks` is false. A disk gets
+at most one reason. The first reason that applies wins. This matches how an
+operator would explain it.
 
 The module applies one more pin afterwards, per group rather than per
 disk. The pin depends on the VM's *other* disks in the group.
@@ -229,25 +229,24 @@ module skips the volume. It logs a warning and undercounts the reserve.
 parser on purpose. `units.py`'s parser is for *this project's* config
 file. That format is different, and only by coincidence similarly shaped.
 
-**The choice of the node for the content listing matters.** The operator who hit this confirmed the behavior
-live. PVE 9.2 supports qcow2-on-shared-LVM snapshots. Because of that
-support, `size` for one of these volumes is readable only from the node
-that has its LV *active*. The read is cheap on the node currently running
-the owning VM. PVE keeps the LV active there. The read is expensive, or
-blocked entirely, on a shared storage's other nodes. Those nodes report
-`approximate-size` instead. That value is PVE's own answer from LVM
-metadata, without activating anything. `_pick_active_node()` picks one
-node per *storage*. That is the node every other section 3.5 call uses.
-The pick is not guaranteed to be the node with the active LV. The module
-resolves a managed disk's size/format against a content listing fetched
-from **that disk's own VM's node** specifically. It uses
-`_needed_content_node_pairs()` (step 5 above), not `_pick_active_node()`'s
-pick. Only the *foreign*-volume sum in `_build_storages` still uses the
-storage-wide listing. An unreferenced volume has no owning VM to pick a
-node from. Before this fix, a disk on this kind of storage could silently
-carry the storage's generic pick's `approximate-size`. It could fall
-further, to a possibly-stale VM config `size=`. The exact figure was one
-call away.
+**The choice of the node for the content listing matters.** The operator who
+hit this confirmed the behavior live. PVE 9.2 supports qcow2-on-shared-LVM
+snapshots. Because of that support, `size` for one of these volumes is
+readable only from the node that has its LV *active*. The read is cheap on the
+node currently running the owning VM. PVE keeps the LV active there. The read
+is expensive, or blocked entirely, on a shared storage's other nodes. Those
+nodes report `approximate-size` instead. That value is PVE's own answer from
+LVM metadata, without activating anything. `_pick_active_node()` picks one
+node per *storage*. That is the node every other section 3.5 call uses. The
+pick is not guaranteed to be the node with the active LV. The module resolves
+a managed disk's size/format against a content listing fetched from **that
+disk's own VM's node** specifically. It uses `_needed_content_node_pairs()`
+(step 5 above), not `_pick_active_node()`'s pick. Only the *foreign*-volume
+sum in `_build_storages` still uses the storage-wide listing. An unreferenced
+volume has no owning VM to pick a node from. Before this fix, a disk on this
+kind of storage could silently carry the storage's generic pick's
+`approximate-size`. It could fall further, to a possibly-stale VM config
+`size=`. The exact figure was one call away.
 
 ## `Uˢᵉˣᵗ`: everything not referenced
 
@@ -278,26 +277,24 @@ whatever a pattern matched for that same id. The overwrite is a plain
 Entry order in the file never matters.
 
 `_match_pattern_entries` checks three things a pattern can get wrong. The
-checks run right there, before anything downstream sees the result. A
-pattern matching zero storages is a `TopologyError`. Section 11.1 already
-gives that treatment to a literal id that does not exist. A typo is the
-likelier cause. A matched storage may have a `GET /storage` definition but
-be reported active by no node. That is the shape of a disabled storage.
-The check is fatal and names the pattern and the storage. A literal
-reference to such a storage already hit the same condition in
-`_pick_active_node` (REVIEW.md U-01), with a worse message. That call sits three steps
-downstream of expansion. It has no way to know a pattern was involved. The
-check here tells the operator which pattern is responsible. Two
-*different* patterns in the same group matching the same storage is also
-fatal (`claimed_by`). The tool could not decide which entry's options
-should apply. That choice would be arbitrary. A fourth check,
-`_check_cross_group_uniqueness`, runs once every group is expanded. It
-catches a pattern in one group and a literal (or another pattern) in a
-different group that match the same real storage.
-`config._check_group_storage_membership` cannot see that case at load
-time. It only compares two groups' raw entry *text*. `"san-a"` and
-`"/san-.*/"` are different text, even when they resolve to the same
-storage.
+checks run right there, before anything downstream sees the result. A pattern
+matching zero storages is a `TopologyError`. Section 11.1 already gives that
+treatment to a literal id that does not exist. A typo is the likelier cause. A
+matched storage may have a `GET /storage` definition but be reported active by
+no node. That is the shape of a disabled storage. The check is fatal and names
+the pattern and the storage. A literal reference to such a storage already hit
+the same condition in `_pick_active_node` (REVIEW.md U-01), with a worse
+message. That call sits three steps downstream of expansion. It has no way to
+know a pattern was involved. The check here tells the operator which pattern
+is responsible. Two *different* patterns in the same group matching the same
+storage is also fatal (`claimed_by`). The tool could not decide which entry's
+options should apply. That choice would be arbitrary. A fourth check,
+`_check_cross_group_uniqueness`, runs once every group is expanded. It catches
+a pattern in one group and a literal (or another pattern) in a different group
+that match the same real storage. `config._check_group_storage_membership`
+cannot see that case at load time. It only compares two groups' raw entry
+*text*. `"san-a"` and `"/san-.*/"` are different text, even when they resolve
+to the same storage.
 
 One deliberate asymmetry remains. Section 11.4's own closing paragraph
 calls it out explicitly. A pattern-matched storage does **not** get the
@@ -384,27 +381,26 @@ self-consistent unit test.
 
 `_build_storages()` resolves section 5.3.1's `soft_s`/`hard_s` pair onto
 `Storage.free_space_soft_bytes`/`.free_space_hard_bytes`.
-`_resolve_free_space()` does the work. It uses the
-same place and the same per-storage pattern `_resolve_reserve_factor()`
-already uses for `reserve_factor`. The reason is the same: a `/…/`
-pattern's `free_space` entry applies to every storage it matches. A
-literal entry overrides it. Only a real storage's `capacity_bytes` can
-resolve a percentage. That value is known here, not in `config.py`. The
-mandated order is inheritance. Then percent-to-bytes conversion. Then the
-two section 11.1 hard rules against the resolved values (`hard_s <= soft_s`,
-`soft_s < C_s`). Both rules raise `TopologyError`. They behave exactly like
-the pattern-expansion rules above. Both rules need the cluster inventory
-that `config.py` never has. A *null* `hard` means `hard_s = soft_s`.
-`_resolve_free_space()` returns a `ResolvedFreeSpace`. The value is the
-pair plus two display-only strings. Each string names the level its half
-came from (global, storage entry, `pattern /re/`, percent-converted). The
-strings are carried on `Storage.free_space_soft_source`/`_hard_source` for
-`verify-storages`. Nothing else reads them. By the time
-`compute_reserve_status()` reads `storage.free_space_soft_bytes`, both
-values are plain, already-resolved byte constants. The same holds when
-`schedule.transient_invariant_ok()` reads `.free_space_hard_bytes`. Section
-5.3.1's own grammar (percentages, patterns) is never seen again past this
-module.
+`_resolve_free_space()` does the work. It uses the same place and the same
+per-storage pattern `_resolve_reserve_factor()` already uses for
+`reserve_factor`. The reason is the same: a `/…/` pattern's `free_space` entry
+applies to every storage it matches. A literal entry overrides it. Only a real
+storage's `capacity_bytes` can resolve a percentage. That value is known
+here, not in `config.py`. The mandated order is inheritance. Then
+percent-to-bytes conversion. Then the two section 11.1 hard rules against the
+resolved values (`hard_s <= soft_s`, `soft_s < C_s`). Both rules raise
+`TopologyError`. They behave exactly like the pattern-expansion rules above.
+Both rules need the cluster inventory that `config.py` never has. A *null*
+`hard` means `hard_s = soft_s`. `_resolve_free_space()` returns a
+`ResolvedFreeSpace`. The value is the pair plus two display-only strings.
+Each string names the level its half came from (global, storage entry,
+`pattern /re/`, percent-converted). The strings are carried on
+`Storage.free_space_soft_source`/`_hard_source` for `verify-storages`.
+Nothing else reads them. By the time `compute_reserve_status()` reads
+`storage.free_space_soft_bytes`, both values are plain, already-resolved byte
+constants. The same holds when `schedule.transient_invariant_ok()` reads
+`.free_space_hard_bytes`. Section 5.3.1's own grammar (percentages, patterns)
+is never seen again past this module.
 
 ## (C2) format eligibility: `storage_type`/`allowed_formats`
 
