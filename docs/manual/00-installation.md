@@ -3,87 +3,89 @@
 ## What you need
 
 - **Proxmox VE 9.2**, or a management host with network access to a PVE 9.x
-  cluster's API (tcp/8006) — the tool does not need to run on a cluster
-  member.
-- **A Prometheus-compatible backend** already receiving PVE's per-disk
-  `blockstat` metrics via the InfluxDB external metric server — plain
-  Prometheus, VictoriaMetrics, or gigapipe on ClickHouse, which is what this
-  project is dogfooded against. If your cluster's dashboards already show
-  per-VM disk I/O, the export side is already on. That is not the same as
-  all six counters having survived the trip, which is a real and silent
-  failure mode: read [`05-metrics-pipeline.md`](05-metrics-pipeline.md)
-  before writing the `metrics` block, and run `pve-storage-drs
-  verify-metrics` before relying on any plan. No new exporter or collector
-  is required.
-- **A PVE user or API token** with read access to VM and storage inventory
-  and permission to call `move_disk`. An API token is preferred for
-  unattended operation (`execution.mode: auto`); a username/password pair
-  works for interactive use. See "Setting up the PVE credential" below for
-  the exact privileges — the obvious-looking "just grant Audit everywhere"
-  is not enough, and the gap is silent rather than an error.
+  cluster API (tcp/8006). The tool does not need to run on a cluster member.
+- **A Prometheus-compatible backend** that already receives PVE's per-disk
+  `blockstat` metrics via the InfluxDB external metric server. The backend
+  can be plain Prometheus, VictoriaMetrics, or gigapipe on ClickHouse. The
+  project's own cluster uses gigapipe. If your cluster dashboards already
+  show per-VM disk I/O, the export side is already on. That is not the same
+  as all six counters surviving the transport. Losing one counter is a real
+  failure, and the failure is silent. Read
+  [`05-metrics-pipeline.md`](05-metrics-pipeline.md) before you write the
+  `metrics` block. Run `pve-storage-drs verify-metrics` before you rely on
+  any plan. The tool needs no new exporter or collector.
+- **A PVE user or API token** with read access to VM and storage inventory,
+  plus permission to call `move_disk`. An API token is preferred for unattended
+  operation (`execution.mode: auto`). A username and password work for
+  interactive use. The section "Setting up the PVE credential" below lists
+  the exact privileges. The obvious
+  approach, "just grant Audit everywhere", is not enough. The
+  gap is silent, not an error.
 
 ## Setting up the PVE credential
 
-Grant, on **every storage the tool will manage** (the shared, image-holding
-storages in your `groups`, not backup targets):
+Grant the following on **every storage the tool will manage** (the shared,
+image-holding storages in your `groups`, not backup targets):
 
-- `Datastore.Audit` **and `Datastore.Allocate`** — not Audit alone.
-  `GET /nodes/{node}/storage/{storage}/content`, which the tool uses to
-  cross-check each disk's real allocated size, silently returns an empty
-  list under Audit-only permission: a clean `200` response with no content
-  and no error, indistinguishable from "this storage genuinely has nothing
-  on it" unless you already know to be suspicious. Audit alone is enough for
-  every *other* read call the tool makes; this one endpoint is the
-  exception, verified against a live PVE 9.2.11 cluster (see
-  `IMPLEMENTATION_PLAN.md` section 3.5's note). Getting this wrong does not
-  make the tool fail loudly — it makes it under-count what already occupies
-  each storage, which quietly erodes the **snapshot reserve**: the free
-  capacity `pve-storage-drs` always keeps clear on every managed storage
-  (sized from `snapshot_reserve.factor`/`free_space.soft` — see
-  [`10-configuration.md`](10-configuration.md)) so that a snapshot, or a
-  disk mid-migration existing on two storages at once, never runs a LUN
-  out of space. An under-counted storage looks to have more headroom than
-  it really does, so the tool plans and executes migrations that erode a
-  safety margin it believes it is still protecting.
+- `Datastore.Audit` **and `Datastore.Allocate`**, not Audit alone.
+  The tool uses `GET /nodes/{node}/storage/{storage}/content` to cross-check
+  each disk's real allocated size. Under an Audit-only permission that
+  endpoint returns a `200` status, an empty list, and no error. The result
+  looks the same as a storage that genuinely has nothing on it. Audit alone
+  is enough for every *other* read call the tool makes. This one endpoint is
+  the exception. A live PVE 9.2.11 cluster confirms the behavior (see
+  `IMPLEMENTATION_PLAN.md` section 3.5's note). A missing permission does
+  not make the tool fail. The tool under-counts what already occupies each
+  storage instead. The under-count shrinks the **snapshot reserve**. The
+  reserve is the free capacity `pve-storage-drs` keeps clear on every
+  managed storage. The tool sizes it from
+  `snapshot_reserve.factor`/`free_space.soft` (see
+  [`10-configuration.md`](10-configuration.md)). The reserve keeps a
+  snapshot, or a disk that exists on two storages during a migration, from
+  running a LUN out of space. The under-count makes the storage appear to
+  have more free space than it has. The tool then plans and runs migrations
+  that reduce a safety margin it believes it still protects.
 - Grant it **at each storage's own path** (`/storage/<id>`), not only at the
-  parent `/storage` — that is the grant confirmed to work.
-- Also add `VM.Audit` cluster-wide (`/`) for VM inventory and config, which
-  `PVEAuditor` already includes if you use that built-in role as a base.
+  parent `/storage`. The storage-path grant is
+  the one that is confirmed to work.
+- Also add `VM.Audit` cluster-wide (`/`) for VM inventory and config. If you
+  use the built-in role `PVEAuditor` as a base, it already includes it.
 
-**If you are using an API token** (recommended — see above), Proxmox's
-privilege separation means **the token has its own, separate ACL entries
-from its owning user**. A role granted to the user alone has no effect on
-the token, and a role granted to the token alone has no effect either unless
-the user has it too: the token's effective permission is the *intersection*
-of the two. Grant the same roles to both the user and `user@realm!tokenid`,
-or disable privilege separation on the token (Datacenter → Permissions →
-API Tokens → uncheck "Privilege Separation") so it always matches its
-user's permissions exactly.
+**If you use an API token** (recommended, see above), Proxmox privilege
+separation gives **the token its own ACL entries, separate from those of
+its user**. A role granted to the user alone does not affect the token. A
+role granted to the token alone does not affect it either unless the user
+has it too. The token's effective permission is the *intersection* of the
+two. Grant the same roles to both the user and `user@realm!tokenid`. Or
+disable privilege separation on the token (Datacenter → Permissions →
+API Tokens → uncheck "Privilege Separation"). Then the token always
+matches its user's permissions exactly.
 
-A concrete, minimal setup: create a role (e.g. `pve-storage-drs`) with
-`Datastore.Allocate,Datastore.Audit,VM.Audit`, then add it as an ACL entry
-for both the user and the token at `/` for `VM.Audit`, and at each managed
-storage's `/storage/<id>` path for the datastore privileges.
+Here is a minimal setup. Create a role (e.g. `pve-storage-drs`) with
+`Datastore.Allocate,Datastore.Audit,VM.Audit`. Add the role as an ACL entry
+for both the user and the token. Add it at `/` for `VM.Audit`. Add it at
+each managed storage's `/storage/<id>` path for the datastore privileges.
 
-**Two further, VM-level privileges are needed once `apply` executes a
-move** — `VM.Config.Disk` and `VM.Migrate`, both cluster-wide (`/`) or at
-least on every VM whose disks live in a managed group, granted to both the
-user and the token exactly as above. Not needed for `verify-metrics`,
-`show-load` or `verify-storages`, which only read; `apply` needs them for
-`move_disk` itself, in every `execution.mode` (`30-safety-and-status.md`).
-Grant them now alongside the privileges above so the credential does not
-need revisiting later; if you set up the credential read-only for now, add
-`VM.Config.Disk,VM.Migrate` to the role before you first run `apply`.
+**`apply` needs two more VM-level privileges once it executes a move**:
+`VM.Config.Disk` and `VM.Migrate`. Grant both cluster-wide (`/`), or at
+least on every VM whose disks live in a managed group. Grant them to both
+the user and the token, exactly as above. You do not need them for
+`verify-metrics`, `show-load`, or `verify-storages`. Those commands only
+read. `apply` needs them for `move_disk` itself, in every
+`execution.mode` (`30-safety-and-status.md`). Grant them now, with the
+privileges above. Then you do not revisit the credential later. If you set
+the credential up read-only for now, add `VM.Config.Disk,VM.Migrate` to the
+role before your first `apply` run.
 
 ## Installing the package
 
-On a Debian trixie host (which is what Proxmox VE 9.x is built on). Every
-release is published as a ready-built package on the project's GitHub
-releases page, <https://github.com/bzed/proxmox-storage-drs/releases>: one
-architecture-independent `pve-storage-drs_<version>_all.deb`, with a
-`SHA256SUMS` file beside it. There is no apt repository yet, so download the
-`.deb` and install it with `apt`, which fetches the dependencies from the
-trixie archive the host already uses:
+Install on a Debian trixie host. Proxmox VE 9.x runs on trixie. The project
+publishes every release as a ready-made package on its GitHub releases page,
+<https://github.com/bzed/proxmox-storage-drs/releases>. Each release has
+one `pve-storage-drs_<version>_all.deb` file that works on any
+architecture, with a `SHA256SUMS` file beside it. No apt repository exists
+yet. Download the `.deb` and install it with `apt`. `apt` fetches the
+dependencies from the trixie archive the host already uses:
 
 ```sh
 VERSION=0.1.21      # the newest release on the releases page
@@ -94,22 +96,23 @@ apt install ./pve-storage-drs_${VERSION}_all.deb
 ```
 
 The package is not signed. `SHA256SUMS` comes from the same page as the
-`.deb`, so it detects a corrupted download, not a tampered release. A
-release is published only after the project's CI has built the package in a
-clean Debian trixie container, checked it with lintian, installed it and run
-its tests there. If you keep a local apt repository, put the `.deb` into it
-and `apt install pve-storage-drs` and `apt upgrade` work as usual; from a
-source checkout, `make deb` builds the same package.
+`.deb`. The check detects a corrupted download, not a tampered release. The
+project's CI publishes a release only after it builds the package in a clean
+Debian trixie container. That run also checks the package with lintian,
+installs it, and runs its tests. If you keep a local apt repository, put
+the `.deb` into it. Then `apt install pve-storage-drs` and `apt upgrade`
+work as usual. From a source checkout, `make deb` builds the same package.
 
-This installs the `pve-storage-drs` executable, its manpage, the example
+The install puts the `pve-storage-drs` executable, its manpage, the example
 configuration at `/usr/share/doc/pve-storage-drs/examples/drs.example.yaml`,
-and the whole documentation set under `/usr/share/doc/pve-storage-drs/`:
-this manual as `manual/*.md`, the internals guide as `internals/*.md` and
-the specification as `IMPLEMENTATION_PLAN.md`, each also as a typeset PDF.
-The Markdown is deliberately left uncompressed — a cluster node has no GUI
-and often no way to get a PDF off it, so `less
-/usr/share/doc/pve-storage-drs/manual/20-verifying-metrics.md` has to work
-on the machine that has the problem.
+and the whole documentation set under `/usr/share/doc/pve-storage-drs/`.
+The set has this manual as `manual/*.md`, the internals guide as
+`internals/*.md`, and the specification as `IMPLEMENTATION_PLAN.md`. Each of the three documents also ships
+as one typeset PDF. The Markdown files stay uncompressed on
+purpose. A cluster node has no GUI. It often has no way to get a PDF off
+the node. So the command `less
+/usr/share/doc/pve-storage-drs/manual/20-verifying-metrics.md` must work on
+the machine that has the problem.
 
 `coinor-cbc` and `python3-pulp` are `Depends`: `apt install pve-storage-drs`
 always gets a real MILP solver, no separate step needed. The tool still
@@ -157,7 +160,9 @@ actually running the timer. See
 Putting the configuration on `pmxcfs` does not make the tool cluster-aware.
 `state.json` is node-local: each node would keep its own cooldowns, its own
 drift baseline and its own run lock, which do not coordinate with each
-other. **Enable the systemd timer on exactly one host.** The one thing that
+other. **Schedule the tool on exactly one
+host.** The package ships no timer unit. Create your own systemd timer or cron
+job. The one thing that
 *does* cross the cluster is a startup scan for in-flight `move_disk` UPIDs
 owned by the DRS user, which is what keeps two accidental instances from
 actively conflicting (they degrade to "slow and redundant" instead).

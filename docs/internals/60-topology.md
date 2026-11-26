@@ -1,433 +1,476 @@
 # Building the disk/storage/group model
 
 **What does this page answer?** How does `topology.py` turn `pve.py`'s raw
-API responses into the per-group `D`/`S` sets the rest of the engine needs,
-and where does each `IMPLEMENTATION_PLAN.md` section 5.3 (C2) pin condition
-actually get decided? Describes `proxmox_storage_drs/topology.py` and
+API responses into the per-group `D`/`S` sets? Where does each
+`IMPLEMENTATION_PLAN.md` section 5.3 (C2) pin condition get decided? This
+page describes `proxmox_storage_drs/topology.py` and
 `proxmox_storage_drs/reserve.py`.
 
 ## `D` means every disk this module places, pinned or not
 
-This is stated at the top of `topology.py`'s own docstring because it is
-the single easiest thing to get backwards: `D` (section 5.1) is *every*
-disk this module puts into a group's `Group.disks`, whether or not **(C2)**
-pins its placement. (C2) is the plan's per-disk eligibility constraint: a
-pinned disk is still a full member of `D` — its bytes and its I/O still
-count — it is simply excluded from ever being *reassigned*; the "Pin
-priority" section below enumerates every condition that triggers it. A disk
-this module never sees at all — a stopped VM (never
-considered, never moved), or a disk whose current storage is not in any
-configured group — is what "foreign" (`Uˢᵉˣᵗ`, section 5.1.1) means.
+`topology.py`'s own docstring states this first, because this is the
+single easiest thing to get backwards. `D` (section 5.1) is *every* disk
+this module puts into a group's `Group.disks`. This holds whether or not
+**(C2)** pins the disk's placement. (C2) is the plan's per-disk
+eligibility constraint. A pinned disk is still a full member of `D`. Its
+bytes and its I/O still count. The disk is simply excluded from ever being
+*reassigned*. The "Pin priority" section below lists every condition that
+triggers the pin.
+
+A disk this module never sees at all is what "foreign" (`Uˢᵉˣᵗ`, section
+5.1.1) means. A stopped VM never enters the model. The tool never
+considers or moves its disks. A disk whose current storage is not in any
+configured group is foreign too.
+
 Config-excluded disks (`exclude.vmids`/`exclude.disks`/tags) are *not*
-foreign: (C2) pins them into `D` specifically so their bytes still count
-toward a storage's reserve check — **(C4)/(C5)**: `Z_s`, the largest per-VM
-*footprint* on a storage — the sum of all of one VM's disks there, since a snapshot
-covers every disk of the VM at once — sets a reserve floor `R_s = max(reserve_factor_s ·
-Z_s, soft_s)` that must stay free on top of every disk's actual usage
-there (`soft_s` is section 5.3.1's configured free-space requirement,
-resolved per storage onto `Storage.free_space_soft_bytes` below — the
-exact shortfall arithmetic is in "`reserve.py`: one (C4)/(C5) evaluator,
-shared" below) — and toward **`κ`**, the objective's
-per-VM fragmentation penalty, which charges a VM for every extra storage
-its disks are spread across (section 5.4; see `90-heuristic.md`) (section
-3.6, "Pinned disks are modelled, not ignored"). An earlier draft of section
-5.1.1 listed config-excluded disks as foreign, which directly contradicted
-(C2) — that self-contradiction was found and fixed in the same commit that
-first implemented this join; see that section's note if you need the
-history.
+foreign. (C2) pins them into `D`. The reason: their bytes still count
+toward a storage's reserve check. That check is **(C4)/(C5)**. `Z_s` is
+the largest per-VM *footprint* on a storage. It is the sum of all of one
+VM's disks on that storage, since a snapshot covers every disk of the VM
+at once. `Z_s` sets a reserve floor `R_s = max(reserve_factor_s · Z_s,
+soft_s)`. That floor must stay free on top of every disk's actual usage
+there. `soft_s` is section 5.3.1's configured free-space requirement. This
+module resolves it per storage onto `Storage.free_space_soft_bytes` below.
+The exact shortfall arithmetic is in "`reserve.py`: one (C4)/(C5)
+evaluator, shared" below. The excluded bytes also count toward **`κ`**,
+the objective's per-VM fragmentation penalty. It charges a VM for every
+extra storage its disks are spread across (section 5.4; see `90-heuristic.md`)
+(section 3.6, "Pinned disks are modelled, not ignored").
+
+An earlier draft of section 5.1.1 listed config-excluded disks as foreign.
+That contradicted (C2) directly. The same commit that first implemented
+this join found and fixed the contradiction. See that section's note for
+the history.
 
 ## One pass, in the order section 3.5 lists
 
-`build_topology()` fetches everything it needs exactly once, in six
-stages: `_fetch_cluster_data`, a concurrent per-VM fetch phase
+`build_topology()` fetches everything it needs exactly once. The fetch
+runs in six stages: `_fetch_cluster_data`, a concurrent per-VM fetch phase
 (`_fetch_vm()`) over `client.vm_resources()`, a concurrent per-`(node,
 storage)` content-fetch phase, the single-threaded join
 (`_join_vm_disks()`) that consumes both, and finally `_build_storages`:
 
-1. `storage_definitions()` (the list form — see `50-pve-api.md`), which is
-   also what every `/…/` storage pattern (section 11.4, below) is matched
-   against, then the configured `groups` are expanded and validated against
-   it (`_expand_and_validate_groups`): a literal storage that does not
-   exist, or that lacks `images` in its content types, is a fatal
-   `TopologyError` (section 11.1: "storage ids exist in the cluster"). A
-   storage that exists but is not marked `shared` is a warning, not a fatal
-   error — plausible, if unusual, for a single-node group.
-2. `storage_resources()` once, to pick one active node per storage
-   (`_pick_active_node`, preferring one reporting `status: "available"`).
-3. `storage_content()` and `storage_status()` per group storage.
-4. `vm_config()`, `vm_snapshots()` and `vm_pending()` per considered VM. A VM is *not*
-   fetched at all when it is stopped (`exclude.stopped: false` is refused at load) —
-   the one case `cluster/resources`'s own fields can decide without a
-   config fetch. Every other VM is fetched, including config-excluded ones:
-   whether a specific disk turns out to be "ungrouped" is only knowable
-   after seeing which storage it is actually on, and a config-excluded
-   VM's disk still needs its size for (C4)/(C5) (previous section).
+1. The module fetches `storage_definitions()` (the list form, see
+   `50-pve-api.md`). Every `/…/` storage pattern (section 11.4, below) is
+   matched against this list. The module then expands and validates the
+   configured `groups` against it (`_expand_and_validate_groups`). A
+   literal storage that does not exist is a fatal `TopologyError`
+   (section 11.1: "storage ids exist in the cluster"). A literal storage
+   that lacks `images` in its content types is a fatal `TopologyError`
+   too. A storage that exists but is not marked `shared` is a warning, not
+   a fatal error. That state is plausible, if unusual, for a single-node
+   group.
+2. The module fetches `storage_resources()` once. This picks one active
+   node per storage (`_pick_active_node`, preferring one reporting
+   `status: "available"`).
+3. The module fetches `storage_content()` and `storage_status()` per
+   group storage.
+4. The module fetches `vm_config()`, `vm_snapshots()` and `vm_pending()`
+   per considered VM. A stopped VM is *not* fetched at all
+   (`exclude.stopped: false` is refused at load). That is the one case
+   `cluster/resources`'s own fields can decide without a config fetch. The
+   module fetches every other VM, including config-excluded ones. It can
+   tell whether a specific disk is "ungrouped" only after it sees which
+   storage the disk is on. A config-excluded VM's disk still needs its
+   size for (C4)/(C5) (previous section).
 
    This is the one step that runs across a bounded thread pool
-   (`config.proxmox.read_workers`, REVIEW.md P-02): section 3.5's whole
-   point is that `GET .../qemu/{vmid}/config` has no batch form, so for a
-   several-hundred-VM cluster this is the read phase concurrency actually
-   helps. It is split into `_fetch_vm()` (network I/O only, run by the
-   pool, one call per considered VM) and `_join_vm_disks()` (pure —
-   the same function the old sequential `_collect_vm_disks()` was renamed
-   from, unchanged in what it computes). `ThreadPoolExecutor.map()`
-   returns each VM's fetch in the same order `client.vm_resources()`
-   listed it, even though the fetches themselves complete in whatever order
-   the pool schedules them, so the join phase runs single-threaded and in
-   the original order — `disks_by_group`, `referenced_volids` and
-   `warnings` end up byte-for-byte identical to a fully sequential run
-   regardless of `read_workers` or of thread scheduling, and never need a
-   lock. `PveClient` itself may reauthenticate mid-fetch if several threads
-   hit an expired ticket at once (`50-pve-api.md`'s P-01 note); that
-   reauthentication is what its own lock serializes, not this join.
-5. `storage_content()` again, per `(node, storage)` pair `_needed_content_node_pairs()`
-   finds among the just-fetched VMs' own disks that step 3's single
-   per-storage fetch does not already cover — see "Sizes" below for why a
-   second per-node fetch is worth its own concurrent pool pass rather than
-   reusing step 3's listing for everything. Runs the same
-   `ThreadPoolExecutor(read_workers)` pattern as step 4, between it and the
-   join. Bounded by distinct `(node, storage)` pairs, not by VM count
-   (REVIEW.md W-05): worst case (VMs spread across every node, disks on
-   every managed storage) is `|nodes| · |storages|` extra full content
-   listings, though a typical cluster's VM placement is far more
+   (`config.proxmox.read_workers`, REVIEW.md P-02). Section 3.5 makes the
+   point: `GET .../qemu/{vmid}/config` has no batch form. For a
+   several-hundred-VM cluster, this is the read phase concurrency actually
+   helps. The step splits into `_fetch_vm()` (network I/O only, run by the
+   pool, one call per considered VM) and `_join_vm_disks()`. The latter is
+   pure. It is the same function the old sequential
+   `_collect_vm_disks()` was renamed from, unchanged in what it computes.
+   `ThreadPoolExecutor.map()` returns each VM's fetch in the same order
+   `client.vm_resources()` listed it. The fetches themselves complete in
+   whatever order the pool schedules them. The join phase runs
+   single-threaded, in the original order. `disks_by_group`,
+   `referenced_volids` and `warnings` end up byte-for-byte identical to a
+   fully sequential run. This holds regardless of `read_workers` or of
+   thread scheduling. The join never needs a lock. `PveClient` itself may
+   reauthenticate mid-fetch if several threads hit an expired ticket at
+   once (`50-pve-api.md`'s P-01 note). The client's own lock serializes
+   that reauthentication, not this join.
+5. The module fetches `storage_content()` again, per `(node, storage)`
+   pair. `_needed_content_node_pairs()` finds those pairs among the
+   just-fetched VMs' own disks. Step 3's single per-storage fetch does not
+   already cover them. See "Sizes" below for why the tool runs a second
+   per-node fetch on its own concurrent pool pass, rather than reusing
+   step 3's listing for everything. The step runs the same
+   `ThreadPoolExecutor(read_workers)` pattern as step 4, between step 4
+   and the join. The step is bounded by distinct `(node, storage)` pairs,
+   not by VM count (REVIEW.md W-05). The worst case (VMs spread across
+   every node, disks on every managed storage) adds `|nodes| · |storages|`
+   full content listings. A typical cluster's VM placement is far more
    concentrated than that. `IMPLEMENTATION_PLAN.md` §3.5's expected
    call-count formula carries the `|extra content pairs|` term for this.
-6. Non-QEMU resources (`type != "qemu"`) are skipped outright — this tool
-   never touches LXC containers, and section 3.5's read/write paths are
+6. The tool skips non-QEMU resources (`type != "qemu"`) outright. This
+   tool never touches LXC containers. Section 3.5's read/write paths are
    qemu-only throughout.
 
 ## The `lock` field comes from `vm_config()`, not a separate call
 
 Section 9.3's own pseudocode says `lock` is readable from either
-`/qemu/{vmid}/config` or `/status/current`. `_join_vm_disks` reads it
-from the config response already being fetched for the disk join, so
-planning-time lock detection costs no extra API call. `/status/current` is
-still needed later, but only immediately before a specific move (section
-9.2's pre-move re-validation, `execute.py`'s `_preflight()` — see
-`92-execute.md`) — never here.
+`/qemu/{vmid}/config` or `/status/current`. `_join_vm_disks` reads `lock`
+from the config response already fetched for the disk join. Planning-time
+lock detection costs no extra API call. The tool needs `/status/current`
+later, but only immediately before a specific move. That is section 9.2's
+pre-move re-validation, `execute.py`'s `_preflight()` (see
+`92-execute.md`). This module never makes that call.
 
 ## Pin priority: `_pin_reason()`
 
-One function, checked in the fixed order section 5.3 (C2) lists its
-conditions: config exclusion (VM-level, then `exclude.disks`), a real
-snapshot or an unreferenced companion volume (section 3.7,
-`_disk_snapshot_or_orphan_reason` — the `"current"` entry `GET
-.../snapshot` always returns, verified on a live cluster, is filtered out
-before counting; for an unreferenced volume the reason names it,
-`storage:volume`, the first two sorted and a count of the rest, because it
-appears nowhere else the operator looks), an unapplied pending config change (section 3.8, below),
-the per-disk cooldown (below), a VM lock, then an `unusedN` disk when
-`exclude.include_unused_disks` is false. A disk gets at most one reason;
-the first that applies wins, matching how an operator would explain it.
+`_pin_reason()` checks each disk in the fixed order section 5.3 (C2) lists its
+conditions. The first condition is config exclusion (VM-level, then
+`exclude.disks`). The second is a real snapshot or an unreferenced companion
+volume (section 3.7). `_disk_snapshot_or_orphan_reason` handles it.
+`GET .../snapshot` always returns a `"current"` entry. A live cluster
+confirmed this. `_fetch_vm()` drops that
+entry, so the function only sees real snapshots. For an
+unreferenced volume, the reason names the volume as `storage:volume`. It lists
+the first two sorted, plus a count of the rest. The reason names the volume
+because the volume appears nowhere else the operator looks. The third
+condition is an unapplied pending config change (section 3.8, below). The
+fourth is the per-disk cooldown (below). The fifth is a VM lock. The sixth is
+an `unusedN` disk, when `exclude.include_unused_disks` is false. A disk gets
+at most one reason. The first reason that applies wins. This matches how an
+operator would explain it.
 
-One more pin is applied afterwards, per group rather than per disk, because
-it depends on the VM's *other* disks in the group: `pin_lone_small_disks()`
-pins every still-movable disk below `migration.tiny_disk_bytes` whose VM has
-no larger disk in that group (`LONE_SMALL_DISK_REASON`). This is section 5.3
-(C8)'s degenerate case — a small disk may only move to where a larger disk
-of its VM ends up, and here there is none — made visible as a pin. The rule
-itself lives beside it: `is_small_disk()`, `larger_vm_disks()` (the VM's
-non-small disks *in this group*, pinned included — disks of the same VM in
-another group never anchor anything, since nothing moves between groups),
-`small_disk_placement_ok()` for one disk and `small_disks_follow_their_vm()`
-for a whole assignment in a single pass. Both solvers use these
+The module applies one more pin afterwards, per group rather than per
+disk. The pin depends on the VM's *other* disks in the group.
+`pin_lone_small_disks()` pins every still-movable disk below
+`migration.tiny_disk_bytes`. The VM must have no larger disk in that
+group. The reason is `LONE_SMALL_DISK_REASON`. This is section 5.3
+(C8)'s degenerate case, made visible as a pin. A small disk may only move
+to where a larger disk of its VM ends up. Here, no larger disk exists. The
+rule lives beside the pin. `is_small_disk()` tests one disk.
+`larger_vm_disks()` returns the VM's non-small disks *in this group*,
+pinned included. Disks of the same VM in another group never anchor
+anything. Nothing moves between groups. `small_disk_placement_ok()` checks
+one disk. `small_disks_follow_their_vm()` checks a whole assignment in a
+single pass. The
+heuristic calls the two placement functions. The CBC model writes the same rule as
+linear constraints with `is_small_disk()` and `larger_vm_disks()`
 (`docs/internals/90-heuristic.md`, `91-optimize.md`).
 
 ## The pending-change pin
 
-`GET .../qemu/{vmid}/config` (`vm_config()`) is confirmed, against a real
-cluster, to return a key's **pending** value once one exists — not the
-value actually in effect. Only `GET .../qemu/{vmid}/pending`
-(`vm_pending()`) exposes both, so `_fetch_vm()` fetches it alongside
-`vm_config()`/`vm_snapshots()` for every considered VM, and
-`pending_disk_reasons()` (public, unlike its sibling helpers here — see
-below) reduces it to `device -> reason` for exactly the disk keys
-(matching `DISK_KEY_RE`) that carry a `"pending"` field (an edit) or a
-truthy `"delete"` field (a queued removal). `_join_vm_disks()` computes
-this dict once per VM, the same way it already does for
-`snapshot_reason`, and passes each disk's own entry into `_pin_reason()`.
+A real cluster confirmed this: `GET .../qemu/{vmid}/config`
+(`vm_config()`) returns a key's **pending** value once one exists. It does
+not return the value actually in effect. Only `GET .../qemu/{vmid}/pending`
+(`vm_pending()`) exposes both. `_fetch_vm()` fetches it alongside
+`vm_config()`/`vm_snapshots()` for every considered VM.
+`pending_disk_reasons()` reduces it to `device -> reason`. It covers
+exactly the disk keys (matching `DISK_KEY_RE`) that carry a `"pending"`
+field (an edit) or a truthy `"delete"` field (a queued removal). The
+function is public, unlike its sibling helpers here. See below for the
+reason. `_join_vm_disks()` computes this dict once per VM. It does so the
+same way it already does for `snapshot_reason`. The join passes each
+disk's own entry into `_pin_reason()`.
 
-Why this exists at all: `move_disk` acts on a disk's *current* volume, and
+Why does the pin exist? `move_disk` acts on a disk's *current* volume.
 PVE does not reconcile that disk's `pending` entry as a side effect of the
-move — the entry keeps describing a change relative to whatever the disk
-looked like before it moved. Migrating a disk in this state would leave a
-config key that is wrong the moment the operator's next reboot applies it.
-Section 3.8 has the full reasoning and the live-cluster confirmation.
+move. The entry keeps describing a change relative to how the disk looked
+before it moved. A move in this state would leave a config key that is
+wrong the moment the operator's next reboot applies it. Section 3.8 has
+the full reasoning and the live-cluster confirmation.
 
-`pending_disk_reasons()` is exported (not underscore-prefixed) specifically
-so `execute.py`'s `_preflight()` can call the identical parsing
-immediately before issuing a move (section 9.2 step 6, `92-execute.md`) —
-one implementation, per `AGENTS.md` section 5, rather than a second
-`/pending` parser that could silently classify an entry differently from
-this one.
+`pending_disk_reasons()` is exported (not underscore-prefixed) for one
+reason: `execute.py`'s `_preflight()` calls the identical parsing
+immediately before issuing a move (section 9.2 step 6, `92-execute.md`).
+This keeps one implementation, per `AGENTS.md` section 5. A second
+`/pending` parser could silently classify an entry differently.
 
 ## The per-disk cooldown pin
 
 `build_topology()` takes an optional `state: state.State` and `now:
-datetime` (both default to "no cooldowns"/the real clock — see
-`docs/internals/15-state.md`) and computes
+datetime`. Both default to "no cooldowns"/the real clock (see
+`docs/internals/15-state.md`). The function computes
 `state.active_disk_cooldowns()` once per group, before the per-VM join
-loop, into `cooldowns_by_group: dict[str, dict[str, float]]` (bare
-`vmid:device` -> seconds remaining). Inside the loop, once a disk's
-`group_name` is known, `cooldowns_by_group[group_name].get(key, 0.0)` is
-passed to `_pin_reason()` as `cooldown_remaining_seconds` — a plain float,
-not a second `State` lookup inside that function, keeping `_pin_reason()`
-a pure decision over already-resolved flags exactly like every other
-condition it checks. The reported reason names how much of
-`gates.cooldown_per_disk` remains: `cooldown: moved recently, 1.0h left on
-gates.cooldown_per_disk`.
+loop. It stores the result in `cooldowns_by_group: dict[str, dict[str,
+float]]`. The value maps bare `vmid:device` to seconds remaining. Inside
+the loop, once a disk's `group_name` is known, the function reads
+`cooldowns_by_group[group_name].get(key, 0.0)`. It passes that value to
+`_pin_reason()` as `cooldown_remaining_seconds`. The value is a plain
+float, not a second `State` lookup inside that function. This keeps
+`_pin_reason()` a pure decision over already-resolved flags. That is
+exactly how it checks every other condition. The reported reason names how
+much of `gates.cooldown_per_disk` remains: `cooldown: moved recently, 1.0h
+left on gates.cooldown_per_disk`.
 
-This pin is **not** exempted when the disk's storage is actively
-violating (C4)/(C5) — see `docs/internals/15-state.md`'s "Deliberately not
-implemented" section for why, and why that gap is bounded and safe rather
-than silently wrong.
+This pin is **not** exempted when the disk's storage actively violates
+(C4)/(C5). See `docs/internals/15-state.md`'s "Deliberately not
+implemented" section. It explains why, and why that gap is bounded and
+safe rather than silently wrong.
 
 ## Sizes: content is authoritative, config is the fallback of last resort
 
 `_resolve_disk_size_and_format` looks up the volume in a content listing
-first (section 3.5: authoritative for what is actually allocated), in
-three tiers: the entry's own `size` if present; its `approximate-size` if
-`size` is not; the VM config's own `size=` (logged as a warning naming the
-disk and which of the two content-listing gaps applied) only when the
-entry has neither, or is missing from the listing entirely. Two
-independently verified reasons the config fallback is not merely
-defensive: the `Datastore.Allocate`-vs-`Audit` privilege gap
-(`50-pve-api.md`), and an `unusedN` volume, deleted directly on the
-storage backend outside Proxmox (confirmed with the cluster's operator),
-that PVE's own config still referenced and that PVE itself never noticed
-or refused to boot the VM over — `IMPLEMENTATION_PLAN.md` section 3.6's
-note. `_build_storages`'s equivalent sum over *foreign* (unreferenced)
-volumes uses the same `size`/`approximate-size` tiering, but has no VM
-config to fall back to for a size at all — it skips the volume instead
-(warning, undercounting the reserve) when neither is present.
-`_parse_pve_config_size_bytes` parses PVE's own config-file size suffixes
-(`512G` meaning binary GiB, no explicit `i`) — deliberately not
-`units.py`'s parser, which is for *this project's* config file, a
-different and coincidentally similarly-shaped format.
+first. Section 3.5 marks the listing authoritative for what is actually
+allocated. The lookup runs in three tiers. Tier one is the entry's own
+`size`, if present. Tier two is the entry's `approximate-size`, if `size`
+is not present. Tier three is the VM config's own `size=`. The module uses
+tier three only when the entry has neither field, or is missing from the
+listing entirely. It logs a warning that names the disk and which of the
+two content-listing gaps applied.
 
-**Which node's content listing, though, is not a detail this function
-gets to be careless about.** Confirmed live, by the operator who hit it:
-PVE 9.2's qcow2-on-shared-LVM snapshot support means `size` for one of
-these volumes is only readable from the node that has its LV *active* —
-cheap on the node currently running the owning VM (PVE keeps it active
-there), expensive or blocked entirely on a shared storage's other nodes,
-which report `approximate-size` instead (PVE's own answer from LVM
-metadata, without activating anything). `_pick_active_node()`'s one pick
-per *storage* — the node every other section 3.5 call uses — is not
-guaranteed to be that node. So a managed disk's size/format is resolved
-against a content listing fetched from **that disk's own VM's node**
-specifically (`_needed_content_node_pairs()`, step 5 above), not
-`_pick_active_node()`'s pick; only the *foreign*-volume sum in
-`_build_storages` still uses the storage-wide listing, since an
-unreferenced volume has no owning VM to pick a node from. Before this
-fix, a disk on this kind of storage could silently carry the storage's
-generic pick's `approximate-size` (or fall further, to a possibly-stale
-VM config `size=`) even when the exact figure was one call away.
+Two independently verified reasons explain why the config fallback is not
+merely defensive. The first is the `Datastore.Allocate`-vs-`Audit`
+privilege gap (`50-pve-api.md`). The second is an `unusedN` volume,
+deleted directly on the storage backend outside Proxmox. The cluster's
+operator confirmed this. PVE's own config still referenced that volume.
+PVE itself never noticed. It never refused to boot the VM over it. See
+`IMPLEMENTATION_PLAN.md` section 3.6's note.
+
+`_build_storages` sums *foreign* (unreferenced) volumes the same way. The
+sum uses the same `size`/`approximate-size` tiering. It has no VM config
+to fall back to for a size at all. When neither field is present, the
+module skips the volume. It logs a warning and undercounts the reserve.
+`parse_pve_config_size_bytes()` parses PVE's own config-file size suffixes.
+`512G` means binary GiB, with no explicit `i`. The module uses its own
+parser on purpose. `units.py`'s parser is for *this project's* config
+file. That format is different, and only by coincidence similarly shaped.
+
+**The choice of the node for the content listing matters.** The operator who
+hit this confirmed the behavior live. PVE 9.2 supports qcow2-on-shared-LVM
+snapshots. Because of that support, `size` for one of these volumes is
+readable only from the node that has its LV *active*. The read is cheap on the
+node currently running the owning VM. PVE keeps the LV active there. The read
+is expensive, or blocked entirely, on a shared storage's other nodes. Those
+nodes report `approximate-size` instead. That value is PVE's own answer from
+LVM metadata, without activating anything. `_pick_active_node()` picks one
+node per *storage*. That is the node every other section 3.5 call uses. The
+pick is not guaranteed to be the node with the active LV. The module resolves
+a managed disk's size/format against a content listing fetched from **that
+disk's own VM's node** specifically. It uses `_needed_content_node_pairs()`
+(step 5 above), not `_pick_active_node()`'s pick. Only the *foreign*-volume
+sum in `_build_storages` still uses the storage-wide listing. An unreferenced
+volume has no owning VM to pick a node from. Before this fix, a disk on this
+kind of storage could silently carry the storage's generic pick's
+`approximate-size`. It could fall further, to a possibly-stale VM config
+`size=`. The exact figure was one call away.
 
 ## `Uˢᵉˣᵗ`: everything not referenced
 
-Every disk actually placed into a group's `D` records its volid in
-`referenced_volids[storage_id]` as it is processed. `_build_storages` then
-sums the size of every content entry on that storage whose volid was never
-referenced — orphans, templates, other groups' foreign volumes, and disks
-of VMs this run never fetched (stopped-and-excluded, or ungrouped) all fall
-out of this one computation with no special-casing per category, which is
-exactly section 5.1.1's definition read literally.
+Every disk placed into a group's `D` records its volid in
+`referenced_volids[storage_id]` as the module processes it.
+`_build_storages` then sums the size of every content entry on that storage
+whose volid was never referenced. Orphans, templates, other groups'
+foreign volumes, and disks of VMs this run never fetched
+(stopped-and-excluded, or ungrouped) all fall out of this one computation.
+No special-casing per category is needed. This matches section 5.1.1's
+definition read literally. The sum runs only when
+`snapshot_reserve.count_foreign_volumes` is `true`, the default. When it is
+`false`, `Uˢᵉˣᵗ` is 0 and the reserve ignores unreferenced volumes.
 
 ## Section 11.4: `/…/` storage patterns are expanded here, once
 
 `groups[].storages[].id` may be a `/…/` pattern instead of a literal id.
-Expansion happens inside `_fetch_cluster_data`, right after
-`storage_definitions()` *and* `storage_resources()` both return -- the
-latter's fetch was moved ahead of everything else that used to follow it
-(REVIEW.md U-01) specifically so expansion can check a pattern match
-against it -- and is the one thing that runs *before* the ordinary
-literal-id validation described above. `_expand_group()` matches every
-pattern entry in a group against the sorted list of the cluster's storage
-ids with `re.fullmatch` (whole-id, case-sensitive: `/prod/` must not also
-catch `preprod`), then folds in the group's literal entries on top, a
-literal always overwriting whatever a pattern matched for that same id in
-a plain `dict` assignment -- precedence is a dict overwrite, not a
-positional rule, so entry order in the file never matters.
+The expansion happens inside `_fetch_cluster_data`. It runs right after
+`storage_definitions()` *and* `storage_resources()` both return. The
+module moved the `storage_resources()` fetch ahead of everything else that
+used to follow it (REVIEW.md U-01). The reason: expansion checks a pattern
+match against that list. Expansion is the one thing that runs *before* the
+ordinary literal-id validation described above. `_expand_group()` matches
+every pattern entry in a group against the sorted list of the cluster's
+storage ids. It uses `re.fullmatch`. The match is whole-id and
+case-sensitive: `/prod/` must not also catch `preprod`. The function then
+folds in the group's literal entries on top. A literal always overwrites
+whatever a pattern matched for that same id. The overwrite is a plain
+`dict` assignment. Precedence is a dict overwrite, not a positional rule.
+Entry order in the file never matters.
 
-Three things a pattern can get wrong are checked right there, before
-anything downstream sees the result, all in `_match_pattern_entries`: a
-pattern matching zero storages is a `TopologyError` (same treatment
-section 11.1 already gives a literal id that doesn't exist -- a typo is
-the likelier cause); a matched storage that has a `GET /storage`
-definition but is reported active by no node -- the shape of a disabled
-storage -- is also fatal, naming the pattern and the storage (REVIEW.md
-U-01: a literal reference to such a storage already hit the same wall in
-`_pick_active_node`, just with a worse message, since that call is three
-steps downstream of expansion and has no way to know a pattern was ever
-involved; catching it here instead means the operator is told which
-pattern is responsible); and two *different* patterns in the same group
-matching the same storage is fatal too (`claimed_by`) -- which entry's
-options should apply would be arbitrary. A fourth check,
-`_check_cross_group_uniqueness`, runs once every group has been expanded:
-it is what catches a pattern in one group and a literal (or another
-pattern) in a different group matching the same real storage --
-`config._check_group_storage_membership` cannot see that case at load time
-because it only ever compares two groups' raw entry *text*, and `"san-a"`
-and `"/san-.*/"` are different text even when they'd resolve to the same
-storage.
+`_match_pattern_entries` checks three things a pattern can get wrong. The
+checks run right there, before anything downstream sees the result. A pattern
+matching zero storages is a `TopologyError`. Section 11.1 already gives that
+treatment to a literal id that does not exist. A typo is the likelier cause. A
+matched storage may have a `GET /storage` definition but be reported active by
+no node. That is the shape of a disabled storage. The check is fatal and names
+the pattern and the storage. A literal reference to such a storage already hit
+the same condition in `_pick_active_node` (REVIEW.md U-01), with a worse
+message. That call sits three steps downstream of expansion. It has no way to
+know a pattern was involved. The check here tells the operator which pattern
+is responsible. Two *different* patterns in the same group matching the same
+storage is also fatal (`claimed_by`). The tool could not decide which entry's
+options should apply. That choice would be arbitrary. A fourth check,
+`_check_cross_group_uniqueness`, runs once every group is expanded. It catches
+a pattern in one group and a literal (or another pattern) in a different group
+that match the same real storage. `config._check_group_storage_membership`
+cannot see that case at load time. It only compares two groups' raw entry
+*text*. `"san-a"` and `"/san-.*/"` are different text, even when they resolve
+to the same storage.
 
-One deliberate asymmetry remains, called out explicitly in section 11.4's
-own closing paragraph: a pattern-matched storage does **not** get the
+One deliberate asymmetry remains. Section 11.4's own closing paragraph
+calls it out explicitly. A pattern-matched storage does **not** get the
 literal path's "must have `images` in its content list" check. An operator
-who names a storage explicitly gets a hard error for a typo; a pattern that
-happens to pick up an ISO-only or otherwise unusable LUN is a
-balance-quality concern, not a safety one -- (C2) still keeps any disk from
-ever landing there, and `u* = L_s / c_s` (section 4) simply divides by one
-more `c_s` than intended. The not-`shared` warning is *not* a second such
-asymmetry (an earlier draft left it literal-only, REVIEW.md U-03): it is
-computed once, after expansion, uniformly over every final member of the
-group regardless of whether a literal or a pattern named it -- a warning
-carries no typo-safety rationale for staying quiet, unlike the content
-check.
+who names a storage explicitly gets a hard error for a typo. A pattern that
+picks up an ISO-only or otherwise unusable LUN is a balance-quality
+concern, not a safety one. (C2) still keeps any disk from ever landing
+there. `u* = L_s / c_s` (section 4) simply divides by one more `c_s` than
+intended. The not-`shared` warning is *not* a second such asymmetry. An
+earlier draft left it literal-only (REVIEW.md U-03). The module computes
+the warning once, after expansion. It applies uniformly over every final
+member of the group. This holds regardless of whether a literal or a
+pattern named the storage. A warning carries no typo-safety rationale for
+staying quiet. The content check does.
 
-Every pattern's expansion -- the raw entry and the ids it matched -- is
-logged at INFO (`logger.info(..., extra={"event": "storage_pattern_expanded", ...})`)
-and carried on `Topology.pattern_expansions` for `cli.py`'s
-`verify-storages` to print (section 3.5). `Topology.unmanaged_storage_ids`
-is computed once, right after `groups` -- every cluster storage id
-`storage_definitions()` returned minus every id `storage_group_of` resolved
-to -- and is the storage-level twin of the per-disk "ungrouped, not
-managed" warning `_join_vm_disks` already emits: it does not need a disk to
-actually be sitting on the storage to be visible.
+The module logs every pattern's expansion at DEBUG. It logs the raw entry
+and the ids it matched. The call is
+`logger.debug(..., extra={"event": "storage_pattern_expanded", ...})`. The
+expansion is carried on `Topology.pattern_expansions` for `cli.py`'s
+`verify-storages` to print (section 3.5). The module computes
+`Topology.unmanaged_storage_ids` once, right after `groups`. The value is
+every cluster storage id `storage_definitions()` returned, minus every id
+`storage_group_of` resolved to. This is the storage-level twin of the
+per-disk "ungrouped, not managed" warning `_join_vm_disks` already emits.
+The value does not need a disk sitting on the storage to be visible.
 
 By the time `_build_storages` runs, `data.expanded_by_group[group.name]`
-holds real storage ids only -- it iterates that, not `group_cfg.storages`,
-so `Storage.id` and everything keyed off it (`storage_group_of`, cooldown
-keys, `state.json`) never carries pattern text. Nothing past
-`_expand_and_validate_groups` in this module, or in any module downstream
-of it, needs to know a pattern was ever involved.
+holds real storage ids only. The function iterates that list, not
+`group_cfg.storages`. `Storage.id` and everything keyed off it
+(`storage_group_of`, cooldown keys, `state.json`) never carries pattern
+text. Nothing past `_expand_and_validate_groups` knows a pattern was
+involved. This holds in this module and in every module downstream of it.
 
 ## `reserve.py`: one (C4)/(C5) evaluator, shared
 
-**The footprint.** A snapshot is taken of a VM and snapshots every disk of it at once,
-so what a snapshot of VM `v` needs on storage `s` is `F_{v,s} = Σ z_{d,s}` over `v`'s
-disks *on `s`*, and `Z_s = max_v F_{v,s}` (`vm_footprints_bytes()`,
-`largest_footprint()`). Every disk in `D` counts, movable or pinned; only `s` itself is
-summed (the room on the VM's *other* storages is those storages' own footprint); foreign
-volumes and disks of stopped VMs contribute bytes to `used` but no footprint — a stopped
-VM is planned neither for snapshots nor for I/O. `ReserveStatus` carries `Z_s` as
-`largest_footprint_bytes` together with the VM it comes from (`largest_footprint_vmid`,
-lowest vmid on a tie) so `show-load` can name it. The per-disk maximum
-(`largest_disk_bytes()`) survives for exactly one purpose: the saferemove wipe-time
-estimate, which really is per volume. `split_vm_caps()` and `split_excess_bytes()` derive
-`V^split`, each VM's cap `T_v = max(T, largest disk)` and its excess `o_v` — the peak
-footprint beyond the cap — for the large-VM split rule (`91-optimize.md`, `80-gates.md`).
+**The footprint.** A snapshot of a VM snapshots every disk of it at once.
+What a snapshot of VM `v` needs on storage `s` is `F_{v,s} = Σ z_{d,s}`
+over `v`'s disks *on `s`*. `Z_s = max_v F_{v,s}` (`vm_footprints_bytes()`,
+`largest_footprint()`). Every disk in `D` counts, movable or pinned. Only
+`s` itself is summed. The room on the VM's *other* storages is those
+storages' own footprint. Foreign volumes and disks of stopped VMs
+contribute bytes to `used`, but no footprint. A stopped VM is planned
+neither for snapshots nor for I/O. `ReserveStatus` carries `Z_s` as
+`largest_footprint_bytes`. It also carries the VM the value comes from
+(`largest_footprint_vmid`, lowest vmid on a tie). `show-load` names that
+VM. The per-disk maximum (`largest_disk_bytes()`) survives for exactly one
+purpose. It is the saferemove wipe-time estimate, which really is per
+volume. `split_vm_caps()` and `split_excess_bytes()` derive `V^split`.
+They also derive each VM's cap `T_v = max(T, largest disk)` and its excess
+`o_v`. The excess is the peak footprint beyond the cap. These values serve
+the large-VM split rule (`91-optimize.md`, `80-gates.md`).
 
-`compute_reserve_status()` computes, for one storage: `used = Σ_{d∈D on s} z_d
-+ Uˢᵉˣᵗ_s` (every managed disk's bytes plus the foreign/unreferenced bytes
-from "`Uˢᵉˣᵗ`: everything not referenced" above), `shortfall = max(0, used +
-R_s − capacity_s)` **rounded up to the next whole MiB** (`round_up_to_mib()`),
-and `ReserveStatus.violated` is exactly `shortfall > 0` — unchanged by the
-rounding, since only a zero shortfall rounds to zero. The MiB granularity
-is the one every consumer of a shortfall *difference* needs to agree on:
-the heuristic's repair step, the MILP's lexicographic stage 1 (whose `r_s`
-are integer MiB, `docs/internals/91-optimize.md`), and payback's repair
-exemption and revert test (`docs/internals/96-payback.md`) all compare
-these sums, and at byte resolution they disagreed about sub-MiB noise.
-Rounding *up* overstates a real shortfall by under a MiB and never hides
-one. `ReserveStatus.violated` is the boolean `gates.py`'s reserve-override gate reads directly
-(`docs/internals/80-gates.md`). It is deliberately its own module, not a
-method on `Storage`: `heuristic.py` needs to evaluate the identical formula
-against a *candidate* assignment, not only the current one (`storage_of=`
-overrides which storage each disk is treated as sitting on), and
-`pve-storage-drs show-load`'s reporting needs it against the current
-assignment today. Both
-call the same function (AGENTS.md section 5) — `show-load`'s use of it is
-already exercised end-to-end (see `cli.py`'s
-`_render_show_load_human`/`_json`). `optimize.py`'s MILP path needs the
-same (C4)/(C5) invariant but cannot call a Python function from inside a
-solver's constraint system — see `91-optimize.md` for how it encodes the
-equivalent bound directly as scaled linear constraints (one per VM and storage) instead. The
-section 14 worked example's initial state (`tests/unit/test_reserve.py`)
-is the proof this reproduces the plan's own arithmetic exactly, not merely
-a self-consistent unit test.
+`compute_reserve_status()` computes, for one storage: `used = Σ_{d∈D on s} z_d +
+Uˢᵉˣᵗ_s`. That is every managed disk's bytes plus the foreign/unreferenced
+bytes from "`Uˢᵉˣᵗ`: everything not referenced" above. It computes
+`shortfall = max(0, used + R_s − capacity_s)`. The module rounds the result
+**up to the next whole MiB** (`round_up_to_mib()`). `ReserveStatus.violated`
+is exactly `shortfall > 0`. The rounding does not change that, since only a
+zero shortfall rounds to zero. Every consumer of a shortfall *difference*
+needs to agree on the MiB granularity. The consumers are the heuristic's
+repair step, the MILP's lexicographic stage 1 (whose `r_s` are integer MiB,
+`docs/internals/91-optimize.md`), and payback's repair exemption and
+revert test (`docs/internals/96-payback.md`). They all compare these sums.
+At byte resolution, they disagreed about sub-MiB noise. Rounding *up*
+overstates a real shortfall by under a MiB. It never hides one.
+`ReserveStatus.violated` is the boolean `gates.py`'s reserve-override gate
+reads directly (`docs/internals/80-gates.md`). The evaluator is
+deliberately its own module, not a method on `Storage`. `heuristic.py`
+needs to evaluate the identical formula against a *candidate* assignment,
+not only the current one. `storage_of=` overrides which storage each disk
+is treated as sitting on. `pve-storage-drs show-load`'s reporting needs
+the same formula against the current assignment today. Both call the same
+function (AGENTS.md section 5). `show-load`'s use of it is already
+exercised end-to-end (see `cli.py`'s `_render_show_load_human`/`_json`).
+`optimize.py`'s MILP path needs the same (C4)/(C5) invariant. It cannot
+call a Python function from inside a solver's constraint system. See
+`91-optimize.md` for how it encodes the equivalent bound directly as scaled
+linear constraints (one per VM and storage) instead. The section 14 worked
+example's initial state (`tests/unit/test_reserve.py`) proves this
+reproduces the plan's own arithmetic exactly. It is not merely a
+self-consistent unit test.
 
 ## `free_space` resolution: `soft_s`/`hard_s`, resolved once, here
 
-Section 5.3.1's `soft_s`/`hard_s` pair is resolved onto
-`Storage.free_space_soft_bytes`/`.free_space_hard_bytes` in
-`_build_storages()`, by `_resolve_free_space()` -- the same place and the
-same per-storage pattern `_resolve_reserve_factor()` already uses for
-`reserve_factor`, and for the same reason: a `/…/` pattern's `free_space`
-entry applies to every storage it matches, a literal entry overrides it,
-and only a real storage's `capacity_bytes` (known here, not in `config.py`)
-can resolve a percentage. The mandated order is inheritance, then
-percent-to-bytes conversion, then the two section 11.1 hard rules against
-the resolved values (`hard_s <= soft_s`, `soft_s < C_s` -- both raise
-`TopologyError`, exactly like the pattern-expansion rules above, since both
-need the cluster inventory config.py never has). A *null* `hard` means
-`hard_s = soft_s`. `_resolve_free_space()` returns
-a `ResolvedFreeSpace`: the pair plus two display-only strings naming the level
-each half came from (global, storage entry, `pattern /re/`, percent-converted),
-carried on `Storage.free_space_soft_source`/`_hard_source` for
-`verify-storages` and read by nothing else. By the time
-`compute_reserve_status()` reads `storage.free_space_soft_bytes`, or
-`schedule.transient_invariant_ok()` reads `.free_space_hard_bytes`, both
-are plain, already-resolved byte constants -- section 5.3.1's own grammar
-(percentages, patterns) is never seen again past this
-module.
+`_build_storages()` resolves section 5.3.1's `soft_s`/`hard_s` pair onto
+`Storage.free_space_soft_bytes`/`.free_space_hard_bytes`.
+`_resolve_free_space()` does the work. It uses the same place and the same
+per-storage pattern `_resolve_reserve_factor()` already uses for
+`reserve_factor`. The reason is the same: a `/…/` pattern's `free_space` entry
+applies to every storage it matches. A literal entry overrides it. Only a real
+storage's `capacity_bytes` can resolve a percentage. That value is known
+here, not in `config.py`. The mandated order is inheritance. Then
+percent-to-bytes conversion. Then the two section 11.1 hard rules against the
+resolved values (`hard_s <= soft_s`, `soft_s < C_s`). Both rules raise
+`TopologyError`. They behave exactly like the pattern-expansion rules above.
+Both rules need the cluster inventory that `config.py` never has. A *null*
+`hard` means `hard_s = soft_s`. `_resolve_free_space()` returns a
+`ResolvedFreeSpace`. The value is the pair plus two display-only strings.
+Each string names the level its half came from (global, storage entry,
+`pattern /re/`, percent-converted). The strings are carried on
+`Storage.free_space_soft_source`/`_hard_source` for `verify-storages`.
+Nothing else reads them. By the time `compute_reserve_status()` reads
+`storage.free_space_soft_bytes`, both values are plain, already-resolved byte
+constants. The same holds when `schedule.transient_invariant_ok()` reads
+`.free_space_hard_bytes`. Section 5.3.1's own grammar (percentages, patterns)
+is never seen again past this module.
 
 ## (C2) format eligibility: `storage_type`/`allowed_formats`
 
-`Storage` also carries `storage_type` (from `GET /storage`'s own `type`
-field, never guessed) and `allowed_formats` -- the disk formats that type
-can actually hold, from a fixed table keyed by the same storage-type
-partition `_default_format()` already draws for the fallback format of a
-content listing with no `format` field of its own: a block-backed type
-(`lvmthin`, `zfspool`, `rbd`, `iscsi`, `iscsidirect`) holds `raw` only --
-there is no image container on the array, a volume *is* the raw block
-device -- and a file-backed type (`dir`, `nfs`, `cifs`, `cephfs`) holds
-whatever `qemu-img` formats PVE offers a regular file for. Ordinary
-(non-thin) `lvm` is the one block-backed exception: current PVE versions
-also accept `qcow2` there, since PVE 9.2 added snapshot support on plain
-LVM by formatting the LV itself as a qcow2 image rather than using it raw
-(the same mechanism `_resolve_disk_size_and_format()`'s `approximate-size`
-note above describes) -- `lvmthin` needs no such carve-out, since its
-snapshots are native LVM-thin COW, never qcow2-on-the-LV. Section 5.3
-(C2)'s "`s` cannot hold the disk's format" is `topology.
-storage_accepts_format(storage, disk.format)` -- one function, called by
-both MILP backends (`91-optimize.md`) and by `heuristic.py`'s own
-candidate-generating helpers to fix `x_{d,s}=0` (or exclude the pair from
-the neighbourhood the heuristic searches) for every ineligible target.
+`Storage` also carries `storage_type`. The value comes from `GET /storage`'s
+own `type` field, never guessed. `Storage` also carries `allowed_formats`.
+These are the disk formats that type can actually hold. The formats come
+from a fixed table. The table is keyed by the same storage-type partition
+`_default_format()` already draws. `_default_format()` picks the fallback
+format for a content listing with no `format` field of its own. A
+block-backed type (`lvmthin`, `zfspool`, `rbd`, `iscsi`, `iscsidirect`)
+holds `raw` only. There is no image container on the array. A volume *is*
+the raw block device. A file-backed type (`dir`, `nfs`, `cifs`, `cephfs`)
+holds whatever `qemu-img` formats PVE offers a regular file for. Ordinary
+(non-thin) `lvm` is the one block-backed exception. Current PVE versions
+also accept `qcow2` there. PVE 9.2 added snapshot support on plain LVM.
+PVE formats the LV itself as a qcow2 image rather than using it raw. The
+mechanism is the same one `_resolve_disk_size_and_format()`'s
+`approximate-size` note above describes. `lvmthin` needs no such carve-out.
+Its snapshots are native LVM-thin COW, never qcow2-on-the-LV.
+
+Section 5.3 (C2)'s "`s` cannot hold the disk's format" is
+`topology.storage_accepts_format(storage, disk.format)`. The
+CBC model calls this function, with `target_format(disk, storage)` as the format
+(`91-optimize.md`). So do `heuristic.py`'s own candidate-generating helpers. They fix `x_{d,s}=0` (or exclude the pair
+from the neighbourhood the heuristic searches) for every ineligible target.
 Unlike the free-space floor, format eligibility needs no per-run
-resolution step of its own -- it is a pure function of `storage_type`,
-computed once when `Storage` is built and read directly thereafter.
+resolution step of its own. It is a pure function of `storage_type`. The
+module computes it once when `Storage` is built. Every later reader reads
+it directly.
 
 ### `enforce_format`: `target_format()` and `disk_size_on()`
 
-A storage entry may name the format every disk moved onto it arrives in
-(`groups[].storages[].enforce_format`: `raw`, `qcow2` or unset; plan section
-5.3.2). `Storage.enforce_format` carries the resolved value (a pattern
-entry's value is copied to each storage it matches in `_match_pattern_entries`,
-a literal entry replaces it wholesale, like every per-storage option) and
-`enforce_format_source` says which entry it came from, for `verify-storages`.
-`_expand_group` refuses a value the storage's type cannot hold (`qcow2` on an
-RBD, ZFS or LVM-thin storage) with a `TopologyError` naming the storage.
+A storage entry may name the format every disk moved onto it arrives in.
+The key is `groups[].storages[].enforce_format`. The value is `raw`,
+`qcow2` or unset (plan section 5.3.2). `Storage.enforce_format` carries the
+resolved value. `_match_pattern_entries` copies a pattern entry's value to
+each storage it matches. A literal entry replaces the value wholesale, like
+every per-storage option. `enforce_format_source` says which entry the
+value came from, for `verify-storages`. `_expand_group` refuses a value the
+storage's type cannot hold. One example is `qcow2` on an RBD, ZFS or
+LVM-thin storage. It raises a `TopologyError` naming the storage.
 
-Two functions are the only implementations of the two questions enforcement
-adds. `target_format(disk, storage)` is the plan's `phi(d,s)`: the storage's
-`enforce_format` for a disk that is *not* already on it, otherwise the disk's
-own format; a `tpmstate0` always keeps its own. (C2)'s eligibility is then
-`storage_accepts_format(s, target_format(d, s))` at every call site -- the two
-solver backends, the heuristic's candidate generators and the executor -- so
-enforcement can only widen what a storage accepts. `disk_size_on(disk,
-storage)` is `z_{d,s}`: `Disk.size_bytes` unless the move changes the format,
-where PVE allocates a fresh volume and the charge is
-`max(size_bytes, config_size_bytes)` (`Disk.config_size_bytes` is the disk
-line's `size=`, 0 when absent), and a `qcow2` volume landing on an `lvm`
-storage is charged at least `qcow2_lvm_allocation_bytes()` of that. The latter
-is an upper bound on what PVE's `LVMPlugin::alloc_image` creates -- it sizes
-the LV from `qemu-img measure`'s `fully-allocated` figure, the virtual size
-plus the image's own metadata (about 0.015 % with the default 64 KiB
-clusters) -- so it is `size + size/4096 + 8 MiB`, never below the real value.
-`reserve.py`, `schedule.py` and both solver backends read sizes through
-`disk_size_on`, so (C4), (C5), (C7) and the transient check agree; the group
-mean fill `b_bar` and the move-cost terms deliberately stay at `size_bytes`
-(they are targets and prices, not constraints). With no `enforce_format`
-anywhere `disk_size_on` is `size_bytes` and every earlier plan is unchanged.
+Two functions implement the two questions enforcement adds.
+`target_format(disk, storage)` is the plan's `phi(d,s)`. It returns the
+storage's `enforce_format` for a disk that is *not* already on that
+storage. For a disk already on the storage, it returns the disk's own
+format. A `tpmstate0` always keeps its own format. (C2)'s eligibility is
+then `storage_accepts_format(s, target_format(d, s))` at every call site.
+The call sites are the two solver backends, the heuristic's candidate
+generators and the executor. Enforcement can only widen what a storage
+accepts.
+
+`disk_size_on(disk, storage)` is `z_{d,s}`. It returns `Disk.size_bytes`,
+unless the move changes the format. When the format changes, PVE allocates
+a fresh volume. The charge is then `max(size_bytes, config_size_bytes)`.
+`Disk.config_size_bytes` is the disk line's `size=`, 0 when absent. A
+`qcow2` volume landing on an `lvm` storage is charged at least
+`qcow2_lvm_allocation_bytes()`. The value is an upper bound on what PVE's
+`LVMPlugin::alloc_image` creates. PVE sizes the LV from `qemu-img
+measure`'s `fully-allocated` figure. That is the virtual size plus the
+image's own metadata. The metadata is about 0.015 % with the default 64
+KiB clusters. The charge is `size + size/4096 + 8 MiB`, never below the
+real value. `reserve.py`, `schedule.py` and both solver backends read sizes
+through `disk_size_on`. (C4), (C5), (C7) and the transient check agree.
+The group mean fill `b_bar` and the move-cost terms deliberately stay at
+`size_bytes`. They are targets and prices, not constraints. With no
+`enforce_format` anywhere, `disk_size_on` is `size_bytes`. Every earlier
+plan is unchanged.

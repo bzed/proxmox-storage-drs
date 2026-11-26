@@ -155,12 +155,12 @@ _EXECUTION_MODES = ("dry-run", "confirm", "auto")
 # Subcommands from section 2 (module layout) / the manpage COMMANDS section,
 # each with the one-line description shown in --help and in the manpage.
 _SUBCOMMANDS: dict[str, str] = {
-    "plan": "Compute and print a migration plan. Does not execute it.",
-    "apply": "Execute a plan, subject to execution.mode, concurrency caps and time windows.",
+    "plan": "Compute and print a migration plan. This command does not run the plan.",
+    "apply": "Run a plan. execution.mode, concurrency caps and time windows limit the run.",
     "show-load": "Print every storage with its disks, sizes, measured load and reserve status.",
-    "explain": "Say why the tool did what it did: gates, pins, deferrals and payback arithmetic.",
-    "verify-metrics": "Validate configured metric/label names against the live Prometheus.",
-    "verify-storages": "Report saferemove and the implied wipe time per storage.",
+    "explain": "Show the reasons for a result: gates, pins, deferrals and payback arithmetic.",
+    "verify-metrics": "Check the configured metric and label names against the live Prometheus.",
+    "verify-storages": "Show saferemove and the implied wipe time of each storage.",
     "collect-testdata": (
         "Capture an anonymized diagnostic bundle (topology, config, metrics). Read-only."
     ),
@@ -172,9 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pve-storage-drs",
         description=(
-            "Balance disk I/O load across Proxmox VE shared storages by "
-            "live-migrating VM disks. Dry-run is the default: nothing is changed "
-            "unless a less safe --mode is explicitly selected."
+            "Balance disk I/O load across Proxmox VE shared storages. The tool "
+            "live-migrates VM disks. Dry-run is the default. The tool changes nothing "
+            "unless execution.mode or --mode selects a less safe mode."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -185,8 +185,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             f"Read the configuration from PATH instead of {DEFAULT_CONFIG_PATH} "
-            f"(env: {ENV_CONFIG_VAR}). A PATH named here that is missing, unreadable "
-            "or invalid is a hard failure -- never a silent fallback to the default."
+            f"(env: {ENV_CONFIG_VAR}). The run fails if this PATH is missing, "
+            "unreadable or invalid. The tool never falls back to the default file."
         ),
     )
     parser.add_argument(
@@ -194,21 +194,21 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         action="append",
         default=None,
-        help="Restrict the run to one storage group. Repeatable. Groups are independent.",
+        help="Limit the run to one storage group. Repeatable. Each group is independent.",
     )
     parser.add_argument(
         "--mode",
         choices=_EXECUTION_MODES,
         default=None,
         help=(
-            "Override execution.mode for this run only. Moving toward less safety "
-            "(dry-run to confirm/auto, confirm to auto) is logged at warning level."
+            "Override execution.mode for this run only. The tool logs a change toward "
+            "less safety (dry-run to confirm/auto, confirm to auto) at warning level."
         ),
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit the machine-readable report instead of the human one.",
+        help="Print the machine-readable report instead of the human-readable report.",
     )
     parser.add_argument(
         "-v",
@@ -216,16 +216,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="count",
         default=0,
         help=(
-            "-v logs this run's decision trail (gate, plan, payback, every move); "
-            "-vv adds per-query detail and third-party library logs."
+            "-v logs the decision trail of this run (gate, plan, payback, every move). "
+            "-vv also logs per-query detail and third-party library messages."
         ),
     )
     parser.add_argument(
         "--quiet",
         action="store_true",
         help=(
-            "Errors only. On an 'auto' run this also discards the audit trail such a "
-            "run otherwise logs unconditionally -- the only record of what was moved."
+            "Log errors only. On an 'auto' run, this option also discards the audit "
+            "trail. Without this option, such a run always logs that trail. The trail "
+            "is the only record of the moves."
         ),
     )
     parser.add_argument(
@@ -233,18 +234,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=LOG_LEVELS,
         default=None,
         help=(
-            "Set the log level explicitly. Wins over -v and --quiet, except that on an "
-            "'auto'/'confirm' apply run a level below the mandatory audit-trail floor "
-            "(info) is raised back up to it -- --quiet is the only way to discard that "
-            "record."
+            "Set the log level. This option overrides -v and --quiet, with one "
+            "exception. An 'auto' or 'confirm' apply run has a mandatory audit-trail "
+            "floor (info). The tool raises a lower level to that floor. Only --quiet "
+            "discards that record."
         ),
     )
     parser.add_argument(
         "--log-format",
         choices=LOG_FORMATS,
         default="text",
-        help="text (the default) is one human-readable line per record; json is one JSON "
-        "object per line. auto is a legacy alias for text.",
+        help="text (the default) prints one human-readable line per record. json prints "
+        "one JSON object per line. auto is a legacy alias for text.",
     )
     parser.add_argument(
         "--version",
@@ -261,9 +262,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         default=None,
         help=(
-            "Run against a collect-testdata bundle at PATH instead of the live cluster -- "
-            "no network access at all (section 16.5). The bundle's own config.yaml is used "
-            "unless -c is also given. apply and any --mode above dry-run are a usage error."
+            "Run against a collect-testdata bundle at PATH instead of the live cluster. "
+            "The tool does not access the network (section 16.5). The tool uses the "
+            "config.yaml of the bundle unless you also give -c. apply and any --mode "
+            "above dry-run are a usage error."
         ),
     )
 
@@ -282,12 +284,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         metavar="DIR",
         default=None,
-        help="Where the bundle directory/tarball are written (default: support.bundle_dir).",
+        help="Write the bundle directory and tarball here (default: support.bundle_dir).",
     )
     collect_parser.add_argument(
         "--estimate",
         action="store_true",
-        help="Print the query count and payload estimate, then exit without fetching.",
+        help="Print the query count and payload estimate. Then exit and fetch nothing.",
     )
     collect_parser.add_argument(
         "--range",
@@ -304,12 +306,12 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument(
         "--no-series",
         action="store_true",
-        help="Capture topology, instant queries and findings only -- no forecaster-sized series.",
+        help="Capture only topology, instant queries and findings. Skip forecaster-sized series.",
     )
     collect_parser.add_argument(
         "--no-archive",
         action="store_true",
-        help="Write the bundle directory only, no .tar.gz.",
+        help="Write only the bundle directory. Do not write a .tar.gz file.",
     )
     collect_parser.add_argument(
         "--salt-file",
@@ -320,8 +322,8 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument(
         "--new-salt",
         action="store_true",
-        help="Generate a fresh salt, replacing the persisted one. Bundles made before and "
-        "after no longer share a pseudonym mapping.",
+        help="Generate a new salt and replace the stored salt. Bundles from before and "
+        "after this change do not share a pseudonym mapping.",
     )
 
     return parser

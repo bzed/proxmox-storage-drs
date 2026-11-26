@@ -1,20 +1,19 @@
 # Reading `apply`
 
-`apply` runs the identical per-group pipeline `plan` prints — the same
-gate, the same solver, the same scheduler, the same payback test (`plan`'s
-own manual page, `docs/manual/27-plan.md`, describes all four in detail)
-— and then, unless it is `dry-run`, actually issues the moves.
-`execution.mode` (or `--mode`) picks what happens next:
+`apply` runs the identical per-group pipeline that `plan` prints. It uses the same
+gate, solver, scheduler and payback test. The manual
+page of `plan`, `docs/manual/27-plan.md`, describes all four in detail. Then,
+unless the mode is `dry-run`, `apply` issues the moves. `execution.mode` (or
+`--mode`) selects what happens next:
 
 | Mode | What `apply` does |
 |---|---|
-| `dry-run` *(default)* | Prints the same report `plan` would, plus a `would_move` outcome per move. Issues zero API calls. |
-| `confirm` | Executes one move at a time, prompting before each: `[y]es`/`[n]o skip`/`[a]ll remaining`/`[q]uit`. |
-| `auto` | Executes unattended, subject to `execution.time_windows`, `max_migrations_per_run`, and a bounded automatic re-plan loop — see "Reading `auto` mode" below. Also the only mode that honours `execution.max_concurrent_migrations`/`max_concurrent_per_storage` above their default of `1`, running several moves at once — see "Concurrent execution" below. |
+| `dry-run` *(default)* | Prints the same report as `plan`, plus a `would_move` outcome per move. Reads the cluster and Prometheus as `plan` does, and sends no write call. |
+| `confirm` | Runs one move at a time and asks before each move: `[y]es`/`[n]o skip`/`[a]ll remaining`/`[q]uit`. |
+| `auto` | Runs unattended. `execution.time_windows`, `max_migrations_per_run` and a bounded automatic re-plan loop limit the run (see "Reading `auto` mode" below). Only this mode honours `execution.max_concurrent_migrations`/`max_concurrent_per_storage` above their default of `1` and runs several moves at once (see "Concurrent execution" below). |
 
-A `confirm` run, using the same section 14 fixture `plan`'s own manual
-page walks through, with the operator declining the first move and
-accepting the rest:
+The following is a `confirm` run with the section 14 fixture that the manual page
+of `plan` uses. The operator declines the first move and accepts the rest:
 
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml --mode confirm apply
@@ -29,251 +28,248 @@ Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the 
   payback: benefit 3.02e+07 load·s vs cost 1.05e+04 load·s → ratio 2.88e+03 (need 10) ✓
 ```
 
-Everything above the `→ status: detail` suffix on each move line is
-identical to `plan`'s own output — the "after"/"spread"/"payback" lines
-still describe the plan as scheduled, not adjusted for what a declined
-move would have changed, since (as with a partial deadlock, see `plan`'s
-manual page) reporting what was actually asked for is more honest than
-recomputing a hypothetical.
+Each move line is identical to the output of `plan`, up to the `→ status:
+detail` suffix. The "after", "spread" and "payback" lines still describe the
+plan as scheduled. The tool does not adjust them for what a declined move would
+change. As with a partial deadlock (see the manual page of `plan`), a report of
+what you asked for is more honest than a recomputed hypothetical.
 
 ## The `[y]es/[n]o skip/[a]ll remaining/[q]uit` prompt
 
-Only in `confirm` mode, once per move, before it is issued — never for a
-move `dry-run` would only report. `[a]ll remaining` stops prompting for
-the rest of *this run* (every group, not just the current one); `[q]uit`
-stops the whole run immediately, including any group not yet even
-planned. An answer that is not one of the four is rejected right there
-("please answer y, n, a or q") and asked again — it never reaches
-`execute.py` at all, so a typo can never be mistaken for one of the four
-real decisions.
+The prompt appears only in `confirm` mode, once per move, before the tool issues
+the move. It never appears for a move that `dry-run` would only report. `[a]ll
+remaining` stops the prompt for the rest of *this run*: every group, not just the
+current one. `[q]uit` stops the whole run at once, including any group that the
+tool has not yet planned. The tool rejects any other answer right there ("please
+answer y, n, a or q") and asks again. Such an answer never reaches `execute.py`,
+so a typo can never count as one of the four real decisions.
 
 ## Reading `auto` mode
 
-`auto` behaves like `[a]ll remaining` chosen up front, unprompted, plus
-three things `dry-run`/`confirm` do not do at all
+`auto` behaves like `[a]ll remaining` chosen in advance, without a prompt. It
+also does three things that `dry-run`/`confirm` do not do at all
 (`IMPLEMENTATION_PLAN.md` section 9.1/9.2):
 
-- **`execution.time_windows`.** If any are configured, a move is refused
-  (reported `skipped`, "outside execution.time_windows") unless the
-  current moment — in the **local time of the host running
-  `pve-storage-drs`**, not UTC — falls inside one of them, and before
-  starting a move `auto` also refuses it if its estimated duration
-  (mirror plus any `saferemove` wipe) would not finish before the window
-  closes. No windows configured at all means no restriction. Either way,
-  a move already in progress is never aborted at window close — the
-  check only ever runs *before* issuing the next one.
-- **`execution.max_migrations_per_run`.** A ceiling on how many moves
-  the whole invocation executes, shared across every group it visits
-  (not reset per group) — the remainder waits for the next scheduled
-  run.
-- **The re-plan loop.** A `replan_needed` mismatch does not end an
-  `auto` run the way it ends a `dry-run`/`confirm` one: `apply`
-  re-invokes the whole pipeline (gates, load model, solver, payback,
-  ordering) from freshly observed cluster state and tries again, up to
-  `execution.max_replans_per_run` times. The gate may well conclude no
-  further action is needed on the re-plan — a normal, quiet outcome, not
-  a failure. Exceeding the cap ends the run with a message naming the
-  setting, and the run still exits `0`: too many outside changes (VMs
-  moved, disks created, another tool filling a target) to plan against is
-  a reason to try again later, not a failure of the tool, and the next
-  run starts from freshly observed state. A re-plan that cannot be
-  computed because Prometheus cannot be read is different — see "When
-  something cannot be read" below.
-  Cross-referencing the report's `outcomes[]` shows the whole story for
-  a re-planned group: the mismatch that triggered each re-plan, and
-  whatever the next attempt then did.
+- **`execution.time_windows`.** If you configure any window, the current moment
+  must fall inside one of them. The tool uses the **local time of the host that
+  runs `pve-storage-drs`**, not UTC. Otherwise the tool refuses the move and
+  reports it as `skipped`, "outside execution.time_windows". Before it starts a
+  move, `auto` also refuses a move whose estimated duration (mirror plus any
+  `saferemove` wipe) would not end before the window closes. With no windows
+  configured, no restriction applies. In both cases, the tool never aborts a move
+  in progress when a window closes. The check only runs *before* the next move.
+- **`execution.max_migrations_per_run`.** This is a ceiling on the number of
+  moves that one call runs. All groups that the call visits share it. The tool
+  does not reset it for each group. The remaining moves wait for the next
+  scheduled run.
+- **The re-plan loop.** A `replan_needed` mismatch does not end an `auto` run
+  as it ends a `dry-run`/`confirm` run. `apply` runs the whole pipeline again
+  (gates, load model, solver, payback, ordering) from freshly observed cluster
+  state and tries again, up to `execution.max_replans_per_run` times. On a
+  re-plan, the gate may well decide that no further action is needed. That is a
+  normal, quiet outcome, not a failure. Above the cap, the run ends with a message
+  that names the setting, and the run still exits `0`. Outside changes can be too many: VMs moved, disks created, another tool filled a
+  target. That is a reason to try again later, not a failure of the tool. The next run starts from freshly
+  observed state. A re-plan that cannot be computed because Prometheus cannot be
+  read is different (see "When something cannot be read" below). The `outcomes[]` entries of the report show the whole story of a re-planned group.
+  They show the mismatch that caused each re-plan, and what the next attempt did.
 
 ## Concurrent execution
 
-Configuring `execution.max_concurrent_migrations`/`max_concurrent_per_storage`
-above their default of `1` runs several moves at once in `auto` mode
-(`dry-run`/`confirm` always run strictly sequentially, regardless of these
-settings — concurrency only makes sense for unattended operation).
-The **transient reserve invariant** — the rule (`docs/manual/27-plan.md`)
-that a storage's snapshot reserve must hold even while a disk migrating
-onto it exists on both source and target at once, not only once the move
-finishes — generalizes to a whole in-flight set of moves landing on the
-same storage at the same time (`IMPLEMENTATION_PLAN.md` section 8.1's own
-formula for it), checked live before every launch exactly like the
-sequential executor's own pre-flight re-check; `max_concurrent_per_storage`
-counts a storage as occupied whether a move touches it as source *or*
-target.
+If you set `execution.max_concurrent_migrations`/`max_concurrent_per_storage`
+above their default of `1`, `auto` runs several moves at once. `dry-run` and
+`confirm` always run strictly one move after another, whatever these settings say.
+Concurrency only makes sense for unattended operation.
 
-**Launch order stays strictly FIFO.** The scheduler's own queue (the same
-one a sequential run would follow, one move at a time) is never
-reordered to keep every concurrency slot busy: if the next queued move
-cannot launch yet — its VM is locked, or a per-storage cap is already
-reached — `apply` waits for it rather than skipping ahead to a later
-move that could launch immediately. Several moves genuinely run at once
-once launched (nothing blocks waiting for one move's own completion or
-lock to affect any other), but which move launches *next* is always
-decided in the order `plan` would have shown it. This can under-deliver
-on throughput in a mixed queue, but never launches a move out of the
-order the payback-scored plan itself computed.
+The **transient reserve invariant** (`docs/manual/27-plan.md`) is a rule about the
+snapshot reserve of a storage. The reserve must hold while a disk that moves onto
+the storage exists on both source and target. It is not enough that the reserve
+holds after the move ends. The
+rule extends to a whole set of moves in flight onto the same storage at the same
+time (`IMPLEMENTATION_PLAN.md` section 8.1 gives its formula). The tool checks it
+live before every launch, exactly like the pre-flight re-check of the sequential
+executor. `max_concurrent_per_storage` counts a storage as occupied when a move
+uses it as source *or* as target.
 
-A failure (or a budget/deadline limit) stops the run from launching
-anything further, exactly as in the sequential case, but does not
-abandon moves already in flight: `apply` keeps polling them to their own
-natural conclusion (`moved`, `failed`, or `draining`) before returning,
-so nothing already running is left unreported.
+**Launch order stays strictly FIFO.** The tool never reorders the scheduler's own
+queue (the queue that a sequential run follows, one move at a time) to keep every
+concurrency slot busy. The next queued move may be unable to launch yet, because
+its VM is locked or a per-storage cap is reached. `apply` then waits for it. It
+does not skip ahead to a later move that could launch at once. Several moves
+really run at once after launch: no move blocks another while it waits for its own
+completion or lock. But the move that launches *next* always follows the order that
+`plan` would show. This can give less throughput in a mixed queue. It never
+launches a move out of the order that the payback-scored plan computed.
+
+A failure, or a budget or deadline limit, stops the run from launching anything
+more, exactly as in the sequential case. It does not abandon moves in flight.
+`apply` continues to poll them to their own natural end (`moved`, `failed` or
+`draining`) before it returns. No running move stays unreported.
 
 ## What "done" means for one move, and why it can take a while
 
 A move is not finished when the `move_disk` task itself succeeds.
-`IMPLEMENTATION_PLAN.md` section 9.3 requires all three, together: the
-task reports `exitstatus: OK`, the source volume is gone from the source
-storage's own content listing, and the VM's config lock is clear again. A
-storage with `saferemove` enabled zeroes the old volume afterwards at
-`saferemove_throughput` (default 10 MiB/s; a negative value in `storage.cfg`
-is a rate too, see [`verify-storages`](25-show-load-and-verify-storages.md))
-— for a large disk, that can
-run for hours after the task itself is long done. While it runs, `apply`
-reports the move as `draining`, not `moved` and not `failed`: it is a
-normal, expected state, bounded by `execution.source_release.timeout`
-(default 48h), not an error. A `draining` move still counts as
-"executed" for `state.json`'s bookkeeping below — the mirror itself
-completed; only the source's own cleanup is still in flight. For the
-*rest of this same run*, that storage is excluded as both a source and a
-target for any later move: it holds a storage-level lock for as long as
-the wipe runs, so a subsequent `move_disk` touching it would either queue
-behind a wipe that can take days or fail outright. A move skipped this
-way is reported plainly (`skipped`, naming the draining storage) rather
-than attempted into that lock.
+`IMPLEMENTATION_PLAN.md` section 9.3 requires all three of these together:
 
-Before *every* move, `apply` re-checks the live cluster rather than
-trusting the plan: the VM may have moved node, the disk may no longer be
-on the expected source, a snapshot may have appeared, it may have been
-tagged for exclusion, or the target storage's free space may no longer
-satisfy the transient invariant (the target must still hold every disk on
-it, plus the disk being moved, plus the snapshot reserve, while both copies
-of the moving disk exist). That last re-check reads the target's volume
-listing afresh and counts every volume at its *provisioned* size, exactly
-as planning did — not the pool's own allocated figure, which on a
-thin-provisioned pool is much lower and would let a move through onto a
-pool that other provisioning has since filled. A mismatch — the VM moved,
-a snapshot appeared, the target no longer has room — stops the group's run
-with `replan_needed`. In `dry-run`/`confirm`, that is the end of it — the
-operator re-runs `apply` by hand once ready; see "Reading `auto` mode" below
-for what `auto` itself does about it automatically.
+- the task reports `exitstatus: OK`;
+- the source volume is gone from the content listing of the source storage;
+- the config lock of the VM is clear again.
 
-If a check cannot be *made* at all — the PVE API errors while re-reading the
-VM or the target, or the target lists a volume with no size — the move is
-refused and the whole run fails; see "When something cannot be read".
+A storage with `saferemove` enabled zeroes the old volume afterwards, at
+`saferemove_throughput`. The default is 10 MiB/s. A negative value in `storage.cfg`
+is also a rate (see [`verify-storages`](25-show-load-and-verify-storages.md)). For a
+large disk, this can run for hours after the task itself ends. During this time,
+`apply` reports the move as `draining`, not `moved` and not `failed`. This is a
+normal, expected state, not an error. `execution.source_release.timeout` (default
+48h) bounds it.
 
-A VM config lock (`backup`, `snapshot`, `migrate`, or any other value —
-this set is never whitelisted, see `docs/internals/92-execute.md`) makes
-`apply` wait, not fail, up to `execution.locks.wait_timeout_seconds`.
-So does a task still running on the VM — typically the "Erase data" job
-(`imgdel`) of an earlier move — because it can hold the config file's own
-lock and would make the move fail with `can't lock file ... - got timeout`;
-console sessions do not count. It is the same wait, with the same timeout and
-`on_timeout` handling.
-What happens on that timeout depends on `execution.locks.on_timeout`:
-`skip` (the default) reports the move `skipped` and continues with the
-rest of the plan; `abort` reports it `failed` and stops the *whole run*
-unconditionally — this one case ignores `execution.abort_on_failure`
-entirely, because the manual's own words for `on_timeout: abort` are
-"abort the run," a distinct, stronger promise than the general
-"stop after any failed move" policy a plain task failure still goes
-through.
+A `draining` move still counts as "executed" for the bookkeeping in `state.json`
+below: the mirror is complete, and only the cleanup of the source is still in
+flight. For the *rest of this run*, the tool excludes that storage as source and
+as target of any later move. The storage holds a storage-level lock as long as the
+wipe runs. A later `move_disk` that uses it would queue behind a wipe that can
+take days, or fail outright. The tool reports such a move plainly (`skipped`, with
+the name of the draining storage) instead of running it into that lock.
+
+Before *every* move, `apply` checks the live cluster again and does not trust the
+plan. The check covers these cases:
+
+- the VM moved to another node;
+- the disk is no longer on the expected source;
+- a snapshot appeared;
+- someone tagged the VM for exclusion;
+- the free space of the target no longer satisfies the transient invariant. The
+  target must still hold every disk on it, plus the moving disk, plus the snapshot
+  reserve, while both copies of the moving disk exist.
+
+That last check reads the volume listing of the target again. It counts every
+volume at its *provisioned* size, exactly as planning did. It does not use the
+allocated figure of the pool. On a thin-provisioned pool, that figure is much
+lower. It would let a move through onto a pool that other provisioning has filled
+since planning. A mismatch (the VM moved, a snapshot appeared, the target has no
+room any more) stops the run of the group with `replan_needed`. In
+`dry-run`/`confirm`, that is the end of it: run `apply` again by hand when you are
+ready. See "Reading `auto` mode" above for what `auto` does about it by itself.
+
+Sometimes a check cannot be *made* at all: the PVE API fails while the tool reads
+the VM or the target again, or the target lists a volume without a size. The tool
+then refuses the move, and the whole run fails (see "When something cannot be
+read").
+
+A VM config lock makes `apply` wait, not fail, up to
+`execution.locks.wait_timeout`. The lock can be `backup`, `snapshot`,
+`migrate` or any other value. The tool never uses a whitelist of values (see
+`docs/internals/92-execute.md`). A task that
+still runs on the VM does the same. This is typically the "Erase data" job
+(`imgdel`) of an earlier move. It can hold the lock of the config file itself, and
+the move would then fail with `can't lock file ... - got timeout`. Console sessions
+do not count. The tool applies the same wait, with the same timeout and the same
+`on_timeout` handling. `execution.locks.on_timeout` decides what happens at the
+timeout. `skip` (the default) reports the move as `skipped` and continues with the
+rest of the plan. `abort` reports it as `failed` and stops the *whole run*
+unconditionally. This one case ignores `execution.abort_on_failure` entirely. The
+words of the manual for `on_timeout: abort` are "abort the run". That is a
+distinct, stronger promise than the general policy "stop after any failed move",
+which still applies to an ordinary task failure.
 
 ## Failure and `abort_on_failure`
 
-A failed `move_disk` task is reported `failed` with its detail; `apply`
-then lists any volume left behind on the target that is not referenced in
-the VM's config (`IMPLEMENTATION_PLAN.md` section 9.4) — **never deleted,
-only reported**, exactly like every other orphan this project surfaces.
-With `execution.abort_on_failure: true` (the default), the whole run
-stops there; with it `false`, `apply` continues with the plan's remaining
-moves. The lock-timeout-`abort` case above is the one exception that
-always stops the run regardless of this setting.
+`apply` reports a failed `move_disk` task as `failed`, with its detail. It then
+lists any volume that remains on the target and that the config of the VM does not
+reference (`IMPLEMENTATION_PLAN.md` section 9.4). The tool **never deletes such a
+volume; it only reports it**, like every other orphan that this project shows. With
+`execution.abort_on_failure: true` (the default), the whole run stops there. With
+`false`, `apply` continues with the remaining moves of the plan. The lock-timeout
+`abort` case above is the one exception: it always stops the run, whatever this
+setting says.
 
 ## When something cannot be read
 
-A mismatch between the plan and the cluster is something `apply` can plan
-around; a *failure to look* is not. These end the whole run at once — no
-later group is planned or executed — and `apply` exits `1`:
+`apply` can plan around a mismatch between the plan and the cluster. It cannot plan
+around a *failure to look*. The following failures end the whole run at once. The
+tool then plans and runs no later group, and `apply` exits `1`:
 
-- the PVE API errors while `apply` re-reads a VM or the target storage just
-  before a move (or the target lists a volume with no size);
-- Prometheus cannot be read while computing a group's load — in the first
-  plan, or in an `auto` re-plan. (A re-plan that cannot be computed is a
+- the PVE API fails while `apply` reads a VM or the target storage again just
+  before a move (or the target lists a volume without a size);
+- Prometheus cannot be read while the tool computes the load of a group, in the
+  first plan or in an `auto` re-plan. (A re-plan that cannot be computed is a
   failed run, not "no further action needed".)
 
-Moves that already completed stay recorded in `state.json` and in the
-report, and the report says what could not be read. Planning around data it
-could not observe would be a worse plan, not a better one, so the tool does
-not try: fix the connection and run it again. `plan` and `explain`, which
-change nothing, still report every group they can — and also exit `1` when
-any group's load could not be computed.
+Moves that completed stay recorded in `state.json` and in the report. The report
+says what could not be read. A plan around data that the tool could not observe
+would be a worse plan, not a better one, so the tool does not try. Repair the
+connection and run the command again. `plan` and `explain` change nothing. They
+still report every group that they can, and they also exit `1` when the tool could
+not compute the load of any group.
 
 ## `state.json`: what a real run actually changes
 
-`apply` is the one command that takes `state.json`'s advisory lock
-(`docs/internals/15-state.md`) — checked first, before it ever touches
-PVE or Prometheus, so a second concurrent `apply` (any mode, including
-`dry-run`) exits `0` immediately and quietly rather than racing the first
-one. After the run, for every group where at least one move actually
-executed (`moved` or `draining` — both mean the mirror itself completed):
+`apply` is the one command that takes the advisory lock of `state.json`
+(`docs/internals/15-state.md`). It checks the lock first, before it touches PVE or
+Prometheus. A second concurrent `apply` (any mode, including `dry-run`) thus exits
+`0` at once and quietly, and does not race the first one. After the run, the tool
+updates the state for every group in which at least one move ran (`moved` or
+`draining`; both mean that the mirror completed):
 
-- `last_balance.load_vector` is replaced with that group's load for this
-  run — the load the balancer acted on, so forecast-scaled under
-  `forecast.model: holt_winters` — so the next run's drift gate compares
+- The tool replaces `last_balance.load_vector` with the load of that group in this
+  run. This is the load that the balancer acted on, so it is forecast-scaled under
+  `forecast.model: holt_winters`. The drift gate of the next run thus compares
   against a real balance instead of treating every run as the first one.
-- Every executed disk gets a fresh `gates.cooldown_per_disk` timestamp at
-  its **new** location.
-- **Both** of the move's storages — source and destination — get a fresh
-  `gates.cooldown_per_storage` timestamp: section 6 says a storage
-  "involved in a migration" accepts no new incoming moves, and section
-  9.3's sizing rule for this cooldown is specifically about protecting a
-  *source* still draining a `saferemove` wipe, so recording the
-  destination alone could never deliver on it. What the cooldown actually
-  *excludes* on the next run stays destination-only (the heuristic/MILP
-  backends refuse a cooldown storage as an incoming-move target, never as
-  a source a disk may still leave) — recording both endpoints only
-  widens which storages carry a timestamp, not what that timestamp
-  blocks.
+- Every moved disk gets a new `gates.cooldown_per_disk` timestamp at its **new**
+  location.
+- **Both** storages of the move, source and destination, get a new
+  `gates.cooldown_per_storage` timestamp. Section 6 says that a storage "involved
+  in a migration" accepts no new incoming moves. The sizing rule of section 9.3 for
+  this cooldown protects a *source* that still drains a `saferemove` wipe. A record
+  of the destination alone could never achieve that. On the next run, the cooldown only *excludes* destinations. The heuristic and MILP
+  backends refuse a cooldown storage as the target of an incoming move. They never
+  refuse it as a source that a disk may still leave. A record of both endpoints only increases the number of storages with
+  a timestamp. It does not change what the timestamp blocks.
 
-A group that never executes anything (the gate said `NO ACTION`, or a
-`load_error`/`replan_needed` stopped it before any move ran) leaves
-`state.json` untouched for that group.
+A group in which no move runs (the gate said `NO ACTION`, or a
+`load_error`/`replan_needed` stopped it before any move ran) leaves `state.json`
+unchanged for that group.
 
 ## Crash and two-instance recovery
 
-Before planning anything, every `apply` run (including `dry-run`) checks
-for a `move_disk` left running by a crashed previous run or a second,
-concurrently-running instance: `state.json`'s own `inflight_upids` are
-re-checked, and every node's task list is scanned for a still-running
-`qmmove` task from this tool's own configured user. Any vmid this finds is
-excluded from this run's planning exactly like a manually-configured
-`exclude.vmids` entry — it shows up pinned in the report with the reason
-"excluded by config (`exclude.vmids`)", and a log line at `WARNING`
-explains which check actually found it. It is never force-cancelled, and
-this run never assumes it is safe to touch that VM's disk again.
+Before it plans anything, every `apply` run (including `dry-run`) looks for a
+`move_disk` that is still running. A crashed previous run, or a second instance
+that runs at the same time, can leave one. It checks the `inflight_upids` of `state.json` again. It scans
+the task list of every node for a still running `qmmove` task of the user that this
+tool is configured with. The tool excludes any vmid that it finds from the planning
+of this run, exactly like a manual `exclude.vmids` entry. The report shows the vmid
+as pinned, with the reason "excluded by config (`exclude.vmids`)". A log line at
+`WARNING` says which check found it. The tool never force-cancels the task, and
+this run never assumes that it is safe to touch the disk of that VM again.
 
-During execution, `state.json`'s `inflight_upids` is written **before**
-each `move_disk` is issued and cleared once that task itself has finished
-— synchronously, so a crash (killed, OOM, host reboot) partway through a
-move leaves a trace the *next* run's own startup check will find, rather
-than only ever being updated at the very end of a whole `apply` run. See
+During execution, the tool writes `inflight_upids` to `state.json` **before** it
+issues each `move_disk`. It clears the entry after that task itself ends. The write
+is synchronous. A crash in the middle of a move (kill, out of memory, host reboot)
+thus leaves a trace that the startup check of the *next* run finds. The tool does
+not only update the file at the very end of a whole `apply` run. See
 `docs/internals/93-crashrecovery.md` for the full mechanism.
 
 ## `--json`
 
-Identical to `plan`'s own `groups[]` shape (see `docs/manual/27-plan.md`),
-with one addition per group: `"execution"`, either `null` (never reached
-— a `load_error`, `NO ACTION`, or a group the run never got to because an
-earlier one stopped it, e.g. an operator's `[q]uit`) or an object with
-`stopped_early`, `stop_reason` (`null` unless the run stopped for this
-group specifically), `aborted` (`true` when this group's execution hit
-one of the failures above and the run ended because of it),
-`replans_exhausted` (`true` when `execution.max_replans_per_run` ran out —
-the run bailed out and exits `0`) and `outcomes[]` — one entry per move actually
-attempted, each with `disk_key`, `vm_name`, `from_storage`, `to_storage`, `status`
-(`would_move`/`moved`/`skipped`/`failed`/`draining`/`replan_needed`),
-`detail`, `upid` (`null` unless `move_disk` was actually issued for this
-move — always `null` for `would_move`/`replan_needed`, and for `skipped`
-except a lock timeout that happened after issuing nothing yet, so still
-`null` there too; a `failed` outcome carries one only when the task
-itself ran and failed, not when a lock timeout aborted before it started)
-and `orphaned_volumes` (only ever non-empty after a `failed` outcome).
+The output has the same `groups[]` shape as `plan` (see `docs/manual/27-plan.md`),
+with one addition per group: `"execution"`. It is `null` when the tool never reached the group. The causes are a `load_error`,
+`NO ACTION`, or an earlier group that stopped the run (for example, a `[q]uit` of
+the operator).
+Otherwise it is an object with these fields:
+
+- `stopped_early`;
+- `stop_reason` (`null` unless the run stopped for this group specifically);
+- `aborted` (`true` when the execution of this group met one of the failures above
+  and the run ended because of it);
+- `replans_exhausted` (`true` when `execution.max_replans_per_run` ran out; the run
+  stops and exits `0`);
+- `outcomes[]`: one entry for each move that the tool actually attempted.
+
+Each outcome has `disk_key`, `vm_name`, `from_storage`, `to_storage`, `status`
+(`would_move`/`moved`/`skipped`/`failed`/`draining`/`replan_needed`), `detail`,
+`upid` and `orphaned_volumes`. `upid` is `null` unless the tool actually issued
+`move_disk` for this move. It is always `null` for `would_move`/`replan_needed`. It
+is also `null` for `skipped`: even a lock timeout in that case happens before the
+tool issues anything. A `failed` outcome carries a UPID in `upid` only when the task itself
+ran and failed, not when a lock timeout aborted the move before the task started.
+`orphaned_volumes` is only non-empty after a `failed` outcome.

@@ -1,22 +1,26 @@
 # Reading `explain`
 
-`explain` runs the identical gate/solve/schedule/payback pipeline `plan`
-does (`docs/manual/27-plan.md`) — same load, same gate, same solver, same
-scheduler, same payback test, byte-for-byte the same numbers — and prints
-everything `plan` already shows, plus the "why" `plan` itself never does:
-the measured load every one of those numbers derives from, which disks are
-pinned and the exact reason, which VMs a pin leaves spread across more than
-one storage, the section 5.4 objective broken into its seven terms, and
-whether the pinned load is large enough that the residual imbalance is
-structural rather than a planning shortfall. `-v` additionally names
-exactly which Prometheus query produced all of it. It never changes
-anything, in any `execution.mode` — exactly like `plan`.
+`explain` runs the identical gate/solve/schedule/payback pipeline as `plan`
+(`docs/manual/27-plan.md`). It uses the same load, the same gate, the same solver,
+the same scheduler and the same payback test, and gets byte-for-byte the same
+numbers. It prints everything that `plan` shows, plus the "why" that `plan` never
+prints:
 
-This example extends the section 14 worked example `plan`'s own manual
-page uses with one more VM, `106` (`archive01`): its `scsi0` carries two
-real snapshots, so it is pinned (section 3.7), while its `scsi1` is an
-ordinary movable disk on a different storage — the "cannot fully
-consolidate" case section 3.6 exists to name:
+- the measured load from which every one of those numbers comes;
+- which disks are pinned, and the exact reason;
+- which VMs a pin leaves on more than one storage;
+- the objective of section 5.4, broken into its seven terms;
+- whether the pinned load is so large that the remaining imbalance is structural,
+  not a shortfall of the planning.
+
+`-v` also names exactly which Prometheus query produced all of this. The command
+never changes anything, in any `execution.mode`, exactly like `plan`.
+
+This example extends the worked example of section 14, which the manual page of
+`plan` uses, with one more VM, `106` (`archive01`). Its `scsi0` has two real
+snapshots, so the tool pins it (section 3.7). Its `scsi1` is an ordinary movable
+disk on a different storage. This is the "cannot fully consolidate" case that
+section 3.6 names:
 
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml explain
@@ -49,63 +53,67 @@ Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   pinned load 0.90 of 8.40 (10.7%, warn at 25%);  best achievable spread given pins: 17.9%
 ```
 
-Everything up to and including the `payback:` line is identical to
-`plan`'s own output for the same input — see `docs/manual/27-plan.md` for
-how to read the move lines and the payback verdict. What follows is new.
+Everything up to and including the `payback:` line is identical to the output of
+`plan` for the same input. See `docs/manual/27-plan.md` for how to read the move
+lines and the payback verdict. The text after that line is new.
 
 ## The `forecast:` line
 
-Printed only under `forecast.model: holt_winters`, just before the `objective:`
-line, once per group whose load was computed:
+The line appears only under `forecast.model: holt_winters`, just before the
+`objective:` line, once for each group whose load the tool computed:
 
 ```
   forecast: holt_winters used (backtest error 0.08 vs baseline 0.14): 37 disks scaled to their forecast p95, 5 kept as observed
   forecast: holt_winters not used -- it did not beat the quantile baseline on this group's recent history (or there is not enough of it yet); loads are as observed
 ```
 
-`used` means the group's per-disk loads (the `ℓ` in every number above and below)
-are scaled to a Holt-Winters forecast of their p95 over the next
-`window.lookback`; the two errors are the backtest that decided it (see
-`forecast.model` in `docs/manual/10-configuration.md`). "Kept" disks are flagged
-for low coverage, idle, or had no fit. `plan --json` and `explain --json` carry
-the same facts as a per-group `forecast` object, and `show-load` prints the same
-line (and `--json` object) so its loads are never mistaken for observed ones.
+`used` means that the tool scaled the load of each disk in the group (the `ℓ` in
+every number above and below) to a Holt-Winters forecast of its p95 over the next
+`window.lookback`. The two errors come from the backtest that made the decision
+(see `forecast.model` in `docs/manual/10-configuration.md`). "Kept" disks are
+flagged for low coverage, are idle, or had no fit. `plan --json` and
+`explain --json` carry the same facts as a `forecast` object per group. `show-load`
+prints the same line (and the `--json` object), so that nobody mistakes its loads
+for observed loads.
 
 ## The `objective:` line
 
-The section 5.4 objective the solver actually minimized, broken into its
-seven terms rather than only the total — `imbalance` (`alpha` times the
-spread metric), `moves` (`beta` times the move count), `bytes` (`gamma`
-times TiB moved), `fragmentation` (`kappa` times each VM's I/O-weighted
-extra storage count beyond one — section 5.4's `w_v`, so a VM doing
-several times the group's average I/O costs correspondingly more to
-split), `spread` (`delta` times the section 5.3 (C7) data-spread
-deviation), `split` (`mu` times the TiB by which a VM above
-`snapshot_reserve.split_vm_footprint` exceeds its cap on its fullest storage —
-zero when no VM is that large), and `reserve` (the penalty for any remaining (C5) shortfall,
-zero on a plan that resolves or never had one). This is the same
-`heuristic.ObjectiveBreakdown` the solver itself compares candidate
-assignments with — the reason that class keeps the seven terms apart
-instead of collapsing to only `.total` in the first place. Only printed
-when the gate said `ACT`; a `NO ACTION` group solved nothing this run, so
-there is no objective to show.
+This is the objective of section 5.4 that the solver actually minimized, broken
+into its seven terms instead of only the total:
+
+- `imbalance`: `alpha` times the spread metric.
+- `moves`: `beta` times the number of moves.
+- `bytes`: `gamma` times the TiB moved.
+- `fragmentation`: `kappa` times the I/O-weighted number of extra storages of each
+  VM beyond one. The weight is `w_v` of section 5.4, so a VM that does several
+  times the average I/O of the group costs correspondingly more to split.
+- `spread`: `delta` times the data-spread deviation of section 5.3 (C7).
+- `split`: `mu` times the TiB by which a VM above
+  `snapshot_reserve.split_vm_footprint` exceeds its cap on its fullest storage. It
+  is zero when no VM is that large.
+- `reserve`: the penalty for any remaining (C5) shortfall. It is zero on a plan
+  that resolves the shortfall or never had one.
+
+The solver itself compares candidate assignments with the same
+`heuristic.ObjectiveBreakdown`. That is why this class keeps the seven terms apart
+instead of only a `.total`. The tool prints the line only when the gate said `ACT`.
+A `NO ACTION` group solved nothing in this run, so it has no objective to show.
 
 ## `no moves made: ...` / `closest alternative: ...`
 
-Only printed when the gate said `ACT` *and* the solver's own optimum still
-moves nothing — every disk eligible, nothing pinned, yet the objective is
-lowest at the current assignment. This is a real, expected outcome, not a
-bug: it happens when the only move (or moves) that would meaningfully
-improve the spread costs more, in `moves`/`bytes`/`fragmentation`, than the
-imbalance it fixes is worth under the configured weights. Without this
-section, that case is indistinguishable from "the solver didn't try" —
-`plan`'s one-line verdict says `ACT` either way.
+The tool prints these lines only when the gate said `ACT` *and* the optimum of the
+solver still moves nothing: every disk is eligible, nothing is pinned, but the
+objective is lowest at the current assignment. This is a real, expected outcome,
+not a bug. It happens when the only move (or moves) that would improve the spread
+clearly costs more, in `moves`/`bytes`/`fragmentation`, than the imbalance that it
+repairs is worth under the configured weights. Without this section, you cannot
+tell this case apart from "the solver did not try". The one-line verdict of `plan`
+says `ACT` in both cases.
 
-`explain` finds the single-disk move closest to being worth taking —
-every movable disk against every other storage in the group, evaluated
-with the same objective the solver itself minimizes (section 5.3's
-one-move neighbourhood) — and shows the term-by-term arithmetic that
-rejected it:
+`explain` finds the single-disk move that is closest to being worth it. It tries
+every movable disk against every other storage of the group. It evaluates each with
+the same objective that the solver minimizes (the one-move neighbourhood of section
+5.3). It shows the arithmetic, term by term, that rejected the move:
 
 ```
   objective: imbalance 0.576 + moves 0 + bytes 0 + fragmentation 0 + spread 0 + split 0 + reserve 0 = 0.576
@@ -115,44 +123,43 @@ rejected it:
     total 0.576 → 0.8  (worse by 0.223 -- rejected)
 ```
 
-Read left to right: moving `vm110(110):scsi1` from `VM-krbd` to `VM` would cut
-the imbalance term from `0.576` to `0.043` — a real improvement — but
-`110` is a two-disk VM with its other disk staying put, so the move splits
-it across two storages, and `objective.kappa_vm_affinity`'s fragmentation
-penalty (`0` → `0.5`) for that outweighs the gain. If this is a tradeoff
-you want to accept rather than reject, lowering `objective.kappa_vm_affinity`
-(or `objective.beta_move_count`/`gamma_move_bytes_per_tib`, whichever term
-dominates the rejection) is the knob — not a reason to suspect the solver.
+Read from left to right. A move of `vm110(110):scsi1` from `VM-krbd` to `VM` would
+cut the imbalance term from `0.576` to `0.043`, a real improvement. But `110` is a
+VM with two disks, and its other disk stays. The move therefore splits the VM
+across two storages. The fragmentation penalty of `objective.kappa_vm_affinity` (`0`
+→ `0.5`) for that split outweighs the gain. If you want to accept this trade-off
+instead of rejecting it, lower `objective.kappa_vm_affinity` (or
+`objective.beta_move_count`/`gamma_move_bytes_per_tib`, whichever term dominates
+the rejection). A rejection is no reason to suspect the solver.
 
-Omitted entirely when there is nothing to compare against (every disk
-pinned, or a one-storage group) or when the plan actually moved something.
+The tool omits these lines when there is nothing to compare against (every disk
+pinned, or a group with one storage), or when the plan actually moved something.
 
 ## `measured load:`
 
-The section 4 input every number above derives from — identical to
-`show-load`'s own per-storage, per-disk report
-(`docs/manual/25-show-load-and-verify-storages.md`): each storage's
-used/capacity, `L_s`/`u_s`, reserve status, and every disk on it with its
-size, format, measured `ℓ_d` when one was fetched, and `[pinned: ...]`
-when section 5.3 (C2) excludes it. Always present, printed even for a
-`NO ACTION` group and even when no migration was possible at all — it is
-the data the rest of `explain`'s narrative is *about*, not part of the
-plan itself.
+This is the input of section 4 from which every number above comes. It is identical
+to the report that `show-load` gives per storage and per disk
+(`docs/manual/25-show-load-and-verify-storages.md`): the used and total capacity of
+each storage, `L_s`/`u_s`, the reserve status, and every disk on the storage. For
+each disk, it shows the size, the format, the measured `ℓ_d` when the tool fetched
+one, and `[pinned: ...]` when section 5.3 (C2) excludes the disk. The block is
+always present, also for a `NO ACTION` group and also when no migration was possible
+at all. It is the data that the rest of the narrative of `explain` is *about*, not a
+part of the plan itself.
 
 ## `-v`: the `data source:` line
 
-One extra line, printed once for the whole run rather than once per group
-(every group here was computed against the identical selector and window):
-the exact section 3.4 node-scoping filter this run's queries carried
-(`(no node-scoping filter)` if none applied), and the
-`window.lookback`/`quantile`/`metrics.rate_window`/`metrics.step` settings
-the load above was computed from — see `docs/manual/10-configuration.md`
-for what each controls and `IMPLEMENTATION_PLAN.md` section 3.4 for the
-filter itself. This is the one piece of `explain`'s output that is about
-*how* the data was fetched rather than what it is, which is why it is the
-one thing here gated behind `-v` instead of always shown. By default this
-is the node-list alternation from this cluster's own node names; with
-`metrics.extra_selector` set, it is that instead:
+This is one extra line. The tool prints it once for the whole run, not once per
+group, because it computed every group here with the identical selector and window.
+The line shows the node-scoping filter of section 3.4 that the queries of this run
+used (`(no node-scoping filter)` if none applied), and the
+`window.lookback`/`quantile`/`metrics.rate_window`/`metrics.step` settings behind
+the load above. See `docs/manual/10-configuration.md` for what each setting
+controls, and `IMPLEMENTATION_PLAN.md` section 3.4 for the filter itself. This is
+the one part of the output of `explain` that is about *how* the tool fetched the
+data, not about the data itself. For this reason, it is the one thing here that only
+`-v` shows. By default, the line shows the alternation of the node names of this
+cluster. With `metrics.extra_selector` set, it shows that value instead:
 
 ```
 $ pve-storage-drs -c /etc/pve/drs.yaml -v explain
@@ -162,86 +169,97 @@ Group fc-tier1 → ACT: imbalance 255% exceeds gates.imbalance_threshold (20%)
   ...
 ```
 
-(With `metrics.extra_selector: 'cluster="mycluster"'`, the same line
-instead reads `data source: {cluster="mycluster"}`.)
+(With `metrics.extra_selector: 'cluster="mycluster"'`, the same line instead reads
+`data source: {cluster="mycluster"}`.)
 
 ## `pinned (not movable this run):`
 
-Every disk section 5.3 (C2) excludes from this run's solve, in the same
-`name(vmid):device` order `show-load` lists disks, with its size, current
-storage, measured load (`ℓ`) and `ℓ/z` ratio when one is available, and
-its exact reason — a real snapshot or an unreferenced companion volume
-(section 3.7), an unapplied pending config change (section 3.8), a config
-exclusion, a still-running `gates.cooldown_per_disk`, a VM config lock, or a
-small disk (below `migration.tiny_disk_bytes`) whose VM has no larger disk
-in this group to move with.
-Identical text to what `show-load` already prints per disk as
-`[pinned: ...]`; gathered here into one block instead of interleaved with
-movable disks, because pins are `explain`'s subject, not an aside.
+This block lists every disk that section 5.3 (C2) excludes from the solve of this
+run, in the same `name(vmid):device` order as `show-load`. For each disk, it shows
+the size, the current storage, the measured load (`ℓ`), the `ℓ/z` ratio when one is
+available, and the exact reason. The possible reasons are:
 
-A pin with something to actually act on or wait for gets a trailing
-`→ <hint>` — "clear snapshots to unblock" for a real snapshot, "check that
-volume and, if it is a leftover copy, delete it by hand to unblock" for an
-unreferenced volume (the reason names it, as `storage:volume`), "apply the pending
-change (reboot the VM) or revert it, then re-check" for a pending config
-change, "re-check next run" for a cooldown, "re-check next run once the
-lock releases" for a VM lock. A standing policy exclusion (`exclude.*`, or
-a deliberately skipped `unusedN` disk) carries no hint — that pin is not
-something to unblock, it is a choice already made in the config.
+- a real snapshot or an unreferenced companion volume (section 3.7);
+- an unapplied pending config change (section 3.8);
+- a config exclusion;
+- a `gates.cooldown_per_disk` that is still running;
+- a VM config lock;
+- a small disk (below `migration.tiny_disk_bytes`) whose VM has no larger disk in
+  this group to move with.
+
+The text is identical to the `[pinned: ...]` text that `show-load` prints per disk.
+`explain` collects it into one block instead of mixing it with movable disks,
+because pins are the subject of `explain`, not a side note.
+
+A pin with something that you can act on, or wait for, gets a trailing `→ <hint>`:
+
+| Reason | Hint |
+|---|---|
+| real snapshot | "clear snapshots to unblock" |
+| unreferenced volume (the reason names it as `storage:volume`) | "check that volume and, if it is a leftover copy, delete it by hand to unblock" |
+| pending config change | "apply the pending change (reboot the VM) or revert it, then re-check" |
+| cooldown | "re-check next run" |
+| VM lock | "re-check next run once the lock releases" |
+
+A standing policy exclusion (`exclude.*`, or an `unusedN` disk that the config
+deliberately skips) has no hint. You do not unblock such a pin. It is a choice that
+the config already made.
 
 ## `cannot fully consolidate:`
 
-Names a VM whose disks — after everything this run's plan actually
-managed to schedule — still sit on more than one storage, *because* at
-least one of them is pinned. A VM legitimately spread across storages by
-an ordinary, unpinned plan is not reported here; that is the plan working
-as intended, not a blocker. This is section 3.6's own example almost
-verbatim: "evacuating a storage completely is ... not achievable [when] it
-is because of a section 3.7 snapshot or an explicit exclusion, never
-because of a device type" — `explain` names which one, and on which
-device, rather than a plan quietly leaving a stray volume behind.
+This block names a VM whose disks still sit on more than one storage after
+everything that the plan of this run actually scheduled, *because* at least one of
+them is pinned. The block does not report a VM that an ordinary plan without pins
+spreads across storages on purpose. That is the plan working as intended, not a
+blocker. This is almost exactly the example of section 3.6: "evacuating a storage
+completely is ... not achievable [when] it is because of a section 3.7 snapshot or
+an explicit exclusion, never because of a device type". `explain` names which one,
+and on which device. A plan does not just leave a stray volume behind without a
+word.
 
 ## `pinned load ... ; best achievable spread given pins: ...`
 
-`report.warn_pinned_load_fraction` (default `0.25`) compared against this
-group's pinned load as a fraction of its total measured load. Below the
-threshold, as in the example above, this line is purely informative. Above
-it, a second, `⚠`-prefixed line follows: the residual imbalance may be
-structural — enough load is pinned that no achievable placement of the
-*movable* disks alone gets the group much closer to balanced — rather than
-a sign the solver or the weights need attention. `best achievable spread
-given pins` is exactly the `after:` spread line above: every solve
-(heuristic or MILP) already fixes every pinned disk at its current storage
-and optimizes only the movable ones (section 5.1's `x_{d,sigma_0(d)} = 1`
-for `d` outside `D^mov`), so what the plan actually reached *is* the best
-that pinned set permits — clearing the pins named above is the only way to
-do better, not a bigger `objective` weight or a longer `solver.time_limit_seconds`.
-Omitted entirely for a group with no measured load at all (an idle group,
-or one `explain` could not get a load for).
+The line compares the pinned load of this group, as a fraction of its total
+measured load, with `report.warn_pinned_load_fraction` (default `0.25`). Below the
+threshold, as in the example above, the line is only information. Above it, a second
+line with a `⚠` prefix follows: the remaining imbalance may be structural. So much
+load is pinned that no achievable placement of the *movable* disks alone gets the
+group much closer to balance. This is then not a sign that the solver or the
+weights need attention. `best achievable spread given pins` is exactly the spread of
+the `after:` line above. Every solve (heuristic or MILP) already keeps every pinned
+disk on its current storage and optimizes only the movable disks
+(`x_{d,sigma_0(d)} = 1` of section 5.1 for `d` outside `D^mov`). What the plan
+reached *is* thus the best that this set of pins allows. Only the removal of the
+pins named above can do better. A larger `objective` weight or a longer
+`solver.time_limit_seconds` cannot. The tool omits the line for a group with no
+measured load at all (an idle group, or a group whose load `explain` could not get).
 
-A `NO ACTION` group still gets the measured-load/pinned/fragmentation/
-pinned-load sections above — they describe the state of the group's disks,
-not the plan, so there is no reason to withhold them just because the gate
-found nothing to balance this run.
+A `NO ACTION` group still gets the sections above on measured load, pins,
+fragmentation and pinned load. They describe the state of the disks of the group,
+not the plan. A gate that finds nothing to balance in this run is no reason to hide
+them.
 
-`--json` emits everything `plan --json` does (`docs/manual/27-plan.md`'s
-own field list) plus `objective` (the seven terms above, `null` when the
-gate said `NO ACTION`), `rejected_alternative` (`null` unless the
-"`no moves made`" case above applies, otherwise `disk_key`, `vmid`,
-`vm_name`, `device`, `from_storage`, `to_storage`, `baseline` and
-`objective` — each the same seven-term breakdown `objective` above
-serializes, for the current assignment and the candidate respectively —
-and `worse_by`, the difference between the two totals), `storages`/`disks`
-(the measured-load section above, identical shape to `show-load --json`'s
-own fields of the same name), `pinned_disks` (`disk_key`, `vmid`,
-`vm_name`, `device`, `current_storage`, `size_bytes`, `load`, `load_per_tib`, `reason`,
-`action_hint` — `null` for a standing policy exclusion, same rule as the
-human report's `→` line), `fragmentation` (a list of
-`{vmid, vm_name, blockers}`, each blocker an object with `device`,
-`disk_key`, `reason`), and `pinned_load` (`null` for an idle group,
-otherwise `pinned_load`, `total_load`, `fraction` and `warn_fraction`).
-Unlike the human report, JSON has no notion of `-v`: a top-level `query`
+`--json` shows everything that `plan --json` shows (the field list of
+`docs/manual/27-plan.md`), plus these fields:
+
+- `objective`: the seven terms above, or `null` when the gate said `NO ACTION`.
+- `rejected_alternative`: `null` unless the "`no moves made`" case above applies.
+  Otherwise it has `disk_key`, `vmid`, `vm_name`, `device`, `from_storage`,
+  `to_storage`, `baseline`, `objective` and `worse_by`. `baseline` and `objective`
+  use the same seven-term breakdown as the `objective` field above, for the current
+  assignment and for the candidate. `worse_by` is the difference between the two
+  totals.
+- `storages`/`disks`: the measured-load section above, with the same shape as the
+  fields of the same name in `show-load --json`.
+- `pinned_disks`: `disk_key`, `vmid`, `vm_name`, `device`, `current_storage`,
+  `size_bytes`, `load`, `load_per_tib`, `reason` and `action_hint` (`null` for a
+  standing policy exclusion, the same rule as for the `→` line of the human report).
+- `fragmentation`: a list of `{vmid, vm_name, blockers}`. Each blocker is an object
+  with `device`, `disk_key` and `reason`.
+- `pinned_load`: `null` for an idle group. Otherwise `pinned_load`, `total_load`,
+  `fraction` and `warn_fraction`.
+
+The JSON output has no notion of `-v`, unlike the human report. A top-level `query`
 object (`node_selector`, `window_lookback_seconds`, `quantile`,
-`rate_window_seconds`, `step_seconds`) is always present, once per
-response rather than once per group, the JSON counterpart of the `-v`
-`data source:` line above.
+`rate_window_seconds`, `step_seconds`) is always present, once per response, not
+once per group. It is the JSON counterpart of the `-v` `data source:` line above.

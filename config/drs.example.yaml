@@ -1,19 +1,21 @@
 # proxmox-storage-drs — reference configuration
-# Every value shown is the default unless marked REQUIRED.
+# Every value shown is the default unless marked REQUIRED or EXAMPLE. The group
+# and storage entries are examples.
 #
-# Install this to /etc/pve/drs.yaml. That path is on the cluster filesystem, so
-# the file is replicated to every node and there is exactly one authoritative
-# copy; a management host that is not a cluster member provides the same path
-# locally. pve-storage-drs looks for its config in this order, first match wins:
+# Install this file to /etc/pve/drs.yaml. The path is on the cluster
+# filesystem. The cluster replicates the file to every node. One copy
+# is authoritative. A management host that is not a cluster member
+# provides the same path locally. pve-storage-drs looks for its config
+# in this order. The first match wins:
 #
 #   1. --config PATH  (-c)      missing or invalid -> hard error, no fallback
 #   2. $PVE_STORAGE_DRS_CONFIG          missing or invalid -> hard error, no fallback
 #   3. /etc/pve/drs.yaml        the default
 #
-# Two warnings that follow from the location:
-#   - An edit here is live on every node immediately. There is no staging.
-#   - Files under /etc/pve are group-readable by www-data. Check `ls -l` before
-#     putting a password in this file, and prefer an API token plus
+# Two warnings follow from the location:
+#   - An edit here applies on every node immediately. There is no staging.
+#   - www-data can read the files under /etc/pve. Check `ls -l` before you
+#     put a password in this file. Prefer an API token plus
 #     PVE_TOKEN_SECRET from the environment.
 
 # Config format version. config.py rejects an unknown MAJOR version rather than
@@ -27,34 +29,38 @@ proxmox:
   verify_ssl: true
   ca_file: null                    # optional path to a CA bundle
   auth:
-    # Password auth (as requested). An API token is supported and preferred for
-    # unattended operation: set token_id/token_secret instead of username/password.
-    username: drs@pve              # REQUIRED
-    # Leave the secret out of this file when the config lives in /etc/pve: both
-    # of these read from the environment when left null.
+    # Password auth. The tool also supports an API token. Prefer the token for
+    # unattended operation: set token_id/token_secret instead of
+    # username/password.
+    username: drs@pve              # REQUIRED unless token_* is set
+
+    # Leave the secret out of this file when the config lives in /etc/pve.
+    # password and token_secret read from the environment when left null.
     password: null                 # REQUIRED unless token_* is set; env: PVE_PASSWORD
     token_id: null                 # e.g. "drs@pve!balancer"
     token_secret: null             # env: PVE_TOKEN_SECRET
-  ticket_refresh_seconds: 3000     # PVE tickets last 2h; refresh well before
-  # PVE has no batch config endpoint, so topology is O(number of VMs) requests.
-  # Bounded parallelism for the read phase.
+  ticket_refresh_seconds: 3000     # PVE tickets last 2h. Refresh well before expiry.
+  # PVE has no batch config endpoint. The topology read takes O(number of
+  # VMs) requests. read_workers bounds the parallelism of this read phase.
   read_workers: 12
 
 prometheus:
   url: http://prometheus.example.com:9090   # REQUIRED
   timeout_seconds: 30
-  # Basic auth / bearer token if your Prometheus is protected
+  # Set basic auth or a bearer token if your Prometheus is protected. Do not set
+  # both: the token is then not sent (a known defect, issue #2).
   username: null
   password: null
   bearer_token: null
 
 # ------------------------------------------------------- metric name mapping
-# Telegraf/InfluxDB naming varies by deployment. Run `pve-storage-drs verify-metrics` after
-# editing this block; it validates every name against the live server and prints
-# a sample series before you rely on it.
+# Telegraf/InfluxDB naming varies by deployment. Run `pve-storage-drs
+# verify-metrics` after editing this block. The command checks every name
+# against the live server and prints a sample series. Read the series
+# before you rely on the metric names.
 metrics:
-  # Metric names. Default assumes Telegraf's influxdb_listener with the
-  # measurement "blockstat" and fields joined by "_".
+  # Metric names. The default assumes the Telegraf influxdb_listener, with
+  # the measurement "blockstat" and fields joined by "_".
   read_ops:      blockstat_rd_operations
   write_ops:     blockstat_wr_operations
   read_bytes:    blockstat_rd_bytes
@@ -64,110 +70,118 @@ metrics:
 
   labels:
     vmid: vmid
-    # PVE emits the drive id (scsi0, virtio0) in a tag named "instance", which
-    # COLLIDES with Prometheus's own scrape "instance" label. Many Telegraf
-    # setups rename it. Confirm with `pve-storage-drs verify-metrics` and set it here.
+    # PVE emits the drive id (scsi0, virtio0) in a tag named "instance".
+    # That name COLLIDES with the Prometheus scrape "instance" label. Many
+    # Telegraf setups rename the tag. Confirm with `pve-storage-drs
+    # verify-metrics` and set the label here.
     device: instance
     node: nodename
 
   rate_window: 5m       # inner range for rate(); must be >= 4x pvestatd_push_interval
   step: 5m              # sampling step for range queries
-  # PVE-side push cadence of pvestatd. The tool cannot read this from the API, so
-  # declare it here; `pve-storage-drs verify-metrics` measures the real sample spacing of a
-  # live series and errors if this value is wrong by more than 20%.
+  # The PVE-side push cadence of pvestatd. The tool cannot read this value
+  # from the API. Declare it here. `pve-storage-drs verify-metrics` measures
+  # the real sample spacing of a live series. It reports an error if this
+  # value is wrong by more than 20%.
   pvestatd_push_interval: 10s   # pvestatd's own default
 
-  # Every query is scoped automatically, so a Prometheus shared by more than
-  # one PVE cluster cannot silently sum in a same-numbered vmid from
-  # somewhere else: by default to labels.node =~ "<this cluster's own node
-  # names>" (fetched from the PVE API). Set extra_selector to override that
-  # with a raw PromQL label matcher of your own -- e.g. if your Telegraf
-  # tagging doesn't use PVE's own node names, you want to scope by a
-  # cluster-naming tag your deployment happens to carry, or you need to
-  # restrict by something else entirely:
+  # The tool scopes every query automatically. A Prometheus shared by more
+  # than one PVE cluster then cannot sum in a same-numbered vmid from
+  # another cluster. The default scope is labels.node =~ "<this cluster's
+  # own node names>". The tool fetches those node names from the PVE API.
+  # Set extra_selector to override the scope with your own raw PromQL label
+  # matcher. Set it when your Telegraf tagging does not use the PVE node
+  # names. Set it when you scope by a cluster-naming tag your deployment
+  # carries. Set it when you need another restriction:
   # extra_selector: 'cluster="mycluster"'
   extra_selector: null
 
 # ------------------------------------------------------------ decision window
 window:
-  # The DECISION window: the period whose load we balance. This is NOT the same
-  # as the history a forecaster needs -- see the forecast: block below.
+  # The DECISION window: the period whose load the tool balances. This is
+  # NOT the same as the history a forecaster needs. See the forecast: block
+  # below.
   lookback: 24h
   quantile: 0.95        # the statistic every placement decision uses (p95 of a disk's load)
   min_coverage: 0.80    # reject a disk's data if fewer than this fraction of
                         # expected samples are present
 
 # ------------------------------------------------------------------ load model
-# Read and write series are fetched separately and combined ENGINE-SIDE:
+# The tool fetches the read and write series separately. The tool combines
+# them ENGINE-SIDE:
 #   raw_X(d) = read_factor*rd_X + write_factor*wr_X    for X in {time, ops, bytes}
-# each term is normalized by its group total so the three are commensurable, the
-# blend is weighted, and the result is RESCALED back onto the in-flight-I/O scale:
+# The tool normalizes each term by its group total. This makes the three
+# terms commensurable. The tool blends them with weights and RESCALES the
+# result onto the in-flight-I/O scale:
 #   load = T_g * (w_iotime*iotime_hat + w_ops*ops_hat + w_bytes*bytes_hat)
 #              / (w_iotime + w_ops + w_bytes)
-# with T_g the group's total in-flight I/O. So `load` is in average in-flight I/O
-# requests -- the same physical unit as migration.source/target_load_weight, which
-# is what makes the payback comparison under `migration:` below a valid one. With
-# the defaults below the whole expression collapses to
+# T_g is the total in-flight I/O of the group. So `load` is in average
+# in-flight I/O requests. That is the same physical unit as
+# migration.source/target_load_weight. That is what makes the payback
+# comparison under `migration:` below valid. With the defaults below the
+# whole expression reduces to
 # load = rate(rd+wr_total_time_ns)/1e9 exactly.
 load_weights:
   iotime: 1.0           # primary: rate(rd+wr_total_time_ns)/1e9, dimensionless
   ops:    0.0
   bytes:  0.0
-  # Read/write asymmetry. Intended for the ops and bytes terms, where the real
-  # cost difference between a read and a write is NOT otherwise represented
-  # (a RAID-6 write costs far more than a read of the same size).
-  # The iotime term already measures that cost directly, so applying these to it
-  # double-counts -- do so only deliberately.
+  # Read/write asymmetry. Each factor scales one side of all three raw signals:
+  # iotime, ops and bytes. The iotime signal already measures the real cost
+  # difference, so a factor other than 1.0 counts that difference twice there.
+  # Change the factors only on purpose.
   read_factor:  1.0
   write_factor: 1.0
 
 # --------------------------------------------------------------------- groups
 # A disk may only ever move between storages listed in the SAME group.
 #
-# storages[].id may also be a `/regex/` pattern instead of a literal id --
-# both delimiters required. Every storage in the cluster whose id
-# `re.fullmatch`es it joins the group, present and future, with no config
-# edit needed when a new one shows up, and that entry's own options apply
-# to every storage it matches:
+# storages[].id may also be a `/regex/` pattern instead of a literal id.
+# The pattern needs both delimiters. Every storage in the cluster whose id
+# `re.fullmatch`es the pattern joins the group. The pattern also matches
+# storages that appear later, with no config edit. The entry's own options
+# apply to every storage the pattern matches:
 #
-#   - id: /san-.*/            # every san-* LUN, present and future
+#   - id: /san-.*/            # all san-* LUNs, now and in the future
 #     capability_weight: 1.0
 #
-# A literal entry always overrides a pattern that also matches its storage,
-# so one exception can still be pinned to different options within a
-# pattern-matched family. Matching is case-sensitive and is redone against
-# the live inventory on every run. Once the patterns are expanded a storage
-# must belong to at most ONE group -- two groups claiming it would leave a
-# disk's eligible destinations ambiguous -- so validation rejects that, and
-# rejects a pattern that matches no storage at all, or two patterns in one
-# group claiming the same storage. `pve-storage-drs verify-storages` prints
-# what every pattern actually matched; run it after editing this block.
+# A literal entry always overrides a pattern that matches the same
+# storage. That pins one exception to different options within a
+# pattern-matched family. The tool matches case-sensitively. The tool
+# redoes the matching against the live inventory on every run. After the
+# tool expands the patterns, a storage must belong to at most ONE group.
+# Two groups that claim one storage make the eligible destinations
+# ambiguous, so validation rejects that setup. Validation also rejects a
+# pattern that matches no storage at all, and two patterns in one group
+# that claim the same storage. `pve-storage-drs verify-storages` prints
+# what every pattern matched. Run it after editing this block.
 groups:
-  # NOTE: this group intentionally mirrors tests/fixtures/fc-tier1.yaml -- same
-  # storage names, same capability weights (all 1.0). Keep them in sync; the
-  # differing-weight feature is illustrated on fc-tier2 below so the fixture stays
-  # reproducible from this file.
+  # NOTE: this group intentionally mirrors tests/fixtures/fc-tier1.yaml:
+  # same storage names, same capability weights (all 1.0). Keep the two in
+  # sync. The fc-tier2 group below illustrates differing weights, so the
+  # fixture stays reproducible from this file.
   - name: fc-tier1
     storages:
       - id: san-a
-        capability_weight: 1.0     # RELATIVE share of load this storage should carry.
-                                   # Only ratios within a group matter; the absolute
-                                   # value is meaningless. Not a capacity.
+        capability_weight: 1.0     # The RELATIVE share of load this storage
+                                   # should carry. Only ratios within a group
+                                   # matter. The absolute value is meaningless.
+                                   # This is not a capacity.
         reserve_factor: null       # null = inherit global snapshot_reserve.factor
-        # Per-storage/per-pattern free_space.soft/hard override -- same shape as
-        # the top-level free_space: block below, most specific wins. See that
-        # section for the full semantics; not set here, so this entry inherits
-        # the global values.
+        # Per-storage/per-pattern override of free_space.soft/hard. The shape
+        # matches the top-level free_space: block below, and the most
+        # specific value wins. See that section for the full semantics. This
+        # entry does not set it, so it inherits the global values.
         # free_space:
         #   soft: "15%"
         #   hard: null
-        # Disk format for disks moved ONTO this storage: raw, qcow2, or null (the
-        # default) to keep each disk's current format. Only applies as a side effect
-        # of a move the balancer makes anyway -- it never moves a disk just to
-        # convert it -- and never to a VM's tpmstate0. On shared LVM, qcow2 is what
-        # enables volume-chain snapshots. The format must be one the storage's type
-        # can hold (qcow2: lvm, dir, nfs, cifs, cephfs). Also valid on /pattern/
-        # entries.
+        # The disk format for disks moved ONTO this storage. Use raw, qcow2,
+        # or null (the default) to keep each disk's current format. The tool
+        # applies it only as a side effect of a move it makes anyway. The
+        # tool never moves a disk just to convert it. The tool never
+        # converts a VM's tpmstate0. On shared LVM, qcow2 is the format that
+        # enables volume-chain snapshots. The storage's type must hold the
+        # format (qcow2: lvm, dir, nfs, cifs, cephfs). The option is also
+        # valid on /pattern/ entries.
         # enforce_format: qcow2
       - id: san-b
         capability_weight: 1.0
@@ -178,54 +192,53 @@ groups:
       - id: san-d
         capability_weight: 1.0
       - id: san-e
-        capability_weight: 0.5     # half the spindles -> carries half the load
+        capability_weight: 0.5     # EXAMPLE: half the spindles -> carries half the load
 
 # --------------------------------------------------------- snapshot reserve
 snapshot_reserve:
-  # Keep factor * (the largest VM footprint on the storage) free at all times,
-  # including transiently during a migration. A VM's footprint on a storage is the
-  # SUM of all its disks there: a snapshot is taken of the whole VM, and PVE 9
-  # volume-chain snapshots allocate a new full-size volume per snapshotted disk.
-  # A VM with five 2 TiB disks on one storage needs 10 TiB free for one snapshot.
+  # The tool keeps factor * (the largest VM footprint on the storage) free at all
+  # times, also during a migration. The footprint of a VM on a storage is the SUM
+  # of all its disks there. A snapshot covers the whole VM. PVE 9 volume-chain
+  # snapshots allocate a new full-size volume for each snapshotted disk. A VM with
+  # five 2 TiB disks on one storage needs 10 TiB free for one snapshot.
   factor: 2.0
-  # The most of ONE VM that ONE storage should hold. A VM whose disks add up to more
-  # than this is spread over several storages until no storage holds more than this
-  # of it -- or as little as the available storages allow (five 2 TiB disks on three
-  # storages end up 4 + 4 + 2 TiB; the cap is a preference, never a requirement). A
-  # single disk larger than this cannot be split and is simply allowed to stay.
-  # A byte count or a byte-unit string ("2TiB"); null switches the rule off.
-  # How strongly it is pursued: objective.mu_vm_split_per_tib.
+  # The most of ONE VM that ONE storage should hold. The tool spreads a larger VM
+  # over several storages until no storage holds more than this of the VM. With too
+  # few storages, the tool spreads the VM as far as they allow. Five 2 TiB disks on
+  # three storages end up 4 + 4 + 2 TiB. The cap is a preference, never a
+  # requirement. A single disk larger than the cap cannot be split, so it may stay.
+  # Use a byte count or a byte-unit string ("2TiB"). null switches the rule off.
+  # objective.mu_vm_split_per_tib sets how strongly the tool pursues the cap.
   split_vm_footprint: 2TiB
-  # Count volumes not managed by DRS (templates, orphans, other clusters)
+  # Count volumes that DRS does not manage (templates, orphans, other clusters)
   # against capacity. Strongly recommended.
   count_foreign_volumes: true
 
 # ---------------------------------------------------------------- free space
-# Keep N bytes (or N% of capacity) free on top of the snapshot reserve above --
-# the larger of the two wins, on every storage, always (section 5.3 (C5)/5.3.1).
-# This is the Storage-DRS mandate: an admin's new VM lands on a storage that is
-# now too full, and the engine migrates data off it until the requirement is
-# met again -- bypassing the drift/imbalance gates and the payback economics,
-# exactly like a snapshot-reserve violation does.
+# The tool keeps N bytes (or N% of capacity) free on every storage, always. The
+# larger of this value and the snapshot reserve above wins (section 5.3
+# (C5)/5.3.1). This is the Storage DRS mandate. Example: an admin's new VM can
+# make a storage too full. The tool then migrates data off that storage until the
+# storage meets the requirement again. This repair bypasses the drift/imbalance
+# gates and the payback economics, exactly like a snapshot-reserve violation does.
 free_space:
-  # The plan-ENDPOINT requirement: (C5) enforces it on the finished plan, and
-  # a violation is repaired unconditionally. An integer byte count, a
-  # byte-unit string ("500GiB"), or a percentage ("10%", resolved per storage
-  # against that storage's own capacity). 0 = no requirement beyond the
-  # snapshot reserve above -- this default changes nothing for a config that
-  # sets nothing here.
+  # The requirement at the plan ENDPOINT. (C5) enforces it on the finished plan.
+  # The tool repairs a violation unconditionally. Use an integer byte count, a
+  # byte-unit string ("500GiB") or a percentage ("10%"). The tool resolves a
+  # percentage against the capacity of each storage. 0 = no requirement beyond the
+  # snapshot reserve above. This default changes nothing for a config that sets
+  # nothing here.
   soft: 0
-  # The TRANSIENT floor: how far a storage may dip below `soft` while a move
-  # is in flight (section 8.1) -- a mirror target is fully allocated before
-  # its source releases anything, so a plan that lands a disk on a storage
-  # heading toward `soft` needs room to pass through it. null (the default)
-  # means hard = soft: no dip at all, the same strength this invariant had
-  # before free_space existed. Leave this null unless you have deliberately
-  # decided to trade a bounded, planned dip for it -- never set it lower "to
-  # make a plan fit"; that is what soft itself is for.
+  # The TRANSIENT floor: how far a storage may dip below `soft` while a move is in
+  # flight (section 8.1). PVE allocates a mirror target in full before the source
+  # releases anything. A plan that lands a disk on a storage heading toward `soft`
+  # thus needs room to pass through it. null (the default) means hard = soft: no dip at
+  # all. That is the same strength this invariant had before free_space existed.
+  # Leave this null unless you decide on purpose to accept a bounded, planned dip.
+  # Never set it lower "to make a plan fit". Change `soft` for that.
   hard: null
-  # Per-storage or per-pattern override, most specific wins (same shape,
-  # placed inside a groups[].storages[] entry):
+  # A per-storage or per-pattern override goes inside a groups[].storages[] entry.
+  # It has the same shape, and the most specific value wins:
   #
   #   - id: san-a
   #     free_space:
@@ -234,16 +247,17 @@ free_space:
 
 # ------------------------------------------------------------------- gating
 gates:
-  # Minimum relative change in the load vector since the last balance before we
-  # even re-plan. Prevents thrashing on noise.
+  # The minimum relative change in the load vector since the last balance before
+  # the tool plans again. This prevents thrashing on noise.
   drift_threshold: 0.10          # 10%
-  # Minimum relative I/O spread across a group before we act at all.
+  # The minimum relative I/O spread across a group before the tool acts at all.
   imbalance_threshold: 0.20      # 20%
-  # Minimum relative spread in fill fraction (bytes/capacity) across a group before
-  # we act at all, even when I/O is perfectly balanced -- the data-spread counterpart
-  # of imbalance_threshold. null disables the gate entirely. It only decides that a
-  # group is planned; whether data moves is objective.delta_capacity_spread's call
-  # (a price per TiB, so only disks above X* = beta / (2 * delta - gamma) can pay).
+  # The minimum relative spread in fill fraction (bytes/capacity) across a group
+  # before the tool acts, even when I/O is perfectly balanced. This is the
+  # data-spread counterpart of imbalance_threshold. null disables the gate. The
+  # gate only decides that the tool plans a group. objective.delta_capacity_spread
+  # decides whether data moves. That is a price per TiB, so only disks above
+  # X* = beta / (2 * delta - gamma) can pay.
   capacity_spread_threshold: 0.25  # 25%
   cooldown_per_disk: 24h
   cooldown_per_storage: 1h
@@ -253,34 +267,36 @@ migration:
   bwlimit_bytes_per_sec: 209715200     # 200 MiB/s; passed to move_disk
   source_load_weight: 1.0              # added in-flight I/O on the source
   target_load_weight: 1.0              # added in-flight I/O on the target
-  payback_horizon: 365d                # H -- an explicit assumption about how long a
+  payback_horizon: 365d                # H: an explicit assumption about how long a
                                         # placement lasts, not operator patience (7.2)
   payback_ratio: 10.0                  # lambda; benefit must exceed lambda * cost
   max_single_move_duration: 6h         # reject any move slower than this (mirror + wipe)
-  # Account for the post-move source wipe in duration and cost. PVE's LVM
-  # "saferemove" zeroes the old volume at saferemove_throughput -- DEFAULT 10 MiB/s,
-  # so a 1.5 TiB disk takes ~44h to clean up against ~2h to mirror. Read per storage
-  # from GET /storage/{id}. Only set false if you have verified saferemove is off
-  # everywhere in the group.
+  # Include the source wipe after a move in duration and cost. The PVE LVM option
+  # "saferemove" zeroes the old volume at saferemove_throughput. The DEFAULT is
+  # 10 MiB/s. At that rate, a 1.5 TiB disk takes ~44h to clean up, against ~2h to
+  # mirror. The tool reads the setting per storage from GET /storage/{id}. Set
+  # false only if you have verified that saferemove is off everywhere in the group.
   account_saferemove_wipe: true
-  # In-flight I/O charged to the SOURCE for the whole duration of that wipe, in the
-  # migration cost model. The zeroing pass is one sequential writer, so 1.0 is the
-  # natural value; lower it only if you have measured that a throttled wipe does not
-  # disturb your array.
+  # The in-flight I/O the migration cost model charges to the SOURCE for the whole
+  # duration of that wipe. The zeroing pass is one sequential writer, so 1.0 is the
+  # natural value. Lower it only if you have measured that a throttled wipe does
+  # not disturb your array.
   wipe_load_weight: 1.0
-  # Kept only so a config that spells it out still loads; `false` is refused. This tool
-  # never considers over-provisioning -- disks count at their provisioned size, on
-  # thin-provisioned storage (Ceph RBD, LVM-thin, ZFS) as much as on thick.
+  # The key stays only so that a config that spells it out still loads. The tool
+  # refuses `false`. The tool never considers over-provisioning. Every disk counts
+  # at its provisioned size, on thin-provisioned storage (Ceph RBD, LVM-thin, ZFS)
+  # as much as on thick storage.
   assume_thick_provisioning: true
-  # Below this size, a disk carries neither the per-move nor the per-TiB penalty of
-  # the objective below, and needs no payback verdict -- comfortably above an EFI var
-  # store or TPM state, far below anything the payback rule was written for.
-  # Together with kappa_vm_affinity below, this is what lets a tiny disk rejoin its
-  # VM for free instead of being priced like a real migration. A disk this small
-  # also never moves on its own: only to a storage where a larger disk of its VM
-  # (in the same group) ends up, so an EFI/TPM disk follows its VM and is never a
-  # "repair" by itself; with no larger disk of its VM in the group it is pinned.
-  # 0 restores the old accounting for every disk and switches that rule off.
+  # A disk below this size carries neither the per-move nor the per-TiB penalty of
+  # the objective below, and needs no payback verdict. The default is well above an
+  # EFI var store or TPM state. It is far below anything the payback rule was
+  # written for. With kappa_vm_affinity below, this lets a tiny disk rejoin its VM
+  # at no cost, without the price of a real migration. A disk this small
+  # also never moves on its own. It moves only to a storage where a larger disk of
+  # its VM (in the same group) ends up. An EFI/TPM disk thus follows its VM and is
+  # never a "repair" by itself. With no larger disk of its VM in the group, the
+  # tool pins it. 0 restores the old accounting for every disk and switches that
+  # rule off.
   tiny_disk_bytes: 67108864            # 64 MiB
 
 # ------------------------------------------------------------ objective weights
@@ -290,39 +306,40 @@ objective:
   beta_move_count: 0.25        # penalty per migration  -> "minimal number of migrations"
   gamma_move_bytes_per_tib: 0.05  # penalty per TiB migrated
   kappa_vm_affinity: 0.50      # penalty per extra storage a VM's disks are spread over
-  # Price per TiB of data spread -- the TiB by which each storage's data is off its
-  # capacity-proportional share of the group's data, summed. Bounds the share of a
-  # group's data any single storage failure costs. Moving X TiB toward the shares
-  # earns 2 * delta whatever the group's size, so a disk pays for its own move once
+  # The price per TiB of data spread. The spread is the TiB by which the data of
+  # each storage differs from its capacity-proportional share of the group's data,
+  # summed. The price bounds the share of a group's data that one storage failure
+  # costs. A move of X TiB toward the shares earns 2 * delta, whatever the size of
+  # the group. A disk thus pays for its own move once
   # X > X* = beta_move_count / (2 * delta - gamma_move_bytes_per_tib): about 270 GiB
-  # at these defaults. Choose delta from the smallest disk you want moved for data
-  # spread alone: delta = (beta / X_min + gamma) / 2 (100 GiB -> 1.3, 1 TiB -> 0.15).
-  # At 0.5 one TiB moved is worth one unit of in-flight-load deviation, so I/O balance
-  # stays the first priority. 0 disables the term; at 2 * delta <= gamma it is on but
-  # can never pay, and validation warns. A value raised under the older relative
-  # formula does not carry over -- re-derive it from X*.
+  # at these defaults. Choose delta from the smallest disk you want the tool to move
+  # for data spread alone: delta = (beta / X_min + gamma) / 2
+  # (100 GiB -> 1.3, 1 TiB -> 0.15). At 0.5, one TiB moved is worth one unit of
+  # in-flight-load deviation, so I/O balance stays the first priority. 0 disables
+  # the term. At 2 * delta <= gamma the term is on but can never pay, and
+  # validation warns. A value you raised under the older relative formula does not
+  # carry over. Derive it again from X*.
   delta_capacity_spread: 0.5
-  # Weight of the large-VM split rule (snapshot_reserve.split_vm_footprint), per TiB
-  # of "excess" -- the most of a large VM any one storage holds beyond the cap. The
-  # default 1.0 lets a split win against I/O-balance and affinity preferences for
-  # any disk above roughly 0.3-0.8 TiB. 0 turns the term off; below
-  # kappa_vm_affinity the rule rarely acts (config validation warns). A large VM's
-  # affinity is not weighted by its I/O, so a busy VM cannot veto the policy.
+  # The weight of the large-VM split rule (snapshot_reserve.split_vm_footprint),
+  # per TiB of "excess". The excess is the most of a large VM that any one storage
+  # holds beyond the cap. The default 1.0 lets a split win against I/O-balance and
+  # affinity preferences for any disk above roughly 0.3-0.8 TiB. 0 turns the term
+  # off. Below kappa_vm_affinity the rule rarely acts, and config validation warns.
+  # The affinity of a large VM is not weighted by its I/O, so a busy VM cannot veto
+  # the policy.
   mu_vm_split_per_tib: 1.0
-  # Disks that cannot move THIS RUN (snapshot-blocked, config-excluded, or on a
-  # locked VM) still count toward the affinity term by default: such a disk still
-  # occupies a storage, so the VM really is spread, and its fixed location anchors
-  # the VM's movable disks. false counts movable disks only, which makes reuniting
-  # a VM with its pinned disks either unrewarded or outright penalized. Note
-  # efidisk0/tpmstate0 are NOT in this set -- they move online on PVE 9.2.
-  # Default changed from false after 0.1.6.
+  # Some disks cannot move THIS RUN (snapshot-blocked, config-excluded, or on a
+  # locked VM). By default, such a disk still counts toward the affinity term. It
+  # still occupies a storage, so the VM really is spread. Its fixed location also
+  # anchors the movable disks of the VM. false counts movable disks only. The tool
+  # then gives no reward, or even a penalty, for reuniting a VM with its pinned
+  # disks. efidisk0/tpmstate0 are NOT in this set: they move online on PVE 9.2.
+  # The default changed from false after 0.1.6.
   affinity_counts_pinned_disks: true
-  # Soft slack so an already-violating start stays repairable rather than infeasible.
-  # This is a FLOOR, not the value used: with the single-stage big-M formulation the
-  # engine computes the provably-dominant P from the group's own load and sizes and
-  # uses max(this, computed), warning when it raises it. The default lexicographic
-  # two-stage solve -- repair the reserve first, then balance within whatever room
-  # that leaves -- needs no penalty at all and is preferred.
+  # Soft slack so that a start state that already violates the reserve stays
+  # repairable instead of infeasible. Only the heuristic backend reads it, and it
+  # uses the value exactly as set. The MILP backend repairs the reserve first
+  # (lexicographic, two stages) and needs no penalty at all.
   reserve_violation_penalty: 1000.0
 
 solver:
@@ -334,9 +351,9 @@ solver:
 # ----------------------------------------------------------------- execution
 execution:
   mode: dry-run          # dry-run | confirm | auto
-  # >1 requires the GENERALIZED transient reserve invariant:
-  # several disks can be landing on one storage at once and no source releases
-  # space until it completes. Leave at 1 unless you have verified headroom.
+  # A value above 1 requires the GENERALIZED transient reserve invariant. Several
+  # disks can then land on one storage at once, and no source releases space until
+  # its move completes. Leave this at 1 unless you have verified the headroom.
   max_concurrent_migrations: 1
   max_migrations_per_run: 5
   max_concurrent_per_storage: 1   # counts a storage as both source and target
@@ -344,39 +361,41 @@ execution:
   abort_on_failure: true
   poll_interval_seconds: 10
 
-  # While executing, a PVE API read that fails because the API cannot be
-  # reached (connection refused/timed out, 5xx -- network maintenance, a node
-  # restarting) is retried with back-off for up to this long instead of ending
-  # the run mid-migration. 0 disables. move_disk itself is never retried
-  # blindly: a dropped connection may still have started the task.
+  # A PVE API read can fail during a run because the API is not reachable
+  # (connection refused or timed out, 5xx: network maintenance, a node restart).
+  # The tool then retries with back-off for up to this long instead of ending the
+  # run in the middle of a migration. 0 disables the retry. The tool never retries
+  # move_disk blindly: a dropped connection may still have started the task.
   api_outage_timeout: 1h
 
   # A VM config lock (backup, snapshot, migrate, clone, rollback, ...) blocks
-  # move_disk. Locks are normal, not errors -- wait them out. The value set is
-  # treated as open-ended: ANY non-empty lock means wait, never a whitelist.
+  # move_disk. Locks are normal, not errors. The tool waits for them to clear. It
+  # treats the set of lock values as open-ended: ANY non-empty lock means wait,
+  # never a whitelist.
   locks:
     wait_timeout: 4h          # generous: a backup of a large VM easily runs hours
     poll_interval: 30s
-    on_timeout: skip          # skip | abort -- skip this move, keep the rest of the plan
+    on_timeout: skip          # skip | abort. skip drops this move and keeps the plan
 
-    # A move_disk TASK can fail immediately with PVE's own "can't lock file
-    # '/var/lock/qemu-server/lock-<vmid>.conf' - got timeout" -- a different
-    # lock than wait_timeout above waits out, momentarily still held by the
-    # previous move's own cleanup for the same VM even after the config
-    # `lock:` attribute has already cleared. Retried automatically.
+    # A move_disk TASK can fail at once with the PVE error "can't lock file
+    # '/var/lock/qemu-server/lock-<vmid>.conf' - got timeout". This is not the lock
+    # that wait_timeout above waits for. The cleanup of the previous move of the
+    # same VM can still hold it for a moment, even after the config `lock:`
+    # attribute has cleared. The tool retries such a task automatically.
     task_retry_limit: 2       # extra attempts after the first task failure
-    task_retry_backoff: 15s   # wait this long before reissuing move_disk
+    task_retry_backoff: 15s   # wait this long before the tool sends move_disk again
 
-  # A move_disk task reporting OK does NOT mean the source space is back. With
-  # saferemove the old volume is still fully allocated while it is being zeroed,
-  # and the storage lock it holds can block the NEXT move. A move counts as done
-  # only when the task succeeded AND the source volume is gone AND the VM is
-  # unlocked.
+  # A move_disk task that reports OK does NOT mean that the source space is free
+  # again. With saferemove, the old volume stays fully allocated while PVE zeroes
+  # it. The storage lock that the wipe holds can block the NEXT move. A move counts
+  # as done only when the task succeeded AND the source volume is gone AND the VM
+  # is unlocked.
   source_release:
     wait: true
     timeout: 48h              # >= largest disk / saferemove_throughput
 
-  time_windows:          # empty = any time. Applies to "auto" mode only.
+  time_windows:          # EXAMPLE window. The default is [] = any time.
+                         # Applies to "auto" mode only.
     - days: [mon, tue, wed, thu, fri, sat, sun]
       start: "22:00"
       end:   "06:00"
@@ -385,60 +404,63 @@ execution:
 exclude:
   vmids: []              # never move disks of these VMs
   disks: []              # e.g. ["101:scsi1"]
-  storages: []           # never move onto/off these
+  storages: []           # NOT APPLIED by this version (issue #1): remove the
+                         # storage from groups instead
   tags: ["no-drs"]       # PVE VM tags that opt a VM out
-  # move_disk delete=1 is REJECTED by PVE on a volume with snapshots, and would not
-  # carry the snapshots across if it were not. Setting this false does not make such
-  # moves work -- it only stops pre-filtering them so they fail at the API instead.
-  # Snapshotted disks are pinned (bytes and load still counted) and reported at WARN
-  # every run, naming the VMs whose snapshots must be cleared.
+  # This key has no effect in this version (issue #5). The tool always pins
+  # snapshotted disks (it still counts their bytes and load). PVE rejects
+  # move_disk delete=1 on them anyway. show-load and explain name the pinned
+  # disks, whose snapshots you must clear.
   skip_vms_with_snapshots: true
-  # Stopped VMs are never moved, whatever violation their disks cause (Veeam and similar
-  # tools break when a replicated VM's volumes move). Only `true` is accepted; false is refused.
+  # The tool never moves a stopped VM, whatever violation its disks cause. Veeam and
+  # similar tools break when the volumes of a replicated VM move. The tool accepts
+  # only `true` and refuses false.
   stopped: true
-  # unused{N} volumes are real allocated bytes with no I/O. Including them lets the
-  # solver relocate one to repair a reserve violation; it will never move one for
-  # balance, since the benefit is zero by construction. false pins them instead.
+  # unused{N} volumes are real allocated bytes with no I/O. true lets the solver
+  # move one to repair a reserve violation. The solver never moves one for balance,
+  # because that move can bring no benefit. false pins these volumes instead.
   include_unused_disks: true
 
 report:
-  # If pinned load (snapshots, efidisk/tpmstate, exclusions, locks) exceeds this
-  # fraction of a group's total, the residual imbalance may be structural rather
-  # than a planning failure. Report the best ACHIEVABLE spread next to the actual
-  # one so the operator can see it is the snapshots, not the solver.
+  # Pinned load (snapshots, efidisk/tpmstate, exclusions, locks) can exceed this
+  # fraction of the total of a group. The remaining imbalance may then be
+  # structural, not a planning failure. The report shows the best ACHIEVABLE spread
+  # next to the actual one. You can then see that the snapshots cause it, not the
+  # solver.
   warn_pinned_load_fraction: 0.25
 
 state:
-  # Local disk, never /etc/pve: this is rewritten on every run, pmxcfs writes
-  # need quorum, and the file is deliberately node-local.
+  # A local disk, never /etc/pve. The tool rewrites this file on every run. pmxcfs
+  # writes need quorum. The file is node-local on purpose.
   path: /var/lib/pve-storage-drs/state.json
 
 forecast:
-  # quantile      -> every disk's load is its p95 over the LAST window.lookback.
-  # holt_winters  -> every disk's load is scaled to a Holt-Winters forecast of its
-  #                  p95 over the NEXT window.lookback, so a disk whose load is
-  #                  rising, or has a daily peak the last window happened to miss,
-  #                  is placed for what it will do rather than what it did.
+  # quantile      -> the load of every disk is its p95 over the LAST window.lookback.
+  # holt_winters  -> the tool scales the load of every disk to a Holt-Winters
+  #                  forecast of its p95 over the NEXT window.lookback. A disk with
+  #                  a rising load, or with a daily peak that the last window
+  #                  missed, is then placed for what it will do, not what it did.
   #
-  # holt_winters is only used for a group when a backtest says it would have
-  # predicted that group's own last window at least as well as simply repeating
-  # the window before it (no threshold to tune); otherwise the group falls back to
-  # quantile for that run, with a warning. That needs 2 * window.lookback of
-  # Prometheus history, and python3-statsmodels installed.
+  # The tool uses holt_winters for a group only when a backtest passes. The backtest
+  # asks whether holt_winters would have predicted the last window of that group at
+  # least as well as a plain repeat of the window before it. You tune no threshold.
+  # Otherwise the group falls back to quantile for that run, with a warning. The
+  # backtest needs 2 * window.lookback of Prometheus history, and
+  # python3-statsmodels installed.
   model: quantile        # quantile | holt_winters
   # holt_winters also needs two full seasonal cycles inside window.lookback
-  # (2 * seasonal_periods * step); startup validation fails if window.lookback is
-  # shorter, rather than silently degrading. With seasonal_periods=288 at a 5m
-  # step that is 48h, so a 24h lookback can never satisfy it.
+  # (2 * seasonal_periods * step). Startup validation fails if window.lookback is
+  # shorter. The tool does not degrade silently. With seasonal_periods=288 at a 5m
+  # step, that is 48h, so a 24h lookback can never satisfy it.
   #
-  # To switch model to holt_winters with the daily-cycle default below, also
-  # raise window.lookback (above) to at least 48h -- it stays the DECISION
-  # window (what load is balanced over) -- and keep 96h of Prometheus history.
-  # Both plan/apply and collect-testdata
-  # fetch this history in day-sized chunks regardless of how wide it gets
-  # (see the RANGE_QUERY_CHUNK_SECONDS note in docs/internals/30-metrics.md),
-  # so this is a Prometheus-request-count cost, never a backend point-per-
-  # series-resolution-limit risk, even for the weekly example below.
+  # To switch model to holt_winters with the daily-cycle default below, also raise
+  # window.lookback (above) to at least 48h. It stays the DECISION window (the
+  # period whose load the tool balances). Keep 96h of Prometheus history.
+  # plan/apply and collect-testdata fetch this history in day-sized chunks, however
+  # wide it gets (see the RANGE_QUERY_CHUNK_SECONDS note in
+  # docs/internals/30-metrics.md). The cost is therefore a number of Prometheus
+  # requests. It is never a risk of the backend's point-per-series resolution limit,
+  # also for the weekly example below.
   #
   # For WEEKLY seasonality instead (weekends look different from weekdays):
   #   window:
@@ -454,40 +476,41 @@ forecast:
 
 support:
   # Diagnostic bundles: `pve-storage-drs collect-testdata` and the global
-  # `--replay` option. Nothing here is read on the normal plan/apply path.
+  # `--replay` option. The normal plan/apply path reads nothing here.
   #
-  # 32 random bytes, generated on first use and persisted here. Keyed
-  # pseudonyms (node/storage/vmid/...) are stable for the life of this file;
-  # `--new-salt` rotates it, after which old and new bundles no longer share
-  # a mapping. Per node by default -- point this at a pmxcfs path (e.g.
-  # /etc/pve/pve-storage-drs-anon-salt) if every node in the cluster should
-  # produce the same pseudonyms.
+  # The salt is 32 random bytes. The tool generates it on first use and stores it
+  # here. Keyed pseudonyms (node/storage/vmid/...) stay stable for the life of this
+  # file. `--new-salt` rotates it. After that, old and new bundles no longer share a
+  # mapping. The file is per node by default. Point this at a pmxcfs path (e.g.
+  # /etc/pve/pve-storage-drs-anon-salt) if every node in the cluster should produce
+  # the same pseudonyms.
   salt_path: /var/lib/pve-storage-drs/anonymization-salt
-  # Default -o/--output for collect-testdata.
+  # The default -o/--output for collect-testdata.
   bundle_dir: /var/lib/pve-storage-drs/testdata
-  # Hard refusal, not a truncation: collect-testdata prints the estimated
-  # series-sample count before fetching anything and refuses above this,
-  # naming the --range/--step/--no-series flags that would bring it under.
+  # A hard refusal, not a truncation. collect-testdata prints the estimated
+  # series-sample count before it fetches anything. Above this value it refuses and
+  # names the --range/--step/--no-series flags that would bring the count under it.
   max_series_points: 5000000
-  # "auto" captures what holt_winters needs (section 16.2), currently
-  # max(2 * window.lookback, 2 * holt_winters.seasonal_periods * metrics.step) --
-  # the superset any supported config could need, not just the one active here. A duration
-  # (e.g. "14d") overrides it; --range on the command line overrides both.
+  # "auto" captures what holt_winters needs (section 16.2). That is currently
+  # max(2 * window.lookback, 2 * holt_winters.seasonal_periods * metrics.step), the
+  # superset that any supported config could need, not just the config active here.
+  # A duration (e.g. "14d") overrides it. --range on the command line overrides
+  # both.
   capture_range: auto
 
 monitoring:
-  # Where `apply` leaves a one-run status report for monitoring. null (the
-  # default) writes nothing. The format is that of the `check_statusfile`
-  # plugin from monitoring-plugins-contrib -- line 1 is OK, WARNING or
-  # CRITICAL, then the output -- so a check like
+  # `apply` leaves a status report of one run here, for monitoring. null (the
+  # default) writes nothing. The format is the format of the `check_statusfile`
+  # plugin from monitoring-plugins-contrib: line 1 is OK, WARNING or CRITICAL, then
+  # the output. A monitoring system thus needs only a check like
   #     /usr/lib/nagios/plugins/check_statusfile /var/lib/pve-storage-drs/status
-  # is all a monitoring system needs. The file is rewritten by EVERY apply run,
-  # including dry runs and runs that moved nothing, because its modification
-  # time is what tells the plugin the timer is still firing (default: WARNING
-  # after 26 h; `check_statusfile -a 2h` for a shorter timer). CRITICAL: the run
-  # failed (a failed move, or PVE/Prometheus could not be read). WARNING: it
-  # gave up after too many outside changes, left an orphaned volume, or a group
-  # is still short of its reserve or free-space requirement. Nothing is
-  # written when the configuration cannot be read (the file then goes stale).
-  # Mode 0644, written atomically; the directory is created if missing.
+  # EVERY apply run rewrites the file, also a dry run and a run that moved nothing.
+  # The plugin uses the modification time to see that the timer still fires
+  # (default: WARNING after 26 h; use `check_statusfile -a 2h` for a shorter
+  # timer). CRITICAL: the run failed (a failed move, or the tool could not read
+  # PVE or Prometheus). WARNING: the run gave up after too many outside changes,
+  # or left an orphaned volume, or a group is still short of its reserve or
+  # free-space requirement. The tool writes nothing when it cannot read the
+  # configuration (the file then goes stale). The tool writes the file atomically
+  # with mode 0644. It creates the directory if the directory is missing.
   status_file: null
