@@ -53,6 +53,24 @@ _DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 @dataclass(frozen=True, slots=True)
 class AuthConfig:
+    """Credentials for the PVE API, from the ``proxmox.auth`` block.
+
+    Fields, with their YAML keys:
+
+    - ``username`` (``proxmox.auth.username``, string, default None): PVE user name,
+      used with ``password``.
+    - ``password`` (``proxmox.auth.password``, string, default None): password for
+      ``username``. When the key is absent, the loader reads ``$PVE_PASSWORD``.
+    - ``token_id`` (``proxmox.auth.token_id``, string, default None): API token id,
+      used with ``token_secret``.
+    - ``token_secret`` (``proxmox.auth.token_secret``, string, default None): secret
+      of ``token_id``. When the key is absent, the loader reads
+      ``$PVE_TOKEN_SECRET``.
+
+    The loader does not check that a usable pair is present. The PVE client
+    reports a failed login when it connects.
+    """
+
     username: str | None = None
     password: str | None = None
     token_id: str | None = None
@@ -61,6 +79,26 @@ class AuthConfig:
 
 @dataclass(frozen=True, slots=True)
 class ProxmoxConfig:
+    """PVE API endpoint and client settings, from the ``proxmox`` block.
+
+    Fields, with their YAML keys:
+
+    - ``host`` (``proxmox.host``, string, default ``""``): host name or address of
+      the PVE API. An empty value fails validation for every run that connects.
+    - ``port`` (``proxmox.port``, integer 1 to 65535, default 8006): TCP port of the
+      PVE API.
+    - ``verify_ssl`` (``proxmox.verify_ssl``, boolean, default True): check the
+      server certificate.
+    - ``ca_file`` (``proxmox.ca_file``, path or null, default None): CA bundle for
+      the certificate check.
+    - ``auth`` (``proxmox.auth``): credentials, see :class:`AuthConfig`.
+    - ``ticket_refresh_seconds`` (``proxmox.ticket_refresh_seconds``, duration in
+      seconds, default 3000): age after which the client renews its login ticket.
+    - ``read_workers`` (``proxmox.read_workers``, integer at least 1, default 12):
+      number of concurrent PVE API reads. The client connection pool holds at least
+      10 connections, whatever this value is.
+    """
+
     host: str = ""
     port: int = 8006
     verify_ssl: bool = True
@@ -72,6 +110,23 @@ class ProxmoxConfig:
 
 @dataclass(frozen=True, slots=True)
 class PrometheusConfig:
+    """Prometheus query endpoint, from the ``prometheus`` block.
+
+    Fields, with their YAML keys:
+
+    - ``url`` (``prometheus.url``, string, default ``""``): base URL of the
+      Prometheus server. An empty value fails validation for every run that
+      connects.
+    - ``timeout_seconds`` (``prometheus.timeout_seconds``, duration in seconds,
+      default 30): timeout for one query.
+    - ``username`` (``prometheus.username``, string, default None): user name for
+      HTTP basic authentication.
+    - ``password`` (``prometheus.password``, string, default None): password for
+      ``username``.
+    - ``bearer_token`` (``prometheus.bearer_token``, string, default None): bearer
+      token for the ``Authorization`` header.
+    """
+
     url: str = ""
     timeout_seconds: float = 30.0
     username: str | None = None
@@ -81,6 +136,20 @@ class PrometheusConfig:
 
 @dataclass(frozen=True, slots=True)
 class MetricLabels:
+    """Label names that identify a series in Prometheus, from ``metrics.labels``.
+
+    Each field names the label that carries one identity:
+
+    - ``vmid`` (``metrics.labels.vmid``, default ``"vmid"``): label holding the VM id.
+    - ``device`` (``metrics.labels.device``, default ``"instance"``): label holding
+      the disk (device) name.
+    - ``node`` (``metrics.labels.node``, default ``"nodename"``): label holding the
+      node name.
+
+    The three names must differ. Equal names would merge distinct series into one
+    (checked by the semantic validation).
+    """
+
     vmid: str = "vmid"
     device: str = "instance"
     node: str = "nodename"
@@ -88,6 +157,33 @@ class MetricLabels:
 
 @dataclass(frozen=True, slots=True)
 class MetricsConfig:
+    """Prometheus metric names and query settings, from the ``metrics`` block.
+
+    Metric names (strings). The defaults are the ``blockstat_*`` counters:
+
+    - ``read_ops`` (``metrics.read_ops``): read operation counter.
+    - ``write_ops`` (``metrics.write_ops``): write operation counter.
+    - ``read_bytes`` (``metrics.read_bytes``): bytes-read counter.
+    - ``write_bytes`` (``metrics.write_bytes``): bytes-written counter.
+    - ``read_time_ns`` (``metrics.read_time_ns``): cumulative read time counter, in
+      nanoseconds.
+    - ``write_time_ns`` (``metrics.write_time_ns``): cumulative write time counter,
+      in nanoseconds.
+
+    Other fields:
+
+    - ``labels`` (``metrics.labels``): label names, see :class:`MetricLabels`.
+    - ``rate_window_seconds`` (``metrics.rate_window``, duration, default ``"5m"``,
+      that is 300 seconds): window of the ``rate()`` query. It must be at least four
+      times ``pvestatd_push_interval_seconds``.
+    - ``step_seconds`` (``metrics.step``, duration, default ``"5m"``, that is 300
+      seconds): resolution of the range query.
+    - ``pvestatd_push_interval_seconds`` (``metrics.pvestatd_push_interval``,
+      duration, default ``"10s"``): interval at which pvestatd writes the counters.
+    - ``extra_selector`` (``metrics.extra_selector``, string or null, default None):
+      extra label matcher for the metric selectors. It is used as written.
+    """
+
     read_ops: str = "blockstat_rd_operations"
     write_ops: str = "blockstat_wr_operations"
     read_bytes: str = "blockstat_rd_bytes"
@@ -103,6 +199,19 @@ class MetricsConfig:
 
 @dataclass(frozen=True, slots=True)
 class WindowConfig:
+    """How much history the load model reads, from the ``window`` block.
+
+    - ``lookback_seconds`` (``window.lookback``, duration, default ``"24h"``, that
+      is 86400 seconds): length of the history window. Must cover the forecast
+      model's needs (checked by the semantic validation).
+    - ``quantile`` (``window.quantile``, number strictly between 0 and 1, default
+      0.95): quantile of the per-disk load series taken over the window.
+    - ``min_coverage`` (``window.min_coverage``, number from above 0 up to 1,
+      default 0.80): fraction of the window that must hold samples. A disk below
+      this fraction is flagged. Its load falls back to its last known load in
+      ``state.json``, or to 0.0 when none is known.
+    """
+
     lookback_seconds: float = 86400.0
     quantile: float = 0.95
     min_coverage: float = 0.80
@@ -110,6 +219,26 @@ class WindowConfig:
 
 @dataclass(frozen=True, slots=True)
 class LoadWeights:
+    """Weights and factors that turn the raw I/O counters into one load value per
+    disk, from the ``load_weights`` block.
+
+    For each disk, the raw measures are I/O time, operations and bytes. Each
+    measure is divided by the group total of that measure, which gives three
+    shares. The load is the weighted mean of the three shares, multiplied by the
+    group total of the I/O time measure. The weights are dimensionless.
+
+    - ``iotime`` (``load_weights.iotime``, default 1.0): weight of the I/O time share.
+    - ``ops`` (``load_weights.ops``, default 0.0): weight of the operations share.
+    - ``bytes`` (``load_weights.bytes``, default 0.0): weight of the bytes share.
+    - ``read_factor`` (``load_weights.read_factor``, default 1.0): multiplier of the
+      read counters before they are summed with the write counters.
+    - ``write_factor`` (``load_weights.write_factor``, default 1.0): multiplier of
+      the write counters before they are summed with the read counters.
+
+    All weights are at least 0. When the three weights sum to 0, every disk has
+    load 0.
+    """
+
     iotime: float = 1.0
     ops: float = 0.0
     bytes: float = 0.0
@@ -134,6 +263,25 @@ class FreeSpaceValue:
 
 @dataclass(frozen=True, slots=True)
 class StorageConfig:
+    """One storage entry in a group, from ``groups[].storages[]``.
+
+    - ``id`` (``groups[].storages[].id``, string, required): PVE storage id, or a
+      pattern written as ``/regex/``.
+    - ``capability_weight`` (``groups[].storages[].capability_weight``, number above
+      0, default 1.0): relative capability of the storage. The load of a storage
+      is divided by this weight.
+    - ``reserve_factor`` (``groups[].storages[].reserve_factor``, number at least 0
+      or null, default None): snapshot reserve factor for this storage. None
+      inherits ``snapshot_reserve.factor``.
+    - ``free_space_soft`` (``groups[].storages[].free_space.soft``): free-space
+      floor at the plan endpoint. None inherits the global ``free_space.soft``.
+    - ``free_space_hard`` (``groups[].storages[].free_space.hard``): free-space floor
+      at every instant of a move. None inherits the global ``free_space.hard``.
+    - ``enforce_format`` (``groups[].storages[].enforce_format``, ``"raw"``,
+      ``"qcow2"`` or null, default None): format that every disk moved onto this
+      storage must have. None keeps the source format.
+    """
+
     id: str
     capability_weight: float = 1.0
     reserve_factor: float | None = None
@@ -193,12 +341,35 @@ def storage_pattern_text(storage_id: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class GroupConfig:
+    """A balancing group, one entry of ``groups[]``.
+
+    - ``name`` (``groups[].name``, string, required): unique group name.
+    - ``storages`` (``groups[].storages``, list): the storages that the group
+      balances against each other, see :class:`StorageConfig`. A group needs at
+      least two storages.
+
+    Disks move only between storages of the same group.
+    """
+
     name: str
     storages: tuple[StorageConfig, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class SnapshotReserveConfig:
+    """Snapshot reserve rule, from the ``snapshot_reserve`` block.
+
+    - ``factor`` (``snapshot_reserve.factor``, number at least 0, default 2.0): the
+      reserve that a storage keeps free is ``factor`` times the size of the largest
+      disk on that storage. A storage's own ``reserve_factor`` replaces this value.
+    - ``count_foreign_volumes`` (``snapshot_reserve.count_foreign_volumes``,
+      boolean, default True): when True, volumes that the tool does not manage are
+      counted in the reserve computation.
+    - ``split_vm_footprint_bytes`` (``snapshot_reserve.split_vm_footprint``, size
+      or null, default ``"2TiB"``): the most of one VM that one storage should hold.
+      Null turns the split rule off. Must be above 0 when set.
+    """
+
     factor: float = 2.0
     count_foreign_volumes: bool = True
     # Section 5.3.3's ``T``: the most of one VM that one storage should hold. ``None`` switches
@@ -220,6 +391,26 @@ class FreeSpaceConfig:
 
 @dataclass(frozen=True, slots=True)
 class GatesConfig:
+    """Thresholds and cooldowns that decide whether a run plans moves, from the
+    ``gates`` block.
+
+    - ``drift_threshold`` (``gates.drift_threshold``, number from 0 to 1, default
+      0.10): drift is the L1 distance between the current load vector and the last
+      recorded load vector, divided by the L1 norm of the last recorded load vector.
+      A drift below this value does not trigger a plan.
+    - ``imbalance_threshold`` (``gates.imbalance_threshold``, number from 0 to 1,
+      default 0.20): imbalance at or above this value triggers a plan.
+    - ``capacity_spread_threshold`` (``gates.capacity_spread_threshold``, number
+      above 0 or null, default 0.25): spread of the fill fraction across storages.
+      Null disables the capacity gate.
+    - ``cooldown_per_disk_seconds`` (``gates.cooldown_per_disk``, duration, default
+      ``"24h"``, that is 86400 seconds): time after a move before the same disk may
+      move again.
+    - ``cooldown_per_storage_seconds`` (``gates.cooldown_per_storage``, duration,
+      default ``"1h"``, that is 3600 seconds): time after a move before the same
+      storage takes part in another move.
+    """
+
     drift_threshold: float = 0.10
     imbalance_threshold: float = 0.20
     # None disables the capacity gate outright (section 6); 0.25 default.
@@ -230,6 +421,39 @@ class GatesConfig:
 
 @dataclass(frozen=True, slots=True)
 class MigrationConfig:
+    """Cost model and limits for one disk move, from the ``migration`` block.
+
+    - ``bwlimit_bytes_per_sec`` (``migration.bwlimit_bytes_per_sec``, size in bytes
+      per second, default 209715200, that is 200 MiB/s): bandwidth limit of one
+      disk copy.
+    - ``source_load_weight`` (``migration.source_load_weight``, number at least 0,
+      default 1.0): weight of the load that the copy puts on the source storage.
+    - ``target_load_weight`` (``migration.target_load_weight``, number at least 0,
+      default 1.0): weight of the load that the copy puts on the target storage.
+    - ``payback_horizon_seconds`` (``migration.payback_horizon``, duration, default
+      ``"365d"``, that is 31536000 seconds): time over which a move must repay its
+      cost. Set it near the real lifetime of a placement. Values below 30 days are
+      warned about.
+    - ``payback_ratio`` (``migration.payback_ratio``, number above 0, default 10.0):
+      the benefit of a plan must be at least ``payback_ratio`` times its total
+      move cost.
+    - ``max_single_move_duration_seconds`` (``migration.max_single_move_duration``,
+      duration, default ``"6h"``, that is 21600 seconds): longest time that one move
+      may take.
+    - ``account_saferemove_wipe`` (``migration.account_saferemove_wipe``, boolean,
+      default True): add the cost of the wipe that saferemove runs on the source
+      volume.
+    - ``wipe_load_weight`` (``migration.wipe_load_weight``, number at least 0,
+      default 1.0): weight of that wipe load.
+    - ``assume_thick_provisioning`` (``migration.assume_thick_provisioning``,
+      boolean, default True): kept only so old configs still load. False is refused:
+      the tool never models over-provisioning, so every disk counts at its
+      provisioned size.
+    - ``tiny_disk_bytes`` (``migration.tiny_disk_bytes``, size in bytes, default
+      ``67108864``, that is 64 MiB): disks smaller than this carry no move cost and
+      need no payback check. Zero charges every disk.
+    """
+
     bwlimit_bytes_per_sec: int = 209_715_200  # 200 MiB/s
     source_load_weight: float = 1.0
     target_load_weight: float = 1.0
@@ -249,6 +473,37 @@ class MigrationConfig:
 
 @dataclass(frozen=True, slots=True)
 class ObjectiveConfig:
+    """Weights of the optimisation objective, from the ``objective`` block.
+
+    The MILP and the heuristic both minimise a sum of these terms. Units are given
+    per term.
+
+    - ``spread_metric`` (``objective.spread_metric``, ``"l1"`` or ``"minmax"``,
+      default ``"l1"``): form of the spread term. ``l1`` sums the absolute
+      deviation of each storage load from the group average. ``minmax`` minimises
+      the largest storage load.
+    - ``alpha_spread`` (``objective.alpha_spread``, number at least 0, default 1.0):
+      weight of the spread term.
+    - ``beta_move_count`` (``objective.beta_move_count``, number at least 0, default
+      0.25): cost per disk moved, for disks at or above ``migration.tiny_disk_bytes``.
+    - ``gamma_move_bytes_per_tib`` (``objective.gamma_move_bytes_per_tib``, number at
+      least 0, default 0.05): cost per TiB of disk moved, for disks at or above
+      ``migration.tiny_disk_bytes``.
+    - ``kappa_vm_affinity`` (``objective.kappa_vm_affinity``, number at least 0,
+      default 0.50): cost per VM for each storage that the VM uses beyond the first.
+      It keeps the disks of one VM on few storages.
+    - ``delta_capacity_spread`` (``objective.delta_capacity_spread``, number at least
+      0, default 0.5): weight of the capacity spread term, per TiB.
+    - ``mu_vm_split_per_tib`` (``objective.mu_vm_split_per_tib``, number at least 0,
+      default 1.0): weight, per TiB of split excess, of the large-VM split rule.
+    - ``affinity_counts_pinned_disks`` (``objective.affinity_counts_pinned_disks``,
+      boolean, default True): when True, pinned disks count in the affinity term of
+      their VM. When False, only movable disks count.
+    - ``reserve_violation_penalty`` (``objective.reserve_violation_penalty``, number
+      at least 0, default 1000.0): cost per TiB of snapshot reserve shortfall in the
+      heuristic objective.
+    """
+
     spread_metric: str = "l1"
     alpha_spread: float = 1.0
     beta_move_count: float = 0.25
@@ -266,6 +521,20 @@ class ObjectiveConfig:
 
 @dataclass(frozen=True, slots=True)
 class SolverConfig:
+    """Solver selection and limits, from the ``solver`` block.
+
+    - ``backend`` (``solver.backend``, ``"auto"``, ``"cbc"`` or ``"heuristic"``,
+      default ``"auto"``): ``cbc`` solves the MILP with CBC through PuLP. ``heuristic``
+      never calls the MILP. ``auto`` tries CBC and falls back to the heuristic when
+      CBC cannot run.
+    - ``time_limit_seconds`` (``solver.time_limit_seconds``, duration, default 60):
+      time limit of one MILP solve.
+    - ``mip_gap`` (``solver.mip_gap``, number from 0 to 1, default 0.02): relative
+      optimality gap at which the MILP stops.
+    - ``heuristic_iterations`` (``solver.heuristic_iterations``, integer above 0,
+      default 5000): iteration limit of the heuristic.
+    """
+
     backend: str = "auto"
     time_limit_seconds: float = 60.0
     mip_gap: float = 0.02
@@ -274,6 +543,24 @@ class SolverConfig:
 
 @dataclass(frozen=True, slots=True)
 class LocksConfig:
+    """Handling of VM and disk locks during execution, from
+    ``execution.locks``.
+
+    - ``wait_timeout_seconds`` (``execution.locks.wait_timeout``, duration, default
+      ``"4h"``, that is 14400 seconds): longest wait for a VM lock to clear.
+    - ``poll_interval_seconds`` (``execution.locks.poll_interval``, duration,
+      default ``"30s"``): interval between lock checks.
+    - ``on_timeout`` (``execution.locks.on_timeout``, ``"skip"`` or ``"abort"``,
+      default ``"skip"``): action when the wait ends. ``skip`` records the move as
+      skipped and the run continues. ``abort`` records the move as failed and stops
+      the whole run.
+    - ``task_retry_limit`` (``execution.locks.task_retry_limit``, integer at least 0,
+      default 2): number of retries when a move task fails at once on a lock held
+      by a cleanup task.
+    - ``task_retry_backoff_seconds`` (``execution.locks.task_retry_backoff``,
+      duration, default ``"15s"``): delay before each retry.
+    """
+
     wait_timeout_seconds: float = 14400.0  # 4h
     poll_interval_seconds: float = 30.0
     on_timeout: str = "skip"
@@ -289,12 +576,41 @@ class LocksConfig:
 
 @dataclass(frozen=True, slots=True)
 class SourceReleaseConfig:
+    """When the tool waits for the source volume to disappear, from
+    ``execution.source_release``.
+
+    A move is not finished until the source volume is gone and the VM config is
+    unlocked.
+
+    - ``wait`` (``execution.source_release.wait``, boolean, default True): wait for
+      the source volume to disappear before the move counts as done.
+    - ``timeout_seconds`` (``execution.source_release.timeout``, duration, default
+      ``"48h"``, that is 172800 seconds): longest wait for the source volume. A
+      source still present after this time gives status ``draining``, which is not
+      a failure.
+    """
+
     wait: bool = True
     timeout_seconds: float = 172800.0  # 48h
 
 
 @dataclass(frozen=True, slots=True)
 class TimeWindow:
+    """One allowed time window for ``auto`` mode, an entry of
+    ``execution.time_windows[]``.
+
+    - ``days`` (``execution.time_windows[].days``, list of ``"mon"`` to ``"sun"``,
+      default all seven days): weekdays on which the window is open. The day is the
+      day on which the window starts.
+    - ``start`` (``execution.time_windows[].start``, string ``HH:MM`` in 24-hour
+      time): start of the window, in the host's local time.
+    - ``end`` (``execution.time_windows[].end``, string ``HH:MM``): end of the window,
+      in local time. ``end`` must differ from ``start``. The semantic validation
+      rejects equal values because they would mean both "never" and "always".
+
+    A window with ``end`` earlier than ``start`` crosses midnight.
+    """
+
     days: tuple[str, ...]
     start: str
     end: str
@@ -302,6 +618,37 @@ class TimeWindow:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionConfig:
+    """How and when moves run, from the ``execution`` block.
+
+    - ``mode`` (``execution.mode``, ``"dry-run"``, ``"confirm"`` or ``"auto"``,
+      default ``"dry-run"``): ``dry-run`` only reports the plan and issues nothing.
+      ``confirm`` asks the operator before each move. ``auto`` runs the moves
+      without asking. Only ``auto`` respects ``time_windows``.
+    - ``max_concurrent_migrations`` (``execution.max_concurrent_migrations``, integer
+      at least 1, default 1): moves in flight at once. Values above 1 apply only in
+      ``auto`` mode.
+    - ``max_migrations_per_run`` (``execution.max_migrations_per_run``, integer at
+      least 1, default 5): moves started in one run.
+    - ``max_concurrent_per_storage`` (``execution.max_concurrent_per_storage``,
+      integer at least 1, default 1): moves in flight that use the same storage.
+      Values above 1 apply only in ``auto`` mode.
+    - ``max_replans_per_run`` (``execution.max_replans_per_run``, integer at least 0,
+      default 3): number of times one run may plan again after the plan no longer
+      matches the cluster.
+    - ``abort_on_failure`` (``execution.abort_on_failure``, boolean, default True):
+      stop the run when one move task fails.
+    - ``poll_interval_seconds`` (``execution.poll_interval_seconds``, number above 0,
+      default 10): seconds between checks of a running move task.
+    - ``api_outage_timeout_seconds`` (``execution.api_outage_timeout``, duration,
+      default ``"1h"``, that is 3600 seconds): how long one PVE read may keep failing
+      before the run gives up. Zero turns the retries off.
+    - ``locks`` (``execution.locks``): see :class:`LocksConfig`.
+    - ``source_release`` (``execution.source_release``): see
+      :class:`SourceReleaseConfig`.
+    - ``time_windows`` (``execution.time_windows``, list): see :class:`TimeWindow`.
+      Empty means ``auto`` mode may act at any time.
+    """
+
     mode: str = "dry-run"
     max_concurrent_migrations: int = 1
     max_migrations_per_run: int = 5
@@ -320,6 +667,27 @@ class ExecutionConfig:
 
 @dataclass(frozen=True, slots=True)
 class ExcludeConfig:
+    """Disks and VMs that the tool never moves, from the ``exclude`` block.
+
+    - ``vmids`` (``exclude.vmids``, list of integers, default empty): VM ids to
+      exclude.
+    - ``disks`` (``exclude.disks``, list of strings, default empty): disk names to
+      exclude.
+    - ``storages`` (``exclude.storages``, list of strings, default empty): storage
+      ids whose disks are not moved.
+    - ``tags`` (``exclude.tags``, list of strings, default ``["no-drs"]``): VMs with
+      one of these tags are excluded.
+    - ``skip_vms_with_snapshots`` (``exclude.skip_vms_with_snapshots``, boolean,
+      default True): always True. False is refused, because PVE rejects a disk move
+      for a VM with snapshots.
+    - ``stopped`` (``exclude.stopped``, boolean, default True): always True. False is
+      refused. The disks of a stopped VM are never moved, because backup and
+      replication tools track volumes by location.
+    - ``include_unused_disks`` (``exclude.include_unused_disks``, boolean, default
+      True): when False, unused disks (device names starting with ``unused``) are
+      excluded from planning.
+    """
+
     vmids: tuple[int, ...] = ()
     disks: tuple[str, ...] = ()
     storages: tuple[str, ...] = ()
@@ -331,16 +699,40 @@ class ExcludeConfig:
 
 @dataclass(frozen=True, slots=True)
 class ReportConfig:
+    """Report settings, from the ``report`` block.
+
+    - ``warn_pinned_load_fraction`` (``report.warn_pinned_load_fraction``, number
+      above 0 and at most 1, default 0.25): the report warns when pinned disks carry
+      more than this fraction of a storage's load.
+    """
+
     warn_pinned_load_fraction: float = 0.25
 
 
 @dataclass(frozen=True, slots=True)
 class StateConfig:
+    """Location of the persistent state file, from the ``state`` block.
+
+    - ``path`` (``state.path``, path, default ``/var/lib/pve-storage-drs/state.json``):
+      file where the tool keeps its persistent state between runs.
+    """
+
     path: str = "/var/lib/pve-storage-drs/state.json"
 
 
 @dataclass(frozen=True, slots=True)
 class HoltWintersConfig:
+    """Holt-Winters model settings, from ``forecast.holt_winters``.
+
+    - ``seasonal_periods`` (``forecast.holt_winters.seasonal_periods``, integer above
+      0, default 288): number of samples in one season. At the default step of 5
+      minutes, 288 samples is one day.
+    - ``trend`` (``forecast.holt_winters.trend``, ``"add"``, ``"mul"`` or ``"none"``,
+      default ``"none"``): trend component.
+    - ``seasonal`` (``forecast.holt_winters.seasonal``, ``"add"``, ``"mul"`` or
+      ``"none"``, default ``"add"``): seasonal component.
+    """
+
     seasonal_periods: int = 288
     trend: str = "none"
     seasonal: str = "add"
@@ -348,6 +740,16 @@ class HoltWintersConfig:
 
 @dataclass(frozen=True, slots=True)
 class ForecastConfig:
+    """Forecast settings, from the ``forecast`` block.
+
+    - ``model`` (``forecast.model``, ``"quantile"`` or ``"holt_winters"``, default
+      ``"quantile"``): ``quantile`` takes the quantile of the window. ``holt_winters``
+      fits a seasonal model and takes a quantile of its forecast.
+    - ``holt_winters`` (``forecast.holt_winters``): settings of the Holt-Winters
+      model, see :class:`HoltWintersConfig`. They apply only when ``model`` is
+      ``holt_winters``.
+    """
+
     model: str = "quantile"
     holt_winters: HoltWintersConfig = field(default_factory=HoltWintersConfig)
 
@@ -378,6 +780,41 @@ class MonitoringConfig:
 
 @dataclass(frozen=True, slots=True)
 class Config:
+    """The whole validated configuration, one field per top-level YAML key.
+
+    Each field holds one section of the file. Durations are stored in seconds and
+    sizes in bytes. Each section class lists its own YAML keys:
+
+    - ``schema_version`` (``schema_version``, integer, default 1): must match the
+      major version this build supports.
+    - ``proxmox`` (``proxmox``): :class:`ProxmoxConfig`.
+    - ``prometheus`` (``prometheus``): :class:`PrometheusConfig`.
+    - ``metrics`` (``metrics``): :class:`MetricsConfig`.
+    - ``window`` (``window``): :class:`WindowConfig`.
+    - ``load_weights`` (``load_weights``): :class:`LoadWeights`.
+    - ``groups`` (``groups``): tuple of :class:`GroupConfig`.
+    - ``snapshot_reserve`` (``snapshot_reserve``): :class:`SnapshotReserveConfig`.
+    - ``free_space`` (``free_space``): :class:`FreeSpaceConfig`. The global
+      free-space floors. Each is an absolute size or a percentage of the storage
+      capacity.
+    - ``gates`` (``gates``): :class:`GatesConfig`.
+    - ``migration`` (``migration``): :class:`MigrationConfig`.
+    - ``objective`` (``objective``): :class:`ObjectiveConfig`.
+    - ``solver`` (``solver``): :class:`SolverConfig`.
+    - ``execution`` (``execution``): :class:`ExecutionConfig`.
+    - ``exclude`` (``exclude``): :class:`ExcludeConfig`.
+    - ``report`` (``report``): :class:`ReportConfig`.
+    - ``state`` (``state``): :class:`StateConfig`.
+    - ``forecast`` (``forecast``): :class:`ForecastConfig`.
+    - ``support`` (``support``): :class:`SupportConfig`.
+    - ``monitoring`` (``monitoring``): :class:`MonitoringConfig`.
+
+    The schema requires ``schema_version``, ``proxmox``, ``prometheus`` and ``groups``.
+    Every other section is optional. A missing section takes the defaults of its
+    class. This class raises nothing itself. :func:`load_config` raises
+    :class:`ConfigError` when a value is invalid.
+    """
+
     schema_version: int
     proxmox: ProxmoxConfig
     prometheus: PrometheusConfig
