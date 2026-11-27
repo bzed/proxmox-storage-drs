@@ -800,6 +800,17 @@ def _check_schema_version(config: Config, errors: list[str]) -> None:
         )
 
 
+def _check_group_names_unique(config: Config, errors: list[str]) -> None:
+    """Section 11.1: ``groups[].name`` is unique. A later group with the same
+    name would silently replace the earlier one when the topology is built
+    (keyed by name), hiding the earlier group's storages from every check."""
+    seen: set[str] = set()
+    for group in config.groups:
+        if group.name in seen:
+            errors.append(f"duplicate group name {group.name!r}: groups[].name must be unique")
+        seen.add(group.name)
+
+
 def _check_group_storage_membership(config: Config, errors: list[str]) -> None:
     """No storage twice in one group, and no storage in two groups.
 
@@ -894,6 +905,20 @@ def _check_stopped_vms(config: Config, errors: list[str]) -> None:
             "exclude.stopped: false is not supported -- this tool never moves the disks of a "
             "stopped VM, whatever violation they cause (replication and backup tools such as "
             "Veeam break when a replicated VM's volumes move). Remove the key, or set it to true"
+        )
+
+
+def _check_snapshot_skip(config: Config, errors: list[str]) -> None:
+    """``exclude.skip_vms_with_snapshots`` survives only so a config that spells
+    it out still loads. PVE rejects a disk move for a VM that has snapshots
+    (section 3.7), and the tool always pins such disks, so ``false`` would
+    promise a mode that does not exist -- refused rather than silently
+    ignored."""
+    if not config.exclude.skip_vms_with_snapshots:
+        errors.append(
+            "exclude.skip_vms_with_snapshots: false is not supported -- PVE rejects a disk "
+            "move for a VM that has snapshots, so this tool always pins such disks. Remove "
+            "the key, or set it to true"
         )
 
 
@@ -1047,11 +1072,13 @@ def _validate_semantics(config: Config, *, require_connection: bool = True) -> l
     _check_schema_version(config, errors)
     if require_connection:
         _check_connection_config(config, errors)
+    _check_group_names_unique(config, errors)
     _check_group_storage_membership(config, errors)
     _check_storage_patterns_compile(config, errors)
     _check_group_size(config, errors)
     _check_thick_provisioning(config, errors)
     _check_stopped_vms(config, errors)
+    _check_snapshot_skip(config, errors)
     _check_metrics(config, errors)
     _check_forecast_window(config, errors)
     _check_payback_horizon(config, warnings)

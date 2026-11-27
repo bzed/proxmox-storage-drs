@@ -679,3 +679,32 @@ def test_mu_below_kappa_warns_only_while_the_rule_is_on(tmp_path: Path) -> None:
     data["objective"] = {"mu_vm_split_per_tib": 0}
     resolved = config.load_config(str(write_config(tmp_path, data)), env={})
     assert not any("mu_vm_split_per_tib" in w for w in resolved.warnings)
+
+
+def test_exclude_skip_vms_with_snapshots_false_is_refused_not_ignored(tmp_path: Path) -> None:
+    """PVE rejects moving a VM with snapshots; ``false`` promises a mode that
+    does not exist (issue #5)."""
+    data = minimal_config_dict()
+    data["exclude"] = {"skip_vms_with_snapshots": False}
+    with pytest.raises(
+        ConfigError, match="exclude.skip_vms_with_snapshots: false is not supported"
+    ):
+        config.load_config(str(write_config(tmp_path, data)), env={})
+
+
+def test_exclude_skip_vms_with_snapshots_true_or_absent_loads(tmp_path: Path) -> None:
+    data = minimal_config_dict()
+    absent = config.load_config(str(write_config(tmp_path, data)), env={})
+    data["exclude"] = {"skip_vms_with_snapshots": True}
+    explicit = config.load_config(str(write_config(tmp_path, data, "b.yaml")), env={})
+    assert absent.config.exclude.skip_vms_with_snapshots is True
+    assert explicit.config.exclude.skip_vms_with_snapshots is True
+
+
+def test_duplicate_group_name_is_refused(tmp_path: Path) -> None:
+    """A later group of the same name would replace the earlier one (issue #3)."""
+    data = minimal_config_dict()
+    first = data["groups"][0]
+    data["groups"] = [first, {**first, "name": first["name"]}]
+    with pytest.raises(ConfigError, match=f"duplicate group name '{first['name']}'"):
+        config.load_config(str(write_config(tmp_path, data)), env={})

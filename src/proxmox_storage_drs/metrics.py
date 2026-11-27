@@ -452,6 +452,10 @@ class PrometheusClient:
         self._session = session if session is not None else requests.Session()
 
     def _auth(self) -> tuple[str, str] | None:
+        # A bearer token wins over basic auth: requests applies ``auth`` after
+        # ``headers`` and would overwrite the token's Authorization header.
+        if self._config.bearer_token:
+            return None
         if self._config.username is not None and self._config.password is not None:
             return (self._config.username, self._config.password)
         return None
