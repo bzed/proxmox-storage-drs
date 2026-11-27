@@ -55,7 +55,7 @@ run finished: plan exit=0
 **whether or not `-v` was given**. In those modes the log is the only
 record of what happened to your cluster. A record you only get if you
 remembered a flag is not a record. Read-only commands and
-`apply --mode dry-run` change nothing. They stay at the ordinary default.
+`--mode dry-run apply` changes nothing. They stay at the ordinary default.
 
 `--quiet` still wins, including over this. It is the one option that leaves
 you with an `auto` run that migrated data and no account of what it moved

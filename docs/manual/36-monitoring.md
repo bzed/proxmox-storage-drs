@@ -1,6 +1,6 @@
 # Monitoring: the status file
 
-A timer-driven `pve-storage-drs apply --mode auto` that fails quietly is
+A timer-driven `pve-storage-drs --mode auto apply` that fails quietly is
 worse than one that fails loudly. The journal is not a monitoring system.
 Set [`monitoring.status_file`](10-configuration.md). Then `apply` leaves a
 small report of its last run, in the format of the **`check_statusfile`**
