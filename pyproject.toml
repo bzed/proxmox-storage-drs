@@ -35,7 +35,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-solver = ["pulp>=2.7"]
+# Upper bound: pulp 4 dropped LpVariable's `cat=` keyword, which optimize.py uses;
+# trixie ships 2.7, and 3.x still works.
+solver = ["pulp>=2.7,<4"]
 forecast = ["statsmodels>=0.14", "numpy>=1.26"]
 dev = [
   "black>=24.1",
