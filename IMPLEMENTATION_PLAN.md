@@ -400,6 +400,8 @@ call site cannot silently add an unnameable member.
 | `move_started` | INFO | Immediately after `move_disk` returns, carrying **the UPID**, disk key, source, target, bytes | built — section 2.1 required it; nothing implemented it |
 | `move_finished` | INFO | Per move: UPID, outcome (`moved`/`failed`/`replan_needed`/`draining`), duration | built |
 | `replan` | INFO | Section 9.2's re-plan loop fired: which group, which attempt, why | built |
+| `snapshot_pinned` | WARNING | Per group, per VM pinned by a real snapshot or an unreferenced companion volume (§3.7 point 3): VM, reason, disk keys, `pinned_bytes`, `pinned_load` (`null` when the load model failed). Every `plan`, `explain` and `apply` run, and again on a re-plan | built |
+| `snapshot_pinned_total` | WARNING | Once after the last `snapshot_pinned` of a group: VM count, disk count, `pinned_bytes`, `pinned_load`. Not emitted for a group with no such pin | built |
 | `deadlock` | WARNING | Section 8's scheduler could not order a move set | built |
 | `mode_override` | INFO / WARNING | `--mode` differs from the config; WARNING when it escalates (section 11.3) | as built, correct |
 | `config_warning` | INFO | Configuration advisories (e.g. a `payback_horizon` under 30 days) | built: INFO |
@@ -1100,16 +1102,19 @@ VM shut down (out of scope — this tool never stops a VM, §1). So the policy i
    (`storage:volume`, the first two and a count of the rest): it appears nowhere else the operator
    looks — not in the VM config, not among the plan's disks — and it is usually the source copy a
    move without "delete source" left behind. The tool never deletes it (§9.4); the operator checks
-   it and removes it by hand.
+   it and removes it by hand. The warning is the `snapshot_pinned` event, one per VM, followed by one
+   `snapshot_pinned_total` for the group (§2.3). Only the snapshot and companion-volume pins are
+   reported this way; the other pin reasons keep their place in `show-load` and `explain`.
 4. **Say when the goal has become unreachable.** If pinned load exceeds
    `report.warn_pinned_load_fraction` of a group's total (default 0.25), the residual imbalance may
    be structural rather than a planning failure. Report the best achievable spread *given the pins*
    alongside the actual one, so a stubborn 40% spread is attributable to snapshots rather than
    looking like a broken solver.
 
-`exclude.skip_vms_with_snapshots` stays as a knob but its `false` setting does not make such moves
-work — it merely stops pre-filtering them, and PVE will reject them at the API. Keep it `true`; the
-pre-flight check of §9.3 runs regardless.
+`exclude.skip_vms_with_snapshots` survives only so a config that spells it out still loads. `false`
+is a §11.1 load-time error, exactly like `exclude.stopped: false`: PVE rejects a disk move for a VM
+that has snapshots, so no setting could make such moves work, and a knob that promises it would be
+silently ignored. The pinning is unconditional; the pre-flight check of §9.3 runs regardless.
 
 ### 3.8 Disks with an unapplied pending change are excluded
 
@@ -1146,7 +1151,7 @@ So, exactly like §3.7's snapshot handling:
 3. **Re-check immediately before issuing the move** (§9.2's step 6, below), not only at planning
    time: an operator can queue a pending change in the PVE UI in the gap between `plan` and
    `apply`/`auto` issuing the move, exactly as a lock (§9.3) or a new snapshot (§3.7) can.
-4. **No knob disables this.** Unlike `exclude.skip_vms_with_snapshots`, there is no configuration
+4. **No knob disables this.** Like the snapshot pinning of §3.7 (whose knob accepts only `true`), there is no configuration
    escape hatch — a pending change is not a policy preference to override, it is PVE leaving a
    config key referring to state that would become wrong the moment the disk moves.
 
@@ -1349,6 +1354,12 @@ small:
 - `s` cannot hold the disk's format **as it would arrive there**, `φ(d,s)` — the source format,
   or the storage's `enforce_format` when it sets one (§5.3.2);
 - `d` or `v(d)` is excluded by config (`exclude.vmids`, `exclude.disks`, tags, `no-drs`) — also pin;
+- `σ₀(d)` is listed in `exclude.storages` — also pin, and `s` is never a destination when it is
+  listed there: fix `x_{d,s} = 0` for every `d` with `σ₀(d) ≠ s`. The storage still holds its disks,
+  so their bytes and load stay in every sum, its reserve and free-space requirement stay in force
+  (a violated excluded storage reports a shortfall but the tool does not repair it), and it only
+  stops sending and receiving. One predicate, `topology.storage_accepts_incoming()`, serves the
+  heuristic (single, swap, VM-relocation and repair moves), both MILP backends and the split gate;
 - `σ₀(d)` belongs to **no** configured group — such a disk is unmanaged: it is not in any `D`, it is
   pinned where it is, and its bytes count toward `Uˢᵉˣᵗ` of its storage. Report it in `show-load` as
   "ungrouped, not managed" so an unintended omission from `groups` is visible rather than silent;
@@ -2223,7 +2234,7 @@ something different on every group. The objective asks whether a particular move
 cost, which is a question about bytes, priced in the same unit as `γ`.
 
 **Split gate** — the counterpart of the capacity gate for §5.3.3's split rule. It fires when some
-VM `v ∈ V^split` has a movable disk `d` and an eligible storage `s ≠ σ₀(d)` ((C2), not in cooldown)
+VM `v ∈ V^split` has a movable disk `d` and an eligible storage `s ≠ σ₀(d)` ((C2), including `exclude.storages`, not in cooldown)
 such that moving `d` alone to `s`
 
 1. strictly lowers `v`'s peak footprint `max_s F_{v,s}`, and
@@ -3028,7 +3039,7 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
   2. 101:scsi1  san-a → san-b   1.0 TiB   ~1.5h   Δimbalance −2.00   ℓ/z 1.00   [repair]
 
   after: san-a u=3.00  san-b u=1.70  san-c u=2.70   spread 53% (from 255%)
-  payback: benefit 1.93e8 load·s vs cost 2.62e4 load·s → ratio 7344 (need 10) ✓
+  payback: benefit 2.26e8 load·s vs cost 2.62e4 load·s → ratio 8640 (need 10) ✓
            plan repairs san-a's reserve (Σ r_s 2.5 → 0) — §7.3-exempt
 
   pinned (not movable this run):
@@ -3306,6 +3317,8 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | Rule | Rationale |
 |---|---|
 | `schema_version` major matches | Forward compatibility |
+| `groups[].name` unique | Topology is keyed by name; a duplicate would silently replace the earlier group and hide its storages from the uniqueness check |
+| `exclude.skip_vms_with_snapshots` is `true` (`false` refused) | PVE rejects moving the disks of a VM with snapshots; no mode exists that would honour `false` |
 | Every group non-empty, ≥ 2 storages **after pattern expansion** (§11.4) | A one-storage group has nothing to balance; with patterns the count that matters is storages matched, not entries written |
 | **No storage appears in two groups**, after pattern expansion | A disk's group would be ambiguous; a pattern matching a storage another group also names is the same defect |
 | Storage ids exist in the cluster; every `/…/` pattern matches at least one storage (§11.4) | Catches typos before they silently exclude disks or silently shrink a group |

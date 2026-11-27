@@ -49,13 +49,32 @@ group fc-tier1: payback ratio 151 (need 10) -> accepted
 run finished: plan exit=0
 ```
 
+## Snapshot pins: a warning on every run
+
+A VM with a snapshot, or with an unreferenced volume next to its disks, keeps
+its disks in place. The tool cannot move them. The tool warns about this on
+every `plan`, `explain` and `apply` run, with no `-v` needed.
+
+The tool logs one `snapshot_pinned` record for each such VM. The record names
+the VM, the reason, the disks, the pinned bytes and the pinned load. The tool
+then logs one `snapshot_pinned_total` record for the group. It holds the VM
+count, the disk count, the pinned bytes and the pinned load. Clear the
+snapshots, or check the extra volume, to let the tool balance these disks.
+When the tool cannot measure the load, `pinned_load` is `null` and the byte
+figures stay.
+
+```
+group fc-tier1: VM web1(101) is pinned, snapshots present (2), 2 disks, 3.00 TiB, load 1.000 -- clear the cause to unblock balancing
+group fc-tier1: 1 VMs pinned by snapshots or companion volumes, 2 disks, 3.00 TiB, load 1.000
+```
+
 ## Unattended runs log this without being asked
 
 `apply` in `confirm` or `auto` mode emits the whole decision trail above
 **whether or not `-v` was given**. In those modes the log is the only
 record of what happened to your cluster. A record you only get if you
 remembered a flag is not a record. Read-only commands and
-`apply --mode dry-run` change nothing. They stay at the ordinary default.
+`--mode dry-run apply` changes nothing. They stay at the ordinary default.
 
 `--quiet` still wins, including over this. It is the one option that leaves
 you with an `auto` run that migrated data and no account of what it moved

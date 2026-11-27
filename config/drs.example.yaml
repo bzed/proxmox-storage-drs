@@ -47,8 +47,8 @@ proxmox:
 prometheus:
   url: http://prometheus.example.com:9090   # REQUIRED
   timeout_seconds: 30
-  # Set basic auth or a bearer token if your Prometheus is protected. Do not set
-  # both: the token is then not sent (a known defect, issue #2).
+  # Set basic auth or a bearer token if your Prometheus is protected. If you set
+  # both, the tool sends the token and ignores the basic auth credentials.
   username: null
   password: null
   bearer_token: null
@@ -404,13 +404,13 @@ execution:
 exclude:
   vmids: []              # never move disks of these VMs
   disks: []              # e.g. ["101:scsi1"]
-  storages: []           # NOT APPLIED by this version (issue #1): remove the
-                         # storage from groups instead
+  storages: []           # no disk moves onto or off these storages. They still
+                         # count in the model; their disks are pinned
   tags: ["no-drs"]       # PVE VM tags that opt a VM out
-  # This key has no effect in this version (issue #5). The tool always pins
-  # snapshotted disks (it still counts their bytes and load). PVE rejects
-  # move_disk delete=1 on them anyway. show-load and explain name the pinned
-  # disks, whose snapshots you must clear.
+  # The tool always pins the disks of a VM that has snapshots (it still counts
+  # their bytes and load). PVE rejects a disk move for such a VM. The tool
+  # accepts only `true` and refuses false. show-load and explain name the
+  # pinned disks, whose snapshots you must clear.
   skip_vms_with_snapshots: true
   # The tool never moves a stopped VM, whatever violation its disks cause. Veeam and
   # similar tools break when the volumes of a replicated VM move. The tool accepts

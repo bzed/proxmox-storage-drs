@@ -127,6 +127,7 @@ from proxmox_storage_drs.topology import (
     is_small_disk,
     larger_vm_disks,
     storage_accepts_format,
+    storage_accepts_incoming,
     target_format,
 )
 
@@ -134,13 +135,6 @@ logger = logging.getLogger(__name__)
 
 _BYTES_PER_MIB = 1 << 20
 _BYTES_PER_TIB = 1 << 40
-
-
-def _mib(size_bytes: int) -> int:
-    """Round to whole MiB -- section 5.5's size unit for every MILP variable
-    and constant (`Z_s`, `R_s`, `r_s`, `z_d`, `C_s`, `Uˢᵉˣᵗ`,
-    `soft_s`/`hard_s`)."""
-    return round(size_bytes / _BYTES_PER_MIB)
 
 
 def _movable_disks(group: Group) -> tuple[Disk, ...]:
@@ -176,18 +170,22 @@ def _fixed_zero_pairs(
     movable: tuple[Disk, ...], storages: tuple[Storage, ...], cooldown_storages: frozenset[str]
 ) -> Iterable[tuple[Disk, Storage]]:
     """Every ``(disk, storage)`` pair a destination-only rule forbids --
-    section 6's cooldown ("accepts no new incoming moves") or section 5.3
-    (C2)'s format rule ("s cannot hold the disk's format") -- fixed
-    ``x_{d,s}=0`` for by both MILP backends, in both lexicographic stages.
+    section 6's cooldown ("accepts no new incoming moves"), section 5.3
+    (C2)'s ``exclude.storages`` or its format rule ("s cannot hold the disk's format") -- fixed
+    ``x_{d,s}=0`` for the MILP solver, in both lexicographic stages.
     A disk already resident on a storage is never fixed away from it by
-    either rule, so both are skipped once ``s.id == d.current_storage``.
-    Shared so neither backend's own feasibility-constraint function carries
-    both rules' branching inline (AGENTS.md section 5)."""
+    any of these rules, so all are skipped once ``s.id == d.current_storage``.
+    Shared so the solver's own feasibility-constraint function does not carry
+    the rules' branching inline (AGENTS.md section 5)."""
     for d in movable:
         for s in storages:
             if s.id == d.current_storage:
                 continue
-            if s.id in cooldown_storages or not storage_accepts_format(s, target_format(d, s)):
+            if (
+                s.id in cooldown_storages
+                or not storage_accepts_incoming(s)
+                or not storage_accepts_format(s, target_format(d, s))
+            ):
                 yield d, s
 
 
@@ -198,6 +196,11 @@ def _pinned_of_vmid(group: Group, vmid: int, objective: ObjectiveConfig) -> tupl
 
 
 def cbc_available() -> bool:
+    """True when the ``pulp`` module can be imported.
+
+    This does not check that the CBC binary runs. :func:`_pulp_solve` handles a
+    CBC that cannot run, by returning None.
+    """
     try:
         import pulp  # noqa: F401
     except ImportError:

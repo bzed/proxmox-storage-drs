@@ -9,7 +9,7 @@ swaps until nothing improves it or ``heuristic_iterations`` is reached.
 
 ``evaluate_assignment()`` is the one place the section 5.4 objective is
 computed from an arbitrary candidate assignment -- built specifically so
-``optimize.py`` (the MILP path, not yet written) can call the identical
+``optimize.py`` (the MILP path) can call the identical
 function section 5.5 requires ("the heuristic must use the same
 feasibility and objective functions as the MILP path so the two backends
 are directly comparable"). Everything here is pure: no network I/O, and
@@ -27,6 +27,11 @@ from one). `_repair()` deliberately does **not** consult it at all; see
 that function's own docstring for why a live (C5) violation is never
 deferred for a storage cooldown, mirroring the reserve-override exemption
 already established in `gates.py`/`payback.py`.
+
+**Also implements** ``exclude.storages`` (section 5.3 (C2)): a storage with
+``excluded=True`` is refused as a destination by every move kind, repair
+included, through `topology.storage_accepts_incoming()`. The disks on it
+are pinned by `topology.py`, so it never sends either.
 
 **Descend's neighbourhood is single-disk moves, pairwise swaps, and
 whole-VM co-relocation** (a multi-disk VM's every movable disk moved to
@@ -52,7 +57,7 @@ exists to prove this module correct.
 
 **(C2)'s format-compatibility eligibility rule** (a storage that cannot
 hold a disk's format is fixed `x_{d,s}=0`) is implemented here the same
-way both MILP backends implement it (section 12's phase 13): every
+way the MILP path implements it (section 12's phase 13): every
 candidate-generating function below (`_single_move_trials`,
 `_swap_trials`, `_vm_relocation_trials`, `_best_repair_candidate`'s target
 loop, `best_single_disk_alternative`) excludes a target storage whose
@@ -83,6 +88,7 @@ from proxmox_storage_drs.topology import (
     small_disk_placement_ok,
     small_disks_follow_their_vm,
     storage_accepts_format,
+    storage_accepts_incoming,
     target_format,
 )
 
@@ -132,6 +138,11 @@ class ObjectiveBreakdown:
 
     @property
     def total(self) -> float:
+        """Sum of the seven terms of the objective, in objective units.
+
+        The terms have no common unit. Each is already scaled by its weight in
+        ``objective``. A lower total is a better assignment.
+        """
         return (
             self.imbalance_term
             + self.move_count_term
@@ -144,6 +155,11 @@ class ObjectiveBreakdown:
 
     @property
     def moves(self) -> int:
+        """Number of disks that changed storage, in this assignment.
+
+        Counts every disk that moved, including disks below ``migration.tiny_disk_bytes``.
+        A disk in the same storage as its current storage is not counted.
+        """
         return len(self.moved_disk_keys)
 
 
@@ -223,7 +239,7 @@ def compute_vm_weights(
 ) -> dict[int, float]:
     """Section 5.4's `w_v = max(1, l_v / l_bar)` -- the per-VM weight that
     scales `kappa`'s fragmentation term, shared by `evaluate_assignment()`
-    below and both `optimize.py` MILP backends (AGENTS.md section 5: one
+    below and the `optimize.py` MILP path (AGENTS.md section 5: one
     implementation, every caller).
 
     `l_v = Sum_{d in D: v(d)=v} l_d` is the VM's total load across *every*
@@ -348,6 +364,10 @@ def evaluate_assignment(
     """
 
     def storage_of(disk: Disk) -> str:
+        """Return the storage of ``disk`` in the assignment under evaluation.
+
+        A disk that is not in the assignment keeps its current storage.
+        """
         return assignment.get(disk.key, disk.current_storage)
 
     reserve_statuses: dict[str, ReserveStatus] = {}
@@ -461,6 +481,12 @@ class RejectedCandidate:
 
     @property
     def worse_by(self) -> float:
+        """How much the alternative is worse than the baseline, in objective units.
+
+        This is ``breakdown.total - baseline.total``. A positive value means the
+        alternative has the higher objective, so the baseline wins. The ``explain``
+        report shows this value.
+        """
         return self.breakdown.total - self.baseline.total
 
 
@@ -541,14 +567,18 @@ def _best_repair_candidate(
         if assignment.get(disk.key, disk.current_storage) != worst_id or disk.size_bytes <= 0:
             continue
         for target in group.storages:
-            if target.id == worst_id:
-                continue
+            if target.id == worst_id or not storage_accepts_incoming(target):
+                continue  # an excluded storage (exclude.storages) is never a repair target
             if not storage_accepts_format(target, target_format(disk, target)):
                 continue  # (C2): fixed x_{d,s}=0, not a real repair target
             trial = dict(assignment)
             trial[disk.key] = target.id
 
             def trial_storage_of(d: Disk, _trial: Assignment = trial) -> str:
+                """Return the storage of ``d`` in the trial assignment.
+
+                A disk that is not in the trial assignment keeps its current storage.
+                """
                 return _trial.get(d.key, d.current_storage)
 
             # (C8): a small disk is never a repair on its own -- it frees
@@ -627,6 +657,10 @@ def _repair(
     max_iterations = len(movable) * max(1, len(group.storages)) + 1
 
     def storage_of(disk: Disk) -> str:
+        """Return the storage of ``disk`` in the assignment being repaired.
+
+        A disk that is not in the assignment keeps its current storage.
+        """
         return assignment.get(disk.key, disk.current_storage)
 
     for _ in range(max_iterations):
@@ -691,6 +725,10 @@ def _best_of(
     for trial in trials:
 
         def trial_storage_of(d: Disk, _trial: Assignment = trial) -> str:
+            """Return the storage of ``d`` in the trial assignment.
+
+            A disk that is not in the trial assignment keeps its current storage.
+            """
             return _trial.get(d.key, d.current_storage)
 
         if not small_disks_follow_their_vm(group, trial_storage_of, tiny_disk_bytes):
@@ -719,7 +757,11 @@ def _single_move_trials(
     for disk in movable:
         here = assignment[disk.key]
         for target in storages:
-            if target.id == here or target.id in cooldown_storages:
+            if (
+                target.id == here
+                or target.id in cooldown_storages
+                or not storage_accepts_incoming(target)
+            ):
                 continue
             if not storage_accepts_format(target, target_format(disk, target)):
                 continue  # (C2): fixed x_{d,s}=0
@@ -742,6 +784,11 @@ def _swap_trials(
                 continue  # no-op swap
             if here_a in cooldown_storages or here_b in cooldown_storages:
                 continue  # the swap would send a disk to each of these
+            if not (
+                storage_accepts_incoming(storages_by_id[here_a])
+                and storage_accepts_incoming(storages_by_id[here_b])
+            ):
+                continue  # exclude.storages: same two legs
             # (C2): a swap sends disk_a to here_b and disk_b to here_a -- both legs
             # must be format-eligible, or this pair fixes x_{d,s}=0 for it.
             if not storage_accepts_format(
@@ -766,7 +813,11 @@ def _vm_relocation_trials(
     for disks in vm_relocation_candidates.values():
         here = {assignment[d.key] for d in disks}
         for target in storages:
-            if here == {target.id} or target.id in cooldown_storages:
+            if (
+                here == {target.id}
+                or target.id in cooldown_storages
+                or not storage_accepts_incoming(target)
+            ):
                 continue
             # (C2): every disk in the VM must be format-eligible for the shared target.
             if any(

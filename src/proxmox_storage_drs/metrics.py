@@ -34,7 +34,9 @@ class _ResponseLike(Protocol):
     status_code: int
     text: str
 
-    def json(self) -> Any: ...  # noqa: E704 - black's one-line Protocol body style
+    def json(self) -> Any:
+        """Return the response body decoded from JSON."""
+        ...  # noqa: E704 - black's one-line Protocol body style
 
 
 class _SessionLike(Protocol):
@@ -52,7 +54,14 @@ class _SessionLike(Protocol):
         timeout: float,
         auth: object,
         headers: dict[str, str],
-    ) -> _ResponseLike: ...  # noqa: E704
+    ) -> _ResponseLike:
+        """Send a GET request and return the response.
+
+        ``timeout`` is in seconds. ``params`` become the query string. The
+        method matches ``requests.Session.get`` for the arguments this module
+        uses.
+        """
+        ...  # noqa: E704
 
 
 # The six raw quantities of section 3.4, keyed by the MetricsConfig attribute
@@ -452,6 +461,10 @@ class PrometheusClient:
         self._session = session if session is not None else requests.Session()
 
     def _auth(self) -> tuple[str, str] | None:
+        # A bearer token wins over basic auth: requests applies ``auth`` after
+        # ``headers`` and would overwrite the token's Authorization header.
+        if self._config.bearer_token:
+            return None
         if self._config.username is not None and self._config.password is not None:
             return (self._config.username, self._config.password)
         return None
@@ -605,6 +618,19 @@ class Finding:
 
 @dataclass(frozen=True, slots=True)
 class VerifyMetricsReport:
+    """Result of ``verify-metrics``: what the checks found and measured.
+
+    - ``findings`` (tuple of :class:`Finding`): every check result.
+    - ``sample_series`` (dict): metric name to the labels of one sample series of
+      that metric, used to show the operator a real example.
+    - ``coverage_by_disk`` (dict of :class:`DiskKey` to float): sample coverage of
+      each disk over the decision window, as a fraction from 0 to 1.
+    - ``observed_spacing_seconds`` (float seconds or None): the sample spacing that
+      Prometheus shows. None when no spacing could be measured.
+    - ``missing_disks_by_metric`` (dict): metric name to the ``(vmid, device)``
+      pairs of the disks that lack that metric. The pairs are not truncated.
+    """
+
     findings: tuple[Finding, ...]
     sample_series: dict[str, dict[str, str]]
     coverage_by_disk: dict[DiskKey, float]
@@ -618,6 +644,10 @@ class VerifyMetricsReport:
 
     @property
     def ok(self) -> bool:
+        """True when no finding has level ``error``.
+
+        Findings at level ``info`` or ``warning`` do not make the report fail.
+        """
         return not any(f.level == "error" for f in self.findings)
 
 

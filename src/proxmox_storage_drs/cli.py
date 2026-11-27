@@ -131,11 +131,14 @@ from proxmox_storage_drs.statusfile import (
 )
 from proxmox_storage_drs.timewindow import current_deadline
 from proxmox_storage_drs.topology import (
+    COMPANION_PIN_REASON_PREFIX,
+    SNAPSHOT_PIN_REASON_PREFIX,
     Disk,
     Group,
     Topology,
     build_topology,
     format_disk_id,
+    is_snapshot_pin_reason,
     nonconforming_disks,
 )
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds, parse_duration_seconds
@@ -631,6 +634,10 @@ CommandHandler = Callable[[ResolvedConfig, argparse.Namespace, str], int]
 
 def _make_not_yet_implemented_handler(command: str) -> CommandHandler:
     def handler(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+        """Report that a subcommand is not implemented yet, and return 1.
+
+        The message goes to stderr. The arguments are ignored.
+        """
         del resolved, args, mode
         print(
             f"pve-storage-drs: {command!r} is not implemented yet in this development "
@@ -1136,6 +1143,11 @@ class _VmSplit:
     excess_bytes_after: int
 
     def as_dict(self) -> dict[str, object]:
+        """Return the split figures of this VM as a JSON-ready dict.
+
+        Byte values keep ``bytes`` in their key names. ``cap_bytes`` is the split cap.
+        The peak and excess figures are before and after the plan.
+        """
         return {
             "vmid": self.vmid,
             "cap_bytes": self.cap_bytes,
@@ -1264,9 +1276,15 @@ class _UnfixableShortfall:
 
     @property
     def total_bytes(self) -> int:
+        """Sum of the pinned bytes over every storage, in bytes."""
         return sum(self.by_storage.values())
 
     def as_dict(self) -> dict[str, object]:
+        """Return the pinned-disk summary as a JSON-ready dict.
+
+        Byte values are in bytes. The keys are ``total_bytes``, ``by_storage``, ``proven``
+        and the pinned blockers.
+        """
         return {
             "total_bytes": self.total_bytes,
             "by_storage": dict(self.by_storage),
@@ -1857,9 +1875,9 @@ def _pin_action_hint(reason: str | None) -> str | None:
     "excluded by tag" pin carries no hint either)."""
     if reason is None:
         return None
-    if reason.startswith("snapshots present ("):
+    if reason.startswith(SNAPSHOT_PIN_REASON_PREFIX):
         return "clear snapshots to unblock"
-    if reason.startswith("unreferenced companion volume"):
+    if reason.startswith(COMPANION_PIN_REASON_PREFIX):
         return "check that volume and, if it is a leftover copy, delete it by hand to unblock"
     if reason.startswith("cooldown:"):
         return "re-check next run"
@@ -2661,6 +2679,75 @@ def _log_load_digest(group: Group, group_load: GroupLoad) -> None:
     )
 
 
+def _log_snapshot_pins(group: Group, load_by_key: Mapping[str, float] | None) -> None:
+    """Section 3.7 point 3, "Complain, every run, at WARN": one ``snapshot_pinned`` record per VM
+    with a disk pinned by a real snapshot or an unreferenced companion volume (pinned bytes,
+    pinned load, the reason), then one ``snapshot_pinned_total`` record for the group. Silent
+    when nothing is pinned this way. ``load_by_key`` is ``None`` when the load model failed; the
+    load fields are then ``None`` and the byte fields still report."""
+
+    def load_of(disks: list[Disk]) -> float | None:
+        """Sum the load of ``disks``, in the unit of ``load_by_key``.
+
+        Returns None when ``load_by_key`` is None, which means the load model failed.
+        A disk without a load entry counts as 0.0.
+        """
+        if load_by_key is None:
+            return None
+        return sum(load_by_key.get(d.key, 0.0) for d in disks)
+
+    by_vmid: dict[int, list[Disk]] = {}
+    for disk in group.disks:
+        if is_snapshot_pin_reason(disk.pinned_reason):
+            by_vmid.setdefault(disk.vmid, []).append(disk)
+    if not by_vmid:
+        return
+    for vmid, disks in sorted(by_vmid.items()):
+        reason = disks[0].pinned_reason
+        pinned_bytes = sum(d.size_bytes for d in disks)
+        pinned_load = load_of(disks)
+        logger.warning(
+            "group %s: VM %s(%d) is pinned, %s, %d disks, %s%s -- clear the cause to unblock "
+            "balancing",
+            group.name,
+            disks[0].vm_name,
+            vmid,
+            reason,
+            len(disks),
+            format_bytes(pinned_bytes),
+            "" if pinned_load is None else f", load {pinned_load:.3f}",
+            extra={
+                "event": "snapshot_pinned",
+                "group": group.name,
+                "vmid": vmid,
+                "vm_name": disks[0].vm_name,
+                "reason": reason,
+                "disks": [d.key for d in disks],
+                "pinned_bytes": pinned_bytes,
+                "pinned_load": pinned_load,
+            },
+        )
+    all_disks = [d for ds in by_vmid.values() for d in ds]
+    total_bytes = sum(d.size_bytes for d in all_disks)
+    total_load = load_of(all_disks)
+    logger.warning(
+        "group %s: %d VMs pinned by snapshots or companion volumes, %d disks, %s%s",
+        group.name,
+        len(by_vmid),
+        len(all_disks),
+        format_bytes(total_bytes),
+        "" if total_load is None else f", load {total_load:.3f}",
+        extra={
+            "event": "snapshot_pinned_total",
+            "group": group.name,
+            "vms": len(by_vmid),
+            "disks": len(all_disks),
+            "pinned_bytes": total_bytes,
+            "pinned_load": total_load,
+        },
+    )
+
+
 def _log_gate_decision(group: Group, decision: GateDecision, gates: GatesConfig) -> None:
     """Section 2.3's ``gate_decision``: the computed values *and* the
     thresholds they were compared against. Section 2.1's own wording --
@@ -2796,9 +2883,11 @@ def _plan_group(
             exc,
             extra={"event": "load_unavailable", "group": group.name},
         )
+        _log_snapshot_pins(group, None)
         return _GroupPlan(load_error=str(exc))
 
     _log_load_digest(group, group_load)
+    _log_snapshot_pins(group, group_load.load_by_disk_key())
     reserve_statuses: dict[str, ReserveStatus] = {
         storage.id: compute_reserve_status(storage, group.disks) for storage in group.storages
     }
@@ -3117,10 +3206,20 @@ def _make_inflight_callbacks(
     in real time rather than only once at the end of the run."""
 
     def on_started(upid: str) -> None:
+        """Record the UPID of a new move as in flight, and write the state file.
+
+        ``execute_plan()`` calls this right after it issues a ``move_disk`` task. The
+        state file is written at once, so a crash after this call leaves the UPID on
+        disk for the startup scan.
+        """
         box.value = with_inflight_upid(box.value, upid)
         save_locked_state(lock_handle, box.value)
 
     def on_finished(upid: str) -> None:
+        """Remove the UPID of a finished move from the in-flight list, and write the state file.
+
+        ``execute_plan()`` calls this when the move task ends.
+        """
         box.value = without_inflight_upid(box.value, upid)
         save_locked_state(lock_handle, box.value)
 
@@ -4163,6 +4262,15 @@ def _run_handler(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the command line and return the exit status.
+
+    ``argv`` is the argument list. None reads ``sys.argv``. The return values are:
+
+    - 0: success, or ``--version`` was asked for.
+    - 1: the config could not be loaded, or the command failed.
+    - 2: a usage error, such as no subcommand, or ``--replay`` with a mode other than
+      ``dry-run``.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
 

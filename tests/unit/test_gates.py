@@ -600,6 +600,21 @@ def test_split_gate_ignores_a_target_that_would_itself_fall_short() -> None:
     assert split_gate(group, ObjectiveConfig()) is None
 
 
+def test_split_gate_never_targets_an_excluded_storage() -> None:
+    """exclude.storages: the only storages a split could use are excluded, so the gate stays
+    shut; with one of them open again it opens."""
+    group = _split_group()
+    closed = tuple(
+        dataclasses.replace(s, excluded=True) if s.id != "st-a" else s for s in group.storages
+    )
+    assert split_gate(dataclasses.replace(group, storages=closed), ObjectiveConfig()) is None
+    reopened = tuple(
+        dataclasses.replace(s, excluded=False) if s.id == "st-b" else s for s in closed
+    )
+    opened = split_gate(dataclasses.replace(group, storages=reopened), ObjectiveConfig())
+    assert opened is not None and opened[0] == 701
+
+
 def test_split_gate_respects_format_eligibility() -> None:
     group = _split_group()
     qcow_only = tuple(

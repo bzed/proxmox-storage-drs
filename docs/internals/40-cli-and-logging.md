@@ -176,6 +176,13 @@ Two constraints apply to the content of `extra=`.
   `jq 'select(.event=="move_started")'` is a supported way to use this tool.
   `test_logging_setup.py` parses `src/` with `ast` to prove that no call site
   forgets the name.
+- **Snapshot pins log at WARNING.** `cli._log_snapshot_pins()` runs inside
+  `_plan_group()`, so `plan`, `explain` and `apply` share it. It emits one
+  `snapshot_pinned` record per VM and one `snapshot_pinned_total` record per
+  group. It selects the disks with `topology.is_snapshot_pin_reason()`. The
+  action hint in `show-load` uses the same two prefix constants. The function
+  runs again on a re-plan inside `apply`. It also runs when the load model
+  fails, with `pinned_load` set to `null`.
 - `extra=` must not shadow a standard `LogRecord` attribute. `{"message":
   ...}` raises `KeyError: "Attempt to overwrite 'message' in LogRecord"` at
   run time. For this reason, the payload key of the `deadlock` record is

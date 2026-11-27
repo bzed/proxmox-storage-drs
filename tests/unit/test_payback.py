@@ -4,10 +4,9 @@
 
 Cross-checked against IMPLEMENTATION_PLAN.md section 14.5's worked
 example exactly: the two-move plan's per-move durations/costs, the
-accepted ratio (~7344 at the 365d default horizon, with the delta*F and
-kappa*A terms folded in per sections 12 and 5.4/7.2's affinity-payback
-fix), and the separate failed-payback example (a 4 TiB archive disk,
-ratio 7.5, rejected).
+accepted ratio (~8640 at the 365d default horizon, with the delta*F term in
+absolute TiB and the kappa*A term folded in per sections 5.3 (C7) and 5.4/7.2), and the
+separate failed-payback example (a 4 TiB archive disk, ratio 7.5, rejected).
 """
 
 from __future__ import annotations
@@ -98,13 +97,15 @@ def test_section_14_5_move_durations_and_costs_match_exactly() -> None:
     assert total_cost == pytest.approx(26214.4, abs=0.1)  # plan: "26 214 load*s"
 
 
-def test_section_14_5_two_move_plan_is_accepted_at_ratio_7344() -> None:
+def test_section_14_5_two_move_plan_is_accepted_at_ratio_8640() -> None:
     """Reworked by section 5.4/7.2's affinity-payback fix: the plan splits
     VM 101 (both disks on san-a before, scsi1 moves to san-b), so
     ``kappa*(A_before - A_after)`` -- A_before=0 (together), A_after=w_101
     (one extra storage), w_101=max(1, 4.0/(7.4/5))=2.7027 -- now enters the
     benefit as a negative term the split must pay for out of its alpha
-    gain, lowering the pre-section-12 ratio from ~8970 to ~7344."""
+    gain. ``F`` is in absolute TiB (section 5.3 (C7), 14/3 before and 2/3
+    after), which gives the ratio ~8640 that fc-tier1.expected.json records
+    and that the manual shows."""
     san_a = no_saferemove_storage("san-a")
     moves = [
         move("102:scsi0", "san-a", "san-c", 1.5),
@@ -120,19 +121,19 @@ def test_section_14_5_two_move_plan_is_accepted_at_ratio_7344() -> None:
         8.066667,
         1.533333,
         0.5,
-        2.153846,
-        0.307692,
+        4.666667,
+        0.666667,
         31_536_000.0,
         kappa_vm_affinity=0.5,
         affinity_debt_before=0.0,
         affinity_debt_after=20 / 7.4,  # w_101 = 4.0 / (7.4/5), section 14.3
     )
-    assert benefit == pytest.approx(192527280.0, rel=1e-4)  # plan: "~1.93e8"
+    assert benefit == pytest.approx(226490984.0, rel=1e-6)  # plan: "~2.26e8"
 
     result = evaluate_plan_payback(costs, benefit, SECTION_14_5_MIGRATION.payback_ratio, 0, 0)
 
     assert result.total_cost_load_seconds == pytest.approx(26214.4, abs=0.1)
-    assert result.ratio == pytest.approx(7344.0, abs=1.0)
+    assert result.ratio == pytest.approx(8640.0, abs=1.0)
     assert result.aggregate_ok
     assert result.accepted
     assert result.rejected_moves == ()

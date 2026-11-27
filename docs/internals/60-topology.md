@@ -123,8 +123,15 @@ pre-move re-validation, `execute.py`'s `_preflight()` (see
 
 `_pin_reason()` checks each disk in the fixed order section 5.3 (C2) lists its
 conditions. The first condition is config exclusion (VM-level, then
-`exclude.disks`). The second is a real snapshot or an unreferenced companion
+`exclude.disks`, then `exclude.storages`). A disk on an excluded storage gets the
+reason `excluded by config (exclude.storages)`. The `Storage` also carries
+`excluded=True`. The function `storage_accepts_incoming()` reads that flag.
+The heuristic, both MILP backends and the split gate call that one function.
+They refuse the storage as a destination, repair moves included. The storage
+keeps its disks, its bytes and its load in every sum. The second is a real snapshot or an unreferenced companion
 volume (section 3.7). `_disk_snapshot_or_orphan_reason` handles it.
+The pin is unconditional. The config loader refuses
+`exclude.skip_vms_with_snapshots: false`, because PVE rejects the move.
 `GET .../snapshot` always returns a `"current"` entry. A live cluster
 confirmed this. `_fetch_vm()` drops that
 entry, so the function only sees real snapshots. For an
@@ -373,7 +380,7 @@ not only the current one. `storage_of=` overrides which storage each disk
 is treated as sitting on. `pve-storage-drs show-load`'s reporting needs
 the same formula against the current assignment today. Both call the same
 function (AGENTS.md section 5). `show-load`'s use of it is already
-exercised end-to-end (see `cli.py`'s `_render_show_load_human`/`_json`).
+exercised end-to-end (see `cli.py`'s `_render_show_load_human`/`_render_show_load_json`).
 `optimize.py`'s MILP path needs the same (C4)/(C5) invariant. It cannot
 call a Python function from inside a solver's constraint system. See
 `91-optimize.md` for how it encodes the equivalent bound directly as scaled
@@ -400,7 +407,7 @@ Both rules need the cluster inventory that `config.py` never has. A *null*
 `ResolvedFreeSpace`. The value is the pair plus two display-only strings.
 Each string names the level its half came from (global, storage entry,
 `pattern /re/`, percent-converted). The strings are carried on
-`Storage.free_space_soft_source`/`_hard_source` for `verify-storages`.
+`Storage.free_space_soft_source`/`Storage.free_space_hard_source` for `verify-storages`.
 Nothing else reads them. By the time `compute_reserve_status()` reads
 `storage.free_space_soft_bytes`, both values are plain, already-resolved byte
 constants. The same holds when `schedule.transient_invariant_ok()` reads

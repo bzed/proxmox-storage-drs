@@ -161,7 +161,7 @@ String or `null`, default `null`.
 A bearer token for a Prometheus instance behind an auth proxy that expects
 one. Do not set it together with `prometheus.username`
 and `prometheus.password`. When all are set, this version sends the basic auth
-credentials and does **not** send the token (a known defect, issue #2).
+credentials. The tool sends the token and ignores the basic auth credentials.
 
 ## `metrics` — Telegraf/InfluxDB name mapping
 
@@ -441,9 +441,8 @@ String, required.
 
 The name of the group. A disk may only move between storages in its own
 group. The tool does not balance across groups
-(`IMPLEMENTATION_PLAN.md` section 5). The name must be unique. This version
-does not check this: a duplicate name silently replaces the earlier group (a
-known defect, issue #3).
+(`IMPLEMENTATION_PLAN.md` section 5). The name must be unique. The tool refuses
+a configuration with two groups of the same name and names the duplicate.
 
 ### `groups[].storages[].id`
 
@@ -1458,10 +1457,19 @@ Individual disks excluded regardless of their VM.
 
 List of storage ids, default `[]`.
 
-Intended meaning: storages that no disk moves onto or off. **This version does
-not apply the key** (a known defect, issue #1): plans still move disks onto and
-off the listed storages. To keep a storage out of balancing, remove it from
-`groups`.
+Storages that no disk moves onto or off.
+
+The tool pins every disk on a listed storage. The tool never uses a listed
+storage as the target of a move, and it never uses one as the target of a
+repair move. The storage still counts in the model. Its disks keep their size
+and load in every sum. Its snapshot reserve and its free space requirement
+stay in force. The tool reports a shortfall on a listed storage, but it does
+not repair that shortfall, because it does not move anything away.
+
+Set the key too high, and the other storages must carry all the balancing. Set
+it too low, and the tool moves disks onto or off a storage you want to keep
+still. To take a storage out of the model, remove it from `groups` instead. A
+storage outside `groups` does not count in the balance at all.
 
 ### `exclude.tags`
 
@@ -1471,12 +1479,12 @@ A VM carrying any of these tags opts out entirely.
 
 ### `exclude.skip_vms_with_snapshots`
 
-Boolean, default `true`.
+Boolean, default `true`, and `true` is the only accepted value.
 
-**The key has no effect in this version** (issue #5). The tool pins every disk
-with a snapshot or an unreferenced companion volume, whatever the value. PVE
-rejects `move_disk delete=1` on a snapshotted volume in any case. Keep this
-`true`.
+The tool pins every disk of a VM that has a snapshot. It also pins a disk with
+an unreferenced companion volume. PVE rejects a disk move for such a VM, so no
+setting can make the move work. The tool refuses `false` at load time with an
+error message. Remove the key, or set it to `true`.
 
 ### `exclude.stopped`
 
@@ -1548,7 +1556,7 @@ every group evaluates as if the tool had never balanced it before (see
 
 ## `forecast` — placing disks for the load they will have
 
-See `IMPLEMENTATION_PLAN.md` sections 10 and 12.1 and `proxmox_storage_drs/forecast.py`.
+The `forecast` section sets the model that predicts each disk's load for the next placement. The default model, `quantile`, uses the percentile set by `window.quantile` (p95 by default) over the last `window.lookback`. It needs no fitting and no extra history. The model `holt_winters` predicts that same percentile over the next `window.lookback`, so a disk with a rising load or a daily peak is placed for what it will do. `holt_winters` needs `2 × seasonal_periods × metrics.step` of history, which is 48 hours at the defaults. The tool uses it for a group only if a backtest on that group's recent past shows that it beats `quantile`. (Plan sections 10 and 12.1 give the derivation.)
 
 ### `forecast.model`
 

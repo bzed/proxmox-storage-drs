@@ -142,6 +142,12 @@ class Backtest:
 
     @property
     def passed(self) -> bool:
+        """True when Holt-Winters was fitted and its error is at most the baseline error.
+
+        The errors are absolute errors of the predicted p95 over the last window.
+        ``hw_error`` is None when Holt-Winters could not be fitted. Then the result is
+        False.
+        """
         return self.hw_error is not None and self.hw_error <= self.baseline_error
 
 
@@ -239,6 +245,12 @@ class ForecastReport:
     disks_kept: int
 
     def as_dict(self) -> dict[str, Any]:
+        """Return the report as a JSON-ready dict.
+
+        The keys are ``model``, ``used``, ``backtest_error``, ``baseline_error``,
+        ``disks_scaled`` and ``disks_kept``. The two error values are floats, or None
+        when no backtest ran.
+        """
         return {
             "model": self.model,
             "used": self.used,

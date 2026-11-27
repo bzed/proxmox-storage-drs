@@ -964,3 +964,34 @@ def test_verify_metrics_spacing_disagreement_is_error() -> None:
     report = verify_metrics(client, metrics, window)
     assert not report.ok
     assert any("disagrees" in f.message for f in report.findings)
+
+
+def test_bearer_token_wins_over_basic_auth_on_the_wire() -> None:
+    """requests applies ``auth`` after ``headers``; with both configured the
+    Authorization header must still carry the bearer token (issue #2)."""
+    import requests
+
+    prepared: list[requests.PreparedRequest] = []
+
+    class PreparingSession:
+        def get(
+            self,
+            url: str,
+            params: dict[str, str],
+            timeout: float,
+            auth: Any,
+            headers: dict[str, str],
+        ) -> Any:
+            del timeout
+            request = requests.Request("GET", url, params=params, auth=auth, headers=headers)
+            prepared.append(requests.Session().prepare_request(request))
+            return success({"result": []})
+
+    cfg = replace(PROM_CONFIG, username="u", password="p", bearer_token="TOKEN")
+    PrometheusClient(cfg, session=PreparingSession()).instant_query("up")
+    assert prepared[0].headers["Authorization"] == "Bearer TOKEN"
+
+
+def test_basic_auth_is_sent_without_bearer_token() -> None:
+    client = PrometheusClient(replace(PROM_CONFIG, username="u", password="p"))
+    assert client._auth() == ("u", "p")
