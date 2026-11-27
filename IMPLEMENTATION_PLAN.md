@@ -1107,9 +1107,10 @@ VM shut down (out of scope — this tool never stops a VM, §1). So the policy i
    alongside the actual one, so a stubborn 40% spread is attributable to snapshots rather than
    looking like a broken solver.
 
-`exclude.skip_vms_with_snapshots` stays as a knob but its `false` setting does not make such moves
-work — it merely stops pre-filtering them, and PVE will reject them at the API. Keep it `true`; the
-pre-flight check of §9.3 runs regardless.
+`exclude.skip_vms_with_snapshots` survives only so a config that spells it out still loads. `false`
+is a §11.1 load-time error, exactly like `exclude.stopped: false`: PVE rejects a disk move for a VM
+that has snapshots, so no setting could make such moves work, and a knob that promises it would be
+silently ignored. The pinning is unconditional; the pre-flight check of §9.3 runs regardless.
 
 ### 3.8 Disks with an unapplied pending change are excluded
 
@@ -1146,7 +1147,7 @@ So, exactly like §3.7's snapshot handling:
 3. **Re-check immediately before issuing the move** (§9.2's step 6, below), not only at planning
    time: an operator can queue a pending change in the PVE UI in the gap between `plan` and
    `apply`/`auto` issuing the move, exactly as a lock (§9.3) or a new snapshot (§3.7) can.
-4. **No knob disables this.** Unlike `exclude.skip_vms_with_snapshots`, there is no configuration
+4. **No knob disables this.** Like the snapshot pinning of §3.7 (whose knob accepts only `true`), there is no configuration
    escape hatch — a pending change is not a policy preference to override, it is PVE leaving a
    config key referring to state that would become wrong the moment the disk moves.
 
@@ -3306,6 +3307,8 @@ misconfigured balancer moving production disks is worse than one that refuses to
 | Rule | Rationale |
 |---|---|
 | `schema_version` major matches | Forward compatibility |
+| `groups[].name` unique | Topology is keyed by name; a duplicate would silently replace the earlier group and hide its storages from the uniqueness check |
+| `exclude.skip_vms_with_snapshots` is `true` (`false` refused) | PVE rejects moving the disks of a VM with snapshots; no mode exists that would honour `false` |
 | Every group non-empty, ≥ 2 storages **after pattern expansion** (§11.4) | A one-storage group has nothing to balance; with patterns the count that matters is storages matched, not entries written |
 | **No storage appears in two groups**, after pattern expansion | A disk's group would be ambiguous; a pattern matching a storage another group also names is the same defect |
 | Storage ids exist in the cluster; every `/…/` pattern matches at least one storage (§11.4) | Catches typos before they silently exclude disks or silently shrink a group |

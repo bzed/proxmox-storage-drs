@@ -125,6 +125,8 @@ pre-move re-validation, `execute.py`'s `_preflight()` (see
 conditions. The first condition is config exclusion (VM-level, then
 `exclude.disks`). The second is a real snapshot or an unreferenced companion
 volume (section 3.7). `_disk_snapshot_or_orphan_reason` handles it.
+The pin is unconditional. The config loader refuses
+`exclude.skip_vms_with_snapshots: false`, because PVE rejects the move.
 `GET .../snapshot` always returns a `"current"` entry. A live cluster
 confirmed this. `_fetch_vm()` drops that
 entry, so the function only sees real snapshots. For an

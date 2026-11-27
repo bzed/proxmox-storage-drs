@@ -161,7 +161,7 @@ String or `null`, default `null`.
 A bearer token for a Prometheus instance behind an auth proxy that expects
 one. Do not set it together with `prometheus.username`
 and `prometheus.password`. When all are set, this version sends the basic auth
-credentials and does **not** send the token (a known defect, issue #2).
+credentials. The tool sends the token and ignores the basic auth credentials.
 
 ## `metrics` — Telegraf/InfluxDB name mapping
 
@@ -441,9 +441,8 @@ String, required.
 
 The name of the group. A disk may only move between storages in its own
 group. The tool does not balance across groups
-(`IMPLEMENTATION_PLAN.md` section 5). The name must be unique. This version
-does not check this: a duplicate name silently replaces the earlier group (a
-known defect, issue #3).
+(`IMPLEMENTATION_PLAN.md` section 5). The name must be unique. The tool refuses
+a configuration with two groups of the same name and names the duplicate.
 
 ### `groups[].storages[].id`
 
@@ -1471,12 +1470,12 @@ A VM carrying any of these tags opts out entirely.
 
 ### `exclude.skip_vms_with_snapshots`
 
-Boolean, default `true`.
+Boolean, default `true`, and `true` is the only accepted value.
 
-**The key has no effect in this version** (issue #5). The tool pins every disk
-with a snapshot or an unreferenced companion volume, whatever the value. PVE
-rejects `move_disk delete=1` on a snapshotted volume in any case. Keep this
-`true`.
+The tool pins every disk of a VM that has a snapshot. It also pins a disk with
+an unreferenced companion volume. PVE rejects a disk move for such a VM, so no
+setting can make the move work. The tool refuses `false` at load time with an
+error message. Remove the key, or set it to `true`.
 
 ### `exclude.stopped`
 
