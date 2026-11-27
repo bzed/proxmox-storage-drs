@@ -194,7 +194,8 @@ passed `migration.max_single_move_duration` at planning time. There is no
 separate timeout for the task loop itself. The function then polls the
 source's own content listing and the VM's lock together. It does so only
 when `execution.source_release.wait` is true and the source actually
-`saferemove`s. The bound is `execution.source_release.timeout_seconds`.
+`saferemove`s. The bound is the config key `execution.source_release.timeout` (default `48h`).
+The loader stores it in `SourceReleaseConfig.timeout_seconds`.
 Hitting that bound is not a failure. It is `"draining"`: the mirror is
 done, the wipe is still running. The next run will see the storage as it
 actually is.
