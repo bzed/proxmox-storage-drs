@@ -72,7 +72,7 @@ help:
 	@echo "docs-check assert every generated document matches its Markdown"
 	@echo "site       build the GitHub Pages site (needs mkdocs-material, pip)"
 	@echo "deb        build the Debian package with dpkg-buildpackage"
-	@echo "check      fmt-check + lint + typecheck + test + fixtures + pdf-check"
+	@echo "check      fmt-check + lint + typecheck + test + fixtures + corpus-check + docs-check (docs-check covers the PDFs and manpage stamps)"
 
 $(VENV)/bin/activate:
 	python3 -m venv $(VENV)

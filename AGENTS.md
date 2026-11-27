@@ -81,7 +81,7 @@ Run the formatter before the linter, always. `make fmt lint` does that in the ri
 ## 2. The loop — never commit without running it
 
 ```sh
-make check          # fmt-check + lint + typecheck + test-with-coverage + fixtures + pdf-check
+make check          # fmt-check + lint + typecheck + test + fixtures + corpus-check + docs-check (docs-check covers the PDFs and manpage stamps)
 ```
 
 `make check` is what CI runs and what you run before every commit. It must be green.
