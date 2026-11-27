@@ -44,8 +44,9 @@ placement does. A move that piles a large VM back onto one storage pays for it
 out of its other gains. A split is *not* a repair. A split gets no exemption
 of its own.
 
-`H` is `migration.payback_horizon_seconds` (default `365d`, converted to
-seconds). `H` is the length of time the plan's improvement is assumed to keep
+`H` is set by the config key `migration.payback_horizon` (default `365d`).
+The loader converts it to seconds and stores it in
+`MigrationConfig.payback_horizon_seconds`. The formula uses seconds. `H` is the length of time the plan's improvement is assumed to keep
 paying off.
 
 Both sides of the payback ratio end up in the same **load-seconds** unit.
@@ -59,7 +60,7 @@ quantity, section 5.3 (C7)). It takes `heuristic.raw_affinity_debt()` values
 (A, the raw, `w_v`-weighted but not `kappa`-scaled affinity debt, section
 5.4). It also takes `objective.alpha_spread`/`delta_capacity_spread`/
 `kappa_vm_affinity` as explicit weight parameters. The function multiplies the
-weighted sum by `migration.payback_horizon_seconds`.
+weighted sum by `payback_horizon_seconds` (`H`, in seconds).
 
 **Never** pass `ObjectiveBreakdown.imbalance_term`/`.capacity_spread_term`/
 `.fragmentation_term`. Those are the same quantities already scaled by

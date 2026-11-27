@@ -380,7 +380,7 @@ not only the current one. `storage_of=` overrides which storage each disk
 is treated as sitting on. `pve-storage-drs show-load`'s reporting needs
 the same formula against the current assignment today. Both call the same
 function (AGENTS.md section 5). `show-load`'s use of it is already
-exercised end-to-end (see `cli.py`'s `_render_show_load_human`/`_json`).
+exercised end-to-end (see `cli.py`'s `_render_show_load_human`/`_render_show_load_json`).
 `optimize.py`'s MILP path needs the same (C4)/(C5) invariant. It cannot
 call a Python function from inside a solver's constraint system. See
 `91-optimize.md` for how it encodes the equivalent bound directly as scaled
@@ -407,7 +407,7 @@ Both rules need the cluster inventory that `config.py` never has. A *null*
 `ResolvedFreeSpace`. The value is the pair plus two display-only strings.
 Each string names the level its half came from (global, storage entry,
 `pattern /re/`, percent-converted). The strings are carried on
-`Storage.free_space_soft_source`/`_hard_source` for `verify-storages`.
+`Storage.free_space_soft_source`/`Storage.free_space_hard_source` for `verify-storages`.
 Nothing else reads them. By the time `compute_reserve_status()` reads
 `storage.free_space_soft_bytes`, both values are plain, already-resolved byte
 constants. The same holds when `schedule.transient_invariant_ok()` reads

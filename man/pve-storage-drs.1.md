@@ -307,7 +307,7 @@ covers the load model, the optimization problem and the migration ordering rules
 
 <https://github.com/bzed/proxmox-storage-drs> is the home of the project. Send bug reports
 there. The project welcomes diagnostic bundles collected with **collect-testdata** as pull
-requests. The terms are in *tests/corpus/README.md*.
+requests. The terms are in the manual chapter *26-collect-testdata-and-replay.md*, section *Submission terms*.
 
 **pvesm**(1), **qm**(1), **pvecm**(1).
 

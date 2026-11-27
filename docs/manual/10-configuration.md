@@ -1556,7 +1556,7 @@ every group evaluates as if the tool had never balanced it before (see
 
 ## `forecast` — placing disks for the load they will have
 
-See `IMPLEMENTATION_PLAN.md` sections 10 and 12.1 and `proxmox_storage_drs/forecast.py`.
+The `forecast` section sets the model that predicts each disk's load for the next placement. The default model, `quantile`, uses the percentile set by `window.quantile` (p95 by default) over the last `window.lookback`. It needs no fitting and no extra history. The model `holt_winters` predicts that same percentile over the next `window.lookback`, so a disk with a rising load or a daily peak is placed for what it will do. `holt_winters` needs `2 × seasonal_periods × metrics.step` of history, which is 48 hours at the defaults. The tool uses it for a group only if a backtest on that group's recent past shows that it beats `quantile`. (Plan sections 10 and 12.1 give the derivation.)
 
 ### `forecast.model`
 

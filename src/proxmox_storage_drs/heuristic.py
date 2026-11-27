@@ -9,7 +9,7 @@ swaps until nothing improves it or ``heuristic_iterations`` is reached.
 
 ``evaluate_assignment()`` is the one place the section 5.4 objective is
 computed from an arbitrary candidate assignment -- built specifically so
-``optimize.py`` (the MILP path, not yet written) can call the identical
+``optimize.py`` (the MILP path) can call the identical
 function section 5.5 requires ("the heuristic must use the same
 feasibility and objective functions as the MILP path so the two backends
 are directly comparable"). Everything here is pure: no network I/O, and
@@ -57,7 +57,7 @@ exists to prove this module correct.
 
 **(C2)'s format-compatibility eligibility rule** (a storage that cannot
 hold a disk's format is fixed `x_{d,s}=0`) is implemented here the same
-way both MILP backends implement it (section 12's phase 13): every
+way the MILP path implements it (section 12's phase 13): every
 candidate-generating function below (`_single_move_trials`,
 `_swap_trials`, `_vm_relocation_trials`, `_best_repair_candidate`'s target
 loop, `best_single_disk_alternative`) excludes a target storage whose
@@ -229,7 +229,7 @@ def compute_vm_weights(
 ) -> dict[int, float]:
     """Section 5.4's `w_v = max(1, l_v / l_bar)` -- the per-VM weight that
     scales `kappa`'s fragmentation term, shared by `evaluate_assignment()`
-    below and both `optimize.py` MILP backends (AGENTS.md section 5: one
+    below and the `optimize.py` MILP path (AGENTS.md section 5: one
     implementation, every caller).
 
     `l_v = Sum_{d in D: v(d)=v} l_d` is the VM's total load across *every*
