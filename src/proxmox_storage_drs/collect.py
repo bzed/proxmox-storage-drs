@@ -180,9 +180,9 @@ def estimate_capture(
     # reductions per metric per group, one range query per metric per group
     # -- chunked into `_CHUNK_SECONDS`-sized sub-queries (`_issue_range_chunks`),
     # each a real HTTP request of its own, which this used to leave out: at
-    # the 7 d default that alone made the printed count ~7x below what an
-    # operator sizing the load against a busy Prometheus actually cares
-    # about (X-09).
+    # the 48 h default capture range (support.capture_range: auto) that alone
+    # made the printed count ~7x below what an operator sizing the load
+    # against a busy Prometheus actually cares about (X-09).
     range_chunks = 1 if no_series else max(1, math.ceil(range_seconds / _CHUNK_SECONDS))
     query_count = 3 * _METRICS_PER_DISK + group_count * _METRICS_PER_DISK * (
         1 if no_series else (1 + range_chunks)
