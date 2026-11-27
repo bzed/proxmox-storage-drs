@@ -66,6 +66,11 @@ class MoveCost:
 
     @property
     def duration_seconds(self) -> float:
+        """Total time of one move, in seconds.
+
+        This is the mirror time plus the wipe time: ``duration_mirror_seconds +
+        duration_wipe_seconds``.
+        """
         return self.duration_mirror_seconds + self.duration_wipe_seconds
 
 
@@ -97,15 +102,31 @@ class PaybackResult:
 
     @property
     def total_cost_load_seconds(self) -> float:
+        """Sum of the move costs of the plan, in load-seconds.
+
+        This is the sum of ``cost_load_seconds`` over ``move_costs``. A plan without
+        moves has a total of 0.0.
+        """
         return sum(mc.cost_load_seconds for mc in self.move_costs)
 
     @property
     def ratio(self) -> float:
+        """Benefit of the plan divided by its total move cost. Dimensionless.
+
+        Returns ``inf`` when the total cost is 0. The payback test compares this value
+        with ``migration.payback_ratio``.
+        """
         cost = self.total_cost_load_seconds
         return self.benefit_load_seconds / cost if cost > 0 else float("inf")
 
     @property
     def accepted(self) -> bool:
+        """True when the plan passes the payback test and no single move is rejected.
+
+        The plan passes when ``aggregate_ok`` is True. ``rejected_moves`` lists the
+        moves that break the per-move duration limit. One such move rejects the whole
+        plan, even when ``aggregate_ok`` is True.
+        """
         return self.aggregate_ok and not self.rejected_moves
 
 
@@ -298,6 +319,10 @@ def repair_markers(
     disks_by_key = {d.key: d for d in group.disks}
 
     def storage_of(d: Disk) -> str:
+        """Return the storage of ``d`` in the executed final assignment.
+
+        Falls back to the disk's current storage when the disk is not in the assignment.
+        """
         return executed_final_assignment.get(d.key, d.current_storage)
 
     base = total_shortfall_bytes(group.storages, group.disks, storage_of=storage_of)
@@ -307,6 +332,13 @@ def repair_markers(
         disk = disks_by_key[move.disk_key]
 
         def reverted_storage_of(d: Disk, _disk: Disk = disk) -> str:
+            """Return the storage of ``d`` in the executed final assignment, with one disk
+            reverted.
+
+            The disk ``_disk`` is placed on its current storage. Every other disk keeps its
+            storage in the executed final assignment, or its current storage when it is not
+            in that assignment.
+            """
             if d.key == _disk.key:
                 return _disk.current_storage
             return executed_final_assignment.get(d.key, d.current_storage)

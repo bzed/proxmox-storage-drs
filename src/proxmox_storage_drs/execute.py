@@ -998,6 +998,15 @@ def _execute_one_move(
         orphans: tuple[str, ...] = (),
         always_stop: bool = False,
     ) -> MoveOutcome:
+        """Build the :class:`MoveOutcome` for the move that this function is running.
+
+        - ``status``: one of the status values listed on :class:`MoveOutcome`.
+        - ``detail``: the message the operator reads.
+        - ``upid``: the PVE task id, when a ``move_disk`` task was issued. Otherwise None.
+        - ``orphans``: volumes that the move left behind. They are reported for manual
+          cleanup and are never deleted by the tool.
+        - ``always_stop``: True ends the whole run, not only this group.
+        """
         return MoveOutcome(
             move.disk_key,
             move.from_storage,

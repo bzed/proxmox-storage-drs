@@ -73,6 +73,11 @@ class ReserveStatus:
 
     @property
     def violated(self) -> bool:
+        """True when the reserve is breached, that is when ``shortfall_bytes`` is above 0.
+
+        The shortfall is in bytes. It is rounded up to whole MiB, as the snapshot
+        reserve rule requires.
+        """
         return self.shortfall_bytes > 0
 
 

@@ -196,6 +196,11 @@ def _pinned_of_vmid(group: Group, vmid: int, objective: ObjectiveConfig) -> tupl
 
 
 def cbc_available() -> bool:
+    """True when the ``pulp`` module can be imported.
+
+    This does not check that the CBC binary runs. :func:`_pulp_solve` handles a
+    CBC that cannot run, by returning None.
+    """
     try:
         import pulp  # noqa: F401
     except ImportError:

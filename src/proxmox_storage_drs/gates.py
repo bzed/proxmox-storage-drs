@@ -149,6 +149,10 @@ def split_gate(
                     continue
 
                 def trial(d: Disk, _disk: Disk = disk, _to: str = target.id) -> str:
+                    """Return the storage that ``d`` would have after the trial move.
+
+                    The disk ``_disk`` moves to ``_to``. Every other disk keeps its current storage.
+                    """
                     return _to if d.key == _disk.key else d.current_storage
 
                 if compute_reserve_status(target, group.disks, storage_of=trial).violated:
