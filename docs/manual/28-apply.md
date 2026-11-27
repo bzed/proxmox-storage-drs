@@ -22,10 +22,11 @@ Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the 
   db01(102):scsi0  san-a → san-c  1.50 TiB  [y]es/[n]o skip/[a]ll remaining/[q]uit? n
   1. db01(102):scsi0            san-a → san-c     1.50 TiB   ~2.2h   Δimbalance -4.53   ℓ/z 1.67  → skipped: operator declined
   web01(101):scsi1  san-a → san-b  1.00 TiB  [y]es/[n]o skip/[a]ll remaining/[q]uit? a
-  2. web01(101):scsi1           san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00  → moved: task UPID:... completed OK, source released
-  after: san-a=5.50  san-b=1.70  san-c=0.20
-  spread: 255.4% → 214.9%
-  payback: benefit 3.02e+07 load·s vs cost 1.05e+04 load·s → ratio 2.88e+03 (need 10) ✓
+  2. web01(101):scsi1           san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00  [repair]  → moved: task UPID:... completed OK, source released
+  after: san-a=3.00  san-b=1.70  san-c=2.70
+  spread: 255.4% → 52.7%
+  payback: benefit 2.26e+08 load·s vs cost 2.62e+04 load·s → ratio 8.64e+03 (need 10) ✓
+  overridden: this plan repairs a reserve/free-space shortfall (2.50 TiB → 0 B), exempt from the economic test (section 7.3)
 ```
 
 Each move line is identical to the output of `plan`, up to the `→ status:
