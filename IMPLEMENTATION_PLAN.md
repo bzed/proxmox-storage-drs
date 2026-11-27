@@ -400,6 +400,8 @@ call site cannot silently add an unnameable member.
 | `move_started` | INFO | Immediately after `move_disk` returns, carrying **the UPID**, disk key, source, target, bytes | built — section 2.1 required it; nothing implemented it |
 | `move_finished` | INFO | Per move: UPID, outcome (`moved`/`failed`/`replan_needed`/`draining`), duration | built |
 | `replan` | INFO | Section 9.2's re-plan loop fired: which group, which attempt, why | built |
+| `snapshot_pinned` | WARNING | Per group, per VM pinned by a real snapshot or an unreferenced companion volume (§3.7 point 3): VM, reason, disk keys, `pinned_bytes`, `pinned_load` (`null` when the load model failed). Every `plan`, `explain` and `apply` run, and again on a re-plan | built |
+| `snapshot_pinned_total` | WARNING | Once after the last `snapshot_pinned` of a group: VM count, disk count, `pinned_bytes`, `pinned_load`. Not emitted for a group with no such pin | built |
 | `deadlock` | WARNING | Section 8's scheduler could not order a move set | built |
 | `mode_override` | INFO / WARNING | `--mode` differs from the config; WARNING when it escalates (section 11.3) | as built, correct |
 | `config_warning` | INFO | Configuration advisories (e.g. a `payback_horizon` under 30 days) | built: INFO |
@@ -1100,7 +1102,9 @@ VM shut down (out of scope — this tool never stops a VM, §1). So the policy i
    (`storage:volume`, the first two and a count of the rest): it appears nowhere else the operator
    looks — not in the VM config, not among the plan's disks — and it is usually the source copy a
    move without "delete source" left behind. The tool never deletes it (§9.4); the operator checks
-   it and removes it by hand.
+   it and removes it by hand. The warning is the `snapshot_pinned` event, one per VM, followed by one
+   `snapshot_pinned_total` for the group (§2.3). Only the snapshot and companion-volume pins are
+   reported this way; the other pin reasons keep their place in `show-load` and `explain`.
 4. **Say when the goal has become unreachable.** If pinned load exceeds
    `report.warn_pinned_load_fraction` of a group's total (default 0.25), the residual imbalance may
    be structural rather than a planning failure. Report the best achievable spread *given the pins*
@@ -1349,6 +1353,12 @@ small:
 - `s` cannot hold the disk's format **as it would arrive there**, `φ(d,s)` — the source format,
   or the storage's `enforce_format` when it sets one (§5.3.2);
 - `d` or `v(d)` is excluded by config (`exclude.vmids`, `exclude.disks`, tags, `no-drs`) — also pin;
+- `σ₀(d)` is listed in `exclude.storages` — also pin, and `s` is never a destination when it is
+  listed there: fix `x_{d,s} = 0` for every `d` with `σ₀(d) ≠ s`. The storage still holds its disks,
+  so their bytes and load stay in every sum, its reserve and free-space requirement stay in force
+  (a violated excluded storage reports a shortfall but the tool does not repair it), and it only
+  stops sending and receiving. One predicate, `topology.storage_accepts_incoming()`, serves the
+  heuristic (single, swap, VM-relocation and repair moves), both MILP backends and the split gate;
 - `σ₀(d)` belongs to **no** configured group — such a disk is unmanaged: it is not in any `D`, it is
   pinned where it is, and its bytes count toward `Uˢᵉˣᵗ` of its storage. Report it in `show-load` as
   "ungrouped, not managed" so an unintended omission from `groups` is visible rather than silent;
@@ -2223,7 +2233,7 @@ something different on every group. The objective asks whether a particular move
 cost, which is a question about bytes, priced in the same unit as `γ`.
 
 **Split gate** — the counterpart of the capacity gate for §5.3.3's split rule. It fires when some
-VM `v ∈ V^split` has a movable disk `d` and an eligible storage `s ≠ σ₀(d)` ((C2), not in cooldown)
+VM `v ∈ V^split` has a movable disk `d` and an eligible storage `s ≠ σ₀(d)` ((C2), including `exclude.storages`, not in cooldown)
 such that moving `d` alone to `s`
 
 1. strictly lowers `v`'s peak footprint `max_s F_{v,s}`, and

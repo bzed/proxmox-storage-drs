@@ -127,6 +127,7 @@ from proxmox_storage_drs.topology import (
     is_small_disk,
     larger_vm_disks,
     storage_accepts_format,
+    storage_accepts_incoming,
     target_format,
 )
 
@@ -176,8 +177,8 @@ def _fixed_zero_pairs(
     movable: tuple[Disk, ...], storages: tuple[Storage, ...], cooldown_storages: frozenset[str]
 ) -> Iterable[tuple[Disk, Storage]]:
     """Every ``(disk, storage)`` pair a destination-only rule forbids --
-    section 6's cooldown ("accepts no new incoming moves") or section 5.3
-    (C2)'s format rule ("s cannot hold the disk's format") -- fixed
+    section 6's cooldown ("accepts no new incoming moves"), section 5.3
+    (C2)'s ``exclude.storages`` or its format rule ("s cannot hold the disk's format") -- fixed
     ``x_{d,s}=0`` for by both MILP backends, in both lexicographic stages.
     A disk already resident on a storage is never fixed away from it by
     either rule, so both are skipped once ``s.id == d.current_storage``.
@@ -187,7 +188,11 @@ def _fixed_zero_pairs(
         for s in storages:
             if s.id == d.current_storage:
                 continue
-            if s.id in cooldown_storages or not storage_accepts_format(s, target_format(d, s)):
+            if (
+                s.id in cooldown_storages
+                or not storage_accepts_incoming(s)
+                or not storage_accepts_format(s, target_format(d, s))
+            ):
                 yield d, s
 
 

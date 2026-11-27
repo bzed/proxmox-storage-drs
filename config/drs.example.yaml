@@ -404,8 +404,8 @@ execution:
 exclude:
   vmids: []              # never move disks of these VMs
   disks: []              # e.g. ["101:scsi1"]
-  storages: []           # NOT APPLIED by this version (issue #1): remove the
-                         # storage from groups instead
+  storages: []           # no disk moves onto or off these storages. They still
+                         # count in the model; their disks are pinned
   tags: ["no-drs"]       # PVE VM tags that opt a VM out
   # This key has no effect in this version (issue #5). The tool always pins
   # snapshotted disks (it still counts their bytes and load). PVE rejects

@@ -28,6 +28,11 @@ that function's own docstring for why a live (C5) violation is never
 deferred for a storage cooldown, mirroring the reserve-override exemption
 already established in `gates.py`/`payback.py`.
 
+**Also implements** ``exclude.storages`` (section 5.3 (C2)): a storage with
+``excluded=True`` is refused as a destination by every move kind, repair
+included, through `topology.storage_accepts_incoming()`. The disks on it
+are pinned by `topology.py`, so it never sends either.
+
 **Descend's neighbourhood is single-disk moves, pairwise swaps, and
 whole-VM co-relocation** (a multi-disk VM's every movable disk moved to
 one target storage together, in the same step -- see `_descend()`'s own
@@ -83,6 +88,7 @@ from proxmox_storage_drs.topology import (
     small_disk_placement_ok,
     small_disks_follow_their_vm,
     storage_accepts_format,
+    storage_accepts_incoming,
     target_format,
 )
 
@@ -541,8 +547,8 @@ def _best_repair_candidate(
         if assignment.get(disk.key, disk.current_storage) != worst_id or disk.size_bytes <= 0:
             continue
         for target in group.storages:
-            if target.id == worst_id:
-                continue
+            if target.id == worst_id or not storage_accepts_incoming(target):
+                continue  # an excluded storage (exclude.storages) is never a repair target
             if not storage_accepts_format(target, target_format(disk, target)):
                 continue  # (C2): fixed x_{d,s}=0, not a real repair target
             trial = dict(assignment)
@@ -719,7 +725,11 @@ def _single_move_trials(
     for disk in movable:
         here = assignment[disk.key]
         for target in storages:
-            if target.id == here or target.id in cooldown_storages:
+            if (
+                target.id == here
+                or target.id in cooldown_storages
+                or not storage_accepts_incoming(target)
+            ):
                 continue
             if not storage_accepts_format(target, target_format(disk, target)):
                 continue  # (C2): fixed x_{d,s}=0
@@ -742,6 +752,11 @@ def _swap_trials(
                 continue  # no-op swap
             if here_a in cooldown_storages or here_b in cooldown_storages:
                 continue  # the swap would send a disk to each of these
+            if not (
+                storage_accepts_incoming(storages_by_id[here_a])
+                and storage_accepts_incoming(storages_by_id[here_b])
+            ):
+                continue  # exclude.storages: same two legs
             # (C2): a swap sends disk_a to here_b and disk_b to here_a -- both legs
             # must be format-eligible, or this pair fixes x_{d,s}=0 for it.
             if not storage_accepts_format(
@@ -766,7 +781,11 @@ def _vm_relocation_trials(
     for disks in vm_relocation_candidates.values():
         here = {assignment[d.key] for d in disks}
         for target in storages:
-            if here == {target.id} or target.id in cooldown_storages:
+            if (
+                here == {target.id}
+                or target.id in cooldown_storages
+                or not storage_accepts_incoming(target)
+            ):
                 continue
             # (C2): every disk in the VM must be format-eligible for the shared target.
             if any(

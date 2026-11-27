@@ -131,11 +131,14 @@ from proxmox_storage_drs.statusfile import (
 )
 from proxmox_storage_drs.timewindow import current_deadline
 from proxmox_storage_drs.topology import (
+    COMPANION_PIN_REASON_PREFIX,
+    SNAPSHOT_PIN_REASON_PREFIX,
     Disk,
     Group,
     Topology,
     build_topology,
     format_disk_id,
+    is_snapshot_pin_reason,
     nonconforming_disks,
 )
 from proxmox_storage_drs.units import format_bytes, format_duration_seconds, parse_duration_seconds
@@ -1857,9 +1860,9 @@ def _pin_action_hint(reason: str | None) -> str | None:
     "excluded by tag" pin carries no hint either)."""
     if reason is None:
         return None
-    if reason.startswith("snapshots present ("):
+    if reason.startswith(SNAPSHOT_PIN_REASON_PREFIX):
         return "clear snapshots to unblock"
-    if reason.startswith("unreferenced companion volume"):
+    if reason.startswith(COMPANION_PIN_REASON_PREFIX):
         return "check that volume and, if it is a leftover copy, delete it by hand to unblock"
     if reason.startswith("cooldown:"):
         return "re-check next run"
@@ -2661,6 +2664,70 @@ def _log_load_digest(group: Group, group_load: GroupLoad) -> None:
     )
 
 
+def _log_snapshot_pins(group: Group, load_by_key: Mapping[str, float] | None) -> None:
+    """Section 3.7 point 3, "Complain, every run, at WARN": one ``snapshot_pinned`` record per VM
+    with a disk pinned by a real snapshot or an unreferenced companion volume (pinned bytes,
+    pinned load, the reason), then one ``snapshot_pinned_total`` record for the group. Silent
+    when nothing is pinned this way. ``load_by_key`` is ``None`` when the load model failed; the
+    load fields are then ``None`` and the byte fields still report."""
+
+    def load_of(disks: list[Disk]) -> float | None:
+        if load_by_key is None:
+            return None
+        return sum(load_by_key.get(d.key, 0.0) for d in disks)
+
+    by_vmid: dict[int, list[Disk]] = {}
+    for disk in group.disks:
+        if is_snapshot_pin_reason(disk.pinned_reason):
+            by_vmid.setdefault(disk.vmid, []).append(disk)
+    if not by_vmid:
+        return
+    for vmid, disks in sorted(by_vmid.items()):
+        reason = disks[0].pinned_reason
+        pinned_bytes = sum(d.size_bytes for d in disks)
+        pinned_load = load_of(disks)
+        logger.warning(
+            "group %s: VM %s(%d) is pinned, %s, %d disks, %s%s -- clear the cause to unblock "
+            "balancing",
+            group.name,
+            disks[0].vm_name,
+            vmid,
+            reason,
+            len(disks),
+            format_bytes(pinned_bytes),
+            "" if pinned_load is None else f", load {pinned_load:.3f}",
+            extra={
+                "event": "snapshot_pinned",
+                "group": group.name,
+                "vmid": vmid,
+                "vm_name": disks[0].vm_name,
+                "reason": reason,
+                "disks": [d.key for d in disks],
+                "pinned_bytes": pinned_bytes,
+                "pinned_load": pinned_load,
+            },
+        )
+    all_disks = [d for ds in by_vmid.values() for d in ds]
+    total_bytes = sum(d.size_bytes for d in all_disks)
+    total_load = load_of(all_disks)
+    logger.warning(
+        "group %s: %d VMs pinned by snapshots or companion volumes, %d disks, %s%s",
+        group.name,
+        len(by_vmid),
+        len(all_disks),
+        format_bytes(total_bytes),
+        "" if total_load is None else f", load {total_load:.3f}",
+        extra={
+            "event": "snapshot_pinned_total",
+            "group": group.name,
+            "vms": len(by_vmid),
+            "disks": len(all_disks),
+            "pinned_bytes": total_bytes,
+            "pinned_load": total_load,
+        },
+    )
+
+
 def _log_gate_decision(group: Group, decision: GateDecision, gates: GatesConfig) -> None:
     """Section 2.3's ``gate_decision``: the computed values *and* the
     thresholds they were compared against. Section 2.1's own wording --
@@ -2796,9 +2863,11 @@ def _plan_group(
             exc,
             extra={"event": "load_unavailable", "group": group.name},
         )
+        _log_snapshot_pins(group, None)
         return _GroupPlan(load_error=str(exc))
 
     _log_load_digest(group, group_load)
+    _log_snapshot_pins(group, group_load.load_by_disk_key())
     reserve_statuses: dict[str, ReserveStatus] = {
         storage.id: compute_reserve_status(storage, group.disks) for storage in group.storages
     }

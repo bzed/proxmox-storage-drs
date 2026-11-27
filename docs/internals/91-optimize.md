@@ -271,6 +271,16 @@ and `--json` output both report which backend actually produced each
 group's plan (`solver: cbc (optimal)` / `"solver_backend": "cbc",
 "solver_status": "optimal"`). The distinction is never hidden.
 
+## Excluded storages: never a destination
+
+`_fixed_zero_pairs()` also fixes `x_{d,s} = 0` for every storage `s` with
+`excluded=True` (`exclude.storages`), when `s` is not the current storage of `d`.
+It asks `topology.storage_accepts_incoming()`, the same function the heuristic
+and the split gate ask. The constraint lands in both stages. The disks on an
+excluded storage are pinned by `topology.py`, so no disk leaves either. Unlike
+the cooldown, no repair exemption exists: a repair move never uses an excluded
+storage in the heuristic or in the MILP.
+
 ## The storage cooldown: enforced in both stages (REVIEW.md S-04)
 
 `_cbc_feasibility_constraints()` takes `cooldown_storages`. It adds one

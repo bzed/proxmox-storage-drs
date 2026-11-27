@@ -37,6 +37,7 @@ from proxmox_storage_drs.topology import (
     Group,
     disk_size_on,
     storage_accepts_format,
+    storage_accepts_incoming,
     target_format,
 )
 from proxmox_storage_drs.units import format_bytes
@@ -137,6 +138,7 @@ def split_gate(
                     source is None
                     or target.id == disk.current_storage
                     or target.id in cooldown_storages
+                    or not storage_accepts_incoming(target)
                     or not storage_accepts_format(target, target_format(disk, target))
                 ):
                     continue

@@ -511,6 +511,50 @@ def test_run_heuristic_repair_ignores_storage_cooldown() -> None:
     assert not result.breakdown.reserve_statuses["san-a"].violated
 
 
+# ------------------------------------------------------------- excluded storages
+
+
+def _exclude(group: Group, *ids: str) -> Group:
+    storages = tuple(
+        dataclasses.replace(s, excluded=True) if s.id in ids else s for s in group.storages
+    )
+    return dataclasses.replace(group, storages=storages)
+
+
+def test_descend_never_sends_a_disk_to_an_excluded_storage() -> None:
+    """exclude.storages: no single move, swap or VM relocation lands on san-b, unlike the
+    unconstrained search whose optimum uses it (see the cooldown test above)."""
+    group = _exclude(section_14_group(), "san-b")
+    original_storage = {key: storage for key, _s, _l, storage in _SECTION_14_DISKS}
+
+    result = run_heuristic(group, section_14_loads(), DEFAULT_OBJECTIVE)
+
+    for disk_key, target in result.assignment.items():
+        if target == "san-b":
+            assert original_storage[disk_key] == "san-b"
+    assert result.assignment["101:scsi1"] != "san-b"
+
+
+def test_repair_never_targets_an_excluded_storage() -> None:
+    """Unlike a cooldown, nothing exempts a repair: san-b is the only target that would fix
+    san-a's violation, and it stays untouched."""
+    disks = (
+        make_disk("101:scsi0", 3.0, 3.0, "san-a"),
+        make_disk("102:scsi0", 2.0, 0.0, "san-a", pinned="locked: backup"),
+    )
+    storages = (make_storage("san-a"), make_storage("san-b", capacity_tib=16.0))
+    loads = {"101:scsi0": 3.0, "102:scsi0": 0.0}
+
+    open_result = run_heuristic(
+        Group(name="g", storages=storages, disks=disks), loads, DEFAULT_OBJECTIVE
+    )
+    assert open_result.assignment["101:scsi0"] == "san-b"  # the repair exists...
+
+    group = _exclude(Group(name="g", storages=storages, disks=disks), "san-b")
+    result = run_heuristic(group, loads, DEFAULT_OBJECTIVE)
+    assert result.assignment == {"101:scsi0": "san-a", "102:scsi0": "san-a"}  # ...and is refused
+
+
 # ------------------------------------------------------------------- pinned disks
 
 
