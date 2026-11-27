@@ -830,7 +830,7 @@ def _disk_snapshot_or_orphan_reason(
     or None.
     """
     if real_snapshots:
-        return f"snapshots present ({len(real_snapshots)})"
+        return f"{SNAPSHOT_PIN_REASON_PREFIX}{len(real_snapshots)})"
 
     # Name the volume(s): an orphan does not appear anywhere else the
     # operator looks (not in the VM config, not in the plan's disk list),
@@ -849,7 +849,21 @@ def _disk_snapshot_or_orphan_reason(
     shown = ", ".join(names[:_UNREFERENCED_VOLUMES_SHOWN])
     if len(names) > _UNREFERENCED_VOLUMES_SHOWN:
         shown += f" and {len(names) - _UNREFERENCED_VOLUMES_SHOWN} more"
-    return f"unreferenced companion volume {shown} (snapshot chain or orphan)"
+    return f"{COMPANION_PIN_REASON_PREFIX} {shown} (snapshot chain or orphan)"
+
+
+#: Prefixes of the two pin reasons section 3.7 specifies. `is_snapshot_pin_reason()` and the
+#: per-pin action hint in `cli.py` both match on them, so the text lives in one place.
+SNAPSHOT_PIN_REASON_PREFIX = "snapshots present ("
+COMPANION_PIN_REASON_PREFIX = "unreferenced companion volume"
+
+
+def is_snapshot_pin_reason(reason: str | None) -> bool:
+    """Section 3.7: is ``reason`` a pin from a real snapshot or an unreferenced companion
+    volume? The group of pins the section 3.7 warning reports, and no other pin."""
+    return reason is not None and reason.startswith(
+        (SNAPSHOT_PIN_REASON_PREFIX, COMPANION_PIN_REASON_PREFIX)
+    )
 
 
 def pending_disk_reasons(pending: list[dict[str, Any]]) -> dict[str, str]:

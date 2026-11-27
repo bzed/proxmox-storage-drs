@@ -49,6 +49,25 @@ group fc-tier1: payback ratio 151 (need 10) -> accepted
 run finished: plan exit=0
 ```
 
+## Snapshot pins: a warning on every run
+
+A VM with a snapshot, or with an unreferenced volume next to its disks, keeps
+its disks in place. The tool cannot move them. The tool warns about this on
+every `plan`, `explain` and `apply` run, with no `-v` needed.
+
+The tool logs one `snapshot_pinned` record for each such VM. The record names
+the VM, the reason, the disks, the pinned bytes and the pinned load. The tool
+then logs one `snapshot_pinned_total` record for the group. It holds the VM
+count, the disk count, the pinned bytes and the pinned load. Clear the
+snapshots, or check the extra volume, to let the tool balance these disks.
+When the tool cannot measure the load, `pinned_load` is `null` and the byte
+figures stay.
+
+```
+group fc-tier1: VM web1(101) is pinned, snapshots present (2), 2 disks, 3.00 TiB, load 1.000 -- clear the cause to unblock balancing
+group fc-tier1: 1 VMs pinned by snapshots or companion volumes, 2 disks, 3.00 TiB, load 1.000
+```
+
 ## Unattended runs log this without being asked
 
 `apply` in `confirm` or `auto` mode emits the whole decision trail above

@@ -4865,3 +4865,114 @@ def test_the_explain_objective_terms_sum_to_the_printed_total() -> None:
     terms = [v for k, v in as_json.items() if k != "total"]
     assert len(terms) == 7
     assert sum(terms) == pytest.approx(as_json["total"])
+
+
+# ------------------------------------------------- snapshot pins (section 3.7 point 3)
+
+
+def _snapshot_pinned_fixture() -> tuple[Topology, GroupLoad]:
+    """`_balanced_apply_topology()` plus VM 103 (two disks, snapshots) and VM 104 (one disk, an
+    unreferenced companion volume) and VM 105 (pinned by a lock: not a snapshot pin)."""
+    from dataclasses import replace
+
+    topology = _balanced_apply_topology()
+    group = topology.groups[0]
+    base = group.disks[0]
+
+    def pinned(vmid: int, device: str, size_tib: int, reason: str) -> Disk:
+        return replace(
+            base,
+            key=f"{vmid}:{device}",
+            vmid=vmid,
+            device=device,
+            vm_name=f"vm{vmid}",
+            size_bytes=size_tib * (1 << 40),
+            pinned_reason=reason,
+        )
+
+    extra = (
+        pinned(103, "scsi0", 1, "snapshots present (2)"),
+        pinned(103, "scsi1", 2, "snapshots present (2)"),
+        pinned(
+            104,
+            "scsi0",
+            1,
+            "unreferenced companion volume san-a:vm-104-disk-1 (snapshot chain or orphan)",
+        ),
+        pinned(105, "scsi0", 1, "locked: backup"),
+    )
+    load = _balanced_apply_group_load()
+    group_load = replace(
+        load,
+        disks=load.disks
+        + tuple(DiskLoad(disk_key=d.key, load=0.5, flagged_reason=None) for d in extra),
+    )
+    new_group = replace(group, disks=group.disks + extra)
+    return replace(topology, groups=(new_group,)), group_load
+
+
+def _warn_records(err: str, event: str) -> list[dict[str, Any]]:
+    records = [json.loads(ln) for ln in err.splitlines() if ln.startswith("{")]
+    return [r for r in records if r["event"] == event]
+
+
+def test_plan_warns_about_each_snapshot_pinned_vm_and_the_group_total(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    topology, group_load = _snapshot_pinned_fixture()
+    _patch_plan_deps(monkeypatch, topology, group_load)
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+
+    assert cli.main(["-c", str(path), "--log-format", "json", "plan"]) == 0
+
+    err = capsys.readouterr().err
+    per_vm = _warn_records(err, "snapshot_pinned")
+    assert [r["vmid"] for r in per_vm] == [103, 104]  # the locked VM 105 is not reported
+    assert all(r["level"] == "WARNING" for r in per_vm)
+    vm103, vm104 = per_vm
+    assert vm103["pinned_bytes"] == 3 * (1 << 40)
+    assert vm103["pinned_load"] == 1.0
+    assert vm103["disks"] == ["103:scsi0", "103:scsi1"]
+    assert vm103["reason"] == "snapshots present (2)"
+    assert "unreferenced companion volume san-a:vm-104-disk-1" in vm104["reason"]
+    (total,) = _warn_records(err, "snapshot_pinned_total")
+    assert total["level"] == "WARNING"
+    assert (total["vms"], total["disks"]) == (2, 3)
+    assert total["pinned_bytes"] == 4 * (1 << 40)
+    assert total["pinned_load"] == 1.5
+
+
+def test_apply_warns_about_snapshot_pinned_vms_too(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    topology, group_load = _snapshot_pinned_fixture()
+    _patch_plan_deps(monkeypatch, topology, group_load)
+    _stub_execute_plan(monkeypatch)
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+
+    assert cli.main(["-c", str(path), "--log-format", "json", "--mode", "auto", "apply"]) == 0
+
+    err = capsys.readouterr().err
+    assert len(_warn_records(err, "snapshot_pinned")) == 2
+    assert len(_warn_records(err, "snapshot_pinned_total")) == 1
+
+
+def test_a_group_without_snapshot_pins_logs_no_snapshot_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_plan_deps(monkeypatch, _balanced_apply_topology(), _balanced_apply_group_load())
+    path = write_config(tmp_path, state={"path": str(tmp_path / "state.json")})
+    assert cli.main(["-c", str(path), "--log-format", "json", "plan"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_snapshot_pin_warning_survives_a_load_failure_with_null_load(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    topology, _ = _snapshot_pinned_fixture()
+    with caplog.at_level("WARNING", logger="proxmox_storage_drs.cli"):
+        cli._log_snapshot_pins(topology.groups[0], None)
+    totals = [r for r in caplog.records if getattr(r, "event", "") == "snapshot_pinned_total"]
+    assert len(totals) == 1
+    assert totals[0].pinned_load is None  # type: ignore[attr-defined]
+    assert totals[0].pinned_bytes == 4 * (1 << 40)  # type: ignore[attr-defined]
