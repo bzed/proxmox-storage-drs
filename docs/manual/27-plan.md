@@ -38,11 +38,31 @@ $ pve-storage-drs -c /etc/pve/drs.yaml plan
 Group fc-tier1 → ACT: reserve violated on san-a; acting now regardless of the normal drift/imbalance thresholds -- a capacity shortfall is never delayed by them
   solver: heuristic
   1. db01(102):scsi0            san-a → san-c     1.50 TiB   ~2.2h   Δimbalance -4.53   ℓ/z 1.67
-  2. web01(101):scsi1           san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00
+  2. web01(101):scsi1           san-a → san-b     1.00 TiB   ~1.5h   Δimbalance -2.00   ℓ/z 1.00  [repair]
   after: san-a=3.00  san-b=1.70  san-c=2.70
   spread: 255.4% → 52.7%
-  payback: benefit 1.93e+08 load·s vs cost 2.62e+04 load·s → ratio 7.34e+03 (need 10) ✓
+  payback: benefit 2.26e+08 load·s vs cost 2.62e+04 load·s → ratio 8.64e+03 (need 10) ✓
+  overridden: this plan repairs a reserve/free-space shortfall (2.50 TiB → 0 B), exempt from the economic test (section 7.3)
 ```
+
+The payback numbers assume the weights and settings of the section 14
+fixture. The weights are `objective.alpha_spread` 1.0,
+`objective.delta_capacity_spread` 0.5, `objective.kappa_vm_affinity` 0.5
+and `objective.beta_move_count` 0.25. The migration settings are
+`migration.bwlimit_bytes_per_sec` 200 MiB/s, a payback horizon of 365 days
+and `migration.payback_ratio` 10. `saferemove` is off on all three storages,
+so the wipe adds nothing to the cost. With `saferemove` on, the 1.5 TiB move
+alone would carry about 44 hours of wipe. The cost would then be much higher.
+The cost is 26 214 load·s: 15 729 for the first move and 10 486 for the
+second. The benefit is 7.18 times the horizon of 31 536 000 s. The factor 7.18
+is `ΔE` 6.53, plus `delta_capacity_spread` times `ΔF` (0.5 times 4.00), minus
+`kappa_vm_affinity` times `ΔA` (0.5 times 2.70). The plan splits VM 101 over
+two storages, and that is why `ΔA` is negative.
+
+The `overridden:` line appears when the plan reduces a reserve or
+free-space shortfall. The plan then passes whatever the ratio is (see the
+exemption below). The `[repair]` marker names the move that the repair
+depends on.
 
 The `solver:` line names the backend that actually produced this plan --
 `heuristic` or `cbc`. For the MILP backend it also shows `(optimal)` or
@@ -246,7 +266,7 @@ test" line for both.
 
 **A plan that leaves the group with less reserve/free-space shortfall
 than it found always passes this test.** This holds regardless of the
-ratio shown. The example above happens to pass on merit (133 ≥ 10). A
+ratio shown. The example above also passes on merit (8 640 ≥ 10). A
 plan whose *only* move fixes a snapshot-reserve or `free_space.soft`
 violation with zero balance benefit is accepted too. That is a real,
 common case. Relocating the sole loaded disk in a two-storage group

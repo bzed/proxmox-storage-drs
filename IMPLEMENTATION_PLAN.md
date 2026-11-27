@@ -3028,7 +3028,7 @@ Group fc-tier1 — imbalance 255% (threshold 20%) → ACT
   2. 101:scsi1  san-a → san-b   1.0 TiB   ~1.5h   Δimbalance −2.00   ℓ/z 1.00   [repair]
 
   after: san-a u=3.00  san-b u=1.70  san-c u=2.70   spread 53% (from 255%)
-  payback: benefit 1.93e8 load·s vs cost 2.62e4 load·s → ratio 7344 (need 10) ✓
+  payback: benefit 2.26e8 load·s vs cost 2.62e4 load·s → ratio 8640 (need 10) ✓
            plan repairs san-a's reserve (Σ r_s 2.5 → 0) — §7.3-exempt
 
   pinned (not movable this run):
