@@ -138,6 +138,11 @@ class ObjectiveBreakdown:
 
     @property
     def total(self) -> float:
+        """Sum of the seven terms of the objective, in objective units.
+
+        The terms have no common unit. Each is already scaled by its weight in
+        ``objective``. A lower total is a better assignment.
+        """
         return (
             self.imbalance_term
             + self.move_count_term
@@ -150,6 +155,11 @@ class ObjectiveBreakdown:
 
     @property
     def moves(self) -> int:
+        """Number of disks that changed storage, in this assignment.
+
+        Counts every disk that moved, including disks below ``migration.tiny_disk_bytes``.
+        A disk in the same storage as its current storage is not counted.
+        """
         return len(self.moved_disk_keys)
 
 
@@ -354,6 +364,10 @@ def evaluate_assignment(
     """
 
     def storage_of(disk: Disk) -> str:
+        """Return the storage of ``disk`` in the assignment under evaluation.
+
+        A disk that is not in the assignment keeps its current storage.
+        """
         return assignment.get(disk.key, disk.current_storage)
 
     reserve_statuses: dict[str, ReserveStatus] = {}
@@ -467,6 +481,12 @@ class RejectedCandidate:
 
     @property
     def worse_by(self) -> float:
+        """How much the alternative is worse than the baseline, in objective units.
+
+        This is ``breakdown.total - baseline.total``. A positive value means the
+        alternative has the higher objective, so the baseline wins. The ``explain``
+        report shows this value.
+        """
         return self.breakdown.total - self.baseline.total
 
 
@@ -555,6 +575,10 @@ def _best_repair_candidate(
             trial[disk.key] = target.id
 
             def trial_storage_of(d: Disk, _trial: Assignment = trial) -> str:
+                """Return the storage of ``d`` in the trial assignment.
+
+                A disk that is not in the trial assignment keeps its current storage.
+                """
                 return _trial.get(d.key, d.current_storage)
 
             # (C8): a small disk is never a repair on its own -- it frees
@@ -633,6 +657,10 @@ def _repair(
     max_iterations = len(movable) * max(1, len(group.storages)) + 1
 
     def storage_of(disk: Disk) -> str:
+        """Return the storage of ``disk`` in the assignment being repaired.
+
+        A disk that is not in the assignment keeps its current storage.
+        """
         return assignment.get(disk.key, disk.current_storage)
 
     for _ in range(max_iterations):
@@ -697,6 +725,10 @@ def _best_of(
     for trial in trials:
 
         def trial_storage_of(d: Disk, _trial: Assignment = trial) -> str:
+            """Return the storage of ``d`` in the trial assignment.
+
+            A disk that is not in the trial assignment keeps its current storage.
+            """
             return _trial.get(d.key, d.current_storage)
 
         if not small_disks_follow_their_vm(group, trial_storage_of, tiny_disk_bytes):

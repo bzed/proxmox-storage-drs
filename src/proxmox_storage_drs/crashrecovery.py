@@ -59,6 +59,15 @@ def expected_task_user(auth: AuthConfig) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class UpidInfo:
+    """Fields of one parsed PVE task id (UPID).
+
+    - ``node`` (string): node that runs the task.
+    - ``task_type`` (string): task type, such as ``qmmove`` for a disk move.
+    - ``vmid`` (integer or None): VM id of the task. None for a task that is not
+      scoped to a VM.
+    - ``user`` (string): user that started the task, with the realm.
+    """
+
     node: str
     task_type: str
     vmid: int | None

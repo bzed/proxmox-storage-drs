@@ -113,6 +113,12 @@ def hash_query_text(text: str) -> str:
 
 
 def hash_label_name(label_name: str) -> str:
+    """Return the SHA-256 hex digest of a Prometheus label name.
+
+    Used to name a label in a bundle without writing the label itself. The input
+    is the UTF-8 bytes of ``label_name``. The output is 64 lowercase hex
+    characters. Replay derives the same digest from the same name.
+    """
     return hashlib.sha256(label_name.encode("utf-8")).hexdigest()
 
 
@@ -121,6 +127,28 @@ def hash_label_name(label_name: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class CaptureOptions:
+    """Settings of one ``collect-testdata`` run, built by ``cli.py``.
+
+    - ``output_dir`` (string, required): directory that receives the bundle. The
+      tarball, unless ``no_archive`` is set, is written next to it as
+      ``<output_dir>.tar.gz``.
+    - ``estimate_only`` (boolean, default False): not read by :func:`capture_bundle`.
+      ``cli.py`` prints the estimate through :func:`estimate_capture` instead.
+    - ``range_seconds`` (float seconds or None, default None): length of the
+      Prometheus range to capture. None uses ``support.capture_range``.
+    - ``step_seconds`` (float seconds or None, default None): step of the range
+      queries. None uses ``metrics.step``.
+    - ``no_series`` (boolean, default False): skip the range queries. The bundle
+      then holds topology, instant queries and findings only.
+    - ``no_archive`` (boolean, default False): write only the directory, with no
+      ``.tar.gz``.
+    - ``salt_path`` (path or None, default None): anonymization salt file. None uses
+      ``support.salt_path``.
+    - ``new_salt`` (boolean, default False): generate a new salt, which replaces the
+      existing one. Bundles made with different salts cannot be compared by
+      pseudonym.
+    """
+
     output_dir: str
     estimate_only: bool = False
     range_seconds: float | None = None  # None -> support.capture_range
@@ -133,6 +161,18 @@ class CaptureOptions:
 
 @dataclass(frozen=True, slots=True)
 class CaptureEstimate:
+    """Size of a planned capture, computed before any request is sent.
+
+    - ``group_count`` (integer): number of groups in the topology.
+    - ``disk_count`` (integer): number of disks in all groups.
+    - ``query_count`` (integer): number of HTTP requests the capture will issue.
+    - ``sample_points`` (integer): number of stored samples in all range series. This
+      is the value that ``support.max_series_points`` limits.
+    - ``range_seconds`` (float seconds): length of the captured range.
+    - ``step_seconds`` (float seconds): step that the caller asked for. The queries
+      can use a finer step, see :func:`estimate_capture`.
+    """
+
     group_count: int
     disk_count: int
     query_count: int
@@ -141,6 +181,11 @@ class CaptureEstimate:
     step_seconds: float
 
     def exceeds(self, max_series_points: int) -> bool:
+        """Return True when ``sample_points`` is above ``max_series_points``.
+
+        ``max_series_points`` is the limit from ``support.max_series_points``, a count
+        of samples. The caller refuses the capture when this returns True.
+        """
         return self.sample_points > max_series_points
 
 
@@ -216,6 +261,16 @@ def estimate_capture(
 
 @dataclass
 class CallRecord:
+    """One entry of the capture log: one request, or one step of the capture.
+
+    - ``description`` (string): the request, such as ``vm_config(101)`` or the PromQL
+      text with its path.
+    - ``outcome`` (string): ``ok``, ``http_error``, ``empty``, ``refused`` or
+      ``skipped``.
+    - ``detail`` (string or None): the error text for an ``http_error``, otherwise
+      None.
+    """
+
     description: str
     outcome: str  # ok | http_error | empty | refused | skipped
     detail: str | None = None
@@ -223,13 +278,30 @@ class CallRecord:
 
 @dataclass
 class CaptureLog:
+    """Ordered record of every request that one capture issued.
+
+    ``calls`` holds one :class:`CallRecord` for each request, in call order. The
+    log is kept in the bundle, so a reader can see which data is missing and why.
+    """
+
     calls: list[CallRecord] = field(default_factory=list)
 
     def record(self, description: str, outcome: str, detail: str | None = None) -> None:
+        """Append one :class:`CallRecord` to ``calls``.
+
+        ``outcome`` must be one of the values listed on :class:`CallRecord`. The method
+        does not check the value.
+        """
         self.calls.append(CallRecord(description, outcome, detail))
 
     @property
     def ok(self) -> bool:
+        """True when no call failed.
+
+        A call failed when its outcome is ``http_error`` or ``refused``. The outcomes
+        ``ok``, ``empty`` and ``skipped`` do not count as failures. ``empty`` means
+        that the request worked and returned no data.
+        """
         return all(c.outcome in ("ok", "empty", "skipped") for c in self.calls)
 
 
@@ -266,31 +338,77 @@ class RecordingPveClient(PveClient):
         self._log = log
 
     def vm_resources(self) -> list[dict[str, Any]]:
+        """Return the VM inventory, the result of ``GET /cluster/resources?type=vm``.
+
+        Returns a list of dicts, one per VM. Returns an empty list when the call fails.
+        The failure is recorded in the capture log and is not raised.
+        """
         return _guarded(self._log, "vm_resources", self._inner.vm_resources) or []
 
     def version(self) -> str | None:
+        """Return the PVE version string, the result of ``GET /version``.
+
+        Returns None when the call fails. The failure is recorded in the capture log and
+        is not raised.
+        """
         result: str | None = _guarded(self._log, "version", self._inner.version)
         return result
 
     def cluster_tasks(self) -> list[dict[str, Any]]:
+        """Return the recent and active tasks of the whole cluster, the result of
+        ``GET /cluster/tasks``.
+
+        Returns a list of dicts. Returns an empty list when the call fails. The failure
+        is recorded in the capture log and is not raised.
+        """
         return _guarded(self._log, "cluster_tasks", self._inner.cluster_tasks) or []
 
     def storage_resources(self) -> list[dict[str, Any]]:
+        """Return the storage inventory, the result of ``GET /cluster/resources?type=storage``.
+
+        Returns a list of dicts, one per storage on each node. Returns an empty list when
+        the call fails. The failure is recorded in the capture log and is not raised.
+        """
         return _guarded(self._log, "storage_resources", self._inner.storage_resources) or []
 
     def node_names(self) -> list[str]:
+        """Return the names of all cluster nodes, the result of ``GET /nodes``.
+
+        Returns a list of node names. Returns an empty list when the call fails. The
+        failure is recorded in the capture log and is not raised.
+        """
         return _guarded(self._log, "node_names", self._inner.node_names) or []
 
     def storage_definitions(self) -> list[dict[str, Any]]:
+        """Return the configuration of every storage, the result of ``GET /storage``.
+
+        Returns a list of dicts. Each dict holds one storage's full configuration. It
+        includes the ``saferemove`` setting. Returns an empty list when the call fails.
+        The failure is recorded in the capture log and is not raised.
+        """
         return _guarded(self._log, "storage_definitions", self._inner.storage_definitions) or []
 
     def vm_config(self, node: str, vmid: int) -> dict[str, Any]:
+        """Return the configuration of one VM on one node, the result of
+        ``GET /nodes/{node}/qemu/{vmid}/config``.
+
+        Returns a dict that maps each disk key to its storage and size. Returns an
+        empty dict when the call fails. The failure is recorded in the capture log and
+        is not raised.
+        """
         return (
             _guarded(self._log, f"vm_config({vmid})", lambda: self._inner.vm_config(node, vmid))
             or {}
         )
 
     def storage_status(self, node: str, storage: str) -> dict[str, Any]:
+        """Return the status of one storage on one node, the result of
+        ``GET /nodes/{node}/storage/{storage}/status``.
+
+        The dict holds the total, used and available space, in bytes. Returns an empty
+        dict when the call fails. The failure is recorded in the capture log and is not
+        raised.
+        """
         return (
             _guarded(
                 self._log,
@@ -301,6 +419,13 @@ class RecordingPveClient(PveClient):
         )
 
     def storage_content(self, node: str, storage: str) -> list[dict[str, Any]]:
+        """Return the volumes of one storage on one node, the result of
+        ``GET /nodes/{node}/storage/{storage}/content``.
+
+        Returns a list of dicts, one per volume, with its size in bytes and its owner.
+        Returns an empty list when the call fails. The failure is recorded in the capture
+        log and is not raised.
+        """
         return (
             _guarded(
                 self._log,
@@ -311,6 +436,12 @@ class RecordingPveClient(PveClient):
         )
 
     def vm_snapshots(self, node: str, vmid: int) -> list[dict[str, Any]]:
+        """Return the snapshot chain of one VM on one node, the result of
+        ``GET /nodes/{node}/qemu/{vmid}/snapshot``.
+
+        Returns a list of dicts, one per snapshot. Returns an empty list when the call
+        fails. The failure is recorded in the capture log and is not raised.
+        """
         return (
             _guarded(
                 self._log, f"vm_snapshots({vmid})", lambda: self._inner.vm_snapshots(node, vmid)
@@ -319,12 +450,26 @@ class RecordingPveClient(PveClient):
         )
 
     def vm_pending(self, node: str, vmid: int) -> list[dict[str, Any]]:
+        """Return the pending configuration changes of one VM on one node, the result of
+        ``GET /nodes/{node}/qemu/{vmid}/pending``.
+
+        Returns a list of dicts. Each dict holds one key with its current and pending
+        value. Returns an empty list when the call fails. The failure is recorded in the
+        capture log and is not raised.
+        """
         return (
             _guarded(self._log, f"vm_pending({vmid})", lambda: self._inner.vm_pending(node, vmid))
             or []
         )
 
     def vm_status_current(self, node: str, vmid: int) -> dict[str, Any]:
+        """Return the current status of one VM on one node, the result of
+        ``GET /nodes/{node}/qemu/{vmid}/status/current``.
+
+        The dict includes the ``lock`` field, which the move checks read before a move.
+        Returns an empty dict when the call fails. The failure is recorded in the capture
+        log and is not raised.
+        """
         return (
             _guarded(
                 self._log,
@@ -335,9 +480,21 @@ class RecordingPveClient(PveClient):
         )
 
     def move_disk(self, *args: Any, **kwargs: Any) -> str:  # pragma: no cover - defense in depth
+        """Refuse a disk move. Always raises :class:`PveApiError`.
+
+        ``collect-testdata`` is read-only. This method exists only to fail loudly if a
+        move is ever attempted through this wrapper. The arguments are ignored. The
+        method never sends a request.
+        """
         raise PveApiError("collect-testdata is read-only: move_disk must never be called")
 
     def task_status(self, node: str, upid: str) -> dict[str, Any]:
+        """Return the status of one PVE task, the result of
+        ``GET /nodes/{node}/tasks/{upid}/status``.
+
+        The dict holds ``status`` and ``exitstatus``. Returns an empty dict when the call
+        fails. The failure is recorded in the capture log and is not raised.
+        """
         return (
             _guarded(self._log, f"task_status({upid})", lambda: self._inner.task_status(node, upid))
             or {}
@@ -394,6 +551,23 @@ class RecordingPrometheusClient(PrometheusClient):
 
 @dataclass
 class Bundle:
+    """Everything one capture produced, after anonymization, before it is written.
+
+    - ``manifest`` (dict): the content of ``manifest.json``.
+    - ``config_yaml`` (dict): the configuration, with credentials and endpoints
+      removed.
+    - ``findings`` (dict): the results of the verification checks.
+    - ``pve_files`` (dict): relative path to JSON-serializable content, for the PVE
+      files of the bundle.
+    - ``prometheus_files`` (dict): relative path to content, for the Prometheus files
+      of the bundle.
+    - ``salt_fingerprint`` (string): fingerprint of the anonymization salt. It
+      identifies the salt without revealing it.
+    - ``ok`` (boolean): True when no capture call failed. See :attr:`CaptureLog.ok`.
+
+    Nothing in a bundle is unanonymized. See the module docstring.
+    """
+
     manifest: dict[str, Any]
     config_yaml: dict[str, Any]
     findings: dict[str, Any]
@@ -884,6 +1058,12 @@ def _group_vmid_batches(
     project's own rule against handling what cannot happen)."""
 
     def pseudonym(vmid: int) -> int:
+        """Return the anonymized vmid for a real vmid.
+
+        ``vmid`` must already be registered with the mapper. The function raises
+        ``AssertionError`` otherwise, because that would mean the capture broke its own
+        rule that every disk is registered before the capture starts.
+        """
         mapped = mapper.vmid(vmid)
         assert mapped is not None, "group.disks vmids are always registered before capture"
         return mapped

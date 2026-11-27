@@ -51,6 +51,13 @@ from proxmox_storage_drs.pve import PveClient
 
 
 def load_manifest(bundle_dir: str | Path) -> dict[str, Any]:
+    """Read and parse the ``manifest.json`` of a bundle directory.
+
+    ``bundle_dir`` is the directory, not a ``.tar.gz``. The function does not unpack
+    archives. Raises :class:`BundleError` when the directory has no ``manifest.json``
+    or when the file cannot be read or parsed as JSON. For an archive path, the
+    message tells the operator to unpack it first.
+    """
     path = Path(bundle_dir) / "manifest.json"
     if not path.is_file():
         # X-10: a bundle is transported as `write_tarball()`'s own
@@ -110,31 +117,73 @@ class ReplayPveClient(PveClient):
             raise BundleError(f"{path}: could not read: {exc}") from exc
 
     def vm_resources(self) -> list[dict[str, Any]]:
+        """Return the recorded VM inventory of the bundle.
+
+        Reads ``pve/cluster-resources-vm.json``. Returns a list of dicts, one per VM.
+        Raises :class:`BundleError` when the file is missing or unreadable.
+        """
         return list(self._load("cluster-resources-vm.json", "VM inventory"))
 
     def cluster_tasks(self) -> list[dict[str, Any]]:
+        """Return the recorded cluster task list of the bundle.
+
+        Reads ``pve/cluster-tasks.json``. Returns a list of dicts. Raises
+        :class:`BundleError` when the file is missing or unreadable.
+        """
         return list(self._load("cluster-tasks.json", "cluster task list"))
 
     def storage_resources(self) -> list[dict[str, Any]]:
+        """Return the recorded storage inventory of the bundle.
+
+        Reads ``pve/cluster-resources-storage.json``. Returns a list of dicts. Raises
+        :class:`BundleError` when the file is missing or unreadable.
+        """
         return list(self._load("cluster-resources-storage.json", "storage inventory"))
 
     def node_names(self) -> list[str]:
+        """Return the sorted, unique node names recorded in the bundle.
+
+        Reads ``pve/nodes.json``. Entries without a ``node`` key are skipped. Raises
+        :class:`BundleError` when the file is missing or unreadable.
+        """
         raw = self._load("nodes.json", "node list")
         return sorted({str(n["node"]) for n in raw if n.get("node")})
 
     def storage_definitions(self) -> list[dict[str, Any]]:
+        """Return the recorded storage configurations of the bundle.
+
+        Reads ``pve/storage-definitions.json``. Returns a list of dicts, one per storage.
+        Raises :class:`BundleError` when the file is missing or unreadable.
+        """
         return list(self._load("storage-definitions.json", "storage definitions"))
 
     def vm_config(self, node: str, vmid: int) -> dict[str, Any]:
+        """Return the recorded configuration of one VM.
+
+        Reads ``pve/vm-config/<vmid>.json``. The bundle keys VM files by vmid only, so
+        ``node`` is ignored. Returns a dict. Raises :class:`BundleError` when the file is
+        missing or unreadable.
+        """
         del node  # the bundle keys VM files by vmid alone -- see this module's docstring
         return dict(self._load(f"vm-config/{vmid}.json", f"config for VM {vmid}"))
 
     def storage_status(self, node: str, storage: str) -> dict[str, Any]:
+        """Return the recorded status of one storage on one node.
+
+        Reads ``pve/storage-status/<node>/<storage>.json``. Returns a dict with the
+        total, used and available space in bytes. Raises :class:`BundleError` when the
+        file is missing or unreadable.
+        """
         return dict(
             self._load(f"storage-status/{node}/{storage}.json", f"status of {storage!r} on {node}")
         )
 
     def storage_content(self, node: str, storage: str) -> list[dict[str, Any]]:
+        """Return the recorded volumes of one storage on one node.
+
+        Reads ``pve/storage-content/<node>/<storage>.json``. Returns a list of dicts, one
+        per volume. Raises :class:`BundleError` when the file is missing or unreadable.
+        """
         return list(
             self._load(
                 f"storage-content/{node}/{storage}.json", f"content of {storage!r} on {node}"
@@ -142,10 +191,22 @@ class ReplayPveClient(PveClient):
         )
 
     def vm_snapshots(self, node: str, vmid: int) -> list[dict[str, Any]]:
+        """Return the recorded snapshot chain of one VM.
+
+        Reads ``pve/vm-snapshots/<vmid>.json``. The bundle keys VM files by vmid only, so
+        ``node`` is ignored. Returns a list of dicts. Raises :class:`BundleError` when the
+        file is missing or unreadable.
+        """
         del node
         return list(self._load(f"vm-snapshots/{vmid}.json", f"snapshots for VM {vmid}"))
 
     def vm_status_current(self, node: str, vmid: int) -> dict[str, Any]:
+        """Return the recorded current status of one VM.
+
+        Reads ``pve/vm-status-current/<vmid>.json``. The bundle keys VM files by vmid
+        only, so ``node`` is ignored. Returns a dict. Raises :class:`BundleError` when the
+        file is missing or unreadable.
+        """
         del node
         return dict(self._load(f"vm-status-current/{vmid}.json", f"status for VM {vmid}"))
 
@@ -165,9 +226,19 @@ class ReplayPveClient(PveClient):
         return list(self._load(f"vm-pending/{vmid}.json", f"pending config for VM {vmid}"))
 
     def move_disk(self, *args: Any, **kwargs: Any) -> str:
+        """Refuse a disk move. Always raises :class:`PveApiError`.
+
+        ``--replay`` reads a recorded bundle and never changes the cluster. The arguments
+        are ignored. The method never sends a request.
+        """
         raise PveApiError("--replay is read-only: move_disk cannot be issued under replay")
 
     def task_status(self, node: str, upid: str) -> dict[str, Any]:
+        """Refuse a task status read. Always raises :class:`PveApiError`.
+
+        Replay serves recorded reads only, so no task status is ever returned. The
+        arguments are ignored. The method never sends a request.
+        """
         del node, upid
         raise PveApiError("--replay is read-only: task_status cannot be issued under replay")
 
@@ -277,4 +348,9 @@ class _NeverSession:
     (section 16.5's own explicit requirement, verified by a unit test)."""
 
     def get(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - defense in depth
+        """Refuse any request to the bundle's session. Always raises :class:`BundleError`.
+
+        The replay Prometheus client never builds a real request. A call that reaches
+        this method is a defect, so it fails at once. The arguments are ignored.
+        """
         raise BundleError("--replay must never make a real Prometheus request")

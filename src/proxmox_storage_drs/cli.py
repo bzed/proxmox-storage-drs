@@ -634,6 +634,10 @@ CommandHandler = Callable[[ResolvedConfig, argparse.Namespace, str], int]
 
 def _make_not_yet_implemented_handler(command: str) -> CommandHandler:
     def handler(resolved: ResolvedConfig, args: argparse.Namespace, mode: str) -> int:
+        """Report that a subcommand is not implemented yet, and return 1.
+
+        The message goes to stderr. The arguments are ignored.
+        """
         del resolved, args, mode
         print(
             f"pve-storage-drs: {command!r} is not implemented yet in this development "
@@ -1139,6 +1143,11 @@ class _VmSplit:
     excess_bytes_after: int
 
     def as_dict(self) -> dict[str, object]:
+        """Return the split figures of this VM as a JSON-ready dict.
+
+        Byte values keep ``bytes`` in their key names. ``cap_bytes`` is the split cap.
+        The peak and excess figures are before and after the plan.
+        """
         return {
             "vmid": self.vmid,
             "cap_bytes": self.cap_bytes,
@@ -1267,9 +1276,15 @@ class _UnfixableShortfall:
 
     @property
     def total_bytes(self) -> int:
+        """Sum of the pinned bytes over every storage, in bytes."""
         return sum(self.by_storage.values())
 
     def as_dict(self) -> dict[str, object]:
+        """Return the pinned-disk summary as a JSON-ready dict.
+
+        Byte values are in bytes. The keys are ``total_bytes``, ``by_storage``, ``proven``
+        and the pinned blockers.
+        """
         return {
             "total_bytes": self.total_bytes,
             "by_storage": dict(self.by_storage),
@@ -2672,6 +2687,11 @@ def _log_snapshot_pins(group: Group, load_by_key: Mapping[str, float] | None) ->
     load fields are then ``None`` and the byte fields still report."""
 
     def load_of(disks: list[Disk]) -> float | None:
+        """Sum the load of ``disks``, in the unit of ``load_by_key``.
+
+        Returns None when ``load_by_key`` is None, which means the load model failed.
+        A disk without a load entry counts as 0.0.
+        """
         if load_by_key is None:
             return None
         return sum(load_by_key.get(d.key, 0.0) for d in disks)
@@ -3186,10 +3206,20 @@ def _make_inflight_callbacks(
     in real time rather than only once at the end of the run."""
 
     def on_started(upid: str) -> None:
+        """Record the UPID of a new move as in flight, and write the state file.
+
+        ``execute_plan()`` calls this right after it issues a ``move_disk`` task. The
+        state file is written at once, so a crash after this call leaves the UPID on
+        disk for the startup scan.
+        """
         box.value = with_inflight_upid(box.value, upid)
         save_locked_state(lock_handle, box.value)
 
     def on_finished(upid: str) -> None:
+        """Remove the UPID of a finished move from the in-flight list, and write the state file.
+
+        ``execute_plan()`` calls this when the move task ends.
+        """
         box.value = without_inflight_upid(box.value, upid)
         save_locked_state(lock_handle, box.value)
 
@@ -4232,6 +4262,15 @@ def _run_handler(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the command line and return the exit status.
+
+    ``argv`` is the argument list. None reads ``sys.argv``. The return values are:
+
+    - 0: success, or ``--version`` was asked for.
+    - 1: the config could not be loaded, or the command failed.
+    - 2: a usage error, such as no subcommand, or ``--replay`` with a mode other than
+      ``dry-run``.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
 

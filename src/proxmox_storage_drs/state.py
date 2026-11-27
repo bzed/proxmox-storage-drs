@@ -118,12 +118,41 @@ class LastBalance:
 
 @dataclass(frozen=True, slots=True)
 class Cooldowns:
+    """Times of the last moves, used to block a repeat move for a while.
+
+    - ``disk`` (mapping, default empty): key ``"<group>:<vmid>:<device>"`` to the
+      UTC time of the last move of that disk.
+    - ``storage`` (mapping, default empty): key ``"<group>:<storage>"`` to the UTC
+      time of the last move that touched that storage.
+
+    Each time is a string in the form ``YYYY-MM-DDTHH:MM:SSZ``. A cooldown is active
+    while the time elapsed since then is less than the configured cooldown
+    (``gates.cooldown_per_disk`` or ``gates.cooldown_per_storage``).
+    """
+
     disk: Mapping[str, str] = field(default_factory=dict)
     storage: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class State:
+    """Everything the tool keeps in ``state.json`` between runs.
+
+    - ``schema_version`` (integer): version of the file layout. A file with another
+      version is read as an empty state.
+    - ``lock`` (:class:`LockInfo` or None): descriptive record of the process that
+      holds the run lock. The kernel lock on the file is the real exclusion.
+    - ``last_balance`` (:class:`LastBalance`): load vector of the last executed
+      balance, used for the drift gate.
+    - ``cooldowns`` (:class:`Cooldowns`): times of the last moves, per disk and per
+      storage.
+    - ``inflight_upids`` (tuple of strings): PVE task ids (UPIDs) of moves that
+      were started and are not yet known to be finished. A crash leaves them here
+      for the startup scan.
+    - ``staged_disks`` (tuple of strings): reserved for staged moves. Nothing reads
+      or writes this field yet.
+    """
+
     schema_version: int = STATE_SCHEMA_VERSION
     lock: LockInfo | None = None
     last_balance: LastBalance = field(default_factory=LastBalance)

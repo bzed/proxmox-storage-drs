@@ -88,6 +88,16 @@ class JsonFormatter(logging.Formatter):
     """Render one :class:`logging.LogRecord` as one JSON line."""
 
     def format(self, record: logging.LogRecord) -> str:
+        """Render ``record`` as one JSON object on one line.
+
+        The object has the keys ``timestamp`` (UTC, ISO 8601), ``level``, ``logger`` and
+        ``message``. Every ``extra=`` field of the record is added as its own key. Each
+        such value passes through ``json_safe()`` first. An exception is added as the
+        key ``exc_info``, with its traceback as text. Keys are sorted.
+
+        Raises ``ValueError`` when a value is not finite (NaN or infinity). ``json_safe()``
+        should prevent that before this method runs.
+        """
         payload: dict[str, object] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
@@ -118,6 +128,12 @@ class TextFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
+        """Render ``record`` as one line of text.
+
+        Records at level INFO or below print the message alone. Records at WARNING or
+        above print the level name, a colon, a space and the message. An exception
+        traceback follows on the next line.
+        """
         message = record.getMessage()
         line = message if record.levelno <= logging.INFO else f"{record.levelname}: {message}"
         if record.exc_info:

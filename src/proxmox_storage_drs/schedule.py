@@ -109,6 +109,12 @@ class ScheduleResult:
 
     @property
     def deadlocked_msg(self) -> str | None:
+        """Operator message for the disks that no safe order could move, or None.
+
+        Returns None when ``deadlocked`` is empty. Otherwise the message lists the
+        sorted disk keys and says that the group needs a manual look. The moves are not
+        scheduled, and the tool does not split or stage them automatically.
+        """
         if not self.deadlocked:
             return None
         return (
@@ -153,6 +159,10 @@ def transient_invariant_ok(
     """
 
     def storage_of(d: Disk) -> str:
+        """Return the storage of ``d`` in the state before this move.
+
+        A disk that is not in ``state`` keeps its current storage.
+        """
         return state.get(d.key, d.current_storage)
 
     used_b = (
@@ -185,6 +195,10 @@ def _resolves_reserve_violation(group: Group, state: Assignment, disk: Disk) -> 
     to re-check the reduction amount here."""
 
     def storage_of(d: Disk) -> str:
+        """Return the storage of ``d`` in the state before this move.
+
+        A disk that is not in ``state`` keeps its current storage.
+        """
         return state.get(d.key, d.current_storage)
 
     source_id = state.get(disk.key, disk.current_storage)
