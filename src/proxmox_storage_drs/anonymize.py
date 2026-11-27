@@ -368,6 +368,12 @@ class Mapper:
     # -------------------------------------------------------------- clock
 
     def rebase_timestamp(self, epoch_seconds: float) -> float:
+        """Shift an epoch time to the bundle's synthetic clock.
+
+        ``epoch_seconds`` is seconds since 1970-01-01 UTC. The result is in the same unit.
+        The shift is the same for every time in one bundle, so the gaps between times
+        stay the same.
+        """
         return epoch_seconds - self.time_offset_seconds
 
     # -------------------------------------------------------------- vmid
@@ -414,15 +420,35 @@ class Mapper:
         return f"node-{pseudonym(self.salt, 'node', name)}"
 
     def storage(self, storage_id: str) -> str:
+        """Return the pseudonym of a storage id, in the form ``stor-<hash>``.
+
+        The hash comes from the salt and the storage id. The same salt and id always
+        give the same result.
+        """
         return f"stor-{pseudonym(self.salt, 'storage', storage_id)}"
 
     def group(self, name: str) -> str:
+        """Return the pseudonym of a group name, in the form ``group-<hash>``.
+
+        The hash comes from the salt and the name. The same salt and name always give
+        the same result.
+        """
         return f"group-{pseudonym(self.salt, 'group', name)}"
 
     def tag(self, value: str) -> str:
+        """Return the pseudonym of a VM tag, in the form ``tag-<hash>``.
+
+        The hash comes from the salt and the tag. The same salt and tag always give the
+        same result.
+        """
         return f"tag-{pseudonym(self.salt, 'tag', value)}"
 
     def pool(self, value: str) -> str:
+        """Return the pseudonym of a resource pool name, in the form ``pool-<hash>``.
+
+        The hash comes from the salt and the pool name. The same salt and name always
+        give the same result.
+        """
         return f"pool-{pseudonym(self.salt, 'pool', value)}"
 
     def username(self, value: str) -> str:
