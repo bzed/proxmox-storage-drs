@@ -1458,10 +1458,19 @@ Individual disks excluded regardless of their VM.
 
 List of storage ids, default `[]`.
 
-Intended meaning: storages that no disk moves onto or off. **This version does
-not apply the key** (a known defect, issue #1): plans still move disks onto and
-off the listed storages. To keep a storage out of balancing, remove it from
-`groups`.
+Storages that no disk moves onto or off.
+
+The tool pins every disk on a listed storage. The tool never uses a listed
+storage as the target of a move, and it never uses one as the target of a
+repair move. The storage still counts in the model. Its disks keep their size
+and load in every sum. Its snapshot reserve and its free space requirement
+stay in force. The tool reports a shortfall on a listed storage, but it does
+not repair that shortfall, because it does not move anything away.
+
+Set the key too high, and the other storages must carry all the balancing. Set
+it too low, and the tool moves disks onto or off a storage you want to keep
+still. To take a storage out of the model, remove it from `groups` instead. A
+storage outside `groups` does not count in the balance at all.
 
 ### `exclude.tags`
 

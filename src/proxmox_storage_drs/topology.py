@@ -222,6 +222,10 @@ class Storage:
     # through literal-beats-pattern like every per-storage option.
     enforce_format: str | None = None
     enforce_format_source: str = ""
+    # ``exclude.storages`` (section 5.3 (C2)): the storage still holds its disks and still
+    # counts in every sum, but it neither sends nor receives. Its disks are pinned (see
+    # `_pin_reason`) and `storage_accepts_incoming` refuses it as a destination.
+    excluded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -734,6 +738,16 @@ def storage_accepts_format(storage: Storage, disk_format: str) -> bool:
     return disk_format in storage.allowed_formats
 
 
+def storage_accepts_incoming(storage: Storage) -> bool:
+    """Section 5.3 (C2): may any disk move *onto* ``storage``? ``False`` for a storage named in
+    ``exclude.storages``. The one place this is answered -- the heuristic (single, swap, VM
+    relocation and repair moves), both MILP backends and the split gate all call it, so an
+    excluded storage is never a destination (AGENTS.md section 5). The disks already on an
+    excluded storage are pinned in `build_topology`; this is the other half of "never move
+    onto or off"."""
+    return not storage.excluded
+
+
 #: Device whose volume is never converted (section 5.3.2): swtpm state is raw, and whether PVE
 #: would convert or refuse a ``format=`` move of it is not verified.
 TPM_STATE_DEVICE = "tpmstate0"
@@ -926,6 +940,7 @@ def _pin_reason(
     lock: str | None,
     device: str,
     include_unused_disks: bool,
+    storage_excluded: bool = False,
 ) -> str | None:
     """Section 5.3 (C2)'s pin conditions, in the order the plan lists them
     -- the first that applies is reported; a disk can only have one
@@ -945,6 +960,8 @@ def _pin_reason(
         return "excluded by config"
     if disk_excluded:
         return "excluded by config (exclude.disks)"
+    if storage_excluded:
+        return "excluded by config (exclude.storages)"
     if snapshot_reason is not None:
         return snapshot_reason
     if pending_reason is not None:
@@ -1154,6 +1171,7 @@ def _join_vm_disks(
     )
     pending_reasons = pending_disk_reasons(fetch.pending)
     excluded_disk_keys = set(config.exclude.disks)
+    excluded_storage_ids = set(config.exclude.storages)
 
     for device, (storage_id, volume_name, params) in disk_specs.items():
         key = f"{vmid}:{device}"
@@ -1185,6 +1203,7 @@ def _join_vm_disks(
             lock=lock,
             device=device,
             include_unused_disks=config.exclude.include_unused_disks,
+            storage_excluded=storage_id in excluded_storage_ids,
         )
 
         disks_by_group[group_name].append(
@@ -1276,6 +1295,7 @@ def _build_storages(
                 enforce_format_source=(
                     _entry_level(group_cfg, sid) if storage_cfg.enforce_format else ""
                 ),
+                excluded=sid in config.exclude.storages,
             )
         )
     return tuple(storages)

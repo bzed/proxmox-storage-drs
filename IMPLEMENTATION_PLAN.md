@@ -1349,6 +1349,12 @@ small:
 - `s` cannot hold the disk's format **as it would arrive there**, `φ(d,s)` — the source format,
   or the storage's `enforce_format` when it sets one (§5.3.2);
 - `d` or `v(d)` is excluded by config (`exclude.vmids`, `exclude.disks`, tags, `no-drs`) — also pin;
+- `σ₀(d)` is listed in `exclude.storages` — also pin, and `s` is never a destination when it is
+  listed there: fix `x_{d,s} = 0` for every `d` with `σ₀(d) ≠ s`. The storage still holds its disks,
+  so their bytes and load stay in every sum, its reserve and free-space requirement stay in force
+  (a violated excluded storage reports a shortfall but the tool does not repair it), and it only
+  stops sending and receiving. One predicate, `topology.storage_accepts_incoming()`, serves the
+  heuristic (single, swap, VM-relocation and repair moves), both MILP backends and the split gate;
 - `σ₀(d)` belongs to **no** configured group — such a disk is unmanaged: it is not in any `D`, it is
   pinned where it is, and its bytes count toward `Uˢᵉˣᵗ` of its storage. Report it in `show-load` as
   "ungrouped, not managed" so an unintended omission from `groups` is visible rather than silent;
@@ -2223,7 +2229,7 @@ something different on every group. The objective asks whether a particular move
 cost, which is a question about bytes, priced in the same unit as `γ`.
 
 **Split gate** — the counterpart of the capacity gate for §5.3.3's split rule. It fires when some
-VM `v ∈ V^split` has a movable disk `d` and an eligible storage `s ≠ σ₀(d)` ((C2), not in cooldown)
+VM `v ∈ V^split` has a movable disk `d` and an eligible storage `s ≠ σ₀(d)` ((C2), including `exclude.storages`, not in cooldown)
 such that moving `d` alone to `s`
 
 1. strictly lowers `v`'s peak footprint `max_s F_{v,s}`, and

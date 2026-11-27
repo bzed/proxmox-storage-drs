@@ -572,6 +572,27 @@ def test_solve_excludes_a_cooldown_storage_as_a_target_for_a_movable_disk(backen
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_solve_never_targets_an_excluded_storage(backend: str) -> None:
+    """exclude.storages: san-b is fixed x=0 for every disk not already on it, in both
+    backends, so the section 14 optimum (which uses san-b) changes."""
+    group = section_14_group()
+    group = dataclasses.replace(
+        group,
+        storages=tuple(
+            dataclasses.replace(s, excluded=True) if s.id == "san-b" else s for s in group.storages
+        ),
+    )
+    original_storage = {key: storage for key, _s, _l, storage in _SECTION_14_DISKS}
+
+    result = _solve(group, section_14_loads(), DEFAULT_OBJECTIVE, backend)
+
+    for disk_key, target in result.assignment.items():
+        if target == "san-b":
+            assert original_storage[disk_key] == "san-b"
+    assert result.assignment["101:scsi1"] != "san-b"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_solve_still_allows_a_disk_to_move_away_from_a_cooldown_storage(backend: str) -> None:
     """Mirrors `test_heuristic.py`'s
     `test_descend_still_allows_a_disk_to_move_away_from_a_cooldown_storage`:

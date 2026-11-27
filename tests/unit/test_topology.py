@@ -437,6 +437,18 @@ def _one_disk_cluster(vmid: int = 201) -> tuple[PveClient, dict[int, dict[str, A
     return client, vm_configs
 
 
+def test_build_topology_pins_disks_on_an_excluded_storage(tmp_path: Path) -> None:
+    config = make_config(tmp_path, exclude={"storages": ["san-a"]})
+    client, _ = _one_disk_cluster()
+
+    group = build_topology(client, config).groups[0]
+
+    disk = next(d for d in group.disks if d.key == "201:scsi0")
+    assert disk.pinned_reason == "excluded by config (exclude.storages)"
+    assert disk.size_bytes == 10 * (1 << 30)  # still counted, only pinned
+    assert {s.id: s.excluded for s in group.storages} == {"san-a": True, "san-b": False}
+
+
 def test_build_topology_pins_a_disk_within_its_cooldown(tmp_path: Path) -> None:
     from proxmox_storage_drs.state import Cooldowns, State, disk_state_key
 

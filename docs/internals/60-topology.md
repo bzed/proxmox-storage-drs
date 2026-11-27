@@ -123,7 +123,12 @@ pre-move re-validation, `execute.py`'s `_preflight()` (see
 
 `_pin_reason()` checks each disk in the fixed order section 5.3 (C2) lists its
 conditions. The first condition is config exclusion (VM-level, then
-`exclude.disks`). The second is a real snapshot or an unreferenced companion
+`exclude.disks`, then `exclude.storages`). A disk on an excluded storage gets the
+reason `excluded by config (exclude.storages)`. The `Storage` also carries
+`excluded=True`. The function `storage_accepts_incoming()` reads that flag.
+The heuristic, both MILP backends and the split gate call that one function.
+They refuse the storage as a destination, repair moves included. The storage
+keeps its disks, its bytes and its load in every sum. The second is a real snapshot or an unreferenced companion
 volume (section 3.7). `_disk_snapshot_or_orphan_reason` handles it.
 `GET .../snapshot` always returns a `"current"` entry. A live cluster
 confirmed this. `_fetch_vm()` drops that
