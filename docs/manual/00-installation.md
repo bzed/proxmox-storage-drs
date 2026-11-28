@@ -88,7 +88,7 @@ yet. Download the `.deb` and install it with `apt`. `apt` fetches the
 dependencies from the trixie archive the host already uses:
 
 ```sh
-VERSION=0.1.21      # the newest release on the releases page
+VERSION=0.1.22      # the newest release on the releases page
 BASE=https://github.com/bzed/proxmox-storage-drs/releases/download/debian/$VERSION
 wget "$BASE/pve-storage-drs_${VERSION}_all.deb" "$BASE/SHA256SUMS"
 sha256sum -c SHA256SUMS

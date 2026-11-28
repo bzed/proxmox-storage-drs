@@ -1,3 +1,37 @@
+pve-storage-drs (0.1.22) trixie; urgency=medium
+
+  * exclude.storages now takes effect. It was accepted and ignored: plans
+    moved disks onto and off excluded storages. Disks on an excluded storage
+    are now pinned, their bytes and load still count, and no solver or the
+    large-VM split rule chooses the storage as a destination (GitHub #1).
+    UPGRADE NOTE: a configuration that lists excluded storages now produces
+    different plans. Read a dry-run plan first.
+  * UPGRADE NOTE: two configurations that loaded before are now refused at
+    load time. Duplicate groups[].name entries, where one group silently
+    replaced the other, are an error that names the group (#3). So is
+    exclude.skip_vms_with_snapshots: false, which never had any effect,
+    because PVE refuses to move a disk of a VM with snapshots (#5).
+  * A Prometheus bearer token is now sent when a username and password are
+    configured too. The basic authentication header overwrote it (#2).
+  * Every run of plan, explain and apply now logs a warning for each VM that
+    snapshots or unreferenced companion volumes pin, and one total for the
+    group, as events snapshot_pinned and snapshot_pinned_total (#4).
+  * The solver extra requires pulp below 4. pulp 4 rejects a call the CBC
+    backend uses. The Debian package is not affected: trixie ships 2.7.
+  * The manual, internals documentation, manpage, README, site page, example
+    configuration comments and --help strings are rewritten in
+    ASD-STE100 simplified technical English. Statements that did not match
+    the program are corrected, among them the objective terms, the gate
+    list, the reserve formula and the behaviour of the MILP on timeout. The
+    manual now shows --mode before the apply subcommand (#8), real
+    configuration keys (#9), the submission terms for test data (#11) and
+    current payback figures (#12).
+  * Every public class and function has a docstring, and a test keeps it so
+    (#10). Unused code and stale comments are removed (#6), and the
+    description of make check is correct (#13).
+
+ -- Bernd Zeimetz <bzed@debian.org>  Sat, 28 Nov 2026 15:40:20 +0100
+
 pve-storage-drs (0.1.21) trixie; urgency=medium
 
   * The data-spread term of the objective (objective.delta_capacity_spread) is
