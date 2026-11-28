@@ -73,17 +73,10 @@ that must land together (version files, a `debian/changelog` entry, a git tag) a
 without the others. Mechanically:
 
 ```sh
-/graphify . --update                         # refresh the knowledge graph first (docs too, not just code)
-git add graphify-out/graph.json graphify-out/graph.html graphify-out/GRAPH_REPORT.md
-git commit -m "Refresh the graphify graph for <version>"   # its own commit, just before "Release <version>"
 # ... version bump + changelog + "Release <version>" commit, merge --no-ff to main ...
 make check                                   # must be green before tagging anything
 git tag -a debian/<version> -m "pve-storage-drs <version>"
 ```
-
-Between releases `graphify-out/` is rebuilt in the working tree by a git hook and stays
-uncommitted; only a release commits it. Commit just the three tracked files — the untracked
-`cache/`, dated backup directories and `.graphify_*` files stay out.
 
 The tag is annotated (`-a`), named `debian/<version>` to match this repo's existing tags
 (`git tag -l`), and created on the commit that lands the version bump once it is on `main` — not
@@ -104,8 +97,8 @@ surface) can go to a subagent. Rules:
 ## Never commit
 
 `config/drs.yaml` (contains the PVE password), `state.json`, `.env`, `.claude/`, `.venv/`,
-`.coverage`, `htmlcov/`, `docs/.build/`. They are in `.gitignore`. Adding a `!` exception for any
-of them is a stop-and-ask moment.
+`graphify-out/`, `.coverage`, `htmlcov/`, `docs/.build/`. They are in `.gitignore`. Adding a `!`
+exception for any of them is a stop-and-ask moment.
 
 The one deliberate exception to "do not commit build products" is
 `docs/IMPLEMENTATION_PLAN.pdf`: it is a deliverable, it is read outside a checkout, and
