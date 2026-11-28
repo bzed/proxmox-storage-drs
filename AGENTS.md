@@ -153,8 +153,8 @@ Details and the test-layout conventions: [`.agents/testing.md`](.agents/testing.
 - Commit messages: imperative subject ≤ 72 chars, blank line, body explaining *why*. Agent
   commits end with the `Co-Authored-By:` trailer for the model that wrote them.
 - **Never commit:** `config/drs.yaml` (holds the PVE password), `state.json`, `.env`,
-  `.claude/`, coverage artefacts, `.venv/`. All are in `.gitignore`; if you find yourself
-  adding an exception, stop and ask.
+  `.claude/`, `graphify-out/`, coverage artefacts, `.venv/`. All are in `.gitignore`; if you find
+  yourself adding an exception, stop and ask.
 
 Details: [`.agents/git-workflow.md`](.agents/git-workflow.md).
 
@@ -496,14 +496,6 @@ the others:**
    `Bernd Zeimetz <bernd@bzed.de>` (the general git identity, not the changelog's packaging one),
    with the tag message naming the package and version (`pve-storage-drs <version>`). A changelog
    entry with no tag leaves the release unfindable by anyone who did not read the whole log.
-
-**Before the release commit, refresh the knowledge graph and commit it on its own.** Between
-releases `graphify-out/` is rebuilt in the working tree by a git hook and is left uncommitted; a
-release is the one point where it is committed, so the graph in a tagged tree matches that tree.
-Run `/graphify . --update` (the hook's rebuild is code-only; this also re-extracts the changed
-docs), then commit exactly the three tracked files — `graphify-out/graph.json`, `graph.html`,
-`GRAPH_REPORT.md` — as one commit *just before* the `Release <version>` commit, on the `release/`
-branch. Not the untracked `cache/`, dated backup directories or `.graphify_*` files.
 
 `make check` must be green on the commit being tagged — the same rule as any merge to `main`
 (§4), with no exception for a release commit.

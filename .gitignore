@@ -37,6 +37,9 @@ BUG_REPORT_*.md
 # Claude Code local settings
 .claude/
 
+# Local graphify knowledge graph (rebuilt by a git hook, never committed)
+graphify-out/
+
 # Generated manpage (built by "make man" and by debian/rules)
 man/pve-storage-drs.1
 
