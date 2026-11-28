@@ -1,917 +1,883 @@
-# Graph Report - proxmox-storage-drs  (2026-11-27)
+# Graph Report - proxmox-storage-drs  (2026-11-28)
 
 ## Corpus Check
-- 117 files · ~352,017 words
+- 135 files · ~358,369 words
 - Verdict: corpus is large enough that graph structure adds value.
-- Unclassified: 21 file(s) not represented in the graph (top: (none) 12, .sha256 3, .conf 1)
 
 ## Summary
-- 4076 nodes · 11533 edges · 218 communities (155 shown, 63 thin omitted)
-- Extraction: 86% EXTRACTED · 14% INFERRED · 0% AMBIGUOUS · INFERRED: 1666 edges (avg confidence: 0.93)
-- Token cost: 0 input · 0 output
-
-## Graph Freshness
-- Built from commit: `80648bb1`
-- Run `git rev-parse HEAD` and compare to check if the graph is stale.
-- Run `graphify update .` after code changes (no API cost).
+- 4291 nodes · 11734 edges · 189 communities (154 shown, 35 thin omitted)
+- Extraction: 87% EXTRACTED · 13% INFERRED · 0% AMBIGUOUS · INFERRED: 1526 edges (avg confidence: 0.94)
+- Token cost: 916,913 input · 0 output
 
 ## Community Hubs (Navigation)
 - execute.py
+- collect.py
+- metrics.py
 - test_cli.py
 - test_config.py
-- seed_assignment
-- ExecutionResult
-- test_payback.py
-- compute_reserve_status
-- Path
-- test_enforce_format.py
-- MonkeyPatch
-- GroupLoad
-- run
-- Disk
-- config.py
-- optimize.py
-- IMPLEMENTATION_PLAN.md
-- test_optimize.py
-- collect.py
-- test_anonymize.py
-- Group
-- topology.py
-- test_validate_corpus.py
-- test_replay.py
-- test_topology.py
-- test_metrics.py
-- ExecutionConfig
-- capture_bundle
-- test_collect.py
-- Any
-- ObjectiveBreakdown
-- PveClient
-- evaluate_assignment
-- TimeWindow
-- anonymize.py
-- _sample_topology
-- ._call
-- test_state.py
-- balanced_load
-- ResolvedConfig
-- Mapper
-- Metrics page
-- metrics.py
-- state.py
-- Load model page
-- _is_metrics_expected_absent
-- test_execute.py
-- FakeClock
-- run_heuristic
-- BundleError
-- cli.py
-- Reading `apply`
-- test_documentation.py
-- Mapper
-- make_config
-- crashrecovery.py
-- format_bytes
-- Reading `plan`
-- _vol
-- test_logging_setup.py
-- test_small_disks.py
-- objective section
-- PveApiError
 - test_heuristic.py
-- ._call_once
-- series_of
-- test_large_vm_split_fixture.py
-- Domain invariants (.agents)
-- FakePrometheusSession
-- test_pve.py
-- docs/internals/90-heuristic.md
-- test_schedule.py
-- test_statusfile.py
-- Assignment
-- main
-- _handle_apply
-- Any
-- docs/internals/92-execute.md
-- _plan_group
-- _ResponseLike
-- case_for
-- _exec_group
-- State
-- `execution` — how (and whether) moves actually happen
-- test_forecast.py
-- generate_expected.py
-- disk_factors
-- .agents/documentation.md
-- forecast.py
-- (C7) Capacity-spread linearization (absolute TiB)
-- split_gate_opens
-- _quantile_promql
-- LastBalance
-- Reading `explain`
-- _redact_finding_message
-- Fixture
-- test_running_task_on_the_vm_is_waited_out_before_move_disk
-- .agents/ index
-- forecast_group
-- _group_vmid_batches
-- test_plan_gate_also_reflects_real_drift_history_from_state_json
-- pve-storage-drs manpage
-- test_live_transient_check_fails_safe_when_the_live_read_errors
-- _apply_connection_pool_size
-- _mapper
-- AGENTS.md working agreement
-- Packaging, dependencies and CI (.agents)
-- config/drs.example.yaml
-- `metrics` — Telegraf/InfluxDB name mapping
-- build_node_selector
-- storage_of
-- PVE InfluxDB external metric server
-- pytest
-- test_affinity_repair_fixture.py
-- ForecastConfig
-- apply_forecast
-- Installation and requirements
-- `migration` — cost, bandwidth and the payback rule
-- apply modes: dry-run, confirm, auto
-- empty_state
-- fakes.py
-- test_no_feasible_solution_says_infeasible_rather_than_blaming_the_time_limit
-- _pid_alive
-- Migration cost and payback test
-- `proxmox` — the cluster API connection
-- _render_split_lines
-- pathlib
-- Configuration reference
-- test_solve_returns_none_when_the_library_is_unavailable
-- test_plan_reports_an_unfixable_shortfall_and_the_pins_that_block_it
-- test_manual_falls_back_when_man_exits_nonzero
-- _UnfixableShortfall
-- Where the numbers come from, and how a transport loses them
-- `exclude` — what DRS never touches
-- test_unfixable_shortfall_is_proven_only_for_an_optimal_cbc_solve
-- test_task_lock_timeout_retry_drives_inflight_callbacks_for_both_upids
-- test_holt_winters_quantile_clamps_at_zero
-- test_holt_winters_quantile_forecasts_ceil_window_over_step_steps
-- test_holt_winters_quantile_is_none_for_a_non_finite_forecast
-- test_objective_offset_is_carried_by_a_variable_fixed_to_one
-- Configuration page
-- Persistent state: state.json
-- docs/internals/00-overview.md
-- datetime
-- `groups` — storage groups
-- `load_weights` — combining read/write and time/ops/bytes
-- Safety properties, exit codes, and what this build actually does
-- Diagnostic bundles: `collect-testdata` and `--replay`
-- Logging: what lands where, and what an unattended run records
 - Path
-- footprint_on
-- `forecast` — placing disks for the load they will have
-- `prometheus` — the metrics source
-- `solver` — which backend plans
-- `support` — diagnostic bundles
-- `--json`
+- CaptureFixture
+- test_metrics.py
+- compute_reserve_status
+- test_execute.py
+- GroupLoad
+- test_optimize.py
+- AGENTS.md working agreement
+- BundleError
+- RecordingPveClient
+- Group
+- test_enforce_format.py
+- Disk
+- test_anonymize.py
+- Disk
+- 20-verifying-metrics.md
+- test_replay.py
+- MonkeyPatch
+- test_validate_corpus.py
+- ._call
+- State
+- cli.py
+- PveClient
+- Configuration reference
+- test_collect.py
+- run_concurrent
+- pve-storage-drs manpage
+- ResolvedConfig
+- test_topology.py
+- TimeWindow
+- config.py
+- order_moves
+- `proxmox` — the cluster API connection
+- _sample_topology
+- topology.py
+- _render_group_plan_human
+- test_topology.py
+- ResolvedConfig
+- test_logging_setup.py
+- _handle_apply
+- State
+- ExecutionConfig
+- IMPLEMENTATION_PLAN.md
+- test_documentation.py
+- _plan_group
+- 29-explain.md
+- empty_state
+- exceptions.py
+- `migration` — cost, bandwidth and the payback rule
+- Overview: what is built, and how it fits together
+- config.py
+- FakeClock
+- Assignment
+- make_config
+- heuristic.py
+- ._get
+- test_free_space_repair_fixture.py
+- test_forecast.py
+- exceptions.py
+- format_bytes
+- PveApiError
+- _run_two_onto_san_c
+- test_topology.py
+- Safety properties, exit codes, status
+- build_client
+- test_state.py
+- test_small_disks.py
+- topology.py
+- forecast.py
+- test_payback.py
+- Group
+- test_statusfile.py
+- json_safe
+- stitch_range_results
+- config/drs.example.yaml
+- test_payback.py
+- `execution` — how (and whether) moves actually happen
+- generate_expected.py
+- case_for
+- test_statusfile.py
+- apply modes: dry-run, confirm, auto
+- apply_forecast
+- metrics.py
+- FakePrometheusSession
+- Testing (.agents)
+- Logging
+- check_paper_log.py
+- Reading `explain`
+- _apply_connection_pool_size
+- test_state.py
+- Fixture
+- save_locked_state
+- build_rate_promql()
+- PaybackResult
+- Reading `apply`
+- pytest
+- _mapper
+- test_payback.py
+- repair_markers
+- gates section
+- IMPLEMENTATION_PLAN.md
+- disk_factors
+- FakeProxmoxResource
+- `metrics` — Telegraf/InfluxDB name mapping
+- test_payback.py
+- _outcome
+- evaluate_assignment(): shared section 5.4 objective
+- Test corpus tests/corpus/
+- topology.py
+- test_statusfile.py
+- FakeClock
+- _exec_group
+- Transient invariant
+- Cooldowns
+- build_topology() one-pass join
+- reserve.py shared (C4)/(C5) footprint evaluator
+- IMPLEMENTATION_PLAN.md
+- move_disk (drive-mirror, delete=1)
+- Objective function (alpha, beta, gamma, kappa, delta, mu, P)
+- split_gate_opens()
+- test_affinity_repair_fixture.py
+- RangeStepMismatch
+- test_topology.py
+- test_docstrings.py
+- forecast_group
+- save_state_atomic
+- test_topology.py
+- test_plan_gate_also_reflects_real_drift_history_from_state_json
+- test_statusfile.py
+- delta data spread weight per TiB
+- test_statusfile.py
+- Migration cost and payback test
+- `exclude` — what DRS never touches
+- forecast.py
+- metrics.py
+- test_apply_exits_quietly_when_state_json_is_already_locked
+- test_enforce_format.py
+- Pin priority _pin_reason() (C2)
+- Payback acceptance test
+- (C4)/(C5) Snapshot reserve and free-space constraint
+- _vm_splits
+- Assignment
 - filters.lua
-- proxmox-storage-drs
-- resolve_level
 - _FakeClient
-- `snapshot_reserve` — the free-space floor
-- `window` — the decision window
-- `free_space` — keep N bytes (or N%) free on top of the snapshot reserve
-- Dry-run default; apply is the only writing command
+- test_optimize.py
+- test_optimize.py
+- series_of
+- series_of
+- test_holt_winters_quantile_is_none_for_a_non_finite_forecast
+- last_load drift baseline
+- loadmodel.py
 - fc-tier1 fixture (plan 14 worked example)
+- MonkeyPatch
+- series_of
 - import-all
-- draining status
+- DeepWiki
+- Lock timeout skip vs abort
+- Contributing test data with collect-testdata and --replay
 - run-with-system-python.sh
+- `free_space` — keep N bytes (or N%) free on top of the snapshot reserve
+- Group
 - build_paper.sh
 - build_site.sh
-- autopkgtest runtime-dependency check
-- GitHub Actions and Salsa GitLab CI pipelines
-- Never consider over-provisioning (provisioned size)
-- Structured logs go to stderr
-- --manual prefers man(1), falls back to in-tree markdown
-- 'no moves made' line in plan/apply
-- Unfixable-shortfall report
-- Deadlock report for residual violations
-- ScheduleResult.final_assignment
-- Persistent-objective reduction per cost_m ranking
 - Transient invariant called with single-move set
-- Tiny disks (cost_m = 0) scheduled first
-- migration payback settings (payback_horizon, payback_ratio, max_single_move_duration)
-- Check 5: per-disk coverage
-- Check 3: configured labels present
-- Check 6: observed sample spacing
-- plan --json groups[] schema
-- payback: line (benefit >= payback_ratio * cost)
-- payback.repair_exempt
 - solver: line (backend actually used)
-- Lock timeout skip vs abort
+- apply modes: dry-run, confirm, auto
 - Shared pandoc PDF metadata
 - Affinity repair under payback fixture
-- Storage capability weight and utilization u_s
-- CP-SAT (ortools) backend, removed
-- Execution modes (dry-run default, confirm, auto)
-- Holt-Winters forecasting and backtest gate
 - Free-space repair mandate fixture
-- Free-space repair mandate
-- Keyed pseudonyms with salt
-- max_single_move_duration hard rule
-- Migration benefit over horizon H
 - Per-group MILP optimization model
-- move_disk (drive-mirror, delete=1)
 - Objective (alpha imbalance, beta migrations, gamma bytes, kappa fragmentation, delta spread, P reserve)
-- Prometheus per-disk blockstat metrics
-- Reserve override
 - reserve-tradeoff companion fixture
-- Shared feasibility and objective functions (evaluate_assignment)
-- Deadlock resolution and staging moves
-- Storage group
-- Storage name patterns /…/ in groups
 - Provisioned-size (thick) accounting
 - importlib
 - proxmox-storage-drs
+- proxmox_storage_drs
+- forecast_group
+- CaptureFixture
+- CaptureFixture
+- test_documentation.py
 
 ## God Nodes (most connected - your core abstractions)
-1. `Group` - 200 edges
-2. `PveClient` - 122 edges
-3. `Disk` - 84 edges
+1. `Group` - 232 edges
+2. `Disk` - 111 edges
+3. `write_config()` - 86 edges
 4. `run()` - 84 edges
-5. `write_config()` - 83 edges
-6. `make_move()` - 81 edges
-7. `client_with()` - 80 edges
-8. `build_topology()` - 75 edges
-9. `PrometheusClient` - 70 edges
-10. `fake_api()` - 69 edges
+5. `make_move()` - 81 edges
+6. `client_with()` - 80 edges
+7. `build_topology()` - 78 edges
+8. `PveClient` - 77 edges
+9. `PrometheusClient` - 76 edges
+10. `Storage` - 76 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `The `Group <name> → ACT`/`NO ACTION` line` --references--> `GroupLoad`  [INFERRED]
   docs/manual/25-show-load-and-verify-storages.md → src/proxmox_storage_drs/loadmodel.py
 - `What is in the file` --references--> `duration()`  [INFERRED]
   docs/manual/36-monitoring.md → tests/fixtures/generate_expected.py
-- `The `objective:` line` --references--> `ObjectiveBreakdown`  [INFERRED]
-  docs/manual/29-explain.md → src/proxmox_storage_drs/heuristic.py
-- `What this build actually implements` --references--> `ObjectiveBreakdown`  [INFERRED]
-  docs/manual/30-safety-and-status.md → src/proxmox_storage_drs/heuristic.py
-- `What `plan` does not yet do` --references--> `evaluate_assignment()`  [INFERRED]
-  docs/manual/27-plan.md → src/proxmox_storage_drs/heuristic.py
+- `Seven-stage pipeline: collect, join, gate, solve, cost, order, execute` --references--> `_plan_group()`  [INFERRED]
+  docs/internals/00-overview.md → src/proxmox_storage_drs/cli.py
+- `What `plan` does not yet do` --references--> `GroupLoad`  [INFERRED]
+  docs/manual/27-plan.md → src/proxmox_storage_drs/loadmodel.py
+- `apply_forecast(): scaling, never replacing` --references--> `apply_forecast()`  [EXTRACTED]
+  docs/internals/70-loadmodel.md → src/proxmox_storage_drs/loadmodel.py
 
 ## Import Cycles
 - None detected.
 
 ## Hyperedges (group relationships)
 - **Safety invariants that must not be optimised away** — agents_domain_invariants_snapshot_reserve, implementation_plan_transient_invariant, agents_domain_invariants_finished_task_not_finished_move, agents_domain_invariants_never_auto_delete, agents_domain_invariants_dry_run_default [EXTRACTED 1.00]
-- **Domain safety invariants that must not be optimised away** — agents_domain_invariants_dry_run_default, agents_domain_invariants_snapshot_reserve, agents_three_floors_precedence, implementation_plan_transient_invariant, agents_finished_task_not_finished_move, agents_domain_invariants_never_auto_delete, agents_never_overprovision [EXTRACTED 1.00]
-- **Execution safety chain** — docs_internals_92_execute_revalidate, docs_internals_92_execute_done4, docs_internals_92_execute_locks, docs_internals_92_execute_orphans, implementation_plan_transient [INFERRED 0.75]
-- **Absolute-TiB capacity spread implementation** — implementation_plan_c7_capacity_spread, implementation_plan_delta, implementation_plan_x_star, docs_internals_90_heuristic_ds_abs, implementation_plan_phase18 [INFERRED 0.85]
 - **CI and quality gates enforcing the make check loop** — github_workflows_tests_tests_workflow, github_workflows_debian_package_debian_package_workflow, debian_gitlab_ci_salsa_ci_pipeline, pre_commit_config_pre_commit_hooks, codecov_yml_codecov_config [INFERRED 0.85]
 - **Plan section 14 fixtures** — tests_fixtures_fc_tier1_doc, tests_fixtures_affinity_repair_doc, tests_fixtures_free_space_repair_doc, tests_fixtures_large_vm_split_doc, tests_fixtures_reserve_tradeoff_doc [INFERRED 0.85]
-- **Generated artefacts kept honest by stamps and tests** — _agents_paper_sha256_stamp, _agents_documentation_doc_tests [INFERRED 0.85]
-- **Move completion: task OK, source released, VM unlocked** — docs_manual_28_apply_move_done_definition, docs_manual_28_apply_draining [INFERRED 0.85]
-- **Payback benefit terms** — docs_internals_96_payback_benefit, docs_manual_10_configuration_objective_alpha_spread, docs_manual_10_configuration_objective_delta_capacity_spread, docs_manual_10_configuration_objective_kappa_vm_affinity, docs_manual_10_configuration_mu [INFERRED 0.85]
-- **Debian packaging, CI and release chain** — agents_autopkgtest, agents_ci_pipelines, agents_release_procedure [INFERRED 0.85]
-- **Shared objective across MILP and heuristic** — docs_internals_90_heuristic_evaluate, docs_internals_91_optimize_cbc, docs_internals_91_optimize_shared, implementation_plan_objective [INFERRED 0.85]
+- **Per-group decision pipeline: load, gates, solve, payback, order, execute** — implementation_plan_load_model, implementation_plan_gating, implementation_plan_milp, implementation_plan_payback, implementation_plan_scheduling, implementation_plan_move_disk [EXTRACTED 1.00]
+- **Reserve and free-space safety enforced before, during and after moves** — implementation_plan_reserve, implementation_plan_lexicographic_solve, implementation_plan_reserve_override, implementation_plan_repair_exemption, implementation_plan_transient_invariant [EXTRACTED 1.00]
+- **Collect, anonymize, replay and corpus flow** — implementation_plan_diagnostic_bundles, implementation_plan_anonymization_allowlist, implementation_plan_keyed_pseudonyms, implementation_plan_replay, implementation_plan_test_corpus [EXTRACTED 1.00]
+- **One transient reserve invariant shared by scheduler and executor** — docs_internals_95_schedule_transient, docs_internals_92_execute_live_transient_provisioned, docs_internals_92_execute_no_double_counting, docs_internals_60_topology_reserve_py [EXTRACTED 1.00]
+- **Reserve is never traded against balance** — docs_internals_80_gates_reserve_override, docs_internals_90_heuristic_repair, docs_internals_91_optimize_lex, docs_internals_96_payback_repair_exemption, docs_internals_95_schedule_deadlock_report [INFERRED 0.95]
+- **In-flight UPID crash recovery flow** — docs_internals_15_state_inflight_upids_written_and_read_for_crash_recovery, docs_internals_93_crashrecovery_write_upid_to_disk_before_the_crash_can_happen, docs_internals_93_crashrecovery_reconcile_inflight_recorded_upids_plus_foreign_scan, docs_internals_93_crashrecovery_startup_scan_folds_excluded_vmids_before_planning [EXTRACTED 1.00]
+- **Unconditional safety properties** — agents_domain_invariants_dry_run_default, docs_manual_30_safety_and_status_reserve_never_traded, docs_manual_30_safety_and_status_nodelete [EXTRACTED 1.00]
+- **Silent counter loss and its detection** — docs_manual_05_metrics_pipeline_six_counters, docs_manual_05_metrics_pipeline_string_field_drop, docs_manual_05_metrics_pipeline_telegraf_remote_write, docs_manual_20_verifying_metrics_sample_series_subset_check [EXTRACTED 1.00]
+- **Lifecycle of one executed move** — docs_manual_28_apply_preflight_recheck, docs_manual_28_apply_move_done_definition, docs_manual_28_apply_draining, docs_manual_28_apply_state_json_updates, docs_manual_28_apply_crash_recovery [INFERRED 0.85]
+- **Domain safety invariants that must not be optimised away** — agents_domain_invariants_dry_run_default, agents_reserve_never_traded, agents_three_floors_precedence, implementation_plan_transient_invariant, implementation_plan_finished_move, agents_never_overprovision [EXTRACTED 1.00]
+- **Debian packaging, CI and release chain** — agents_debian_first, agents_autopkgtest, agents_ci_pipelines, agents_release_procedure [INFERRED 0.85]
+- **Rules keeping shipped documentation honest** — _agents_documentation_doc_tests, _agents_documentation_same_commit_rule, _agents_documentation_help_from_argparse, _agents_documentation_reference_config [INFERRED 0.85]
 
-## Communities (218 total, 63 thin omitted)
+## Communities (189 total, 35 thin omitted)
 
 ### Community 0 - "execute.py"
-Cohesion: 0.05
-Nodes (97): Write UPID to disk before the crash can happen, ExcludeConfig, _active_task_on_vm(), _advance_pending(), _auto_budget_stop_outcome(), _check_lock_once(), Clock, _confirm_decision() (+89 more)
-
-### Community 1 - "test_cli.py"
-Cohesion: 0.03
-Nodes (72): _balanced_non_violating_topology(), _breakdown_with_split(), _gate(), _no_move_schedule(), _NodeNamesClient, _one_disk_group_load(), _outcome(), _patch_forecast_deps() (+64 more)
-
-### Community 2 - "test_config.py"
-Cohesion: 0.07
-Nodes (90): ConfigError, The configuration file is missing, unreadable or fails validation. See…, minimal_config_dict(), Any, parametrize, Path, skipif, The smallest config that passes structural + semantic validation. (+82 more)
-
-### Community 3 - "seed_assignment"
-Cohesion: 0.08
-Nodes (42): Section 5.5 step 1: "seed with the current assignment (not from scratch -- we…, seed_assignment(), _large_vm_group(), storage(), make_disk(), make_storage(), parametrize, Section 5.4: "l_v ... pinned disks included -- their I/O is the VM's I/O",… (+34 more)
-
-### Community 4 - "ExecutionResult"
-Cohesion: 0.06
-Nodes (68): ExecutionResult, One group's ``execute_plan()`` call. ``stopped_early`` is true for any reason…, The whole cluster's worth of groups, as seen by this run. By the time anything…, Topology, _fragmented_group(), _make_group_plan(), _moved_outcome(), _one_disk_group() (+60 more)
-
-### Community 5 - "test_payback.py"
-Cohesion: 0.06
-Nodes (71): MigrationConfig, compute_benefit_load_seconds(), compute_move_cost(), evaluate_plan_payback(), executed_assignment(), Assignment, Section 7.1's cost for one scheduled move. Only ``source`` is needed (not the…, Section 7.2: ``benefit = (alpha*(E_before - E_after) + delta*(F_before -… (+63 more)
-
-### Community 6 - "compute_reserve_status"
-Cohesion: 0.07
-Nodes (52): compute_reserve_status(), (C4)/(C5) evaluated for one storage at the assignment ``storage_of`` encodes.…, ``size_bytes`` rounded *up* to the next whole MiB, in bytes. Up, never to…, round_up_to_mib(), _each_own_vm(), make_disk(), make_storage(), parametrize (+44 more)
-
-### Community 7 - "Path"
-Cohesion: 0.06
-Nodes (72): load_config(), Apply the section 11 resolution order. Returns ``(path, was_explicit)``.…, Resolve, read, parse and validate the configuration. See section 11 for…, resolve_config_path(), _patch_show_load_deps(), _patch_show_load_forecast(), CaptureFixture, Exception (+64 more)
-
-### Community 8 - "test_enforce_format.py"
-Cohesion: 0.08
-Nodes (59): needs_cbc, disk_size_on(), qcow2_lvm_allocation_bytes(), Upper bound on the LV ``alloc_image`` creates for a ``qcow2`` volume of…, Section 5.3.2's ``phi(d, s)``: the format ``disk`` would have on ``storage``.…, Section 5.3.2's ``z_{d,s}``, in bytes: what ``disk`` occupies when placed on…, target_format(), tests_unit (+51 more)
-
-### Community 9 - "MonkeyPatch"
-Cohesion: 0.09
-Nodes (53): _balanced_apply_group_load(), _balanced_apply_topology(), _check_statusfile(), _monitored_config(), _patch_plan_deps(), MonkeyPatch, Two evenly-sized, evenly-loaded disks on one storage, none on the other, no…, Matches `_balanced_apply_topology()`: both disks on san-a, load 5.0 each (200%… (+45 more)
-
-### Community 10 - "GroupLoad"
-Cohesion: 0.08
-Nodes (57): GatesConfig, _capacity_spread(), evaluate_group_gates(), _l1_drift(), Section 6, applied in the order it lists: reserve override, then the capacity…, ``(‖ℓ_last‖₁, ‖ℓ_now − ℓ_last‖₁)`` over the **union** of disk keys present in…, Section 5.3 (C7)'s `(max_s b_s - min_s b_s) / b_bar`, or ``None`` when the gate…, _aggregate_storages() (+49 more)
-
-### Community 11 - "run"
-Cohesion: 0.10
-Nodes (60): client_with(), default_group(), make_move(), Fails safe: a volume with neither `size` nor `approximate-size` makes the…, A move missing from `move_costs_by_key` is never refused for lack of an…, Section 13: `state.json` must learn about a UPID *before* this function goes on…, Not only the happy path -- a `move_disk` task that itself fails still finished…, `dry-run` never calls `move_disk` at all -- the callbacks must simply never… (+52 more)
-
-### Community 12 - "Disk"
-Cohesion: 0.07
-Nodes (58): dataclasses, Section 6: decide whether to act on a group at all, before the solver runs.…, Migration cost and the payback acceptance test. See IMPLEMENTATION_PLAN.md…, _current_storage(), largest_disk_bytes(), largest_footprint(), largest_footprint_bytes(), managed_used_bytes() (+50 more)
-
-### Community 13 - "config.py"
-Cohesion: 0.06
-Nodes (62): contextlib, jsonschema, re, requests, ruamel_yaml, ruamel_yaml_error, _build_config(), _check_connection_config() (+54 more)
-
-### Community 14 - "optimize.py"
-Cohesion: 0.11
-Nodes (44): _cbc_capacity_spread_term(), _cbc_feasibility_constraints(), _cbc_objective_terms(), _cbc_small_disks_follow_their_vm(), _cbc_split_excess_term(), _cbc_storage_load(), _cbc_storage_used_mib(), _cbc_vm_footprint() (+36 more)
-
-### Community 15 - "IMPLEMENTATION_PLAN.md"
 Cohesion: 0.04
-Nodes (55): Anonymization allowlist, never denylist, Big-M penalty P fallback (computed P_min), Migrations throttled by bwlimit only, (C2) Eligibility via variable fixing, (C3) VM affinity linking, (C4) Largest-disk linearization Z_s, (C6) Load spread, (C8) Small disks follow their VM (+47 more)
+Nodes (109): Move done needs four conditions, Draining outcome excludes source storage, Injectable Clock, VM locks are an open set, waited out, Orphaned volumes reported, never deleted, Retry on move_disk task flock timeout, Wipe duration uses magnitude of saferemove_throughput, ExcludeConfig (+101 more)
 
-### Community 16 - "test_optimize.py"
-Cohesion: 0.12
-Nodes (48): make_disk(), make_storage(), parametrize, Section 5.4's D^big: at beta_move_count=1.0, moving `201:efidisk0` (1 MiB) to…, IMPLEMENTATION_PLAN.md section 14.3's "delta knob, demonstrated at the…, The MILP solver backend. See proxmox_storage_drs/optimize.py. Cross-checked…, REVIEW.md AA-01: the then-CP-SAT backend's (C7) linearization once built `d_s`…, The inverse check: explicitly disabling delta must restore beta's own three-… (+40 more)
+### Community 1 - "collect.py"
+Cohesion: 0.04
+Nodes (101): anonymize.py pure allowlist shared with scrub audit, Fail-closed pseudonym anonymization, functools, gzip, hashlib, hmac, MappingType, re (+93 more)
 
-### Community 17 - "collect.py"
+### Community 2 - "metrics.py"
+Cohesion: 0.04
+Nodes (93): Group-scoped, batched raw queries (REVIEW Q-02), _RawTimeSeries, MetricLabels, MetricsConfig, Label names that identify a series in Prometheus, from ``metrics.labels``. Each…, Prometheus metric names and query settings, from the ``metrics`` block. Metric…, _fetch_all_raw_quantities(), _fetch_all_raw_quantity_series() (+85 more)
+
+### Community 3 - "test_cli.py"
+Cohesion: 0.03
+Nodes (73): load_config(), Resolve, read, parse and validate the configuration. See section 11 for…, _balanced_non_violating_topology(), _breakdown_with_split(), _NodeNamesClient, LogCaptureFixture, REVIEW.md R-06: `move.size_bytes == 0` must not raise `ZeroDivisionError` --…, REVIEW.md R-02: when the scheduler can only order *some* of the heuristic's… (+65 more)
+
+### Community 4 - "test_config.py"
+Cohesion: 0.07
+Nodes (85): minimal_config_dict(), Any, parametrize, Path, skipif, The smallest config that passes structural + semantic validation., Config loading, resolution order and section 11.1 semantic validation., There is no ``metrics.labels.cluster`` any more -- an earlier revision's… (+77 more)
+
+### Community 5 - "test_heuristic.py"
+Cohesion: 0.06
+Nodes (86): Return the pseudonym of a group name, in the form ``group-<hash>``. The hash…, active_split_caps(), compute_vm_weights(), evaluate_assignment(), Section 5.5 step 1: "seed with the current assignment (not from scratch -- we…, ``{vmid: T_v}`` for ``V^split`` (section 5.3.3), or empty when the rule is off…, Section 5.4's `w_v = max(1, l_v / l_bar)` -- the per-VM weight that scales…, Section 5.4's objective for one candidate ``assignment``.… (+78 more)
+
+### Community 6 - "Path"
+Cohesion: 0.07
+Nodes (71): The whole cluster's worth of groups, as seen by this run. By the time anything…, Topology, _fragmented_group(), _make_group_plan(), _moved_outcome(), _one_disk_group(), _one_disk_group_load(), _one_move() (+63 more)
+
+### Community 7 - "CaptureFixture"
+Cohesion: 0.07
+Nodes (75): CaptureFixture, Exception, _patch_plan_deps(), _patch_show_load_deps(), _patch_show_load_forecast(), MonkeyPatch, parametrize, `_sample_topology()` with san-b given more headroom (16 TiB instead of 8):… (+67 more)
+
+### Community 8 - "test_metrics.py"
+Cohesion: 0.06
+Nodes (69): How much history the load model reads, from the ``window`` block. -…, WindowConfig, _check_coverage(), PrometheusClient, Thin wrapper over the Prometheus HTTP API. See section 3.4/3.5. ``session`` is…, Section 3.3 step 5: report which disks fall below ``window.min_coverage``., _all_metric_names(), FakeResponse (+61 more)
+
+### Community 9 - "compute_reserve_status"
+Cohesion: 0.06
+Nodes (72): dataclasses, Migration cost and the payback acceptance test. See IMPLEMENTATION_PLAN.md…, compute_reserve_status(), _current_storage(), largest_disk_bytes(), largest_footprint(), largest_footprint_bytes(), managed_used_bytes() (+64 more)
+
+### Community 10 - "test_execute.py"
 Cohesion: 0.09
-Nodes (27): functools, gzip, Path, proxmox_storage_drs, _anonymize_captured_prometheus(), _anonymize_prometheus_series(), _anonymize_query_text(), Bundle (+19 more)
+Nodes (71): client_with(), default_group(), make_move(), parametrize, Fails safe: a volume with neither `size` nor `approximate-size` makes the…, A PVE API error while re-reading the target refuses the move and fails the run…, A move missing from `move_costs_by_key` is never refused for lack of an…, Section 13: `state.json` must learn about a UPID *before* this function goes on… (+63 more)
 
-### Community 18 - "test_anonymize.py"
+### Community 11 - "GroupLoad"
+Cohesion: 0.06
+Nodes (68): GatesConfig, Thresholds and cooldowns that decide whether a run plans moves, from the…, _capacity_spread(), evaluate_group_gates(), _l1_drift(), GroupLoad, Section 6, applied in the order it lists: reserve override, then the capacity…, ``(‖ℓ_last‖₁, ‖ℓ_now − ℓ_last‖₁)`` over the **union** of disk keys present in… (+60 more)
+
+### Community 12 - "test_optimize.py"
+Cohesion: 0.10
+Nodes (61): _movable_disks(), OptimizeResult, `D^mov` (section 5.3) -- identical filter to `heuristic._movable_disks()`,…, One group's MILP solve. ``breakdown``/``initial_breakdown`` are computed by the…, Solve one group with ``backend`` (``"cbc"``). ``probing`` says this backend was…, solve(), Group, One storage group: section 5's independent optimization unit. (+53 more)
+
+### Community 13 - "AGENTS.md working agreement"
+Cohesion: 0.05
+Nodes (55): ASD-STE100 writing at 80 % compliance, Config knob entry: type, default, unit, extremes, interactions, Tests keeping docs honest (help covers options, manual covers config), --help generated from argparse definitions, no hardcoded defaults, Internals pages: question first, name modules, explain why, ASCII diagrams, Manpage skeleton with complete OPTIONS, Payback rule: benefit > payback_ratio * cost in load-seconds, Change behaviour and documentation in the same commit (+47 more)
+
+### Community 14 - "BundleError"
+Cohesion: 0.06
+Nodes (36): The Prometheus client and verify-metrics, PrometheusClient single _get() request path, SessionLike protocol for network-free tests, Replay clients are real subclasses, bundle_reference_now(), load_manifest(), _NeverSession, _parse_step_seconds() (+28 more)
+
+### Community 15 - "RecordingPveClient"
+Cohesion: 0.05
+Nodes (35): CallRecord, _capture_prometheus_files(), CaptureLog, _drive_group_series(), _drive_label_values(), _group_vmid_batches(), _guarded(), _issue_range_chunks() (+27 more)
+
+### Community 16 - "Group"
+Cohesion: 0.12
+Nodes (54): LoadWeights, Weights and factors that turn the raw I/O counters into one load value per…, compute_group_load(), Compute one group's :class:`GroupLoad` for this run. Section 4.…, _client(), full_coverage(), make_disk(), make_storage() (+46 more)
+
+### Community 17 - "test_enforce_format.py"
+Cohesion: 0.10
+Nodes (51): enforce_format: target_format() and disk_size_on(), (C2) format eligibility, needs_cbc, disk_size_on(), qcow2_lvm_allocation_bytes(), Upper bound on the LV ``alloc_image`` creates for a ``qcow2`` volume of…, Section 5.3.2's ``z_{d,s}``, in bytes: what ``disk`` occupies when placed on…, tests_unit (+43 more)
+
+### Community 18 - "Disk"
+Cohesion: 0.09
+Nodes (51): Feasibility constraints shared by both stages, ObjectiveConfig, Weights of the optimisation objective, from the ``objective`` block. The MILP…, _cbc_capacity_spread_term(), _cbc_feasibility_constraints(), _cbc_objective_terms(), _cbc_small_disks_follow_their_vm(), _cbc_split_excess_term() (+43 more)
+
+### Community 19 - "test_anonymize.py"
 Cohesion: 0.06
 Nodes (42): make_mapper(), MonkeyPatch, parametrize, Path, A node and a storage that happen to share a name must not collide., Section 16.3: 'the result never depends on iteration order'., Force two different vmids to hash to the same base slot and confirm both still…, X-09: `vmid`'s own linear probing makes a collision impossible, but nothing did… (+34 more)
 
-### Community 19 - "Group"
-Cohesion: 0.11
-Nodes (67): LoadWeights, _blend_loads(), compute_disk_load_series(), compute_group_load(), TimeSeries, Section 4's normalize-then-weight-then-rescale blend, given every key's own…, Compute one group's :class:`GroupLoad` for this run. Section 4.…, Section 4's `ℓ_d` blend, as a time series per disk over ``[now - range_seconds,… (+59 more)
+### Community 20 - "Disk"
+Cohesion: 0.08
+Nodes (46): 'no moves made' line in plan/apply, best_single_disk_alternative() for explain, Descend: moves, swaps and whole-VM relocation, _RepairCandidate, Section 6: decide whether to act on a group at all, before the solver runs.…, _best_of(), _best_repair_candidate(), trial_storage_of() (+38 more)
 
-### Community 20 - "topology.py"
-Cohesion: 0.06
-Nodes (65): concurrent_futures, GroupConfig, is_storage_pattern(), A ``storages[].id`` value is a pattern iff it both begins and ends with ``/``…, The regular expression text of a pattern entry, its two ``/`` delimiters…, storage_pattern_text(), StorageConfig, _allowed_formats() (+57 more)
-
-### Community 21 - "test_validate_corpus.py"
-Cohesion: 0.09
-Nodes (47): tests_corpus, tests_corpus_validate_corpus, _case(), _invariant_inputs(), MonkeyPatch, needs_full_checkout, parametrize, Path (+39 more)
+### Community 21 - "20-verifying-metrics.md"
+Cohesion: 0.05
+Nodes (46): apply privileges VM.Config.Disk and VM.Migrate, Configuration location /etc/pve/drs.yaml, PVE credential setup (Datastore.Audit and Datastore.Allocate, VM.Audit), First steps after installing, Installation and requirements, Installing the package, Running the timer on exactly one host, Setting up the PVE credential (+38 more)
 
 ### Community 22 - "test_replay.py"
-Cohesion: 0.11
-Nodes (42): PrometheusConfig, _captured_step(), _config_from_bundle(), _free_space_pairs(), MonkeyPatch, Path, AH-06: a live ``free_space`` config is collected as the resolved per-storage…, Section 16.5's one deliberate exception: a bundle captured before section 3.8… (+34 more)
+Cohesion: 0.10
+Nodes (45): PrometheusConfig, Prometheus query endpoint, from the ``prometheus`` block. Fields, with their…, BundleError, A diagnostic bundle (IMPLEMENTATION_PLAN.md section 16) could not be written or…, _captured_step(), _config_from_bundle(), _free_space_pairs(), MonkeyPatch (+37 more)
 
-### Community 23 - "test_topology.py"
-Cohesion: 0.05
-Nodes (115): Disk-cooldown pin is not exempted for reserve repair, The cluster topology could not be built from the API responses. See…, TopologyError, disk_state_key(), ``"<group>:<vmid>:<device>"`` (section 11.2) -- the group prefix is what keeps…, build_topology(), pending_disk_reasons(), _pin_reason() (+107 more)
-
-### Community 24 - "test_metrics.py"
-Cohesion: 0.04
-Nodes (89): MetricsError, Prometheus could not be queried, or the response was unusable. See…, _issue_chunked_range_query(), Any, ``client.range_query()``, issued in ``RANGE_QUERY_CHUNK_SECONDS``-sized sub-…, _disk_keys_seen(), PrometheusClient, Any (+81 more)
-
-### Community 25 - "ExecutionConfig"
+### Community 23 - "MonkeyPatch"
 Cohesion: 0.09
-Nodes (47): ExecutionConfig, LocksConfig, concurrent_client_with(), log_messages(), LogCaptureFixture, The defining property of concurrency: `move_disk` for the second move is issued…, Each move's own UPID reaches both callbacks correctly attributed --…, Two otherwise-independent moves landing on the *same* target: even with… (+39 more)
+Nodes (45): ExecutionResult, One group's ``execute_plan()`` call. ``stopped_early`` is true for any reason…, _balanced_apply_group_load(), _balanced_apply_topology(), _check_statusfile(), _monitored_config(), Two evenly-sized, evenly-loaded disks on one storage, none on the other, no…, Matches `_balanced_apply_topology()`: both disks on san-a, load 5.0 each (200%… (+37 more)
 
-### Community 26 - "capture_bundle"
-Cohesion: 0.12
-Nodes (28): Config, datetime, PrometheusClient, PveClient, ResolvedConfig, _handle_collect_testdata(), Section 16.4. Always the real clients -- collect-testdata needs a live cluster…, _build_manifest() (+20 more)
+### Community 24 - "test_validate_corpus.py"
+Cohesion: 0.09
+Nodes (45): tests_corpus, tests_corpus_validate_corpus, _case(), _invariant_inputs(), MonkeyPatch, needs_full_checkout, parametrize, Path (+37 more)
 
-### Community 27 - "test_collect.py"
+### Community 25 - "._call"
+Cohesion: 0.06
+Nodes (28): move_disk(): single bytes/s to KiB/s conversion, Retry policy: reauthentication and transient failures, storage_definitions() uses the GET /storage list form, API outage tolerance for reads, Mirror duration is z_d / bwlimit, _apply_ticket_refresh_seconds(), _build_api(), Any (+20 more)
+
+### Community 26 - "State"
+Cohesion: 0.09
+Nodes (42): cluster/tasks vs task_status conventions differ, parse_upid() grammar confirmed live, reconcile_inflight(): recorded UPIDs plus foreign scan, AuthConfig, Credentials for the PVE API, from the ``proxmox.auth`` block. Fields, with…, expected_task_user(), parse_upid(), PveClient (+34 more)
+
+### Community 27 - "cli.py"
+Cohesion: 0.08
+Nodes (43): shutil, _apply_exit_code(), _capacity_gate_hint(), _footprint_text(), _fragmented_vms(), _load_per_tib(), _objective_breakdown_json(), _pin_action_hint() (+35 more)
+
+### Community 28 - "PveClient"
+Cohesion: 0.11
+Nodes (41): PveClient, One method per IMPLEMENTATION_PLAN.md section 3.5 endpoint. ``api`` is typed…, Retry idempotent calls that fail because the API is unreachable for up to…, fake_api(), BaseException, Section 9.2: "convert at the call site and nowhere else" -- this is that site., A ticket that expired for reasons external to this call (a long confirm-mode…, A successful re-login does not guarantee the retried call succeeds -- e.g. the… (+33 more)
+
+### Community 29 - "Configuration reference"
+Cohesion: 0.05
+Nodes (41): Configuration reference, exclude section (vmids, disks, storages, tags, stopped VMs), `forecast.holt_winters.seasonal`, `forecast.holt_winters.seasonal_periods`, `forecast.holt_winters.trend`, forecast.model (quantile, holt_winters), `forecast` — placing disks for the load they will have, `free_space.hard` (+33 more)
+
+### Community 30 - "test_collect.py"
 Cohesion: 0.09
 Nodes (38): capture(), Path, X-08: section 16.1's manifest line ("schema, versions, what was captured...")…, X-08: section 16.3 promises the manifest "flags" a non-node-shaped…, Z-03: `resolve_node_selector()`'s tier-1 precedence used to win on *both* sides…, A live capture against the dev cluster found the previous implementation's bug…, verify_metrics() never carries a node selector at all -- nothing to rewrite,…, Even when the configured model is ``quantile``, the bundle is captured with… (+30 more)
 
-### Community 28 - "Any"
-Cohesion: 0.25
-Nodes (5): _guarded(), Any, Run ``fn()``, recording its outcome in ``log``. Returns ``None`` (and records…, Wraps a real, already-authenticated :class:`PveClient` and records every call's…, RecordingPveClient
-
-### Community 29 - "ObjectiveBreakdown"
-Cohesion: 0.07
-Nodes (51): What `plan` does not yet do, _capacity_gate_hint(), _GroupPlan, _load_per_tib(), _log_plan_selected(), _note_forecast(), _objective_breakdown_json(), ``(max_s u_s - min_s u_s) / u*`` -- gates.py's own imbalance formula (section… (+43 more)
-
-### Community 30 - "PveClient"
-Cohesion: 0.09
-Nodes (49): Section 13's startup scan. Returns the vmids to exclude from this run's…, reconcile_inflight(), PveClient, One method per IMPLEMENTATION_PLAN.md section 3.5 endpoint. ``api`` is typed…, Retry idempotent calls that fail because the API is unreachable for up to…, fake_api(), BaseException, The same in-flight move already recorded in state.json also shows up in the… (+41 more)
-
-### Community 31 - "evaluate_assignment"
-Cohesion: 0.11
-Nodes (36): _RepairCandidate, active_split_caps(), _best_of(), _best_repair_candidate(), trial_storage_of(), best_single_disk_alternative(), compute_vm_weights(), _descend() (+28 more)
-
-### Community 32 - "TimeWindow"
-Cohesion: 0.15
-Nodes (34): date, TimeWindow, current_deadline(), _day_name(), is_window_active(), _parse_hhmm(), datetime, ``execution.time_windows``: when ``auto`` mode may execute moves. See… (+26 more)
-
-### Community 33 - "anonymize.py"
-Cohesion: 0.07
-Nodes (30): hashlib, hmac, MappingType, filter_disk_value_params(), filter_vm_config_fields(), filter_vm_pending_entries(), generate_new_salt(), load_or_create_salt() (+22 more)
-
-### Community 34 - "_sample_topology"
-Cohesion: 0.09
-Nodes (33): _fake_build_topology(), _fake_reconcile_inflight(), `_sample_topology()` plus a section 11.4 pattern expansion and one cluster…, Every `apply` test here uses `build_pve_client`'s "fake-client" string stand-…, X-05: cli.py used to build one bare topology (for the estimate check) and then…, A ``cli.build_topology`` stand-in that ignores the ``state``/``now`` cooldown…, Section 7.1's signed `saferemove_throughput`, end to end: the configured value…, Section 3.5 / AH-04: the resolved pair is printed with its provenance, in both… (+25 more)
-
-### Community 35 - "._call"
-Cohesion: 0.08
-Nodes (17): Any, Replace the session after a transport failure, best effort. A TLS handshake…, :meth:`_call_once`, retried while the failure is transient. Only ``idempotent``…, ``GET /cluster/resources?type=vm``: VM inventory., ``GET /cluster/tasks``: recent/active tasks across **every** node -- the one…, ``GET /cluster/resources?type=storage``: storage inventory., ``GET /nodes``: every node in the cluster, by name. Section 3.4's node-scoping…, ``GET /version``: the running PVE's own version string (section 16.1/16.3's… (+9 more)
-
-### Community 36 - "test_state.py"
-Cohesion: 0.18
-Nodes (28): flock is the lock; JSON lock field is only a label, acquire_lock(), load_state(), LockInfo, Best-effort read of ``path``. See the module docstring: a missing file is the…, Section 11.2's advisory lock: ``fcntl.flock(LOCK_EX | LOCK_NB)`` on ``path``…, Clears the descriptive ``lock`` field and releases the OS-level lock, writing…, Descriptive only -- see the module docstring's "Locking" section for why the… (+20 more)
-
-### Community 37 - "balanced_load"
-Cohesion: 0.21
-Nodes (15): balanced_load(), fill_reserve_statuses(), make_disk(), make_storage(), Section 14.2's initial byte layout: san-a/b/c used 4.5/1.5/0.5 TiB of 8.0 TiB…, A perfectly I/O-balanced GroupLoad for ``group`` -- so only the capacity gate,…, Section 6: the capacity gate acts even though the group is perfectly…, Section 5.3 (C7): "if b_bar = 0 the group holds no data: the term is inactive"… (+7 more)
-
-### Community 38 - "ResolvedConfig"
-Cohesion: 0.11
-Nodes (38): CommandHandler, Namespace, _dump_report_json(), _filter_groups(), _handle_explain(), _handle_plan(), _handle_show_load(), _handle_verify_metrics() (+30 more)
-
-### Community 39 - "Mapper"
-Cohesion: 0.18
-Nodes (23): Mapper, filter_allowed_fields(), Drop every key of ``obj`` not in ``allowed``. The one primitive both the…, _anonymize_cluster_tasks(), _anonymize_disk_value(), _anonymize_exclude_disk_key(), _anonymize_node_list(), _anonymize_storage_content() (+15 more)
-
-### Community 40 - "Metrics page"
-Cohesion: 0.25
-Nodes (15): Gigapipe step workaround, Metrics page, Node-scoping selector, PrometheusClient, PromQL builders, Range query chunking, SessionLike protocol, verify_metrics six checks (+7 more)
-
-### Community 41 - "metrics.py"
-Cohesion: 0.04
-Nodes (116): _RawTimeSeries, MetricLabels, MetricsConfig, WindowConfig, RangeStepMismatch, ``--replay`` found the requested range query, but at a different step than this…, _combine_raw_values(), _combined_raw() (+108 more)
-
-### Community 42 - "state.py"
-Cohesion: 0.14
-Nodes (21): Cooldown data stored here, interpreted by topology and heuristic, errno, fcntl, socket, _active_cooldowns(), active_disk_cooldowns(), active_storage_cooldowns(), cooldown_remaining_seconds() (+13 more)
-
-### Community 43 - "Load model page"
-Cohesion: 0.22
-Nodes (15): Backtest gate, Drift baseline is effective load, Forecast provenance report, Forecast scaling ratio, Forecasting page, Holt-Winters forecast, statsmodels optional, apply_forecast scaling (+7 more)
-
-### Community 44 - "_is_metrics_expected_absent"
-Cohesion: 0.67
-Nodes (3): _is_metrics_expected_absent(), parametrize, test_is_metrics_expected_absent()
-
-### Community 45 - "test_execute.py"
-Cohesion: 0.12
-Nodes (36): SourceReleaseConfig, _group_with_types(), make_disk(), make_storage(), Section 9.3: a source_release timeout "does not fail the run: mark the storage…, Same as above, except the second move's *target* -- not source -- is the…, Section 9.3 point 3: PVE's own `saferemove_throughput` (already read live off…, No `saferemove_throughput` configured on the storage (e.g. Ceph RBD or ZFS,… (+28 more)
-
-### Community 46 - "FakeClock"
-Cohesion: 0.12
-Nodes (13): Section 9.3.1: any non-empty ``lock`` means wait, never whitelist a value…, _wait_for_unlocked(), MoveCost, Section 7.1's cost for one already-scheduled move., FakeClock, datetime, Section 9.1: the pre-loop time-window check (above) only knows the answer as of…, REVIEW.md T-06's collateral bug: before the fix, this "skipped" outcome let the… (+5 more)
-
-### Community 47 - "run_heuristic"
-Cohesion: 0.13
-Nodes (29): group_average_fill(), group_average_utilization(), HeuristicResult, One group's heuristic solve. ``assignment`` is the final target placement…, `u* = (Sum_d l_d) / (Sum_s c_s)` (C6) -- a constant under any reassignment of…, `b_bar = (Sum_d z_d + Sum_s U^ext) / (Sum_s C_s)` (section 5.3 (C7)) -- a…, Section 7.2's unweighted ``F`` -- ``sum(d_s)``, always L1 regardless of…, Section 7.2's unweighted ``E`` -- ``sum(e_s)`` (``"l1"``) or ``max(u_s)``… (+21 more)
-
-### Community 48 - "BundleError"
+### Community 31 - "run_concurrent"
 Cohesion: 0.10
-Nodes (22): hash_label_name(), hash_query_text(), The cache key both this module (writing) and ``replay.py`` (reading) derive a…, BundleError, A diagnostic bundle (IMPLEMENTATION_PLAN.md section 16) could not be written or…, bundle_reference_now(), load_manifest(), _NeverSession (+14 more)
+Nodes (35): concurrent_client_with(), datetime, The defining property of concurrency: `move_disk` for the second move is issued…, Each move's own UPID reaches both callbacks correctly attributed --…, Two otherwise-independent moves landing on the *same* target: even with…, Section 8.1's generalized invariant, live: san-c has only 2 TiB of headroom…, A leftover 1 TiB volume of VM 201 already on san-c when 201 launched (an orphan…, The deliberate simplification documented in `_execute_concurrent()`'s own… (+27 more)
 
-### Community 49 - "cli.py"
+### Community 32 - "pve-storage-drs manpage"
+Cohesion: 0.06
+Nodes (37): Release procedure (version bump, changelog, debian/ tag, graphify commit), A reference implementation that is well tested, Other backends, Telegraf with a Prometheus remote-write output, The failure mode: a transport that cannot carry strings, The six counters, Two things deliberately not used, What catches it (+29 more)
+
+### Community 33 - "ResolvedConfig"
 Cohesion: 0.11
-Nodes (25): shutil, _fragmented_vms(), _pin_action_hint(), _pinned_disks(), _pinned_load_fraction(), Assignment, Every disk in ``group`` section 5.3 (C2) pins this run, in the same order…, Section 3.6: name the actual pinned disk(s) keeping one VM's disks spread… (+17 more)
+Nodes (38): ResolvedConfig with path and sha256, Controllable now for byte-identical bundles, Namespace, _dump_report_json(), _filter_groups(), _handle_apply(), _handle_explain(), _handle_plan() (+30 more)
 
-### Community 50 - "Reading `apply`"
-Cohesion: 0.07
-Nodes (24): A negative `saferemove_throughput` is normal, Negative saferemove_throughput is normal, Reading `show-load` and `verify-storages`, `show-load`, show-load command, The `Group <name> → ACT`/`NO ACTION` line, ACT / NO ACTION gate verdict line, verify-storages command (+16 more)
+### Community 34 - "test_topology.py"
+Cohesion: 0.15
+Nodes (39): The cluster topology could not be built from the API responses. See…, TopologyError, build_topology(), datetime, Build the whole cluster's :class:`Topology` for this run. One pass: every read…, _lvm_def(), test_a_format_the_storage_type_cannot_hold_is_refused(), test_a_literal_entry_can_set_its_own_value() (+31 more)
 
-### Community 51 - "test_documentation.py"
+### Community 35 - "TimeWindow"
 Cohesion: 0.14
-Nodes (26): importlib_resources, _flatten_schema_keys(), _load_schema(), _manpage_source_text(), _manual_documented_keys(), Any, needs_full_checkout, parametrize (+18 more)
+Nodes (36): date, auto mode budgets and time windows, One allowed time window for ``auto`` mode, an entry of…, TimeWindow, current_deadline(), _day_name(), is_window_active(), _parse_hhmm() (+28 more)
 
-### Community 52 - "Mapper"
+### Community 36 - "config.py"
+Cohesion: 0.10
+Nodes (37): jsonschema, ruamel_yaml, ruamel_yaml_error, _check_connection_config(), _check_forecast_window(), _check_group_names_unique(), _check_group_size(), _check_group_storage_membership() (+29 more)
+
+### Community 37 - "order_moves"
 Cohesion: 0.11
-Nodes (16): `proxmox.auth.token_id`, _check_no_pseudonym_collision(), Mapper, pseudonym(), ``HMAC-SHA256(salt, kind || "\\0" || value)``, truncated to 8 hex chars.…, 32-bit (8 hex char) truncation makes a same-``kind`` collision astronomically…, The single per-bundle offset :meth:`Mapper.rebase_timestamp` applies: the…, The stateful half of anonymization: one instance per bundle capture. ``vmid``… (+8 more)
+Nodes (36): order_moves(), _pending_moves(), Assignment, Section 8.1's transient invariant, called with the single-move set ``{disk}``…, Section 8.2 priority 1: is ``disk``'s *current* (in ``state``) storage…, Section 8.2's scheduling loop for one group. ``target_assignment`` is normally…, _resolves_reserve_violation(), transient_invariant_ok() (+28 more)
 
-### Community 53 - "make_config"
+### Community 38 - "`proxmox` — the cluster API connection"
+Cohesion: 0.06
+Nodes (27): `metrics.labels.vmid`, `proxmox.auth.password`, `proxmox.auth.token_id`, `proxmox.auth.token_secret`, `proxmox.auth.username`, `proxmox.ca_file`, `proxmox.host`, `proxmox.port` (+19 more)
+
+### Community 39 - "_sample_topology"
+Cohesion: 0.08
+Nodes (34): _all_pinned_sample_topology(), _fake_build_topology(), _fake_reconcile_inflight(), `_sample_topology()` plus a section 11.4 pattern expansion and one cluster…, Every `apply` test here uses `build_pve_client`'s "fake-client" string stand-…, `_sample_topology()` with its one movable disk pinned too: san-a violates (C5)…, X-05: cli.py used to build one bare topology (for the estimate check) and then…, A ``cli.build_topology`` stand-in that ignores the ``state``/``now`` cooldown… (+26 more)
+
+### Community 40 - "topology.py"
+Cohesion: 0.09
+Nodes (35): concurrent_futures, Disk size resolution: content listing first, per VM node, _build_storages(), _ClusterData, content_item_size(), _default_format(), _disk_snapshot_or_orphan_reason(), _disk_specs_from_config() (+27 more)
+
+### Community 41 - "_render_group_plan_human"
+Cohesion: 0.12
+Nodes (34): What this build actually implements, _log_plan_selected(), GroupLoad, ``(max_s u_s - min_s u_s) / u*`` -- gates.py's own imbalance formula (section…, Section 9.5: every ``v in V^split`` whose split excess the plan changes, plus…, The residual shortfall of ``final_breakdown`` (the assignment the plan actually…, Why ``plan``/``apply`` show a gate verdict of ACT and then no move. The gate…, One group's worth of ``_render_plan_human()``'s report -- shared with… (+26 more)
+
+### Community 42 - "test_topology.py"
+Cohesion: 0.08
+Nodes (34): _allowed_formats(), pending_disk_reasons(), _pin_reason(), PVE tags as returned by `cluster/resources`: semicolon-separated, with comma…, Section 5.3 (C2): the disk formats ``storage_type`` can hold. An unrecognised…, Section 3.8: which disk device keys in ``GET .../pending`` (section 3.5's…, Section 5.3 (C2)'s pin conditions, in the order the plan lists them -- the…, _split_tags() (+26 more)
+
+### Community 43 - "ResolvedConfig"
+Cohesion: 0.07
+Nodes (34): ArgumentParser, CommandHandler, --manual prefers man(1), falls back to in-tree markdown, --mode escalation rule, _accumulate_move_stats(), apply_mode_override(), build_parser(), _fallback_manual_text() (+26 more)
+
+### Community 44 - "test_logging_setup.py"
+Cohesion: 0.11
+Nodes (33): Log levels, mandatory INFO floor and root handler, Structured logs go to stderr, io, configure_logging(), floor_for_command(), The mandatory ``INFO`` floor of section 2.3, or ``None``. A run that can change…, ``auto`` and ``text`` -> ``"text"``; ``json`` -> ``"json"``. JSON is opt-in. It…, Install this run's log handler. Called once, from ``main()``. ``floor`` is… (+25 more)
+
+### Community 45 - "_handle_apply"
+Cohesion: 0.07
+Nodes (32): Forecast provenance report, Payback gate in apply (REVIEW S-02), Bounded re-plan loop; errors are not mismatches, _plan_group(): one pipeline for plan and apply, Mutable state box exception to functional style, _apply_payback_gate(), _compute_group_load(), _GroupPlan (+24 more)
+
+### Community 46 - "State"
+Cohesion: 0.11
+Nodes (32): errno, fcntl, socket, Section 11.2: ``last_balance``/cooldowns are "updated only after a run that…, _record_executed_moves(), _active_cooldowns(), active_disk_cooldowns(), active_storage_cooldowns() (+24 more)
+
+### Community 47 - "ExecutionConfig"
+Cohesion: 0.13
+Nodes (31): ExecutionConfig, When the tool waits for the source volume to disappear, from…, How and when moves run, from the ``execution`` block. - ``mode``…, SourceReleaseConfig, _group_with_types(), make_disk(), make_storage(), Section 9.3: a source_release timeout "does not fail the run: mark the storage… (+23 more)
+
+### Community 48 - "IMPLEMENTATION_PLAN.md"
+Cohesion: 0.09
+Nodes (30): Big-M penalty P fallback (computed P_min), Migrations throttled by bwlimit only, (C4) Largest-disk linearization Z_s, (C6) Load spread, Storage capability weight and utilization u_s, Per-disk and per-storage cooldowns, Data spread as tunable delta preference, Deadlock and staging (+22 more)
+
+### Community 49 - "test_documentation.py"
+Cohesion: 0.12
+Nodes (30): importlib_resources, needs_full_checkout, _flatten_schema_keys(), _load_schema(), _manpage_source_text(), _manual_documented_keys(), Any, parametrize (+22 more)
+
+### Community 50 - "_plan_group"
+Cohesion: 0.09
+Nodes (29): auto backend cascade to heuristic, _log_gate_decision(), _log_load_digest(), _log_snapshot_pins(), _plan_group(), Section 5.5's backend dispatch. ``solver.backend: auto`` cascades CBC, then the…, Section 2.3's ``load_digest``: what section 4 measured, compactly enough to put…, Section 3.7 point 3, "Complain, every run, at WARN": one ``snapshot_pinned``… (+21 more)
+
+### Community 51 - "29-explain.md"
+Cohesion: 0.08
+Nodes (26): A negative `saferemove_throughput` is normal, Prometheus outage degrades only per-group load, Seven Prometheus queries per group, Reading `show-load` and `verify-storages`, `show-load`, show-load command, The `Group <name> → ACT`/`NO ACTION` line, `verify-storages` (+18 more)
+
+### Community 52 - "empty_state"
+Cohesion: 0.16
+Nodes (29): acquire_lock(), empty_state(), load_state(), _parse_state_text(), First-run state: no lock, no recorded balance, no cooldowns, nothing in flight…, The tolerant-parse half of :func:`load_state`, factored out so…, Best-effort read of ``path``. See the module docstring: a missing file is the…, Re-reads whatever is currently written through an already-open,… (+21 more)
+
+### Community 53 - "exceptions.py"
+Cohesion: 0.10
+Nodes (25): AuthenticationError, contextlib, proxmoxer, random, requests, ResourceException, PveUnreachableError, A :class:`PveApiError` with ``transient`` set: the API could not be reached, or… (+17 more)
+
+### Community 54 - "`migration` — cost, bandwidth and the payback rule"
+Cohesion: 0.08
+Nodes (28): saferemove wipe cost accounting, migration.bwlimit_bytes_per_sec, `migration` — cost, bandwidth and the payback rule, `migration.max_single_move_duration`, migration payback settings (payback_horizon, payback_ratio, max_single_move_duration), `migration.payback_horizon`, `migration.payback_ratio`, `migration.source_load_weight` (+20 more)
+
+### Community 55 - "Overview: what is built, and how it fits together"
+Cohesion: 0.09
+Nodes (26): config.py depends on forecast.py via deferred import, Overview: what is built, and how it fits together, Module layout, Seven-stage pipeline: collect, join, gate, solve, cost, order, execute, Persistent state: state.json, staged_disks field unimplemented, State dataclass tree mirrors section 11.2 JSON, Forecasting: Holt-Winters scaling of each disk's load (+18 more)
+
+### Community 56 - "config.py"
+Cohesion: 0.09
+Nodes (26): Config path resolution order, How a YAML file becomes a validated Config, Secrets from environment only when file value is null, Schema, build and semantic validation of the config, _build_config(), FreeSpaceConfig, _load_schema(), MonitoringConfig (+18 more)
+
+### Community 57 - "FakeClock"
+Cohesion: 0.12
+Nodes (24): LocksConfig, Handling of VM and disk locks during execution, from ``execution.locks``. -…, FakeClock, log_messages(), LogCaptureFixture, `execution.locks.on_timeout: skip` (the default): the locked head times out…, `/cluster/tasks` shape for a task still running: no endtime/status., The reported failure: an earlier move's "Erase data" (imgdel) job still holds… (+16 more)
+
+### Community 58 - "Assignment"
+Cohesion: 0.14
+Nodes (26): all_assignments(), best_lexicographic(), big_m_agreement_threshold(), E_of(), F_of(), objective_big_m(), objective_nonreserve(), payback() (+18 more)
+
+### Community 59 - "make_config"
 Cohesion: 0.13
 Nodes (26): make_config(), make_prometheus_client(), make_pve_client(), --no-series must skip the big, per-group superset range captures -- it does not…, Y-06: the manifest's version fields are machine-generated provenance, not free…, X-09: the printed query count used to treat a multi-day range as one range…, Z-05: a live capture stores every range series at…, Section 3.8/16.3: a real pending edit on the VM's own disk survives as the… (+18 more)
 
-### Community 54 - "crashrecovery.py"
+### Community 60 - "heuristic.py"
 Cohesion: 0.14
-Nodes (24): Crash and two-instance recovery: crashrecovery.py, cluster/tasks vs task_status conventions differ, parse_upid PVE UPID grammar confirmed live, reconcile_inflight: recorded UPIDs plus foreign scan, Two failure modes, one in-flight UPID mechanism, AuthConfig, expected_task_user(), parse_upid() (+16 more)
+Nodes (22): Large-VM split gate, (C9) large-VM split excess term, Section 6's split gate: ``(vmid, reason)`` for the first large VM (``V^split``,…, split_gate(), _disk(), _footprints(), _group(), parametrize (+14 more)
 
-### Community 55 - "format_bytes"
-Cohesion: 0.08
-Nodes (36): _footprint_text(), _make_confirm_move_interactively(), confirm(), Any, The economic test (``aggregate_ok``) and the hard per-move duration rule…, The human form of :class:`_UnfixableShortfall` -- printed whether or not the…, Only called when the gate decided to ACT but the *final* assignment moves…, ``None`` for a group ``apply`` never got as far as executing (a load error, or… (+28 more)
-
-### Community 56 - "Reading `plan`"
-Cohesion: 0.29
-Nodes (6): Payback rule check, plan command (never changes anything), Reading a move line, Reading `plan`, solver line (heuristic or cbc), The `payback:` line
-
-### Community 57 - "_vol"
-Cohesion: 0.12
-Nodes (16): A `san-c` content responder plus a `move_disk` responder for 201. The listing…, The exclusion is narrow: only 201's *own* mirror target (same VM, the disk's…, Section 8.1 / 5.3.3: VM 101 already has 3 TiB on san-b, another VM 3.5 TiB. A 1…, Between different storage types the target is allocated at the disk line's…, The same 2 TiB config `size=` and the same 4.5 TiB already on the target, but…, Section 5.3.1's `hard_b` -- resolved once onto `Storage. free_space_hard_bytes`…, _san_c_content_after_201_launches(), content() (+8 more)
-
-### Community 58 - "test_logging_setup.py"
-Cohesion: 0.10
-Nodes (37): ast, io, configure_logging(), floor_for_command(), JsonFormatter, The mandatory ``INFO`` floor of section 2.3, or ``None``. A run that can change…, Install this run's log handler. Called once, from ``main()``. ``floor`` is…, Render one :class:`logging.LogRecord` as one JSON line. (+29 more)
-
-### Community 59 - "test_small_disks.py"
-Cohesion: 0.16
-Nodes (23): Section 5.3 (C8): a small disk ends a plan either where it is now, or on a…, small_disk_placement_ok(), current(), disk(), efi_repair_group(), parametrize, skipif, VM 301's big disks live in another group: its efidisk0 is alone here and never… (+15 more)
-
-### Community 60 - "objective section"
-Cohesion: 0.21
-Nodes (13): objective.mu_vm_split_per_tib, objective section, `objective.affinity_counts_pinned_disks`, `objective.alpha_spread`, `objective.beta_move_count`, `objective.gamma_move_bytes_per_tib`, `objective.reserve_violation_penalty`, `objective.spread_metric` (+5 more)
-
-### Community 61 - "PveApiError"
-Cohesion: 0.10
-Nodes (32): ProxmoxConfig, PveApiError, The Proxmox VE API returned an error or an unusable response. See…, _apply_ticket_refresh_seconds(), _build_api(), build_client(), REVIEW.md P-01: wire ``proxmox.ticket_refresh_seconds`` through, best-effort.…, Construct a :class:`PveClient` from ``config.py``'s ``ProxmoxConfig``. Always… (+24 more)
-
-### Community 62 - "test_heuristic.py"
-Cohesion: 0.16
-Nodes (25): An idle group (every disk's load is 0) has no basis to weight one VM over…, Section 5.4: minmax is `t >= u_s` -- the hottest storage's own u_s, not its…, The heuristic solver. See proxmox_storage_drs/heuristic.py. Cross-checked…, The plan's own demonstration: at beta=0.25 the three-move plan beats the two-…, ``heuristic_iterations`` caps descend's own loop: capped at 1, only the single…, Safety first: even a beta so high that no balance-only move is ever worth it…, Section 6: "a storage involved in a migration within `cooldown_per_storage`…, Cooldown blocks incoming moves, never outgoing ones -- structural, like… (+17 more)
-
-### Community 63 - "._call_once"
-Cohesion: 0.13
-Nodes (18): AuthenticationError, ResourceException, PveUnreachableError, A :class:`PveApiError` with ``transient`` set: the API could not be reached, or…, _api_error(), _auth_failure_is_transient(), _describe(), _is_server_error() (+10 more)
-
-### Community 64 - "series_of"
-Cohesion: 0.16
-Nodes (16): HoltWintersConfig, holt_winters_quantile(), ``window.quantile`` of the Holt-Winters forecast path over the next…, Any, The shipped default (288 periods at a 5m step) over the two cycles the lookback…, A diurnal series that *ends at its trough*: the last forecast point (one day…, series_of(), test_backtest_is_none_without_a_fit_half() (+8 more)
-
-### Community 65 - "test_large_vm_split_fixture.py"
-Cohesion: 0.16
-Nodes (20): Section 6's split gate: ``(vmid, reason)`` for the first large VM (``V^split``,…, split_gate(), _disk(), _footprints(), _group(), parametrize, No single move lowers a peak of 4 on three storages (4, 4, 2 -> 2, 4, 4)., The counterfactual recorded in the expected file. (+12 more)
-
-### Community 66 - "Domain invariants (.agents)"
-Cohesion: 0.12
-Nodes (20): Domain invariants (.agents), Dry-run is the default, Enumerate every disk bus, Finished task is not a finished move, Never auto-delete a volume, Provisioned size, never allocated, Disks with snapshots pinned, Snapshot reserve never traded for balance (+12 more)
-
-### Community 67 - "FakePrometheusSession"
-Cohesion: 0.18
-Nodes (17): FakePrometheusSession, A ``metrics._SessionLike`` double capable of answering *many* distinct queries…, _instant_answer(), _range_answer(), A live capture against the dev cluster found this one directly (section 16.3's…, A live capture against the dev cluster found this directly:…, A live capture found this the hard way: ``_check_sample_series()``'s "info"…, Z-02: `_check_coverage()`'s per-disk warning embeds a real vmid taken straight… (+9 more)
-
-### Community 68 - "test_pve.py"
-Cohesion: 0.13
-Nodes (24): proxmoxer, _client_with_fake_time(), _FakeHttpsBackend, _FakeProxmoxApiWithBackend, _FakeTicketAuth, _flaky(), Exception, parametrize (+16 more)
-
-### Community 69 - "docs/internals/90-heuristic.md"
-Cohesion: 0.11
-Nodes (19): config section objective, Storage cooldown excludes destination, Descend swaps and whole-VM moves, evaluate_assignment objective, Unconditional repair, objective.spread_metric, w_v and D^big, auto backend cascade (+11 more)
-
-### Community 70 - "test_schedule.py"
-Cohesion: 0.14
-Nodes (25): make_disk(), make_storage(), _one_move_that_would_leave_san_b_slightly_short(), The plan's own arithmetic: move 1 -> 5.0 <= 8.0, move 2 -> 4.5 <= 8.0, move 3…, A storage with no existing disks and a tiny arriving one must still reserve…, Two disks, both storages already full: the target assignment swaps them, which…, Section 8.2 priority 1: among the *feasible* moves, one resolving a currently-…, REVIEW.md AA-04: section 8.2 was revised to rank candidates by "the alpha and… (+17 more)
-
-### Community 71 - "test_statusfile.py"
-Cohesion: 0.07
-Nodes (60): CompletedProcess, `report`, `report.warn_pinned_load_fraction`, needs_plugin, os, DrsError, ExecutionError, Exception (+52 more)
-
-### Community 72 - "Assignment"
-Cohesion: 0.18
-Nodes (20): best_lexicographic(), big_m_agreement_threshold(), E_of(), F_of(), objective_big_m(), objective_nonreserve(), payback(), Assignment (+12 more)
-
-### Community 73 - "main"
+### Community 61 - "._get"
 Cohesion: 0.09
-Nodes (24): ArgumentParser, _accumulate_move_stats(), apply_mode_override(), build_parser(), _fallback_manual_text(), _log_run_summary(), main(), _note_shortfall_for_status() (+16 more)
+Nodes (15): Protocol, _disk_keys_seen(), Any, The subset of ``requests.Response`` this module relies on., Return the response body decoded from JSON., The subset of ``requests.Session`` this module relies on. A structural type…, Issue one request and return the decoded ``data`` field. Typed ``Any`` rather…, ``GET /api/v1/query``. Returns the raw ``data.result`` list. (+7 more)
 
-### Community 74 - "_handle_apply"
-Cohesion: 0.12
-Nodes (23): Mutable state box narrow exception to functional style, Startup scan folds excluded vmids before planning, _apply_exit_code(), _apply_payback_gate(), _handle_apply(), _InflightStateBox, _make_inflight_callbacks(), ConfirmCallback (+15 more)
-
-### Community 75 - "Any"
+### Community 62 - "test_free_space_repair_fixture.py"
 Cohesion: 0.15
-Nodes (10): FakeResponse, FakeSession, no_coverage(), Any, _RangeStepMismatchFakeClient, 0/2 samples: present in the coverage series but with nothing in it., Answers `/api/v1/query` and `/api/v1/query_range` by the exact `query` param…, A ``range_query`` stand-in that returns caller-supplied data keyed by the exact… (+2 more)
+Nodes (24): `Σ_s r_s` at the assignment ``storage_of`` encodes -- section 7.3's outcome…, total_shortfall_bytes(), _free_space_repair_group(), _loads(), _make_disk(), _make_storage(), parametrize, tests/fixtures/free-space-repair.yaml, built as real topology objects.… (+16 more)
 
-### Community 76 - "docs/internals/92-execute.md"
-Cohesion: 0.12
-Nodes (16): config section migration, auto mode timewindow, Concurrent execution, Done needs four conditions, VM locks open set, Orphans reported never deleted, Payback gate in apply, Live re-validation of every move (+8 more)
+### Community 63 - "test_forecast.py"
+Cohesion: 0.15
+Nodes (23): _group_series(), _noise_series(), Any, TimeSeries, Holt-Winters forecasting, its backtest gate, and the required-range rule., Fewer than 2 * seasonal_periods samples before now - W: Holt-Winters cannot be…, A diurnal series that *ends at its trough*: the last forecast point (one day…, series_of() (+15 more)
 
-### Community 77 - "_plan_group"
-Cohesion: 0.11
-Nodes (17): What this build actually implements, _compute_group_load(), _log_forecast(), _log_gate_decision(), _log_load_digest(), _log_payback_verdict(), _plan_group(), Section 5.5's backend dispatch. ``solver.backend: auto`` cascades CBC, then the… (+9 more)
+### Community 64 - "exceptions.py"
+Cohesion: 0.14
+Nodes (21): Durations and sizes parsed once into canonical units, ConfigError, The configuration file is missing, unreadable or fails validation. See…, Exception hierarchy for the project. Every error the tool can raise…, format_bytes(), format_duration_seconds(), parse_duration_seconds(), parse_size_bytes() (+13 more)
 
-### Community 78 - "_ResponseLike"
-Cohesion: 0.29
-Nodes (5): Protocol, The subset of ``requests.Response`` this module relies on., The subset of ``requests.Session`` this module relies on. A structural type…, _ResponseLike, _SessionLike
+### Community 65 - "format_bytes"
+Cohesion: 0.10
+Nodes (21): confirm callback owned by cli.py, _make_confirm_move_interactively(), confirm(), The economic test (``aggregate_ok``) and the hard per-move duration rule…, Section 5.3's "report any residual `r_s > 0` prominently as an unfixable…, Sum of the pinned bytes over every storage, in bytes., Return the pinned-disk summary as a JSON-ready dict. Byte values are in bytes.…, The human form of :class:`_UnfixableShortfall` -- printed whether or not the… (+13 more)
 
-### Community 79 - "case_for"
-Cohesion: 0.20
-Nodes (18): StorageState, best_big_m(), build(), capacity_spread(), case_for(), moves_of(), order_moves(), per_storage() (+10 more)
+### Community 66 - "PveApiError"
+Cohesion: 0.14
+Nodes (21): PveApiError, The Proxmox VE API returned an error or an unusable response. See…, raise_error(), raise_error(), raise_error(), broken(), _client_with_fake_time(), _flaky() (+13 more)
 
-### Community 80 - "_exec_group"
-Cohesion: 0.24
-Nodes (10): _exec_disk(), _exec_group(), _posted_move(), The live transient check charges the converted size from the live `size=`., test_a_converting_move_is_refused_when_the_live_check_finds_no_room(), test_a_live_format_that_differs_from_the_plan_means_replan(), test_format_is_not_sent_when_the_disk_already_has_the_enforced_format(), test_format_is_not_sent_without_enforcement() (+2 more)
+### Community 67 - "_run_two_onto_san_c"
+Cohesion: 0.09
+Nodes (23): A `san-c` content responder plus a `move_disk` responder for 201. The listing…, 201's mirror target is already *listed* on san-c at its full 1 TiB by the time…, Between different storage types, or from thin to thick, `move_disk` allocates…, The match stays narrow: a same-VM volume that appeared after launch but has…, The exclusion is narrow: only 201's *own* mirror target (same VM, the disk's…, Section 8.1 / 5.3.3: VM 101 already has 3 TiB on san-b, another VM 3.5 TiB. A 1…, Between different storage types the target is allocated at the disk line's…, The same 2 TiB config `size=` and the same 4.5 TiB already on the target, but… (+15 more)
 
-### Community 81 - "State"
+### Community 68 - "test_topology.py"
 Cohesion: 0.13
-Nodes (24): State dataclass tree mirrors section 11.2 JSON, Section 11.2: ``last_balance``/cooldowns are "updated only after a run that…, _record_executed_moves(), Cooldowns, _parse_state_text(), Any, ``"<group>:<storage>"`` (section 11.2)., Raises on any shape this module does not recognize -- the caller… (+16 more)
+Nodes (24): build_fake_client(), _content(), _pair(), Any, PveClient, Section 5.3 (C8): VM 301's only disk in this group is a 528 KiB efidisk0 (its…, Section 3.7 item 3: the operator must learn *which* volume blocks the VM. The…, A storage plugin can list a volid with no `size` key at all -- seen on a live… (+16 more)
+
+### Community 69 - "Safety properties, exit codes, status"
+Cohesion: 0.10
+Nodes (22): Dry-run is the default, Command handler dispatch dict, Command dispatch, mode override and logging to stderr, free_space.soft / free_space.hard, solver.backend (auto, cbc, heuristic), `solver.heuristic_iterations`, `solver.mip_gap`, `solver.time_limit_seconds` (+14 more)
+
+### Community 70 - "build_client"
+Cohesion: 0.14
+Nodes (19): Why proxmoxer: backend abstraction, ProxmoxConfig, PVE API endpoint and client settings, from the ``proxmox`` block. Fields, with…, build_client(), Construct a :class:`PveClient` from ``config.py``'s ``ProxmoxConfig``. Always…, _config(), _FakeHttpsBackend, _FakeProxmoxApiWithBackend (+11 more)
+
+### Community 71 - "test_state.py"
+Cohesion: 0.12
+Nodes (22): ``state.path`` could not be written, or its advisory lock could not be…, StateError, cooldown_remaining_seconds(), _pid_alive(), Seconds left in ``key``'s cooldown -- ``0.0`` if nothing is recorded for it,…, Best-effort, used only to make a "still held" log message useful to an operator…, skipif, The `finally` block's own cleanup, pinned directly rather than only inferred… (+14 more)
+
+### Community 72 - "test_small_disks.py"
+Cohesion: 0.17
+Nodes (22): current(), disk(), efi_repair_group(), parametrize, skipif, VM 301's big disks live in another group: its efidisk0 is alone here and never…, "slow" is short by 1000.2 MiB, so moving the 528 KiB EFI disk crosses a whole-…, Lexicographic stage 1 takes any shortfall reduction, however small, so without… (+14 more)
+
+### Community 73 - "topology.py"
+Cohesion: 0.14
+Nodes (22): Storage name pattern expansion, GroupConfig, is_storage_pattern(), One storage entry in a group, from ``groups[].storages[]``. - ``id``…, A ``storages[].id`` value is a pattern iff it both begins and ends with ``/``…, The regular expression text of a pattern entry, its two ``/`` delimiters…, A balancing group, one entry of ``groups[]``. - ``name`` (``groups[].name``,…, storage_pattern_text() (+14 more)
+
+### Community 74 - "forecast.py"
+Cohesion: 0.13
+Nodes (20): math, HoltWintersConfig, Holt-Winters model settings, from ``forecast.holt_winters``. -…, Backtest, holt_winters_quantile(), _quantile(), One group's backtest: absolute error of each model's predicted p95 of ``[now-W,…, True when Holt-Winters was fitted and its error is at most the baseline error.… (+12 more)
+
+### Community 75 - "test_payback.py"
+Cohesion: 0.18
+Nodes (22): MigrationConfig, Cost model and limits for one disk move, from the ``migration`` block. -…, compute_move_cost(), Section 7.1's cost for one scheduled move. Only ``source`` is needed (not the…, move(), `saferemove=True` with no known throughput (e.g. never surfaced by `GET…, The regression this fixes, at the exact shape that found it: a real cluster…, The exemption above is from the *economic* test only -- the hard per-move… (+14 more)
+
+### Community 76 - "Group"
+Cohesion: 0.10
+Nodes (21): Forecast applied as a ratio f_d/h_d, never a substitution, apply_forecast(): scaling, never replacing, compute_disk_load_series(): same blend as a time series, _blend_loads(), _combine_raw_values(), _combined_raw(), compute_disk_load_series(), TimeSeries (+13 more)
+
+### Community 77 - "test_statusfile.py"
+Cohesion: 0.22
+Nodes (20): build_run_status(), The level policy (section 2.4). ``CRITICAL`` when the run exited non-zero: a…, stat, subprocess, ``statusfile.py`` (IMPLEMENTATION_PLAN.md section 2.4): the level policy, the…, report(), test_a_clean_dry_run_is_ok_and_says_nothing_moved(), test_a_clean_run_is_ok() (+12 more)
+
+### Community 78 - "json_safe"
+Cohesion: 0.10
+Nodes (18): JsonFormatter and event-named log records, LogRecord, json_safe(), JsonFormatter, One human-readable line per record: ``LEVEL: message``. Deliberately not a…, Render ``record`` as one line of text. Records at level INFO or below print the…, Replace every non-finite float with ``None``, recursively. Python's JSON…, Render one :class:`logging.LogRecord` as one JSON line. (+10 more)
+
+### Community 79 - "stitch_range_results"
+Cohesion: 0.11
+Nodes (17): Backtest gate: beat the persistence baseline, Range query chunking and stitching, Capture chunks range queries, stitches by query text, RangeStepMismatch, ``--replay`` found the requested range query, but at a different step than this…, _issue_chunked_range_query(), Any, ``client.range_query()``, issued in ``RANGE_QUERY_CHUNK_SECONDS``-sized sub-… (+9 more)
+
+### Community 80 - "config/drs.example.yaml"
+Cohesion: 0.12
+Nodes (17): config/drs.example.yaml as documentation that parses, Never consider over-provisioning (provisioned size), config section exclude, config section forecast, config section groups, config section load_weights, config section metrics, config section migration (+9 more)
+
+### Community 81 - "test_payback.py"
+Cohesion: 0.14
+Nodes (18): Reserve override: safety is not subject to hysteresis, ScheduleResult.final_assignment, Outcome-based reserve repair exemption, evaluate_plan_payback(), Section 7.3: the aggregate acceptance test over a whole plan, plus the hard…, no_saferemove_storage(), Reworked by section 5.4/7.2's affinity-payback fix: the plan splits VM 101…, The plan's own counter-example: a 4 TiB disk whose relocation improves E by… (+10 more)
 
 ### Community 82 - "`execution` — how (and whether) moves actually happen"
-Cohesion: 0.12
-Nodes (17): `execution.abort_on_failure`, `execution` — how (and whether) moves actually happen, `execution.locks.on_timeout`, `execution.locks.poll_interval`, `execution.locks.task_retry_backoff`, `execution.locks.task_retry_limit`, `execution.locks.wait_timeout`, `execution.max_concurrent_migrations` (+9 more)
+Cohesion: 0.11
+Nodes (18): `execution.abort_on_failure`, `execution` — how (and whether) moves actually happen, `execution.locks.on_timeout`, `execution.locks.poll_interval`, `execution.locks.task_retry_backoff`, `execution.locks.task_retry_limit`, `execution.locks.wait_timeout`, `execution.max_concurrent_migrations` (+10 more)
 
-### Community 83 - "test_forecast.py"
-Cohesion: 0.19
-Nodes (15): random, _group_series(), _noise_series(), TimeSeries, Holt-Winters forecasting, its backtest gate, and the required-range rule., Fewer than 2 * seasonal_periods samples before now - W: Holt-Winters cannot be…, test_backtest_fails_on_white_noise(), test_backtest_hw_error_is_none_when_the_fit_half_is_too_short() (+7 more)
-
-### Community 84 - "generate_expected.py"
+### Community 83 - "generate_expected.py"
 Cohesion: 0.14
 Nodes (17): itertools, computed_p_min(), cost(), Deadlock, duration(), duration_mirror(), duration_wipe(), load_fixture() (+9 more)
 
-### Community 85 - "disk_factors"
-Cohesion: 0.27
-Nodes (13): disk_factors(), ``f_d / h_d`` for every disk that has one: ``f_d`` the Holt-Winters forecast…, _factor_series(), _FixedForecast, MonkeyPatch, 96 hourly samples whose last 24 are ``window_values`` (repeated)., Patches ``holt_winters_quantile`` to a constant so the ratio is exact., test_disk_factors_is_forecast_over_observed_p95() (+5 more)
+### Community 84 - "case_for"
+Cohesion: 0.20
+Nodes (18): StorageState, best_big_m(), build(), capacity_spread(), case_for(), moves_of(), order_moves(), per_storage() (+10 more)
 
-### Community 86 - ".agents/documentation.md"
+### Community 85 - "test_statusfile.py"
 Cohesion: 0.13
-Nodes (13): Config knob entry: type, default, unit, extremes, interactions, Tests keeping docs honest (help covers options, manual covers config), --help generated from argparse definitions, no hardcoded defaults, Internals pages: question first, name modules, explain why, ASCII diagrams, Manpage skeleton with complete OPTIONS, config/drs.example.yaml as documentation that parses, Change behaviour and documentation in the same commit, PDF is a build product; fix text not LaTeX (+5 more)
+Nodes (15): datetime, os, Storage DRS for Proxmox VE 9.2. Balances disk I/O load across configurable…, _one_line(), Collapse any run of whitespace, newlines included, to one space: a newline…, The file's exact text: level, summary ``| perfdata``, details, and a trailing…, The monitoring status file: one ``apply`` run's outcome, in the format the…, What one ``apply`` run did, as the level policy needs it. ``errors`` are… (+7 more)
 
-### Community 87 - "forecast.py"
-Cohesion: 0.18
-Nodes (10): math, Backtest, _quantile(), One group's backtest: absolute error of each model's predicted p95 of ``[now-W,…, Section 10.2's backtest, comparing against a baseline: fit on ``[now-2W,…, Holt-Winters load forecasting. See IMPLEMENTATION_PLAN.md sections 10 and 12.1.…, Linear-interpolation quantile, matching ``numpy.percentile``'s default.…, test_quantile_matches_numpy_percentile_convention() (+2 more)
-
-### Community 88 - "(C7) Capacity-spread linearization (absolute TiB)"
-Cohesion: 0.22
-Nodes (10): config section gates, last_load, Three gates in order, d_s is absolute TiB, Diagnostic bundles collect-testdata and --replay (section 16), (C7) Capacity-spread linearization (absolute TiB), Capacity gate (section 6), cluster-6 production bundle (+2 more)
-
-### Community 89 - "split_gate_opens"
-Cohesion: 0.25
-Nodes (8): excess_of(), peak_footprint(), Section 5.3 (C5)/5.3.1: `R_s = max(f_s * Z_s, soft_s)`., ``max_s F_{v,s}`` -- the peak share of one VM any single storage holds., Section 5.3.3 (C9): ``O = sum_{v in V^split} o_v`` in TiB, ``o_v = max(0,…, Section 6's split gate, restated independently of ``gates.split_gate()``: some…, reserve_term(), split_gate_opens()
-
-### Community 90 - "_quantile_promql"
-Cohesion: 0.33
-Nodes (6): _coverage_promql(), _group_selector(), _quantile_promql(), The one combined selector `compute_group_load()`/`compute_disk_load_series()`…, The exact PromQL `_fetch_raw_quantity` builds for one raw field -- computed…, The exact PromQL `compute_disk_coverage` builds for its range query.
-
-### Community 91 - "LastBalance"
-Cohesion: 0.15
-Nodes (16): LastBalance, load_vector_for_group(), now_iso(), ``at`` is ``None`` before any run has ever executed a migration -- distinct…, This group's slice of ``last_balance.load_vector``, re-keyed from…, Pure: a new :class:`State` with ``group_name``'s slice of…, UTC, second precision, ``Z`` suffix -- exactly section 11.2's own example…, with_recorded_balance() (+8 more)
-
-### Community 92 - "Reading `explain`"
-Cohesion: 0.16
-Nodes (13): cannot fully consolidate, forecast line, `measured load:`, `no moves made: ...` / `closest alternative: ...`, objective line, `pinned load ... ; best achievable spread given pins: ...`, `pinned (not movable this run):`, Reading `explain` (+5 more)
-
-### Community 93 - "_redact_finding_message"
-Cohesion: 0.40
-Nodes (5): DiskKey, ``verify_metrics()``'s own finding text, and this module's own call log (built…, Bundle-safe rewrite of one ``verify_metrics()`` finding message. Returns…, _redact_finding_message(), _redact_free_text()
-
-### Community 94 - "Fixture"
-Cohesion: 0.13
-Nodes (7): Fixture, Section 5.3 (C7): `(Sum_d z_d + Sum_s U^ext) / (Sum_s C_s)` -- the group's mean…, Section 5.4's `D^big` threshold, converted from the fixture's…, Section 5.4's mu (``objective.mu_vm_split_per_tib``), 0 when the split rule is…, ``{vmid: T_v}`` for ``V^split`` (section 5.3.3), written out independently of…, Section 5.4's `w_v = max(1, l_v / l_bar)`. `V` (the vmids this returns weights…, One group: its storages, its disks and the weights to solve it with. ``keys``…
-
-### Community 95 - "test_running_task_on_the_vm_is_waited_out_before_move_disk"
-Cohesion: 0.18
-Nodes (9): `/cluster/tasks` shape for a task still running: no endtime/status., The reported failure: an earlier move's "Erase data" (imgdel) job still holds…, Network maintenance between issuing `move_disk` and its completion., running_imgdel(), test_api_outage_beyond_the_tolerance_still_raises(), test_api_outage_while_the_move_task_runs_does_not_fail_the_run(), test_running_task_on_the_vm_is_waited_out_before_move_disk(), task_status() (+1 more)
-
-### Community 96 - ".agents/ index"
+### Community 86 - "apply modes: dry-run, confirm, auto"
 Cohesion: 0.12
-Nodes (18): .agents/ index, Python style (.agents), black vs flake8 disagreements (E203, W503, E704), One implementation of every rule (MILP and heuristic share), Units in names, If it fails, Running it, Verifying your setup (+10 more)
+Nodes (17): execution.source_release wait and timeout, `migration.assume_thick_provisioning`, Deadlock report (report, never force), Transient reserve invariant, Concurrent execution with strict FIFO launch, confirm prompt [y]es/[n]o/[a]ll/[q]uit, draining status, apply modes: dry-run, confirm, auto (+9 more)
 
-### Community 97 - "forecast_group"
-Cohesion: 0.22
-Nodes (10): Collection, forecast_group(), group_aggregate_series(), TimeSeries, Sum every disk's own series into one group-aggregate series, at the union of…, One group's forecast: run the backtest on the group aggregate, and only if…, 101:scsi0 has no sample at t=1 at all -- that timestamp still appears (from…, test_group_aggregate_series_empty_input_is_empty() (+2 more)
-
-### Community 99 - "test_plan_gate_also_reflects_real_drift_history_from_state_json"
-Cohesion: 0.24
-Nodes (10): _imbalanced_group_load(), _no_reserve_violation_topology(), Two storages, generously sized -- unlike `_sample_topology()`, no (C4)/(C5)…, san-a all the load, san-b none -- imbalance is 200% of `u*`, far above the…, Baseline for the next test: with no `state.json` at all, `last_load` is `None`,…, The same fixture as above, except `state.json` now records a `last_balance`…, Same drift-suppression scenario as `show-load`'s, through `plan` -- the two…, test_plan_gate_also_reflects_real_drift_history_from_state_json() (+2 more)
-
-### Community 100 - "pve-storage-drs manpage"
-Cohesion: 0.14
-Nodes (14): AUTHOR, COLLECT-TESTDATA OPTIONS, COMMANDS, CONFIGURATION, COPYRIGHT, DESCRIPTION, pve-storage-drs manpage, ENVIRONMENT (+6 more)
-
-### Community 101 - "test_live_transient_check_fails_safe_when_the_live_read_errors"
-Cohesion: 0.25
-Nodes (8): _detect_orphan_volumes(), Section 9.4/domain rule 6: after a failed or cancelled mirror, a target volume…, parametrize, A PVE API error while re-reading the target refuses the move and fails the run…, test_live_transient_check_fails_safe_when_the_live_read_errors(), test_orphan_detection_finds_only_unreferenced_volumes_of_this_vm(), test_orphan_detection_handles_a_pve_api_error_gracefully(), raise_error()
-
-### Community 102 - "_apply_connection_pool_size"
-Cohesion: 0.18
-Nodes (11): _apply_connection_pool_size(), Size the underlying ``requests`` session's connection pool to fit…, _FakeProxmoxApiWithSession, _FakeSession, Any, Confirmed live against a real multi-VM cluster: `requests`'s own default…, A small `read_workers` (or the field's own minimum) must not shrink the pool…, A plain string, an object with no ``_store``, or a session-shaped object with… (+3 more)
-
-### Community 103 - "_mapper"
-Cohesion: 0.14
-Nodes (12): _mapper(), Any, BaseException, _Raise, X-09: `manifest.json`'s `counts.dropped_records` is documented as counting…, A task's ``id`` is the vmid its UPID embeds. It used to be copied raw, leaving…, _tasks_by_kind(), test_anonymize_cluster_tasks_maps_the_task_id_with_the_upid() (+4 more)
-
-### Community 104 - "AGENTS.md working agreement"
-Cohesion: 0.21
-Nodes (13): fc-tier1 / reserve-tradeoff acceptance fixtures, AGENTS.md working agreement, AGPL-3.0-or-later licence and SPDX headers, black/flake8 E203 W503 E704 ignores, Branch-first git workflow, 85% coverage floor, Documentation pipeline (make docs / docs-check), make check (+5 more)
-
-### Community 105 - "Packaging, dependencies and CI (.agents)"
-Cohesion: 0.10
-Nodes (21): Git workflow (.agents), Branch first, decided from the task, Merge --no-ff on green make check, Release process (version, changelog, tag, graphify), Packaging, dependencies and CI (.agents), Autopkgtest as the dependency test, coinor-cbc and python3-pulp as Depends, Debian-first dependency policy (trixie) (+13 more)
-
-### Community 106 - "config/drs.example.yaml"
-Cohesion: 0.09
-Nodes (21): config section exclude, config section execution, config section forecast, config section free_space, config section groups, config section load_weights, config section metrics, config section monitoring (+13 more)
-
-### Community 107 - "`metrics` — Telegraf/InfluxDB name mapping"
-Cohesion: 0.14
-Nodes (14): `metrics.extra_selector`, `metrics.labels.device`, `metrics.labels.node`, `metrics.labels.vmid`, `metrics.pvestatd_push_interval`, `metrics.rate_window`, `metrics.read_bytes`, `metrics.read_ops` (+6 more)
-
-### Community 108 - "build_node_selector"
-Cohesion: 0.25
-Nodes (8): build_node_selector(), _escape_promql_regex_literal(), Escape one literal string for safe use inside a PromQL/RE2 ``=~`` alternation.…, Section 3.4's auto-derived node-scoping filter: ``<node_label>=~"n1|n2|..."``…, A node named `pve1.example.com` must match only that exact string in RE2 -- an…, test_build_node_selector_empty_list_is_none(), test_build_node_selector_escapes_dots_in_an_fqdn(), test_build_node_selector_sorts_and_dedupes()
-
-### Community 109 - "storage_of"
-Cohesion: 0.25
-Nodes (8): all_assignments(), eligible_storages(), A disk's storage under `assign` -- `assign` only ever has entries for movable…, Section 5.3 (C2): every storage whose `allowed_formats` holds this disk's own…, Every eligible placement of the movable disks -- (C2)'s per-disk domain…, Section 5.3 (C8), written out independently of the engine's…, small_disks_follow(), storage_of()
-
-### Community 110 - "PVE InfluxDB external metric server"
+### Community 87 - "apply_forecast"
 Cohesion: 0.17
-Nodes (12): gigapipe with ClickHouse (reference backend), PVE InfluxDB external metric server, instance label collision, OpenTelemetry metric server rejected, Other backends, RRD rejected as data source, Six per-disk blockstat counters, Silent counter loss from string fields in line protocol (+4 more)
+Nodes (16): _aggregate_storages(), apply_forecast(), DiskLoad, GroupLoad, Convenience for callers (``show-load``) keying off `Disk.key`., Each storage's ``L_s``/``u_s`` from its disks' ``l_d``, and the group's ``u*``…, Section 12.1 point 2: scale each disk's ``l_d`` by its forecast factor ``f_d /…, One disk's `ℓ_d`. Section 4. (+8 more)
 
-### Community 111 - "pytest"
-Cohesion: 0.10
-Nodes (17): fixture, json, logging, LogRecord, pytest, json_safe(), One human-readable line per record: ``LEVEL: message``. Deliberately not a…, ``auto`` and ``text`` -> ``"text"``; ``json`` -> ``"json"``. JSON is opt-in. It… (+9 more)
+### Community 88 - "metrics.py"
+Cohesion: 0.12
+Nodes (17): build_node_selector(), _escape_promql_regex_literal(), Escape one literal string for safe use inside a PromQL/RE2 ``=~`` alternation.…, Section 3.4's auto-derived node-scoping filter: ``<node_label>=~"n1|n2|..."``…, The one selector every query in this module inserts, resolved once per run…, resolve_node_selector(), A node named `pve1.example.com` must match only that exact string in RE2 -- an…, `metrics.extra_selector` wins outright, even over a real node list -- the… (+9 more)
 
-### Community 112 - "test_affinity_repair_fixture.py"
-Cohesion: 0.33
-Nodes (9): _affinity_repair_group(), _loads(), _make_disk(), _make_storage(), parametrize, tests/fixtures/affinity-repair.yaml, built as real topology objects., IMPLEMENTATION_PLAN.md section 14.7's fixture, exercised through the real…, test_both_milp_backends_agree_with_the_heuristic() (+1 more)
-
-### Community 113 - "ForecastConfig"
-Cohesion: 0.48
-Nodes (7): ForecastConfig, The history ``forecast.model`` needs, in seconds. Called by ``config.py``'s…, required_range_seconds(), test_holt_winters_required_range_is_the_lookback_when_that_is_longer(), test_holt_winters_required_range_matches_plan_worked_example(), test_quantile_required_range_is_the_lookback(), test_required_range_unknown_model_raises()
-
-### Community 114 - "apply_forecast"
-Cohesion: 0.43
-Nodes (7): apply_forecast(), Section 12.1 point 2: scale each disk's ``l_d`` by its forecast factor ``f_d /…, _forecast_fixture(), test_apply_forecast_leaves_idle_and_no_series_matched_alone(), test_apply_forecast_never_scales_a_flagged_disk_even_if_a_factor_is_given(), test_apply_forecast_scales_only_disks_with_a_factor_and_rebuilds_the_totals(), test_apply_forecast_with_no_factors_is_the_identity()
-
-### Community 115 - "Installation and requirements"
+### Community 89 - "FakePrometheusSession"
 Cohesion: 0.18
-Nodes (11): Configuration location, PVE credential setup, First steps after installing, Installation and requirements, Installing the package, Running the timer on exactly one host, Setting up the PVE credential, Running timer on exactly one host (+3 more)
+Nodes (17): FakePrometheusSession, A ``metrics._SessionLike`` double capable of answering *many* distinct queries…, _instant_answer(), _range_answer(), A live capture against the dev cluster found this one directly (section 16.3's…, A live capture against the dev cluster found this directly:…, A live capture found this the hard way: ``_check_sample_series()``'s "info"…, Z-02: `_check_coverage()`'s per-disk warning embeds a real vmid taken straight… (+9 more)
 
-### Community 116 - "`migration` — cost, bandwidth and the payback rule"
-Cohesion: 0.18
-Nodes (11): `migration.account_saferemove_wipe`, `migration.assume_thick_provisioning`, `migration.bwlimit_bytes_per_sec`, `migration` — cost, bandwidth and the payback rule, `migration.max_single_move_duration`, `migration.payback_horizon`, `migration.payback_ratio`, `migration.source_load_weight` (+3 more)
+### Community 90 - "Testing (.agents)"
+Cohesion: 0.12
+Nodes (16): Release process (version, changelog, tag, graphify), Autopkgtest as the dependency test, Debian-first dependency policy (trixie), Testing (.agents), Acceptance fixtures and generate_expected.py, 85 percent coverage floor, No network, no real sleep, deterministic ties in tests, Higher bar for safety-critical modules (+8 more)
 
-### Community 117 - "apply modes: dry-run, confirm, auto"
-Cohesion: 0.20
-Nodes (11): Transient reserve invariant (operator explanation), Concurrent execution with strict FIFO launch, confirm prompt [y]es/[n]o/[a]ll/[q]uit, apply modes: dry-run, confirm, auto, Pre-flight live re-check before each move, auto re-plan loop, Decision trail events, --log-format text vs json (+3 more)
+### Community 91 - "Logging"
+Cohesion: 0.12
+Nodes (15): support section (salt_path, bundle_dir, max_series_points, capture_range), `collect-testdata`: capturing a bundle, Diagnostic bundles: `collect-testdata` and `--replay`, `--replay`: running against a bundle offline, Sending one to the project, What is in a bundle, and what is not, Per-command implementation status table, Logging (+7 more)
 
-### Community 118 - "empty_state"
-Cohesion: 0.18
-Nodes (17): ``state.path`` could not be written, or its advisory lock could not be…, StateError, empty_state(), First-run state: no lock, no recorded balance, no cooldowns, nothing in flight…, Temp file in the same directory, ``fsync``, then ``os.replace`` -- a reader…, save_state_atomic(), skipif, Only `schema_version` present -- every other field must default the same way… (+9 more)
-
-### Community 119 - "fakes.py"
-Cohesion: 0.22
-Nodes (5): FakeProxmoxResource, FakeQueryResponse, Any, Shared test doubles. Not collected by pytest (no ``test_`` prefix).…, Matches ``metrics._ResponseLike``: ``.status_code`` and ``.json()``.
-
-### Community 120 - "test_no_feasible_solution_says_infeasible_rather_than_blaming_the_time_limit"
-Cohesion: 0.29
-Nodes (7): LogCaptureFixture, The defect that prompted IMPLEMENTATION_PLAN.md section 2.3, in the operator's…, The other half: an operator who wrote `solver.backend: cbc` and is silently not…, The warning used to claim "within the time limit" for every status, including a…, test_a_missing_optional_solver_is_not_a_warning_under_auto(), test_an_explicitly_configured_solver_that_is_missing_still_warns(), test_no_feasible_solution_says_infeasible_rather_than_blaming_the_time_limit()
-
-### Community 121 - "_pid_alive"
-Cohesion: 0.33
-Nodes (6): _pid_alive(), Best-effort, used only to make a "still held" log message useful to an operator…, pid 1 (init) always exists but is not ours to signal as a normal user --…, test_pid_alive_is_false_for_a_reaped_child(), test_pid_alive_is_true_for_a_process_we_cannot_signal(), test_pid_alive_is_true_for_our_own_process()
-
-### Community 122 - "Migration cost and payback test"
-Cohesion: 0.25
-Nodes (11): compute_benefit_load_seconds benefit formula, compute_move_cost cost_load_seconds, Migration cost and payback test, payback_horizon_seconds H, Affinity term kappa in benefit, REVIEW R-01 double-applied weights, Raw spread, capacity spread, affinity debt, Wipe duration uses magnitude of saferemove_throughput (+3 more)
-
-### Community 123 - "`proxmox` — the cluster API connection"
-Cohesion: 0.20
-Nodes (10): `proxmox.auth.password`, `proxmox.auth.token_secret`, `proxmox.auth.username`, `proxmox.ca_file`, `proxmox.host`, `proxmox.port`, `proxmox.read_workers`, `proxmox` — the cluster API connection (+2 more)
-
-### Community 124 - "_render_split_lines"
-Cohesion: 0.40
-Nodes (4): One large VM's (``V^split``, section 5.3.3) before/after numbers for the report., Section 9.5's ``split:`` lines. A result still above its cap says the solver…, _render_split_lines(), _VmSplit
-
-### Community 125 - "pathlib"
+### Community 92 - "check_paper_log.py"
 Cohesion: 0.15
 Nodes (12): argparse, pathlib, sys, skipif, ``__version__`` must agree with ``pyproject.toml`` and the install instructions., test_install_instructions_name_the_current_version(), check(), _logical_lines() (+4 more)
 
-### Community 126 - "Configuration reference"
+### Community 93 - "Reading `explain`"
+Cohesion: 0.16
+Nodes (12): `measured load:`, `no moves made: ...` / `closest alternative: ...`, `pinned load ... ; best achievable spread given pins: ...`, `pinned (not movable this run):`, Reading `explain`, The `forecast:` line, The `objective:` line, `-v`: the `data source:` line (+4 more)
+
+### Community 94 - "_apply_connection_pool_size"
+Cohesion: 0.17
+Nodes (12): _apply_connection_pool_size(), Size the underlying ``requests`` session's connection pool to fit…, _FakeProxmoxApiWithSession, _FakeSession, Any, Confirmed live against a real multi-VM cluster: `requests`'s own default…, A small `read_workers` (or the field's own minimum) must not shrink the pool…, A plain string, an object with no ``_store``, or a session-shaped object with… (+4 more)
+
+### Community 95 - "test_state.py"
+Cohesion: 0.16
+Nodes (15): LastBalance, load_vector_for_group(), ``at`` is ``None`` before any run has ever executed a migration -- distinct…, This group's slice of ``last_balance.load_vector``, re-keyed from…, Pure: a new :class:`State` with ``group_name``'s slice of…, with_recorded_balance(), Distinct from `{}` -- `gates.py`'s `last_load=None` means "no such run has ever…, `"fc-tier10:101:scsi0"` must not leak into `"fc-tier1"`'s vector -- the… (+7 more)
+
+### Community 96 - "Fixture"
+Cohesion: 0.13
+Nodes (7): Fixture, Section 5.3 (C7): `(Sum_d z_d + Sum_s U^ext) / (Sum_s C_s)` -- the group's mean…, Section 5.4's `D^big` threshold, converted from the fixture's…, Section 5.4's mu (``objective.mu_vm_split_per_tib``), 0 when the split rule is…, ``{vmid: T_v}`` for ``V^split`` (section 5.3.3), written out independently of…, Section 5.4's `w_v = max(1, l_v / l_bar)`. `V` (the vmids this returns weights…, One group: its storages, its disks and the weights to solve it with. ``keys``…
+
+### Community 97 - "save_locked_state"
+Cohesion: 0.20
+Nodes (14): Inflight UPIDs persisted for crash recovery, Write UPID to disk before the crash can happen, _make_inflight_callbacks(), on_finished(), on_started(), Builds the ``on_inflight_started``/``on_inflight_finished`` pair…, LockHandle, Pure: adds ``upid`` to ``state.inflight_upids`` (a no-op if already present).… (+6 more)
+
+### Community 98 - "build_rate_promql()"
+Cohesion: 0.15
+Nodes (14): Pure PromQL builders, build_rate_promql(), The section 3.4 per-metric rate expression. ``sum by (vmid, device)…, _group_selector(), _quantile_promql(), _rate_promql(), The one combined selector `compute_group_load()`/`compute_disk_load_series()`…, The exact PromQL `_fetch_raw_quantity` builds for one raw field -- computed… (+6 more)
+
+### Community 99 - "PaybackResult"
+Cohesion: 0.16
+Nodes (11): What `plan` does not yet do, _log_payback_verdict(), Section 2.3's ``payback_verdict``: section 7's arithmetic, not just its yes/no…, PaybackResult, Sum of the move costs of the plan, in load-seconds. This is the sum of…, Benefit of the plan divided by its total move cost. Dimensionless. Returns…, True when the plan passes the payback test and no single move is rejected. The…, One plan's section 7.3 acceptance verdict. ``aggregate_ok`` (``benefit >=… (+3 more)
+
+### Community 100 - "Reading `apply`"
+Cohesion: 0.14
+Nodes (13): Concurrent execution, Crash and two-instance recovery, Failure and `abort_on_failure`, `--json`, Reading `apply`, Reading `auto` mode, `state.json`: what a real run actually changes, The `[y]es/[n]o skip/[a]ll remaining/[q]uit` prompt (+5 more)
+
+### Community 101 - "pytest"
+Cohesion: 0.16
+Nodes (12): fixture, json, logging, pytest, Section 2.3's ladder: ``--quiet`` < default < ``-v`` < ``-vv``. ``--log-level``…, Logging policy. See IMPLEMENTATION_PLAN.md section 2.3. Every log record goes…, resolve_level(), Shared pytest fixtures. ``logging`` is process-global state, and… (+4 more)
+
+### Community 102 - "_mapper"
+Cohesion: 0.14
+Nodes (12): _mapper(), Any, BaseException, _Raise, X-09: `manifest.json`'s `counts.dropped_records` is documented as counting…, A task's ``id`` is the vmid its UPID embeds. It used to be copied raw, leaving…, _tasks_by_kind(), test_anonymize_cluster_tasks_maps_the_task_id_with_the_upid() (+4 more)
+
+### Community 103 - "test_payback.py"
+Cohesion: 0.18
+Nodes (13): Section 7.1: PVE hands `saferemove_throughput` straight to `cstream -t`, where…, Migration cost and the payback test. See proxmox_storage_drs/payback.py. Cross-…, Storage `a`: 6 TiB disk on a 10 TiB storage, `reserve_factor=2.0` -- required…, The direct case: the sole move IS what repairs `a`'s violation, so holding it…, Storage `a` (6 TiB, f=2) holds two single-disk 2 TiB VMs: 4 + 2*2 = 8 > 6,…, Section 7.3: two moves from a violating storage, either of which alone repairs…, _revert_test_group(), test_a_redundant_repair_plan_is_exempt_with_no_marked_move() (+5 more)
+
+### Community 104 - "repair_markers"
+Cohesion: 0.15
+Nodes (11): Per-move repair marker revert test, executed_assignment(), Assignment, Section 7.3: "what it will really run" -- ``final_assignment``…, Section 7.3's revert test, one verdict per scheduled move in ``order``: would…, repair_markers(), A move whose disk never carried the group's own violation (nothing here needed…, Per-VM footprint (section 5.3.3): VM 101's two disks on `a` make a 3 TiB… (+3 more)
+
+### Community 105 - "gates section"
+Cohesion: 0.18
+Nodes (13): Running timer on exactly one host, execution.api_outage_timeout (read retry with back-off), gates section, `gates.capacity_spread_threshold`, `gates.cooldown_per_disk`, `gates.cooldown_per_storage`, `gates` — deciding whether to act at all, `gates.drift_threshold` (+5 more)
+
+### Community 106 - "IMPLEMENTATION_PLAN.md"
+Cohesion: 0.18
+Nodes (13): Negative saferemove_throughput is normal, Configuration and validation rules, Disk identity join (vmid, device), Failure handling (orphans, partial plan, supervision loss), Do not switch to OpenTelemetry metric server, Prometheus per-disk blockstat metrics, Proxmox VE API, Requirements traceability (+5 more)
+
+### Community 107 - "disk_factors"
+Cohesion: 0.31
+Nodes (12): disk_factors(), ``f_d / h_d`` for every disk that has one: ``f_d`` the Holt-Winters forecast…, _factor_series(), _FixedForecast, MonkeyPatch, 96 hourly samples whose last 24 are ``window_values`` (repeated)., Patches ``holt_winters_quantile`` to a constant so the ratio is exact., test_disk_factors_is_forecast_over_observed_p95() (+4 more)
+
+### Community 108 - "FakeProxmoxResource"
 Cohesion: 0.22
-Nodes (16): Configuration reference, gates section, `gates.capacity_spread_threshold`, `gates.cooldown_per_disk`, `gates.cooldown_per_storage`, `gates` — deciding whether to act at all, `gates.drift_threshold`, `gates.imbalance_threshold` (+8 more)
+Nodes (5): FakeProxmoxResource, FakeQueryResponse, Any, Shared test doubles. Not collected by pytest (no ``test_`` prefix).…, Matches ``metrics._ResponseLike``: ``.status_code`` and ``.json()``.
 
-### Community 127 - "test_solve_returns_none_when_the_library_is_unavailable"
-Cohesion: 0.50
-Nodes (5): cbc_available(), MonkeyPatch, Deliberately *not* parametrized over the skip-guarded `BACKENDS` list above --…, test_cbc_available_is_false_when_pulp_is_not_importable(), test_solve_returns_none_when_the_library_is_unavailable()
+### Community 109 - "`metrics` — Telegraf/InfluxDB name mapping"
+Cohesion: 0.17
+Nodes (12): load_weights normalize, blend and rescale, `metrics.labels.device`, `metrics.labels.node`, `metrics.pvestatd_push_interval`, `metrics.rate_window`, `metrics.read_bytes`, `metrics.read_ops`, `metrics.read_time_ns` (+4 more)
 
-### Community 128 - "test_plan_reports_an_unfixable_shortfall_and_the_pins_that_block_it"
-Cohesion: 0.40
-Nodes (5): _all_pinned_sample_topology(), parametrize, `_sample_topology()` with its one movable disk pinned too: san-a violates (C5)…, Section 5.3/9.5: a residual `r_s > 0` is reported prominently, with the byte…, test_plan_reports_an_unfixable_shortfall_and_the_pins_that_block_it()
+### Community 110 - "test_payback.py"
+Cohesion: 0.17
+Nodes (12): compute_benefit_load_seconds(), Section 7.2: ``benefit = (alpha*(E_before - E_after) + delta*(F_before -…, The mu*dO term is what pays here: kappa*dA alone is negative., test_payback_without_the_mu_term_would_reject(), A plan that makes imbalance worse (possible if beta/gamma/kappa dominate) must…, Section 7.2: "dA may be negative, and then it reduces the benefit: a balance…, Section 14.7's affinity-repair fixture in miniature: two tiny disks reunite…, Section 7.2: `mu * (O_before - O_after) * H`, and a negative `dO` reduces the… (+4 more)
 
-### Community 129 - "test_manual_falls_back_when_man_exits_nonzero"
-Cohesion: 0.40
-Nodes (3): test_manual_falls_back_when_man_exits_nonzero(), test_manual_flag_uses_man_when_available(), fake_run()
+### Community 111 - "_outcome"
+Cohesion: 0.30
+Nodes (12): _gate(), _no_move_schedule(), _outcome(), Any, A replayed dev-cluster bundle: capacity spread 112 %, I/O balanced, the gate…, At 2 * delta <= gamma the data-spread term cannot pay for a move of any size,…, The local cluster bundle under minmax: one disk carries 80 % of the group's…, test_a_capacity_gated_empty_plan_names_the_two_weights_that_decided_it() (+4 more)
 
-### Community 131 - "Where the numbers come from, and how a transport loses them"
+### Community 112 - "evaluate_assignment(): shared section 5.4 objective"
+Cohesion: 0.18
+Nodes (11): Data-spread term d_s in absolute TiB, evaluate_assignment(): shared section 5.4 objective, objective.spread_metric l1 vs minmax, Unscaled CBC model in MiB, CP-SAT backend removal (REVIEW AL-02), The MILP backend: CBC via pulp, Concurrent execution with strict FIFO, No double counting of in-flight mirror targets (+3 more)
+
+### Community 113 - "Test corpus tests/corpus/"
+Cohesion: 0.20
+Nodes (11): Anonymization allowlist, never denylist, CBC via PuLP MILP backend, CP-SAT (ortools) backend removed, Dependencies come from Debian trixie, Diagnostic bundles (collect-testdata), Heuristic fallback (repair, descend, polish), Keyed pseudonyms with salt, Debian packaging, autopkgtest and two CI pipelines (+3 more)
+
+### Community 114 - "topology.py"
+Cohesion: 0.22
+Nodes (11): FreeSpaceValue, One parsed-but-unresolved ``free_space.soft``/``.hard`` entry (section 5.3.1's…, _free_space_level(), _free_space_source(), Section 5.3.1: an absolute value is used as written; a percentage is…, One storage's resolved ``soft_s``/``hard_s`` and where each came from (section…, ``level`` (global / storage entry / pattern ``/re/``), plus the percent-to-…, Section 5.3.1: resolve ``soft_s``/``hard_s`` for one storage. The mandated… (+3 more)
+
+### Community 115 - "test_statusfile.py"
+Cohesion: 0.18
+Nodes (11): DrsError, ExecutionError, MetricsError, Exception, Base class for every error this project raises on purpose., Prometheus could not be queried, or the response was unusable. See…, Neither solver backend could produce a feasible or heuristic plan. See…, No pending move in a plan is individually feasible right now. See… (+3 more)
+
+### Community 116 - "FakeClock"
+Cohesion: 0.20
+Nodes (8): MoveCost, Section 7.1's cost for one already-scheduled move., Total time of one move, in seconds. This is the mirror time plus the wipe time:…, Section 9.1: the pre-loop time-window check (above) only knows the answer as of…, REVIEW.md T-06's collateral bug: before the fix, this "skipped" outcome let the…, test_deadline_recheck_after_a_lock_wait_refuses_a_move_that_no_longer_fits(), test_deadline_recheck_after_a_lock_wait_stops_the_whole_run_not_just_this_move(), status_current()
+
+### Community 117 - "_exec_group"
+Cohesion: 0.24
+Nodes (11): _exec_disk(), _exec_group(), _posted_move(), Any, The live transient check charges the converted size from the live `size=`., test_a_converting_move_is_refused_when_the_live_check_finds_no_room(), test_a_live_format_that_differs_from_the_plan_means_replan(), test_format_is_not_sent_when_the_disk_already_has_the_enforced_format() (+3 more)
+
+### Community 118 - "Transient invariant"
+Cohesion: 0.22
+Nodes (10): config section execution, draining state (source not yet released), enforce_format per-storage target format, A finished task is not a finished move, free_space configuration (soft/hard floors), LVM saferemove and saferemove_throughput, Migration scheduling algorithm, Deadlock resolution and staging moves (+2 more)
+
+### Community 119 - "Cooldowns"
+Cohesion: 0.20
+Nodes (10): flock is the lock; JSON lock field is only a label, Rename-detaches-flock bug and in-place locked write, Any, Raises on any shape this module does not recognize -- the caller…, Writes ``state`` **in place** into the already-open, already-locked ``fd`` --…, _state_from_dict(), _state_to_dict(), _write_state_to_locked_fd() (+2 more)
+
+### Community 120 - "build_topology() one-pass join"
+Cohesion: 0.20
+Nodes (10): Cross-metric disk consistency check for silently dropped fields, Node-scoping selector, verify_metrics() check functions, The Proxmox VE API client, PveClient: one method per endpoint, Building the disk/storage/group model, D: every placed disk, pinned or not, build_topology() one-pass join (+2 more)
+
+### Community 121 - "reserve.py shared (C4)/(C5) footprint evaluator"
+Cohesion: 0.20
+Nodes (10): Unfixable-shortfall report, storage_content() silently empty without Datastore.Allocate, Foreign volume usage U_ext, free_space soft_s/hard_s resolution, reserve.py shared (C4)/(C5) footprint evaluator, Unconditional reserve repair, Lexicographic two-stage reserve solve, Live transient check at provisioned size (+2 more)
+
+### Community 122 - "IMPLEMENTATION_PLAN.md"
+Cohesion: 0.22
+Nodes (10): The heuristic solver, beta/gamma migration count and bytes terms, (C2) Eligibility via variable fixing, (C8) Small disks follow their VM, MILP optimization problem, Online-movable disk set (all buses, efidisk0, tpmstate0, unused), Disks with unapplied pending change excluded, Disks with snapshots excluded, loudly (+2 more)
+
+### Community 123 - "move_disk (drive-mirror, delete=1)"
+Cohesion: 0.22
+Nodes (10): `monitoring` — telling your monitoring system what the last run did, Global command-line options and --mode override logging, PVE 9.2 Dynamic Load Balancer relationship, Execution modes (dry-run default, confirm, auto), Monitoring status file, move_disk (drive-mirror, delete=1), Disks count at provisioned size, never over-provisioned, Re-plan protocol and errors-are-not-mismatches (+2 more)
+
+### Community 124 - "Objective function (alpha, beta, gamma, kappa, delta, mu, P)"
+Cohesion: 0.22
+Nodes (10): (C3) VM affinity linking, Companion fixture affinity repair, large-vm-split companion fixture, kappa VM affinity term weighted by w_v, (C9) Large-VM split rule (split_vm_footprint, mu), Migration benefit over horizon H, Objective function (alpha, beta, gamma, kappa, delta, mu, P), Pinned disks are modelled, not ignored (+2 more)
+
+### Community 125 - "split_gate_opens()"
+Cohesion: 0.20
+Nodes (10): eligible_storages(), excess_of(), peak_footprint(), Section 5.3 (C2): every storage whose `allowed_formats` holds this disk's own…, Section 5.3 (C5)/5.3.1: `R_s = max(f_s * Z_s, soft_s)`., ``max_s F_{v,s}`` -- the peak share of one VM any single storage holds., Section 5.3.3 (C9): ``O = sum_{v in V^split} o_v`` in TiB, ``o_v = max(0,…, Section 6's split gate, restated independently of ``gates.split_gate()``: some… (+2 more)
+
+### Community 126 - "test_affinity_repair_fixture.py"
+Cohesion: 0.33
+Nodes (9): _affinity_repair_group(), _loads(), _make_disk(), _make_storage(), parametrize, tests/fixtures/affinity-repair.yaml, built as real topology objects., IMPLEMENTATION_PLAN.md section 14.7's fixture, exercised through the real…, test_both_milp_backends_agree_with_the_heuristic() (+1 more)
+
+### Community 127 - "RangeStepMismatch"
+Cohesion: 0.27
+Nodes (4): FakeResponse, Any, A ``range_query`` stand-in that returns caller-supplied data keyed by the exact…, _WindowTrackingFakeClient
+
+### Community 128 - "test_topology.py"
+Cohesion: 0.24
+Nodes (10): _one_vm_two_storage_cluster(), Section 5.3.1: ``hard_s > soft_s`` is a validation error -- a floor above the…, Section 5.3.1: ``soft_s >= C_s`` is a validation error -- a requirement no disk…, Section 3.5: ``verify-storages`` shows the resolved pair *with the level each…, _sources(), test_build_topology_rejects_a_hard_floor_above_its_resolved_soft(), test_build_topology_rejects_a_soft_floor_not_below_capacity(), test_free_space_provenance_global_percent_without_a_hard() (+2 more)
+
+### Community 129 - "test_docstrings.py"
+Cohesion: 0.31
+Nodes (8): ast, Path, Return ``file:line name`` for each public class or function in ``path`` that…, Every public class and function in the package has a docstring (AGENTS.md…, The scan itself must work: it has to flag a bare public function and a bare…, test_every_public_definition_has_a_docstring(), test_scanner_flags_a_missing_docstring(), _undocumented_public_items()
+
+### Community 130 - "forecast_group"
+Cohesion: 0.22
+Nodes (9): Collection, forecast_group(), group_aggregate_series(), Sum every disk's own series into one group-aggregate series, at the union of…, One group's forecast: run the backtest on the group aggregate, and only if…, 101:scsi0 has no sample at t=1 at all -- that timestamp still appears (from…, test_group_aggregate_series_empty_input_is_empty(), test_group_aggregate_series_missing_disk_at_a_timestamp_contributes_zero() (+1 more)
+
+### Community 131 - "save_state_atomic"
+Cohesion: 0.28
+Nodes (9): Reading degrades, writing raises, LockInfo, Temp file in the same directory, ``fsync``, then ``os.replace`` -- a reader…, Descriptive only -- see the module docstring's "Locking" section for why the…, save_state_atomic(), A crashed run's `flock()` is released by the kernel on process exit, so the…, test_acquire_lock_overwrites_a_stale_lock_field_left_by_a_dead_process(), test_load_state_round_trips_a_full_document() (+1 more)
+
+### Community 132 - "test_topology.py"
+Cohesion: 0.28
+Nodes (9): disk_state_key(), ``"<group>:<vmid>:<device>"`` (section 11.2) -- the group prefix is what keeps…, _one_disk_cluster(), The default (`state=None`) must be indistinguishable from an empty state --…, test_build_topology_does_not_pin_once_the_cooldown_has_expired(), test_build_topology_ignores_another_groups_cooldown_entry(), test_build_topology_pins_a_disk_within_its_cooldown(), test_build_topology_pins_disks_on_an_excluded_storage() (+1 more)
+
+### Community 133 - "test_plan_gate_also_reflects_real_drift_history_from_state_json"
 Cohesion: 0.25
-Nodes (8): A reference implementation that is well tested, Telegraf with a Prometheus remote-write output, The failure mode: a transport that cannot carry strings, The six counters, Two things deliberately not used, What catches it, What to do next, Where the numbers come from, and how a transport loses them
+Nodes (9): _imbalanced_group_load(), _no_reserve_violation_topology(), GroupLoad, Two storages, generously sized -- unlike `_sample_topology()`, no (C4)/(C5)…, san-a all the load, san-b none -- imbalance is 200% of `u*`, far above the…, Baseline for the next test: with no `state.json` at all, `last_load` is `None`,…, The same fixture as above, except `state.json` now records a `last_balance`…, test_show_load_acts_on_imbalance_when_there_is_no_state_json_yet() (+1 more)
 
-### Community 132 - "`exclude` — what DRS never touches"
+### Community 134 - "test_statusfile.py"
+Cohesion: 0.43
+Nodes (8): CompletedProcess, needs_plugin, Path, A guard on the guard: these are the two ways a status file goes wrong (wrong-…, run_plugin(), test_check_statusfile_calls_a_stale_file_warning_and_a_missing_one_unknown(), test_check_statusfile_reads_what_we_write(), test_the_plugin_rejects_the_shapes_the_module_never_writes()
+
+### Community 135 - "delta data spread weight per TiB"
+Cohesion: 0.25
+Nodes (8): config section gates, config section objective, (C7) Capacity-spread linearization in absolute TiB, Capacity gate (section 6), delta data spread weight per TiB, Plan output and explain narration, Relative-fill capacity form rejected, Break-even disk size X* = beta/(2delta-gamma)
+
+### Community 136 - "test_statusfile.py"
+Cohesion: 0.29
+Nodes (7): Monitoring status file (statusfile.py), Write ``status`` to ``path`` atomically, mode 0644, creating the parent…, The status file could not be written., StatusFileError, write_status_file(), MonkeyPatch, test_a_failed_replace_removes_the_temporary_file()
+
+### Community 137 - "Migration cost and payback test"
+Cohesion: 0.25
+Nodes (8): kappa weighted by VM I/O (w_v) and D^big, Plan benefit in load-seconds, Payback horizon H, Affinity term in benefit, No materiality floor on benefit, Raw terms, never weighted terms (REVIEW R-01), affinity-repair fixture (plan 14.7), kappa*dA affinity benefit isolation
+
+### Community 138 - "`exclude` — what DRS never touches"
 Cohesion: 0.25
 Nodes (8): `exclude.disks`, `exclude.include_unused_disks`, `exclude.running_only`, `exclude.skip_vms_with_snapshots`, `exclude.storages`, `exclude.tags`, `exclude.vmids`, `exclude` — what DRS never touches
 
-### Community 133 - "test_unfixable_shortfall_is_proven_only_for_an_optimal_cbc_solve"
-Cohesion: 0.67
-Nodes (3): test_unfixable_shortfall_is_proven_only_for_an_optimal_cbc_solve(), outcome(), proven()
+### Community 139 - "forecast.py"
+Cohesion: 0.39
+Nodes (8): ForecastConfig, Forecast settings, from the ``forecast`` block. - ``model``…, The history ``forecast.model`` needs, in seconds. Called by ``config.py``'s…, required_range_seconds(), test_holt_winters_required_range_is_the_lookback_when_that_is_longer(), test_holt_winters_required_range_matches_plan_worked_example(), test_quantile_required_range_is_the_lookback(), test_required_range_unknown_model_raises()
 
-### Community 134 - "test_task_lock_timeout_retry_drives_inflight_callbacks_for_both_upids"
-Cohesion: 0.50
-Nodes (3): Crash recovery (section 11.2/13): a retried move is still always exactly one…, move_disk(), test_task_lock_timeout_retry_drives_inflight_callbacks_for_both_upids()
+### Community 140 - "metrics.py"
+Cohesion: 0.25
+Nodes (8): _check_cross_metric_disk_consistency(), format_cross_metric_finding(), Builds :func:`_check_cross_metric_disk_consistency`'s one finding shape from a…, Flags a disk reported by *some* of the six configured metrics but not others --…, REVIEW.md-worthy real-world failure: Telegraf's Prometheus-compatible output…, test_cross_metric_disk_consistency_silent_when_all_metrics_agree(), test_cross_metric_disk_consistency_truncates_a_long_missing_list(), test_cross_metric_disk_consistency_warns_on_a_dropped_field()
 
-### Community 138 - "test_objective_offset_is_carried_by_a_variable_fixed_to_one"
-Cohesion: 0.67
-Nodes (3): skipif, PuLP drops an objective's constant when handing the model to CBC, so CBC's…, test_objective_offset_is_carried_by_a_variable_fixed_to_one()
+### Community 141 - "test_apply_exits_quietly_when_state_json_is_already_locked"
+Cohesion: 0.25
+Nodes (5): `_balanced_apply_topology()`'s one move easily clears the default…, test_apply_exits_quietly_when_state_json_is_already_locked(), test_apply_refuses_the_whole_plan_when_the_aggregate_payback_test_fails(), fail(), test_real_local_now_falls_back_when_the_zone_cannot_be_resolved()
 
-### Community 139 - "Configuration page"
-Cohesion: 0.43
-Nodes (7): Config path resolution order, Configuration page, ResolvedConfig, Secrets from environment, Semantic validation rules, Two-stage validation, Units parsed once
+### Community 142 - "test_enforce_format.py"
+Cohesion: 0.36
+Nodes (8): parametrize, Path, With 64 KiB clusters qcow2 needs an 8-byte L2 and a 2-byte refcount entry per…, test_config_has_no_global_enforce_format(), test_config_parses_enforce_format(), test_config_rejects_a_value_other_than_raw_qcow2_or_null(), test_lvm_qcow2_bound_is_never_below_qemus_default_layout(), _write()
 
-### Community 140 - "Persistent state: state.json"
-Cohesion: 0.13
-Nodes (18): Persistent state: state.json, Drift history reaches the gates via last_balance, Inflight UPIDs written and read for crash recovery, Reading degrades, writing raises, Rename-detaches-flock bug and in-place locked write, staged_disks field unimplemented, on_finished(), on_started() (+10 more)
-
-### Community 141 - "docs/internals/00-overview.md"
-Cohesion: 0.13
-Nodes (12): config.py depends on forecast.py, Module layout, Pipeline as specified and as built, Command dispatch dict, JsonFormatter, --mode escalation rule, 'no moves made' report, Monitoring status file statusfile.py (+4 more)
-
-### Community 143 - "`groups` — storage groups"
-Cohesion: 0.33
-Nodes (6): `groups[].name`, `groups` — storage groups, `groups[].storages[].capability_weight`, `groups[].storages[].free_space.soft` / `groups[].storages[].free_space.hard`, `groups[].storages[].id`, `groups[].storages[].reserve_factor`
-
-### Community 144 - "`load_weights` — combining read/write and time/ops/bytes"
-Cohesion: 0.33
-Nodes (6): `load_weights.bytes`, `load_weights` — combining read/write and time/ops/bytes, `load_weights.iotime`, `load_weights.ops`, `load_weights.read_factor`, `load_weights.write_factor`
-
-### Community 145 - "Safety properties, exit codes, and what this build actually does"
-Cohesion: 0.33
-Nodes (6): verify-metrics exit status and severity levels, Failure to read ends the run with exit 1, Exit codes, Optional dependencies, Safety properties, exit codes, and what this build actually does, What is safe, unconditionally
-
-### Community 146 - "Diagnostic bundles: `collect-testdata` and `--replay`"
-Cohesion: 0.33
-Nodes (5): `collect-testdata`: capturing a bundle, Diagnostic bundles: `collect-testdata` and `--replay`, `--replay`: running against a bundle offline, Sending one to the project, What is in a bundle, and what is not
-
-### Community 147 - "Logging: what lands where, and what an unattended run records"
+### Community 143 - "Pin priority _pin_reason() (C2)"
 Cohesion: 0.29
-Nodes (7): Logging, Logging: what lands where, and what an unattended run records, Text or JSON, The decision trail, Unattended runs log this without being asked, Under systemd, Verbosity
+Nodes (7): Cooldown data stored here, interpreted by topology and solvers, Disk-cooldown pin is not exempted for reserve repair, Pin priority _pin_reason() (C2), Storage cooldown excludes destinations; repair exempt, MILP storage cooldown and fixed-zero pairs, Recording balance and cooldowns after execution, Startup scan folds in-flight vmids into exclude.vmids
 
-### Community 149 - "footprint_on"
+### Community 144 - "Payback acceptance test"
+Cohesion: 0.33
+Nodes (7): Worked example fixture fc-tier1, free-space-repair companion fixture, Free-space repair mandate, max_single_move_duration hard rule, Payback acceptance test, Repair exemption (outcome trigger and revert test), Reserve override
+
+### Community 145 - "(C4)/(C5) Snapshot reserve and free-space constraint"
+Cohesion: 0.40
+Nodes (6): config section free_space, config section snapshot_reserve, Unsized volume fallbacks and approximate-size, (C4)/(C5) Snapshot reserve and free-space constraint, Failure modes and never-trade-the-reserve rule, Foreign usage U_ext computation
+
+### Community 146 - "_vm_splits"
+Cohesion: 0.33
+Nodes (5): One large VM's (``V^split``, section 5.3.3) before/after numbers for the report., Return the split figures of this VM as a JSON-ready dict. Byte values keep…, Section 9.5's ``split:`` lines. A result still above its cap says the solver…, _render_split_lines(), _VmSplit
+
+### Community 147 - "Assignment"
 Cohesion: 0.40
 Nodes (6): footprint_on(), largest_on(), Section 5.3.3's ``F_{v,s}``: the sum of VM ``vmid``'s disks on ``s`` -- every…, Section 5.3 (C4) ``Z_s`` = ``max_v F_{v,s}``, the largest per-VM footprint on…, Section 8.1: the snapshot term's basis while ``key`` mirrors onto ``b``,…, transient_basis()
 
-### Community 152 - "`forecast` — placing disks for the load they will have"
-Cohesion: 0.40
-Nodes (5): `forecast.holt_winters.seasonal`, `forecast.holt_winters.seasonal_periods`, `forecast.holt_winters.trend`, forecast.model (quantile, holt_winters), `forecast` — placing disks for the load they will have
-
-### Community 153 - "`prometheus` — the metrics source"
-Cohesion: 0.40
-Nodes (5): `prometheus.bearer_token`, `prometheus` — the metrics source, `prometheus.timeout_seconds`, `prometheus.url`, `prometheus.username` / `prometheus.password`
-
-### Community 154 - "`solver` — which backend plans"
-Cohesion: 0.40
-Nodes (5): solver.backend (auto, cbc, heuristic), `solver.heuristic_iterations`, `solver.mip_gap`, `solver.time_limit_seconds`, `solver` — which backend plans
-
-### Community 155 - "`support` — diagnostic bundles"
-Cohesion: 0.40
-Nodes (5): `support.bundle_dir`, `support.capture_range`, `support` — diagnostic bundles, `support.max_series_points`, `support.salt_path`
-
-### Community 156 - "`--json`"
-Cohesion: 0.33
-Nodes (5): `--json`, Whether this group's execution failed in a way that must end the whole run…, fake_execute_plan(), delayed_status(), status()
-
-### Community 159 - "proxmox-storage-drs"
-Cohesion: 0.40
-Nodes (4): Getting the tool, proxmox-storage-drs, The documents, The safety properties to rely on
-
-### Community 162 - "resolve_level"
-Cohesion: 0.50
-Nodes (5): Section 2.3's ladder: ``--quiet`` < default < ``-v`` < ``-vv``. ``--log-level``…, resolve_level(), parametrize, test_log_level_wins_over_both_verbose_and_quiet(), test_resolve_level_ladder()
-
-### Community 164 - "_FakeClient"
+### Community 149 - "_FakeClient"
 Cohesion: 0.40
 Nodes (3): str, _FakeClient, The ``"fake-client"`` sentinel every ``build_pve_client`` mock in this file…
 
-### Community 169 - "`snapshot_reserve` — the free-space floor"
+### Community 150 - "test_optimize.py"
+Cohesion: 0.40
+Nodes (5): LogCaptureFixture, The defect that prompted IMPLEMENTATION_PLAN.md section 2.3, in the operator's…, The other half: an operator who wrote `solver.backend: cbc` and is silently not…, test_a_missing_optional_solver_is_not_a_warning_under_auto(), test_an_explicitly_configured_solver_that_is_missing_still_warns()
+
+### Community 151 - "test_optimize.py"
 Cohesion: 0.50
-Nodes (4): free_space.soft / free_space.hard, `snapshot_reserve.count_foreign_volumes`, snapshot_reserve.factor, `snapshot_reserve` — the free-space floor
+Nodes (4): cbc_available(), True when the ``pulp`` module can be imported. This does not check that the CBC…, MonkeyPatch, test_cbc_available_is_false_when_pulp_is_not_importable()
 
-### Community 170 - "`window` — the decision window"
-Cohesion: 0.50
-Nodes (4): `window.lookback`, `window.min_coverage`, `window.quantile`, `window` — the decision window
+### Community 155 - "last_load drift baseline"
+Cohesion: 0.67
+Nodes (3): Drift history reaches the gates via last_balance, Drift baseline is the effective load, last_load drift baseline
 
-### Community 173 - "`free_space` — keep N bytes (or N%) free on top of the snapshot reserve"
-Cohesion: 0.27
-Nodes (6): free_space section, `free_space.hard`, `free_space` — keep N bytes (or N%) free on top of the snapshot reserve, `free_space.soft`, free-space-repair fixture (plan 14.8), free_space.soft repair exemption
+### Community 156 - "loadmodel.py"
+Cohesion: 0.67
+Nodes (3): _is_metrics_expected_absent(), parametrize, test_is_metrics_expected_absent()
 
-### Community 177 - "fc-tier1 fixture (plan 14 worked example)"
+### Community 157 - "fc-tier1 fixture (plan 14 worked example)"
 Cohesion: 0.67
 Nodes (3): fc-tier1 fixture (plan 14 worked example), generate_expected.py exhaustive enumeration, beta x delta sweep contract
 
 ## Knowledge Gaps
-- **314 isolated node(s):** `state.path`, `Migrations throttled by bwlimit only`, `(C2) Eligibility via variable fixing`, `(C3) VM affinity linking`, `(C4) Largest-disk linearization Z_s` (+309 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1564 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **63 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **278 isolated node(s):** `Transient reserve invariant (operator explanation)`, `(C4) Largest-disk linearization Z_s`, `Deadlock and staging`, `14b Holt-Winters-driven l_d`, `Prometheus per-disk blockstat` (+273 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1621 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **35 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Group` connect `Group` to `execute.py`, `test_cli.py`, `seed_assignment`, `ExecutionResult`, `test_payback.py`, `Path`, `test_enforce_format.py`, `MonkeyPatch`, `GroupLoad`, `run`, `Disk`, `test_optimize.py`, `topology.py`, `test_topology.py`, `ExecutionConfig`, `ObjectiveBreakdown`, `_sample_topology`, `balanced_load`, `metrics.py`, `test_execute.py`, `FakeClock`, `run_heuristic`, `cli.py`, `format_bytes`, `test_small_disks.py`, `test_heuristic.py`, `test_large_vm_split_fixture.py`, `test_schedule.py`, `main`, `_handle_apply`, `_plan_group`, `_exec_group`, `_quantile_promql`, `test_plan_gate_also_reflects_real_drift_history_from_state_json`, `test_affinity_repair_fixture.py`, `apply_forecast`, `test_no_feasible_solution_says_infeasible_rather_than_blaming_the_time_limit`, `test_solve_returns_none_when_the_library_is_unavailable`?**
-  _High betweenness centrality (0.072) - this node is a cross-community bridge._
-- **Why does `PveClient` connect `PveClient` to `execute.py`, `._call`, `test_pve.py`, `test_live_transient_check_fails_safe_when_the_live_read_errors`, `ResolvedConfig`, `_handle_apply`, `run`, `config.py`, `FakeClock`, `BundleError`, `cli.py`, `topology.py`, `make_config`, `crashrecovery.py`, `test_topology.py`, `ExecutionConfig`, `PveApiError`, `._call_once`?**
-  _High betweenness centrality (0.051) - this node is a cross-community bridge._
-- **Why does `Crash and two-instance recovery: crashrecovery.py` connect `crashrecovery.py` to `execute.py`, `_handle_apply`, `state.py`, `Persistent state: state.json`, `docs/internals/00-overview.md`, `docs/internals/92-execute.md`, `config.py`, `cli.py`?**
-  _High betweenness centrality (0.049) - this node is a cross-community bridge._
-- **Are the 188 inferred relationships involving `Group` (e.g. with `_accumulate_move_stats()` and `_apply_payback_gate()`) actually correct?**
-  _`Group` has 188 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 93 inferred relationships involving `PveClient` (e.g. with `_apply_payback_gate()` and `_pve_client_for()`) actually correct?**
-  _`PveClient` has 93 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `state.path`, `Migrations throttled by bwlimit only`, `(C2) Eligibility via variable fixing` to the rest of the system?**
-  _314 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Why does `Group` connect `test_optimize.py` to `execute.py`, `collect.py`, `metrics.py`, `test_cli.py`, `test_heuristic.py`, `Path`, `test_plan_gate_also_reflects_real_drift_history_from_state_json`, `CaptureFixture`, `compute_reserve_status`, `test_execute.py`, `GroupLoad`, `RecordingPveClient`, `Group`, `test_enforce_format.py`, `Disk`, `Disk`, `MonkeyPatch`, `cli.py`, `run_concurrent`, `test_topology.py`, `order_moves`, `Group`, `_sample_topology`, `topology.py`, `_render_group_plan_human`, `ResolvedConfig`, `_handle_apply`, `ExecutionConfig`, `_plan_group`, `heuristic.py`, `test_free_space_repair_fixture.py`, `format_bytes`, `test_small_disks.py`, `Group`, `apply_forecast`, `build_rate_promql()`, `PaybackResult`, `test_payback.py`, `repair_markers`, `FakeClock`, `_exec_group`, `test_affinity_repair_fixture.py`?**
+  _High betweenness centrality (0.096) - this node is a cross-community bridge._
+- **Why does `Configuration reference` connect `Configuration reference` to `Safety properties, exit codes, status`, ``proxmox` — the cluster API connection`, `gates section`, ``exclude` — what DRS never touches`, `Logging`, ``metrics` — Telegraf/InfluxDB name mapping`, ``execution` — how (and whether) moves actually happen`, `20-verifying-metrics.md`, ``migration` — cost, bandwidth and the payback rule`, `move_disk (drive-mirror, delete=1)`?**
+  _High betweenness centrality (0.045) - this node is a cross-community bridge._
+- **Why does `.agents/ index` connect `AGENTS.md working agreement` to `pve-storage-drs manpage`, `Safety properties, exit codes, status`, `20-verifying-metrics.md`, `Testing (.agents)`, `Logging`?**
+  _High betweenness centrality (0.044) - this node is a cross-community bridge._
+- **Are the 217 inferred relationships involving `Group` (e.g. with `_accumulate_move_stats()` and `_apply_payback_gate()`) actually correct?**
+  _`Group` has 217 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 89 inferred relationships involving `Disk` (e.g. with `_footprint_text()` and `_fragmented_vms()`) actually correct?**
+  _`Disk` has 89 INFERRED edges - model-reasoned connections that need verification._
+- **What connects `Transient reserve invariant (operator explanation)`, `(C4) Largest-disk linearization Z_s`, `Deadlock and staging` to the rest of the system?**
+  _278 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `execute.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.04864976293547722 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.044062244062244064 - nodes in this community are weakly interconnected._

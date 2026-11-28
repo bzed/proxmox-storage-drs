@@ -56,7 +56,7 @@ it. The project has no apt repository yet. Download the `.deb`. Install it with 
 pulls the dependencies from the trixie archive. A PVE node already has that archive configured:
 
 ```sh
-VERSION=0.1.21      # the newest release on the releases page
+VERSION=0.1.22      # the newest release on the releases page
 BASE=https://github.com/bzed/proxmox-storage-drs/releases/download/debian/$VERSION
 wget "$BASE/pve-storage-drs_${VERSION}_all.deb" "$BASE/SHA256SUMS"
 sha256sum -c SHA256SUMS
